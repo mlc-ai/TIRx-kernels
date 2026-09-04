@@ -38,6 +38,29 @@ def load_lock() -> dict[str, Any]:
     return lock
 
 
+def source_patches(source: dict[str, Any]) -> list[Path]:
+    """Repository-tracked patches applied on the pinned revision (paths relative to the repo)."""
+    return [(LOCK_PATH.parent / patch).resolve() for patch in source.get("patches", [])]
+
+
+def patches_applied(source: dict[str, Any], checkout: Path) -> bool:
+    """True when the checkout carries exactly the declared patches (they reverse-apply cleanly)."""
+    patches = source_patches(source)
+    if not patches:
+        return False
+    try:
+        for patch in patches:
+            output("git", "apply", "--reverse", "--check", str(patch), cwd=checkout)
+    except subprocess.CalledProcessError:
+        return False
+    return True
+
+
+def apply_patches(source: dict[str, Any], checkout: Path) -> None:
+    for patch in source_patches(source):
+        run("git", "apply", str(patch), cwd=checkout)
+
+
 def checkout_source(source: dict[str, Any], source_root: Path) -> Path:
     checkout = source_root / source["name"]
     revision = source["revision"]
@@ -52,7 +75,7 @@ def checkout_source(source: dict[str, Any], source_root: Path) -> Path:
     except subprocess.CalledProcessError:
         has_head = False
     materialized = any(path.name != ".git" for path in checkout.iterdir())
-    if (
+    dirty = (
         has_head
         and materialized
         and output(
@@ -63,7 +86,9 @@ def checkout_source(source: dict[str, Any], source_root: Path) -> Path:
             "--ignore-submodules=untracked",
             cwd=checkout,
         )
-    ):
+    )
+    already_patched = bool(dirty) and patches_applied(source, checkout)
+    if dirty and not already_patched:
         raise RuntimeError(f"reference source checkout has local changes: {checkout}")
     origin = output("git", "remote", "get-url", "origin", cwd=checkout)
     if origin.rstrip("/").removesuffix(".git") != source["url"].rstrip("/").removesuffix(".git"):
@@ -73,11 +98,14 @@ def checkout_source(source: dict[str, Any], source_root: Path) -> Path:
         output("git", "cat-file", "-e", f"{revision}^{{commit}}", cwd=checkout)
     except subprocess.CalledProcessError:
         run("git", "fetch", "--filter=blob:none", "origin", revision, cwd=checkout)
+    if already_patched and output("git", "rev-parse", "HEAD", cwd=checkout) == revision:
+        return checkout
     run("git", "checkout", "--detach", revision, cwd=checkout)
     run("git", "submodule", "update", "--init", "--recursive", cwd=checkout)
     actual = output("git", "rev-parse", "HEAD", cwd=checkout)
     if actual != revision:
         raise RuntimeError(f"{source['name']} resolved to {actual}, expected {revision}")
+    apply_patches(source, checkout)
     return checkout
 
 
@@ -262,8 +290,10 @@ def check(lock: dict[str, Any], source_root: Path, only: set[str] | None = None)
             "--ignore-submodules=untracked",
             cwd=checkout,
         )
-        if dirty:
+        if dirty and not patches_applied(source, checkout):
             failures.append(f"reference source checkout has local changes: {checkout}")
+        elif not dirty and source_patches(source):
+            failures.append(f"declared patches are not applied in {checkout}")
         try:
             materialize_source_links(source, checkout)
         except (FileNotFoundError, RuntimeError) as error:

@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+kernel: cake_vsa_longseq_sm100
+selection_rationale: The three defaults span the longseq fixed-top-k dispatch domain by sparse-work scale (4K query tokens with one selected block, 16K query tokens with 32 selected blocks, and 8K query tokens at the 192-block capacity); the non-default rows add an eight-block prologue-sensitive case, a larger 64-block query sweep, and a 128-block streaming regime.
+defaults:
+  num_gpus: 1
+configs:
+  - {config: m4096_n16384_h8_sel1, default: true, selection_role: small}
+  - {config: m16384_n32768_h8_sel32, default: true, selection_role: medium}
+  - {config: m8192_n32768_h8_sel192, default: true, selection_role: large}
+  - {config: m4096_n16384_h8_sel8, default: false}
+  - {config: m32768_n65536_h8_sel64, default: false}
+  - {config: m8192_n24576_h8_sel128, default: false}

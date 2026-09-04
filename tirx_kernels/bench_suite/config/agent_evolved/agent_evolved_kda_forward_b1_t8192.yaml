@@ -1,8 +1,9 @@
 kernel: agent_evolved_kda_forward_b1_t8192
+selection_rationale: All six rows pack 8192 tokens; the defaults step up from 64 heads over eight uniform 1024-token sequences, to 96 heads over the same packing, to 96 heads over one 8192-token sequence, which carries the longest per-sequence recurrence.
 configs:
-  - {config: h96_fixed, default: true, timer: proton}
-  - {config: h96_mixed, timer: proton}
-  - {config: h96_uniform, default: true, timer: proton}
-  - {config: h64_fixed, timer: proton}
-  - {config: h64_mixed, timer: proton}
-  - {config: h64_uniform, default: true, timer: proton}
+  - {config: h96_fixed, default: true, selection_role: large, timer: proton}
+  - {config: h96_mixed, default: false, timer: proton}
+  - {config: h96_uniform, default: true, selection_role: medium, timer: proton}
+  - {config: h64_fixed, default: false, timer: proton}
+  - {config: h64_mixed, default: false, timer: proton}
+  - {config: h64_uniform, default: true, selection_role: small, timer: proton}

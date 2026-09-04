@@ -1,6 +1,6 @@
 # Move whole rows with vector global accesses
 
-**Symptoms:** `fixed_overhead`, `slow_small_shape`, `dispatch_specific_deficit`, `instruction_count_gap`
+**Symptoms:** `fixed_overhead`, `slow_small_shape`, `dispatch_specific_deficit`, `instruction_count_gap`, `excessive_sectors`
 
 ## Symptom
 
@@ -51,6 +51,15 @@ looking proven. A dispatch that no benchmark covers can hide an arbitrarily
 large fixed cost; when a new port puts that dispatch on the gate, check its
 access widths against the reference before trusting the inheritance.
 
+The same rule applies when only one direction is scalar. In another persistent
+state path, the drain was already vectorized but the 32-element seed still used
+scalar FP32 loads. Explicit 16-byte seed loads reduced global-load requests from
+141,632 to 43,328 and sectors from 4,204,864 to 1,059,136; the matched reference
+reported 43,392 requests and 1,059,200 sectors. Registers stayed at 128 while
+stack allocation fell from 24 to 16 bytes. The shortest state-carrying ratio
+moved from 0.979x to 1.018x, exact correctness passed for both FP32 and BF16
+state, and the complete 18-shape matrix cleared the gate.
+
 ## Boundary
 
 Only for contiguous runs whose base alignment follows from the row length, not
@@ -63,5 +72,8 @@ adds to the enclosing loop body rather than the accesses it issues.
 
 Compare the state-carrying and state-free builds of the same kernel: take the
 difference in `ld.global`/`st.global` sites on each side and require the port's
-delta to match the reference's. Absolute counts across two compilers are not
-comparable; the delta between two builds of the same program is.
+delta to match the reference's. Static absolute counts across two compilers are
+not comparable; the delta between two builds of the same program is. For a
+matched dynamic profile, also compare global-load requests and sectors before
+and after the rewrite. They should collapse on the row-carrying build while a
+build that does not execute the row move stays flat.

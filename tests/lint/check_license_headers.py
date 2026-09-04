@@ -89,6 +89,11 @@ PORT_BUCKETS = {
         "https://github.com/flashinfer-ai/flashinfer",
         "Apache-2.0",
     ),
+    "tirx_kernels/fastcu/": (
+        "fast.cu",
+        "https://github.com/pranjalssh/fast.cu",
+        "Apache-2.0 AND MIT",
+    ),
     "tirx_kernels/msa/": ("MSA", "https://github.com/MiniMax-AI/MSA", "Apache-2.0 AND MIT"),
 }
 
@@ -96,6 +101,13 @@ PORT_BUCKETS = {
 # license requires to stay in the file verbatim (BSD-3 clause 1: the copyright
 # notice, the conditions list and the disclaimer travel with the source).
 FILE_OVERRIDES = {
+    # Port of hao-ai-lab/flash-attention-fp4, a fork of Dao-AILab/flash-attention whose
+    # LICENSE and flash_attn/cute/AUTHORS are byte-identical to the upstream texts under
+    # licenses/; only the canonical URL and commit history differ from the bucket.
+    "tirx_kernels/flashattention/flash_attention4_fp4.py": {
+        "project": "flash-attention-fp4",
+        "url": "https://github.com/hao-ai-lab/flash-attention-fp4",
+    },
     "tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py": {
         "spdx": "Apache-2.0 AND MIT AND BSD-3-Clause",
         "required_text": (
@@ -118,6 +130,13 @@ FILE_OVERRIDES = {
         ),
     },
     "tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py": {
+        "spdx": "Apache-2.0 AND BSD-3-Clause",
+        "required_text": (
+            "Redistribution and use in source and binary forms",
+            'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+        ),
+    },
+    "tirx_kernels/flashinfer/gemm/dense_blockscaled_gemm_sm107.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
@@ -211,6 +230,8 @@ def check(rel: str, text: str) -> list[str]:
 
     project, url, spdx = expect
     override = FILE_OVERRIDES.get(rel, {})
+    project = override.get("project", project)
+    url = override.get("url", url)
     spdx = override.get("spdx", spdx)
 
     if ids[0] != spdx:
@@ -242,10 +263,16 @@ def self_test() -> int:
     cudnn = dict(project="cuDNN Frontend", url="https://github.com/NVIDIA/cudnn-frontend")
     fi = dict(project="FlashInfer", url="https://github.com/flashinfer-ai/flashinfer")
     msa = dict(project="MSA", url="https://github.com/MiniMax-AI/MSA")
+    fastcu = dict(project="fast.cu", url="https://github.com/pranjalssh/fast.cu")
     bsa_combine = "tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py"
     gdn = "tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py"
     gdn_cp = "tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py"
     bmm_fp8_rubin = "tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py"
+    fa4 = dict(project="flash-attention", url="https://github.com/Dao-AILab/flash-attention")
+    fa4_fp4 = dict(
+        project="flash-attention-fp4", url="https://github.com/hao-ai-lab/flash-attention-fp4"
+    )
+    fp4_port = "tirx_kernels/flashattention/flash_attention4_fp4.py"
     bsd_port = (
         "# Copyright (c) 2025 Upstream\n"
         "# Redistribution and use in source and binary forms\n"
@@ -253,6 +280,52 @@ def self_test() -> int:
     )
     cases = [
         # (name, rel, text, must_error)
+        (
+            "valid flash-attention-fp4 fork port",
+            fp4_port,
+            port.format(spdx="Apache-2.0 AND BSD-3-Clause", **fa4_fp4),
+            False,
+        ),
+        (
+            "flash-attention-fp4 port citing the Dao-AILab URL",
+            fp4_port,
+            port.format(spdx="Apache-2.0 AND BSD-3-Clause", **fa4),
+            True,
+        ),
+        (
+            "flash-attention-fp4 port naming the parent project",
+            fp4_port,
+            port.format(
+                spdx="Apache-2.0 AND BSD-3-Clause", project="flash-attention", url=fa4_fp4["url"]
+            ),
+            True,
+        ),
+        (
+            "flash-attention-fp4 port tagged plain Apache",
+            fp4_port,
+            port.format(spdx="Apache-2.0", **fa4_fp4),
+            True,
+        ),
+        (
+            "flash-attention-fp4 port missing the upstream copyright",
+            fp4_port,
+            port.format(spdx="Apache-2.0 AND BSD-3-Clause", **fa4_fp4).replace(
+                "Copyright (c) 2025 Upstream", "2025 Upstream"
+            ),
+            True,
+        ),
+        (
+            "sibling flashattention port citing the fork URL",
+            "tirx_kernels/flashattention/x.py",
+            port.format(spdx="Apache-2.0 AND BSD-3-Clause", **fa4_fp4),
+            True,
+        ),
+        (
+            "valid flash-attention port",
+            "tirx_kernels/flashattention/x.py",
+            port.format(spdx="Apache-2.0 AND BSD-3-Clause", **fa4),
+            False,
+        ),
         (
             "valid deepgemm port",
             "tirx_kernels/deepgemm/x.py",
@@ -264,6 +337,36 @@ def self_test() -> int:
             "tirx_kernels/cudnn/amax/x.py",
             port.format(spdx="Apache-2.0", **cudnn),
             False,
+        ),
+        (
+            "valid fast.cu port",
+            "tirx_kernels/fastcu/x.py",
+            port.format(spdx="Apache-2.0 AND MIT", **fastcu),
+            False,
+        ),
+        (
+            "fast.cu tagged plain Apache-2.0",
+            "tirx_kernels/fastcu/x.py",
+            port.format(spdx="Apache-2.0", **fastcu),
+            True,
+        ),
+        (
+            "fast.cu port citing another upstream URL",
+            "tirx_kernels/fastcu/x.py",
+            port.format(
+                spdx="Apache-2.0 AND MIT",
+                project="fast.cu",
+                url="https://github.com/deepseek-ai/DeepGEMM",
+            ),
+            True,
+        ),
+        (
+            "fast.cu port with no upstream copyright",
+            "tirx_kernels/fastcu/x.py",
+            port.format(spdx="Apache-2.0 AND MIT", **fastcu).replace(
+                ", Copyright (c) 2025 Upstream", ""
+            ),
+            True,
         ),
         (
             "valid cudnn-frontend BSD/MIT combine port",

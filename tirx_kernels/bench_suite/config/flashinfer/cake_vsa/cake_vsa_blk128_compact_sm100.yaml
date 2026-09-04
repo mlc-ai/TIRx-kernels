@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+kernel: cake_vsa_blk128_compact_sm100
+selection_rationale: The three defaults span the blk128_compact dispatch domain by scale and density (4K tokens with 8 heads and 8 selected blocks, 16K tokens with 16 heads and 16 selected blocks plus LSE output, 32K tokens with 24 heads and 32 selected blocks); the non-default rows add the very sparse prologue-bound regime, the 64-block capacity regime with LSE, and a 40-head low-density video-DiT shape.
+defaults:
+  num_gpus: 1
+configs:
+  - {config: m4096_n4096_h8_sel8, default: true, selection_role: small}
+  - {config: m16384_n16384_h16_sel16_lse, default: true, selection_role: medium}
+  - {config: m32768_n32768_h24_sel32, default: true, selection_role: large}
+  - {config: m2048_n8192_h8_sel4, default: false}
+  - {config: m8192_n8192_h8_sel64_lse, default: false}
+  - {config: m32768_n32768_h40_sel12, default: false}

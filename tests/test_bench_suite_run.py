@@ -176,6 +176,21 @@ def test_default_roster_includes_curated_rubin_bmm():
     }
 
 
+def test_default_roster_includes_curated_dense_blockscaled_gemm_sm107():
+    workloads = bench_run.load_config_dir()
+    labels = {
+        workload["config"]
+        for workload in workloads
+        if workload["kernel"] == "dense_blockscaled_gemm_sm107"
+    }
+
+    assert labels == {
+        "bench_t1_mxfp4_bf16_m4096_n1024_k3072",
+        "bench_t3_mxfp4_fp16_m256_n10304_k2688",
+        "bench_t4_nvfp4_bf16_m4096_n2048_k7168",
+    }
+
+
 def test_default_roster_is_available_on_sm103_and_sm107():
     workloads = bench_run.load_config_dir()
 
@@ -183,14 +198,41 @@ def test_default_roster_is_available_on_sm103_and_sm107():
     sm103, sm103_incompatible = bench_run.partition_workloads_by_arch(workloads, "sm_103a")
     sm100, sm100_incompatible = bench_run.partition_workloads_by_arch(workloads, "sm_100a")
 
-    assert len(sm107) == 260
-    assert sm107_incompatible == []
-    assert len(sm103) == 257
-    assert len(sm103_incompatible) == 3
-    assert {workload["kernel"] for workload in sm103_incompatible} == {"bmm_fp8_rubin"}
-    assert len(sm100) == 257
-    assert len(sm100_incompatible) == 3
-    assert {workload["kernel"] for workload in sm100_incompatible} == {"bmm_fp8_rubin"}
+    def kernels(rows):
+        return {workload["kernel"] for workload in rows}
+
+    # 260 rows run everywhere; eight single-architecture kernels contribute three default rows
+    # each: cake_vsa_{blk128_compact,longseq,ultrasparse_bsr}_sm100 (sm_100a), bmm_fp8_rubin and
+    # dense_blockscaled_gemm_sm107 (sm_107a), cake_vsa_longseq_sm103, fastcu_nvfp4_gemm_gb300 and
+    # flash_attention4_fp4 (sm_103a).
+    assert len(sm107) == 266
+    assert len(sm107_incompatible) == 18
+    assert kernels(sm107_incompatible) == {
+        "cake_vsa_blk128_compact_sm100",
+        "cake_vsa_longseq_sm100",
+        "cake_vsa_longseq_sm103",
+        "cake_vsa_ultrasparse_bsr_sm100",
+        "fastcu_nvfp4_gemm_gb300",
+        "flash_attention4_fp4",
+    }
+    assert len(sm103) == 269
+    assert len(sm103_incompatible) == 15
+    assert kernels(sm103_incompatible) == {
+        "bmm_fp8_rubin",
+        "cake_vsa_blk128_compact_sm100",
+        "cake_vsa_longseq_sm100",
+        "cake_vsa_ultrasparse_bsr_sm100",
+        "dense_blockscaled_gemm_sm107",
+    }
+    assert len(sm100) == 269
+    assert len(sm100_incompatible) == 15
+    assert kernels(sm100_incompatible) == {
+        "bmm_fp8_rubin",
+        "cake_vsa_longseq_sm103",
+        "dense_blockscaled_gemm_sm107",
+        "fastcu_nvfp4_gemm_gb300",
+        "flash_attention4_fp4",
+    }
 
 
 def test_validate_workload_archs_rejects_mismatch_before_prepare(monkeypatch):

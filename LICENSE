@@ -220,6 +220,9 @@ tirx_kernels/flashinfer/ (ports of flashinfer-ai/flashinfer kernels, including
 MIT License
 -----------
 
+tirx_kernels/fastcu/ (ports of pranjalssh/fast.cu kernels; the upstream
+                      license text and copyright notice are reproduced in
+                      licenses/LICENSE.fast-cu.txt)
 tirx_kernels/deepgemm/ (ports of deepseek-ai/DeepGEMM kernels)
 tirx_kernels/flashmla/ (ports of deepseek-ai/FlashMLA kernels)
 tirx_kernels/msa/ (ports of MiniMax-AI/MSA kernels)
@@ -233,6 +236,11 @@ BSD 3-Clause "New" or "Revised" License
 
 tirx_kernels/flashattention/ (ports of Dao-AILab/flash-attention kernels; the
                               AUTHORS file its copyright notice refers to is
+                              licenses/AUTHORS.flash-attention.txt)
+tirx_kernels/flashattention/flash_attention4_fp4.py (port of hao-ai-lab/flash-attention-fp4,
+                              a fork of Dao-AILab/flash-attention; its LICENSE and
+                              flash_attn/cute/AUTHORS are byte-identical to
+                              licenses/LICENSE.flash-attention.txt and
                               licenses/AUTHORS.flash-attention.txt)
 tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py (full license text is
                               reproduced in the file header)

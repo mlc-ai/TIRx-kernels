@@ -86,7 +86,10 @@ _DTYPE_LABEL = {
 
 _TRY_WAIT_TICKS = 10_000_000
 _SMEM_CAPACITY = 335_872
-_MAX_ACTIVE_CLUSTERS = {2: 74, 4: 33}
+# Stand-in for the source's ``HardwareInfo().get_max_active_clusters(cluster_size)``
+# query on the 200-SM sm_107a part, so the persistent grid stays a static
+# specialization fact: 100 two-CTA clusters and 40 four-CTA clusters.
+_MAX_ACTIVE_CLUSTERS = {2: 100, 4: 40}
 _SOURCE_ROOT = Path("/root-vol/aarch64-ws/kernel-libs/vr200/flashinfer")
 
 # (mma_tiler, mma_instruction, cluster_mn, raster)

@@ -1,0 +1,9 @@
+kernel: dense_blockscaled_gemm_sm107
+default_suite: true
+selection_rationale: The complete five-row matrix covers every frozen source tactic, both FP4 scale formats, both output dtypes, one-CTA and two-CTA MMA, B reuse, operand swapping, and 1x1, 1x2, and 2x1 clusters. The selected defaults retain a narrow/long one-CTA case plus medium and large two-CTA cases.
+configs:
+  - {config: bench_t0_nvfp4_fp16_m4096_n2048_k7168, default: false}
+  - {config: bench_t1_mxfp4_bf16_m4096_n1024_k3072, default: true, selection_role: medium}
+  - {config: bench_t2_nvfp4_fp16_m1024_n4096_k3072, default: false}
+  - {config: bench_t3_mxfp4_fp16_m256_n10304_k2688, default: true, selection_role: small}
+  - {config: bench_t4_nvfp4_bf16_m4096_n2048_k7168, default: true, selection_role: large}

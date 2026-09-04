@@ -1,6 +1,6 @@
 # Match the MMA descriptor's physical leading-byte offset
 
-**Symptoms:** `illegal_shared_access`, `utchmma_fault`, `mma_descriptor_lbo_mismatch`, `second_kphase_fault`
+**Symptoms:** `illegal_shared_access`, `utchmma_fault`, `mma_descriptor_lbo_mismatch`, `second_kphase_fault`, `bitwise_mismatch`
 
 ## Symptom
 
@@ -25,6 +25,18 @@ that stride and faulted at `UTCHMMA`. Overriding only the four MN-major operands
 restored `0x4000404002000000`, passed Compute Sanitizer with zero errors, and
 made all valid intermediate tiles bit-identical across ten registered
 configurations.
+
+The mismatch does not always fault. An MN-major bf16 V operand whose N extent
+spans two 64-column SW128B atoms (TMA writes the halves 16 KB apart) was
+encoded with LBO 1 like the K-major operands; the kernel ran to completion and
+output columns 0-63 were bitwise-equal to the reference while columns 64-127
+were wrong in every row (16368 of 32768 elements, 0.52 cosine). The reference
+PTX carried `or.b32 lo, 1024 << 16` for that operand only: LBO 1024 (the
+16 KB half stride) for the two-atom bf16 V, 0 for single-atom MN-major e4m3 or
+64-wide V, and 1 for every K-major operand. Encoding those three values made
+all 45 configurations bitwise-equal. Read the LBO per operand from the
+reference's descriptor low-word constant rather than assuming one value for
+all swizzled layouts.
 
 ## Boundary
 

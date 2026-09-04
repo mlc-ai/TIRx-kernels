@@ -46,12 +46,42 @@ selected, so it rebuilds the election and its reconvergence around each issue.
 The hardware election yields the uniform predicate the instruction already
 wants, and the surrounding machinery disappears.
 
+When one lane owns a complete stateful persistent role, apply the same rule to
+the outer role guard. A literal lane-zero comparison can leave ptxas proving
+single-issuer semantics again around every uniform operation in the loop:
+
+```python
+# before: the literal lane comparison does not carry an elected-lane proof.
+with K.If(lane == K.int32(0)), K.Then():
+    with K.While(has_work):
+        update_role_state()
+        issue_transfers_and_collectives()
+
+# after: one hardware election owns the complete persistent role.
+with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
+    with K.While(has_work):
+        update_role_state()
+        issue_transfers_and_collectives()
+```
+
 Measured on a warp-specialized backward attention kernel whose issuing warp runs
 ten chains and ten commits per tile: static `PLOP3` fell from 213 to 48 against
 the reference's 3, `ELECT` from 58 to 18 against 13, `VOTEU` from 52 to 1, and
 total static SASS from 3679 to 3359. Four benchmark shapes moved by -9.5%,
 -10.2%, -10.5% and -11.4%, taking the required matrix from 0 of 16 shapes
 passing to 10 of 16 in one change.
+
+In a seven-warp persistent matrix pipeline, tensor, TMA, shared-memory, and
+global-store issue counts already matched the reference and both sides had zero
+spill traffic, but three long single-lane roles were guarded by literal lane-zero
+comparisons. Changing only those outer guards to one hardware election per role
+reduced static `ELECT` from 371 to 6 and total static `PLOP3` from 1116 to 11,
+with registers unchanged at 46 and no stack or local allocation. The affected
+latency fell from 241.522 to 134.206 microseconds, a 1.80x speedup, and the
+reference/port ratio moved from 0.5591x to 0.9800x. Exact correctness,
+determinism, allocation guards, and placement checks all passed; the elected
+form was retained through the final complete correctness and performance
+matrices.
 
 The predicate *form* is the lever, not the absence of a branch. Moving the same
 guards off branches and onto `pred=` first -- the standard predication rewrite,
@@ -83,6 +113,10 @@ one.
 
 An election establishes *a* lane, not lane 0. Do not swap it in where the
 guarded code also depends on being the lowest lane for addressing or ordering.
+
+For the persistent-role form, keep the election at converged warp scope and let
+it own the whole loop-carried state. Re-electing inside the loop or around each
+issue recreates the repeated control work this rewrite removes.
 
 ## Verification
 
