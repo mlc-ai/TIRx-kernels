@@ -17,8 +17,6 @@ sink-folded-LSE preprocess, the 20-warp main kernel, an FP32-to-element-dtype dK
 conversion, and the attention-sink gradient reduction.
 """
 
-from tirx_kernels.target import prepare_cuda_arch
-
 from ._sparse_attention_backward import data as _data
 from ._sparse_attention_backward import kernel as _kernel
 from ._sparse_attention_backward import spec as _spec
@@ -59,7 +57,7 @@ def prepare_data(**config):
 
 
 def run_test(**config):
-    """Compare TIRx and the upstream kernel against the FP32 oracle."""
+    """Compare all three gradients against the original source implementation."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
@@ -69,14 +67,10 @@ def run_test(**config):
     executables = [compile_kernel(func) for func in get_kernel(**kernel_config)]
     tirx_launch = _data.tirx_launch(executables, data, synchronize_stages=True)
     tirx_launch()
-    if prepare_cuda_arch() == "sm_110a":
-        torch.cuda.synchronize()
-        _data.validate_outputs(data, sources=("tirx",))
-    else:
-        source_launch = _data.compile_reference(data)
-        source_launch()
-        torch.cuda.synchronize()
-        _data.validate_outputs(data, sources=("tirx", "source"))
+    source_launch = _data.compile_reference(data)
+    source_launch()
+    torch.cuda.synchronize()
+    _data.validate_outputs(data, sources=("tirx", "source"))
     return {
         "seqlen_q": data["derived"]["seqlen_q"],
         "seqlen_kv": data["derived"]["seqlen_kv"],
@@ -110,14 +104,13 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     torch.cuda.synchronize()
 
     references = None
-    if external_references_enabled() and prepare_cuda_arch() != "sm_110a":
+    if external_references_enabled():
         source_launch = _data.compile_reference(data)
         source_launch()
         torch.cuda.synchronize()
+        _data.validate_outputs(data, sources=("tirx", "source"))
         references = {"cudnn_frontend": lambda: source_launch}
 
-    # The oracle is far more expensive than the kernels at the benchmark shapes;
-    # ``run_test`` carries it over the correctness matrix instead.
     _data.validate_outputs(data, sources=("tirx",), with_oracle=False)
     return bench(
         {"tirx": tirx_launch},
