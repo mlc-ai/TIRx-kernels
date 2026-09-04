@@ -38,6 +38,17 @@ safe workload changed from 1642.624 us TIRx / 1616.763 us reference (ratio
 TIRx latency reduction.  The complete eleven-row matrix had minimum ratio
 0.994679.
 
+On Thor, the static `M=32`, `H=4096`, PDL RMSNorm specialization also launches
+an exactly full grid.  Folding its row-valid predicate, selecting ptxas register
+level 4, and replacing the 56-register cap with a one-block launch bound removed
+the redundant reconvergence pair.  A 1,800-pair warm counterbalanced run measured
+2.250894 us TIRx / 2.275355 us source (ratio 1.010867, order subsets 1.020061 and
+1.001705).  Two later 2,400-pair runs in a different latency band measured ratios
+0.994144 and 0.997820, so treat the change as bringing this shape to parity rather
+than as a stable throughput win.  Both the affected PDL shape and its non-PDL
+sibling passed the numerical oracle, and the SM100 selector defaults were checked
+unchanged.
+
 ## Boundary
 
 This is valid only when the compiled artifact is tied to the exact static shape

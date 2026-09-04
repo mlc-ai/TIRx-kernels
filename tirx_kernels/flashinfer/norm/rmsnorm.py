@@ -134,13 +134,43 @@ def _source_config(H: int) -> dict[str, int | bool]:
     return _derived_config(H, cluster_n)
 
 
-def _select_ptxas_reg_level(variant: str, H: int) -> str:
+def _select_ptxas_reg_level(variant: str, M: int, H: int, enable_pdl: bool) -> str:
     """Choose the measured Thor schedule while retaining the sm_100a default."""
     if prepare_cuda_arch() != "sm_110a":
         return "10"
     if H == 4096:
+        if variant == "rmsnorm" and M == 32 and enable_pdl:
+            return "4"
         return "6"
     return "10"
+
+
+def _select_max_registers(
+    threads: int, variant: str, M: int, H: int, enable_pdl: bool
+) -> int | None:
+    """Choose the existing per-entry register budget."""
+    if threads != 128:
+        return None
+    if prepare_cuda_arch() == "sm_110a" and enable_pdl and H == 4096:
+        if variant == "rmsnorm" and M == 32:
+            return None
+        return 56
+    return 64 if enable_pdl else (96 if H == 8192 else 93)
+
+
+def _select_min_blocks_per_sm(
+    threads: int, variant: str, M: int, H: int, enable_pdl: bool
+) -> int | None:
+    if (
+        prepare_cuda_arch() == "sm_110a"
+        and threads == 128
+        and variant == "rmsnorm"
+        and M == 32
+        and H == 4096
+        and enable_pdl
+    ):
+        return 1
+    return None if threads == 128 else 1
 
 
 def _butterfly_sum_f32(acc, lane_xors: tuple[int, ...]) -> None:
@@ -474,7 +504,7 @@ def get_kernel(
 ):
     """Return the compact or explicit-i64-strided runtime-M specialization."""
     _validate(variant, dtype, M, H, input_layout, output_layout, eps)
-    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = _select_ptxas_reg_level(variant, H)
+    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = _select_ptxas_reg_level(variant, M, H, enable_pdl)
     compact = _uses_compact_specialization(M, H, input_layout, output_layout)
     source = _source_config(H)
     cluster_n = int(source["cluster_n"])
@@ -491,6 +521,14 @@ def get_kernel(
     smem_bytes = int(source["smem_bytes"])
     total_values = vec * vec_blocks
     thor_predicated_async = prepare_cuda_arch() == "sm_110a"
+    thor_full_rows = (
+        thor_predicated_async
+        and compact
+        and variant == "rmsnorm"
+        and M == 32
+        and H == 4096
+        and enable_pdl
+    )
     packed_pairs = _ceil_div(total_values, 2)
     pair_values = packed_pairs * 2
     packed_narrow = not (vec == 1 or (vec == 2 and vec_blocks == 3))
@@ -516,12 +554,7 @@ def get_kernel(
 
     # A 128-thread entry caps its own allocation; the 256-thread entry pins one
     # CTA per SM instead, and the two spellings are mutually exclusive downstream.
-    max_registers = None
-    if threads == 128:
-        if thor_predicated_async and enable_pdl and H == 4096:
-            max_registers = 56
-        else:
-            max_registers = 64 if enable_pdl else (96 if H == 8192 else 93)
+    max_registers = _select_max_registers(threads, variant, M, H, enable_pdl)
 
     def entry_registers():
         if max_registers is None:
@@ -556,7 +589,9 @@ def get_kernel(
         # int32 value in a local first gives the cast a single Var to sit on.
         row_i32 = K.local_scalar(K.i32, init=block_x * rows + row_in_cta)
         row_i64 = K.cast(row_i32, "int64")
-        row_valid = row_i64 < runtime_M
+        # This exact static-M specialization launches a completely full grid.
+        # Folding the always-true guard avoids one reconvergence pair on Thor.
+        row_valid = K.bool(True) if thor_full_rows else row_i64 < runtime_M
         warp = tid // 32
         lane = tid % 32
         row_warp = warp // warps_per_row
@@ -812,7 +847,7 @@ def get_kernel(
         "warps": threads // 32,
         "arch": "sm_100a",
         "grid": False,
-        "min_blocks_per_sm": None if threads == 128 else 1,
+        "min_blocks_per_sm": _select_min_blocks_per_sm(threads, variant, M, H, enable_pdl),
     }
 
     if compact:
