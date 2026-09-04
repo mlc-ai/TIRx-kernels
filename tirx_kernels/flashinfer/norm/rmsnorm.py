@@ -139,7 +139,7 @@ def _select_ptxas_reg_level(variant: str, H: int) -> str:
     if prepare_cuda_arch() != "sm_110a":
         return "10"
     if H == 4096:
-        return "5"
+        return "6"
     return "10"
 
 
@@ -490,6 +490,7 @@ def get_kernel(
     use_async = bool(source["use_async"])
     smem_bytes = int(source["smem_bytes"])
     total_values = vec * vec_blocks
+    thor_predicated_async = prepare_cuda_arch() == "sm_110a"
     packed_pairs = _ceil_div(total_values, 2)
     pair_values = packed_pairs * 2
     packed_narrow = not (vec == 1 or (vec == 2 and vec_blocks == 3))
@@ -517,7 +518,10 @@ def get_kernel(
     # CTA per SM instead, and the two spellings are mutually exclusive downstream.
     max_registers = None
     if threads == 128:
-        max_registers = 64 if enable_pdl else (96 if H == 8192 else 93)
+        if thor_predicated_async and enable_pdl and H == 4096:
+            max_registers = 56
+        else:
+            max_registers = 64 if enable_pdl else (96 if H == 8192 else 93)
 
     def entry_registers():
         if max_registers is None:
@@ -599,15 +603,24 @@ def get_kernel(
                 x_offset = row_i64 * x_row_stride + K.cast(absolute_col, "int64")
 
             if use_async:
-                with K.If(row_valid), K.Then():
-                    # Ignore-src: an out-of-range column copies nothing and the
-                    # staged bytes read back as zero.
+                if thor_predicated_async:
                     K.ptx[_CP_ASYNC](
                         shared_raw.ptr_to([(row_in_cta * cols + local_col) * _ELEM_BYTES]),
                         x.ptr_to([x_offset]),
                         copy_bytes,
                         K.cast(K.if_then_else(col_valid, copy_bytes, 0), "uint32"),
+                        pred=row_valid,
                     )
+                else:
+                    with K.If(row_valid), K.Then():
+                        # Ignore-src: an out-of-range column copies nothing and the
+                        # staged bytes read back as zero.
+                        K.ptx[_CP_ASYNC](
+                            shared_raw.ptr_to([(row_in_cta * cols + local_col) * _ELEM_BYTES]),
+                            x.ptr_to([x_offset]),
+                            copy_bytes,
+                            K.cast(K.if_then_else(col_valid, copy_bytes, 0), "uint32"),
+                        )
             else:
                 with K.If(K.And(row_valid, col_valid)), K.Then():
                     _load_global_bits(x_bits, vb * vec, x, x_offset, vec)
