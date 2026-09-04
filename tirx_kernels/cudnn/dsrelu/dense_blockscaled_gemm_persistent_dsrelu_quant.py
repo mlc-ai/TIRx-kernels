@@ -2378,6 +2378,14 @@ def run_test(**config):
     if prepare_cuda_arch() == "sm_110a":
         torch.cuda.synchronize()
         _validate_with_oracle(data, kernel_config)
+        if not kernel_config["with_amax"]:
+            # Only the optional amax branch emits redux.sync.max.NaN.f32,
+            # which the pinned source compiler rejects for sm_110a.
+            source_launch = _compile_reference(data, kernel_config)
+            _reset_outputs(data, "source")
+            source_launch()
+            torch.cuda.synchronize()
+            _validate_outputs(data, kernel_config, with_source=True)
         result = data["tirx_amax"]
     else:
         source_launch = _compile_reference(data, kernel_config)
@@ -2407,7 +2415,9 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
 
     config = {**prepared["config"], **kwargs}
     kernel_config = _without_label(config)
-    with_source = external_references_enabled() and prepare_cuda_arch() != "sm_110a"
+    with_source = external_references_enabled() and (
+        prepare_cuda_arch() != "sm_110a" or not kernel_config["with_amax"]
+    )
     gpu_state = prepared.get("gpu_state")
     if gpu_state is None:
         data = prepare_data(**kernel_config)
