@@ -14,7 +14,7 @@ from pathlib import Path
 
 import tirx_kernels.kern as K
 import tvm
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
+from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench, hardware_num_sms
 
 
 class WarpRole(IntEnum):
@@ -338,6 +338,11 @@ def make_kernel(M, N, KDIM):
         raise ValueError("K/16 must be divisible by four")
 
     cfg = {**_DEFAULTS, **TIRX_CONFIGS.get((M, N, KDIM), {})}
+    if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+        # The registry values launch one persistent CTA per B200 SM.  Match
+        # that policy on Thor rather than over-subscribing its 20-SM GPU with
+        # the B200-specific 148-CTA grid.
+        cfg["SM_COUNT"] = hardware_num_sms(default=20)
     SM_COUNT = cfg["SM_COUNT"]
     CTA_GROUP = cfg["CTA_GROUP"]
     CLUSTER_M = cfg["CLUSTER_M"]

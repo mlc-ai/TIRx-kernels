@@ -11,6 +11,7 @@ The source implementation is ``RMSNormKernel`` plus its 2-D host dispatch in
 """
 
 import contextlib
+import os
 from typing import Any
 
 import tirx_kernels.kern as K
@@ -131,6 +132,15 @@ def _source_config(H: int) -> dict[str, int | bool]:
     # per-CTA slices and distributed reductions remain consistent.
     cluster_n = prepare_cluster_shape((1, cluster_n))[1]
     return _derived_config(H, cluster_n)
+
+
+def _select_ptxas_reg_level(variant: str, H: int) -> str:
+    """Choose the measured Thor schedule while retaining the sm_100a default."""
+    if prepare_cuda_arch() != "sm_110a":
+        return "10"
+    if H == 4096:
+        return "5"
+    return "10"
 
 
 def _butterfly_sum_f32(acc, lane_xors: tuple[int, ...]) -> None:
@@ -464,6 +474,7 @@ def get_kernel(
 ):
     """Return the compact or explicit-i64-strided runtime-M specialization."""
     _validate(variant, dtype, M, H, input_layout, output_layout, eps)
+    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = _select_ptxas_reg_level(variant, H)
     compact = _uses_compact_specialization(M, H, input_layout, output_layout)
     source = _source_config(H)
     cluster_n = int(source["cluster_n"])

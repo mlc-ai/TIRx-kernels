@@ -222,16 +222,17 @@ def _render(representative: dict, additions: dict, paths: tuple[Path, Path]) -> 
             f"| FlashAttention-4 revision | `{flashattn.get('git_sha', '-')}` |",
             "",
             "Rows above 10% CV are retained and visibly flagged by their CV columns. In "
-            "particular, the BF16 4096-cube GEMM switched between fast and slow clock regimes "
-            "within its five rounds. Its absolute mean and near-threshold ratio should be rerun "
-            "with "
-            "`sudo jetson_clocks` before publication.",
+            "particular, the 4096-cube GEMMs switched between fast and slow clock regimes "
+            f"within their {additions_protocol['rounds']} rounds. Their absolute means and "
+            "near-threshold ratios should not be treated as locked-clock absolute latency. "
+            "The paired same-process ratios remain the comparison used here.",
             "",
             "## Raw evidence",
             "",
             f"- Original representative run: `{paths[0].resolve()}`",
             f"- Classic additions run: `{paths[1].resolve()}`",
-            "- Both runs used five round samples per implementation and had no interference "
+            f"- Both runs used {additions_protocol['rounds']} round samples per implementation "
+            "and had no interference "
             "retries in the selected final artifacts.",
             "",
         ]
