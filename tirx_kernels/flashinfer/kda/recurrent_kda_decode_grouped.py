@@ -1044,7 +1044,7 @@ def _assert_close(got, want, rtol, atol, what: str) -> None:
     got_f, want_f = got.float(), want.float()
     diff = (got_f - want_f).abs()
     tol = atol + rtol * want_f.abs()
-    bad = diff > tol
+    bad = ~torch.isfinite(got_f) | ~torch.isfinite(want_f) | (diff > tol)
     if bool(bad.any()):
         idx = int(bad.float().argmax())
         raise AssertionError(
