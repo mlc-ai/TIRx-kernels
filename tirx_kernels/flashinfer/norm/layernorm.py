@@ -15,6 +15,7 @@ from typing import Any
 
 import tirx_kernels.kern as K
 from tirx_kernels.runner import bench
+from tirx_kernels.target import prepare_cuda_arch
 
 KERNEL_META = {
     "name": "flashinfer_layernorm",
@@ -284,6 +285,7 @@ def get_kernel(
     mixed_local_sum = bool(source["mixed_local_sum"])
     packed_pairs = _ceil_div(total_values, 2)
     pair_values = packed_pairs * 2
+    thor_vector_affine = prepare_cuda_arch() == "sm_110a" and H == 16384
 
     x_stride_hint = int(kwargs.get("x_row_stride", H if input_layout == "compact" else 2 * H))
     y_stride_hint = int(kwargs.get("y_row_stride", H if output_layout == "compact" else 2 * H))
@@ -427,13 +429,41 @@ def get_kernel(
         for value in range(total_values):
             K.assign(gamma_frag[value], K.float32(0.0))
             K.assign(beta_frag[value], K.float32(0.0))
-        for vb in range(vec_blocks):
-            for e in range(vec):
-                value = vb * vec + e
-                col = tid * vec + vb * threads * vec + e
-                with K.If(col < H), K.Then():
-                    K.ptx.ld.global_.b32(gamma_frag[value], gamma.ptr_to([col]))
-                    K.ptx.ld.global_.b32(beta_frag[value], beta.ptr_to([col]))
+        if thor_vector_affine:
+            for vb in range(vec_blocks):
+                value_offset = vb * vec
+                col = tid * vec + vb * threads * vec
+                gamma_words = K.alloc_local([4], K.u64)
+                beta_words = K.alloc_local([4], K.u64)
+                K.ptx.ld.global_.v4.b64(
+                    gamma_words[0],
+                    gamma_words[1],
+                    gamma_words[2],
+                    gamma_words[3],
+                    gamma.ptr_to([col]),
+                )
+                K.ptx.ld.global_.v4.b64(
+                    beta_words[0], beta_words[1], beta_words[2], beta_words[3], beta.ptr_to([col])
+                )
+                for pair in range(4):
+                    K.ptx.mov.b64(
+                        gamma_frag[value_offset + pair * 2],
+                        gamma_frag[value_offset + pair * 2 + 1],
+                        gamma_words[pair],
+                    )
+                    K.ptx.mov.b64(
+                        beta_frag[value_offset + pair * 2],
+                        beta_frag[value_offset + pair * 2 + 1],
+                        beta_words[pair],
+                    )
+        else:
+            for vb in range(vec_blocks):
+                for e in range(vec):
+                    value = vb * vec + e
+                    col = tid * vec + vb * threads * vec + e
+                    with K.If(col < H), K.Then():
+                        K.ptx.ld.global_.b32(gamma_frag[value], gamma.ptr_to([col]))
+                        K.ptx.ld.global_.b32(beta_frag[value], beta.ptr_to([col]))
 
         y_f32 = K.alloc_local([pair_values], K.f32)
         if total_values == 1:
