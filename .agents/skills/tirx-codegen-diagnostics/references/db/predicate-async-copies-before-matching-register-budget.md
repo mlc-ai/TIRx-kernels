@@ -38,6 +38,15 @@ counterbalanced same-process pairs. Each order subset independently exceeded
 parity at 1.0068x and 1.0167x. Global and shared traffic remained equal, local
 and spill traffic remained zero, and all 279 correctness configurations passed.
 
+The same instruction-level predicate repaired an H8192 FP8-quantizing
+normalization for a different reason. It increased dynamic warp instructions
+from 194,048 to 196,352 (the source used 194,816), but changed the allocation
+from 79 to 80 registers and reduced sampled long/short-scoreboard stalls from
+85/11 to 73/5. Two independent 30-pair runs measured 1.0147x and 1.0065x over
+the source, and all 97 affected configurations passed. This is a useful
+counterexample to treating instruction count as the objective: direct
+predication can improve the dependency schedule even when it adds instructions.
+
 ## Boundary
 
 A false instruction predicate suppresses the copy; it does not promise the
