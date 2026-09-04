@@ -962,7 +962,19 @@ def make_kernel(
                     K.cuda.iket.range_end(softmax_fma_token[0])
                     softmax_exp2_token = iket_range("softmax-exp2", leader_only=True)
                     emu_pairs = EMU_PAIRS_CAUSAL if is_causal else EMU_PAIRS_NC
-                    emu_start = EMU_START_CAUSAL if is_causal else EMU_START_NC
+                    # The Thor CuTeDSL baseline starts causal D128 emulation at
+                    # fragment 1.  Keeping fragment 0 on native EX2 also avoids
+                    # an extra four polynomial pairs per softmax row on SM110.
+                    # The gain reproduces across 1K..8K for the representative
+                    # GQA=8 regime, while wider KV-head regimes regress.  Keep
+                    # those paths and the frozen SM100a schedule unchanged.
+                    emu_start = (
+                        1
+                        if thor_causal_d128 and GQA_RATIO == 8
+                        else EMU_START_CAUSAL
+                        if is_causal
+                        else EMU_START_NC
+                    )
                     for frag_idx in range(4):
                         for i in range(BLK_N // 4 // 2):
                             idx = frag_idx * BLK_N // 4 + 2 * i
