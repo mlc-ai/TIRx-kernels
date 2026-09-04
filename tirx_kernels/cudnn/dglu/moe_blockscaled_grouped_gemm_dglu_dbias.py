@@ -52,6 +52,15 @@ def _runtime_config(config):
     return {**config, "cluster_shape_mn": prepare_cluster_shape(config["cluster_shape_mn"])}
 
 
+def _source_supported_on_target(config):
+    # The pinned source's optional amax and generated-scale epilogues emit
+    # redux.sync.max.NaN.f32, which ptxas rejects on sm_110a. Other source
+    # specializations compile unchanged on Thor.
+    return prepare_cuda_arch() != "sm_110a" or (
+        not config["with_amax"] and not _spec.generates_sfd(config)
+    )
+
+
 def get_kernel(**config):
     """Return the launch sequence for one static specialization."""
     return _kernel.get_kernel(**_runtime_config(config))
@@ -78,10 +87,10 @@ def run_test(**config):
     executables = [compile_kernel(func) for func in get_kernel(**kernel_config)]
     tirx_launch = _data.tirx_launch(executables, data)
     tirx_launch()
-    if prepare_cuda_arch() == "sm_110a" or _spec.upstream_launch_is_flaky(kernel_config):
-        # The pinned source either has the documented flaky launch or cannot
-        # lower its device IR for sm_110a. In both cases the independent FP32
-        # oracle remains available for the TIRx result.
+    if not _source_supported_on_target(kernel_config) or _spec.upstream_launch_is_flaky(
+        kernel_config
+    ):
+        # Keep the independent FP32 oracle where the pinned source cannot run.
         torch.cuda.synchronize()
         _data.validate_outputs(data, sources=("tirx",))
     else:
@@ -118,7 +127,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     tirx_launch = _data.tirx_launch(prepared["executables"], data)
     tirx_launch()
     torch.cuda.synchronize()
-    with_source = external_references_enabled() and prepare_cuda_arch() != "sm_110a"
+    with_source = external_references_enabled() and _source_supported_on_target(kernel_config)
     references = None
     if with_source:
         source_launch = _data.compile_reference(data)
