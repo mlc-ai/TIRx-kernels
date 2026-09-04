@@ -70,8 +70,14 @@ The numerical contract remains explicit:
 
 - DeepGEMM GEMMs retain the Thor mathematical checks and restore the original
   direct source comparison threshold. MQA and paged MQA restore source checks at
-  their existing tolerance. HC retains its original `1e-8` oracle threshold;
-  its observed source/oracle failure remains a failure pending separate review.
+  their existing tolerance. HC retains its original `1e-8` oracle threshold.
+  Its Thor oracle explicitly rounds the FP32 B operand to TF32 nearest-even,
+  matching the `TFLOAT32` tensor-map load used by both implementations, before
+  FP32 accumulation. BF16 A is exactly representable in TF32. Allowing cuBLAS
+  TF32 alone can select a full-FP32 skinny GEMM and thus a different input
+  precision. A standalone Thor TMA test matched nearest-even on 917,504 signed
+  input patterns, including subnormal values and halfway cases. Native
+  architecture oracles and all device functions remain unchanged.
 - MegaMoE admits Thor only for `num_processes=1`, retaining exact numerical
   output and integer statistics comparisons. Multiple processes are rejected
   before GPU allocation. The required workload matrix is unchanged.

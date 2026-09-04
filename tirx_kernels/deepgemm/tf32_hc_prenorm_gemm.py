@@ -279,6 +279,33 @@ def _get_num_sms(default: int) -> int:
     return hardware_num_sms(default)
 
 
+def _round_to_tf32_rne(value: torch.Tensor) -> torch.Tensor:
+    """Represent FP32 values at the TFLOAT32 tensor-map input precision."""
+    if value.dtype != torch.float32:
+        raise TypeError("TF32 oracle input must be float32")
+    bits = value.contiguous().view(torch.int32)
+    rounded = ((bits + 0xFFF + ((bits >> 13) & 1)) & -0x2000).view(torch.float32)
+    return torch.where(torch.isfinite(value), rounded, value)
+
+
+def _reference_hc_output(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() != "sm_110a":
+        return a.float() @ b.T
+    # Both implementations load B through a TFLOAT32 tensor map. Thor TMA
+    # rounds that input to nearest-even; A is BF16 and already exact in TF32.
+    # Merely allowing cuBLAS TF32 does not force it for skinny GEMMs, so make
+    # the operand precision explicit and accumulate the oracle in FP32.
+    rounded_b = _round_to_tf32_rne(b)
+    previous = torch.backends.cuda.matmul.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        return a.float() @ rounded_b.T
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous
+
+
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     deep_gemm, source = load_deep_gemm_hc()
     config = _make_config(**kwargs)
@@ -309,7 +336,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     sqr_deepgemm = torch.empty(config.sqr_sum_shape, dtype=torch.float32, device="cuda")
     d_tirx = torch.empty(config.d_shape, dtype=torch.float32, device="cuda")
     sqr_tirx = torch.empty(config.sqr_sum_shape, dtype=torch.float32, device="cuda")
-    reference_d = a.float() @ b.T
+    reference_d = _reference_hc_output(a, b)
     reference_sqr = a.float().square().sum(dim=-1)
     return {
         "config": runtime_config,
