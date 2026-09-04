@@ -4,6 +4,7 @@
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 import ctypes
+import math
 from dataclasses import asdict, dataclass
 from functools import cache
 from typing import Any
@@ -1033,7 +1034,8 @@ def _calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
     if denominator == 0:
         return 0.0
     sim = 2 * (x * y).sum() / denominator
-    return float((1 - sim).item())
+    diff = float((1 - sim).item())
+    return diff if math.isfinite(diff) else float("inf")
 
 
 def _assert_correct(

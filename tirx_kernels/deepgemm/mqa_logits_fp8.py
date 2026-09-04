@@ -9,6 +9,7 @@ Upstream source: deep_gemm/include/deep_gemm/impls/sm100_mqa_logits.cuh.
 """
 
 import ctypes
+import math
 import os
 from dataclasses import asdict, dataclass
 from functools import cache
@@ -978,7 +979,8 @@ def _calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
     if denominator == 0:
         return 0.0
     sim = 2 * (x * y).sum() / denominator
-    return float((1 - sim).item())
+    diff = float((1 - sim).item())
+    return diff if math.isfinite(diff) else float("inf")
 
 
 def _assert_correct(data: dict[str, Any], logits: torch.Tensor, *, name: str) -> float:
