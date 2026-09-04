@@ -516,6 +516,31 @@ def _flashinfer_tinygemm2_spec():
         raise RuntimeError(
             "FlashInfer TinyGEMM2 source is unavailable; checked " + ", ".join(map(str, candidates))
         )
+    if prepare_cuda_arch() == "sm_110a":
+        from flashinfer.jit.core import common_nvcc_flags
+        from flashinfer.jit.utils import write_if_different
+
+        # The frozen device kernels run on Thor. Its original host check and
+        # binary targets predate that device; adapt only those in a separate JIT
+        # cache, after validating the complete original source above.
+        original = source.read_text()
+        guard = "TVM_FFI_ICHECK(major == 10 && (minor == 0 || minor == 3))"
+        if original.count(guard) != 1:
+            raise RuntimeError("TinyGEMM2 frozen host architecture check changed")
+        adapted = original.replace(
+            guard,
+            "TVM_FFI_ICHECK((major == 10 && (minor == 0 || minor == 3)) || "
+            "(major == 11 && minor == 0))",
+        )
+        generated = jit_env.FLASHINFER_GEN_SRC_DIR / "tinygemm2_sm110a" / filename
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        write_if_different(generated, adapted)
+        return gen_jit_spec(
+            "tinygemm2_sm110a",
+            [generated],
+            extra_cuda_cflags=["-gencode=arch=compute_110a,code=sm_110a", *common_nvcc_flags],
+            extra_include_paths=[source.parent, source.parent.parent / "include"],
+        )
     return gen_jit_spec(
         "tinygemm2_sm100",
         [source],
@@ -576,21 +601,19 @@ def run_test(B: int, O: int, K: int) -> None:
     for use_pdl in (False, True):
         tirx_out = torch.zeros_like(case["out"])
         _run_tirx(case, stage, use_pdl, tirx_out)
+        flashinfer_out = torch.zeros_like(case["out"])
+        _run_flashinfer(case, stage, use_pdl, flashinfer_out)
+        torch.cuda.synchronize()
         if prepare_cuda_arch() == "sm_110a":
-            torch.cuda.synchronize()
             _validate_mathematical_reference(case, tirx_out)
-        else:
-            flashinfer_out = torch.zeros_like(case["out"])
-            _run_flashinfer(case, stage, use_pdl, flashinfer_out)
-            torch.cuda.synchronize()
-            if not torch.equal(tirx_out, flashinfer_out):
-                differing = int((tirx_out != flashinfer_out).sum().item())
-                max_diff = float((tirx_out.float() - flashinfer_out.float()).abs().max().item())
-                raise AssertionError(
-                    f"TinyGEMM2 bitwise mismatch for B={B}, O={O}, K={K}, "
-                    f"stage={stage}, use_pdl={use_pdl}: {differing} elements, "
-                    f"max_abs_diff={max_diff}"
-                )
+        if not torch.equal(tirx_out, flashinfer_out):
+            differing = int((tirx_out != flashinfer_out).sum().item())
+            max_diff = float((tirx_out.float() - flashinfer_out.float()).abs().max().item())
+            raise AssertionError(
+                f"TinyGEMM2 bitwise mismatch for B={B}, O={O}, K={K}, "
+                f"stage={stage}, use_pdl={use_pdl}: {differing} elements, "
+                f"max_abs_diff={max_diff}"
+            )
 
 
 def prepare_bench(B: int, O: int, K: int):
@@ -630,7 +653,7 @@ def run_gpu(
         executable(*args)
         torch.cuda.synchronize()
         _validate_mathematical_reference(case, case["out"])
-    elif external_references_enabled():
+    if external_references_enabled():
         reference_out = torch.zeros_like(case["out"])
         _run_flashinfer(case, stage, False, reference_out)
         executable(*args)
@@ -649,16 +672,12 @@ def run_gpu(
 
         return launch
 
-    references = None
-    if prepare_cuda_arch() != "sm_110a":
-        references = {"flashinfer_sm100": _flashinfer_builder}
-
     return bench(
         {"tirx": lambda: executable(*args)},
         warmup=warmup,
         repeat=repeat,
         timer=timer,
-        references=references,
+        references={"flashinfer_sm100": _flashinfer_builder},
         rounds=rounds,
         cooldown_s=cooldown_s,
     )
