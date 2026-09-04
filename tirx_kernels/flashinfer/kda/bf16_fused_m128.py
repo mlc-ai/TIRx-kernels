@@ -613,6 +613,11 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
 
 def _load_flashinfer_recurrent_kda():
     """Import the reference kernel from the installed flashinfer."""
+    if prepare_cuda_arch() == "sm_110a":
+        from ._source import recurrent_kda_m128
+
+        return recurrent_kda_m128
+
     try:
         from flashinfer.kda import recurrent_kda
     except ImportError as e:
@@ -2538,22 +2543,25 @@ def run_test(**kwargs: Any) -> None:
     compile_kernel(bf16_fused_m128(**kwargs))(*_tirx_args(case))
     torch.cuda.synchronize()
 
+    # Evaluate the additional mathematical oracle before the source wrapper
+    # updates initial_state in place. Source agreement is required on Thor too.
+    references = []
     if prepare_cuda_arch() == "sm_110a":
-        flashinfer_out, flashinfer_state = _mathematical_reference(case)
-    else:
-        flashinfer_out, flashinfer_state = _flashinfer_cuda_reference(case)
-    torch.testing.assert_close(case["out"], flashinfer_out, rtol=4.01 / 128, atol=5e-3)
-    if cfg.store_final_state:
-        # The state comparison must not silently vanish when the reference
-        # declines to return one.
-        if flashinfer_state is None:
-            raise AssertionError("store_final_state set but the reference returned no state")
-        torch.testing.assert_close(
-            case["final_state"],
-            flashinfer_state.reshape(case["final_state"].shape),
-            rtol=4.01 / 128,
-            atol=5e-3,
-        )
+        references.append(_mathematical_reference(case))
+    references.append(_flashinfer_cuda_reference(case))
+    for flashinfer_out, flashinfer_state in references:
+        torch.testing.assert_close(case["out"], flashinfer_out, rtol=4.01 / 128, atol=5e-3)
+        if cfg.store_final_state:
+            # The state comparison must not silently vanish when the reference
+            # declines to return one.
+            if flashinfer_state is None:
+                raise AssertionError("store_final_state set but the reference returned no state")
+            torch.testing.assert_close(
+                case["final_state"],
+                flashinfer_state.reshape(case["final_state"].shape),
+                rtol=4.01 / 128,
+                atol=5e-3,
+            )
     cfg.validate()
 
 
@@ -2606,9 +2614,7 @@ def run_gpu(
         flashkda_peer["reference"] = peer
         return peer.launch
 
-    references = None
-    if prepare_cuda_arch() != "sm_110a":
-        references = {"flashinfer_m128": _flashinfer_builder, "flashkda_raw": _flashkda_raw_builder}
+    references = {"flashinfer_m128": _flashinfer_builder, "flashkda_raw": _flashkda_raw_builder}
 
     result = bench(
         funcs,

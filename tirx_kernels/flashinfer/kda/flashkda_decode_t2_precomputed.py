@@ -28,7 +28,6 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.kern as K
-from tirx_kernels.target import prepare_cuda_arch
 
 HEAD_DIM = 128
 NUM_TOKENS = 2
@@ -1016,7 +1015,7 @@ def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
     kernel-only and every metadata combination (negative slots, arbitrary
     num_accepted_tokens) is reachable.
     """
-    from flashinfer.jit.flash_kda_decode import get_flash_kda_decode_module
+    from ._source import get_decode_module
 
     device = case["device"]
     major, minor = torch.cuda.get_device_capability(device)
@@ -1026,10 +1025,12 @@ def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
         # Non-direct variants are not exported for sm103a
         # (flash_kda_decode.py:213-217).
         target = "sm100f"
+    elif (major, minor) == (11, 0):
+        target = "sm110a"
     else:
         raise SkipTest(f"FlashKDA cake decode has no export for compute capability {major}.{minor}")
 
-    module = get_flash_kda_decode_module("d128_t2_precomputed_split4", target)
+    module = get_decode_module("d128_t2_precomputed_split4", target)
     reference_out = torch.empty_like(case["tirx_out"])
     dummy_f32 = torch.ones(1, device=device, dtype=torch.float32)
 
@@ -1052,14 +1053,6 @@ def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
     )
     torch.cuda.synchronize(device)
     return reference_out
-
-
-def _validation_reference(case: dict[str, Any]) -> torch.Tensor:
-    if prepare_cuda_arch() == "sm_110a":
-        from ._reference import recurrent_kda_reference
-
-        return recurrent_kda_reference(case, num_tokens=NUM_TOKENS)
-    return _flashinfer_reference(case)
 
 
 # The port replicates the source's MMA chain, swizzle and association orders, so
@@ -1089,24 +1082,20 @@ def run_test(**kwargs: Any) -> None:
 
     tirx_out = case["tirx_out"]
     tirx_state = case["tirx_state_raw"].clone()
-    from ._reference import validation_tolerances
-
-    validation_rtol, validation_atol = validation_tolerances(_RTOL, _ATOL)
-
     # 1. the frozen cake export (the arbiter) itself, on an independent state pool
-    reference_out = _validation_reference(case)
+    reference_out = _flashinfer_reference(case)
     torch.testing.assert_close(
         tirx_out.float(),
         reference_out.float(),
-        rtol=validation_rtol,
-        atol=validation_atol,
+        rtol=_RTOL,
+        atol=_ATOL,
         msg=lambda m: f"output vs flashinfer cake export\n{m}",
     )
     torch.testing.assert_close(
         tirx_state.float(),
         case["reference_state_raw"].float(),
-        rtol=validation_rtol,
-        atol=validation_atol,
+        rtol=_RTOL,
+        atol=_ATOL,
         msg=lambda m: f"state vs flashinfer cake export\n{m}",
     )
 
@@ -1165,25 +1154,6 @@ def run_gpu(
 
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
-
-    if prepare_cuda_arch() == "sm_110a":
-        from ._reference import benchmark_tirx_with_oracle, validation_tolerances
-
-        validation_rtol, validation_atol = validation_tolerances(_RTOL, _ATOL)
-
-        return benchmark_tirx_with_oracle(
-            executable,
-            args,
-            case,
-            _validation_reference,
-            rtol=validation_rtol,
-            atol=validation_atol,
-            warmup=warmup,
-            repeat=repeat,
-            timer=timer,
-            rounds=rounds,
-            cooldown_s=cooldown_s,
-        )
 
     def flashinfer_builder():
         # Validate once outside the timed region. Both sides mutate independent state pools.
