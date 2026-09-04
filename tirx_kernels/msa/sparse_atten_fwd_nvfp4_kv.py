@@ -3984,7 +3984,7 @@ def run_test(**config) -> None:
 
     import torch
 
-    from tirx_kernels.msa.sparse_atten_fwd import assert_partials_match, torch_reference_partials
+    from tirx_kernels.msa.sparse_atten_fwd import assert_partials_match
     from tirx_kernels.runner import compile_kernel
 
     if not torch.cuda.is_available():  # pragma: no cover - environment dependent
@@ -3993,41 +3993,24 @@ def run_test(**config) -> None:
     config.pop("label", None)
     data = prepare_data(**config)
 
-    from tirx_kernels.target import prepare_cuda_arch
-
-    if prepare_cuda_arch() == "sm_110a":
-        expected = torch_reference_partials(data)
-    else:
-        try:
-            from tirx_kernels.msa.utils._msa_bench import compiled_sparse_atten_nvfp4_kv
-        except ImportError as exc:  # pragma: no cover - environment dependent
-            raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
-        expected = make_outputs(data)
-        try:
-            compiled_sparse_atten_nvfp4_kv(reference_case(data, expected))()
-        except ImportError as exc:  # pragma: no cover - environment dependent
-            raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
-        torch.cuda.synchronize()
+    try:
+        from tirx_kernels.msa.utils._msa_bench import compiled_sparse_atten_nvfp4_kv
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+    expected = make_outputs(data)
+    try:
+        compiled_sparse_atten_nvfp4_kv(reference_case(data, expected))()
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+    torch.cuda.synchronize()
 
     executable = compile_kernel(get_kernel(**config))
     outputs = make_outputs(data)
     executable(*tirx_args(data, outputs))
     torch.cuda.synchronize()
-    if prepare_cuda_arch() == "sm_110a":
-        output_tolerance = 0.5 if data["partial_dtype"] == "float8_e4m3" else 0.125
-        assert_partials_match(
-            data,
-            outputs,
-            expected,
-            rtol=output_tolerance,
-            atol=output_tolerance,
-            lse_rtol=2e-3,
-            lse_atol=2e-3,
-        )
-    else:
-        assert_partials_match(data, outputs, expected)
+    assert_partials_match(data, outputs, expected)
 
-    if prepare_cuda_arch() != "sm_110a" and data["q_dtype"] == "bfloat16":
+    if data["q_dtype"] == "bfloat16":
         _assert_matches_dequantized_twin(data, outputs)
 
 
@@ -4151,11 +4134,9 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         launch()  # pay the CuTeDSL compile and first-launch cost outside timing
         return launch
 
-    from tirx_kernels.target import prepare_cuda_arch
-
     return bench(
         {"tirx": tirx_launch},
-        references={"msa": build_reference} if prepare_cuda_arch() != "sm_110a" else {},
+        references={"msa": build_reference},
         warmup=warmup,
         repeat=repeat,
         timer=timer,

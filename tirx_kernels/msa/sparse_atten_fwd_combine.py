@@ -1575,28 +1575,22 @@ def run_test(**config):
     config.pop("label", None)
     data = prepare_data(**config)
 
-    from tirx_kernels.target import prepare_cuda_arch
-
-    if prepare_cuda_arch() == "sm_110a":
-        expected = torch_reference_outputs(data)
-    else:
-        try:
-            from tirx_kernels.msa.utils._msa_bench import compiled_sparse_atten_combine
-        except ImportError as exc:  # pragma: no cover - environment dependent
-            raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
-        expected = make_outputs(data)
-        try:
-            compiled_sparse_atten_combine(reference_case(data, expected))()
-        except ImportError as exc:  # pragma: no cover - environment dependent
-            raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
-        torch.cuda.synchronize()
+    try:
+        from tirx_kernels.msa.utils._msa_bench import compiled_sparse_atten_combine
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+    expected = make_outputs(data)
+    try:
+        compiled_sparse_atten_combine(reference_case(data, expected))()
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+    torch.cuda.synchronize()
 
     executable = compile_kernel(get_kernel(**config))
     outputs = make_outputs(data)
     executable(*tirx_args(data, outputs))
     torch.cuda.synchronize()
-    tolerance = 2e-2 if prepare_cuda_arch() == "sm_110a" else 0.0
-    assert_outputs_match(data, outputs, expected, rtol=tolerance, atol=tolerance)
+    assert_outputs_match(data, outputs, expected)
 
 
 def prepare_bench(**config):
@@ -1637,11 +1631,9 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         launch()  # pay the CuTeDSL compile and first-launch cost outside timing
         return launch
 
-    from tirx_kernels.target import prepare_cuda_arch
-
     return bench(
         {"tirx": tirx_launch},
-        references={"msa": build_reference} if prepare_cuda_arch() != "sm_110a" else {},
+        references={"msa": build_reference},
         warmup=warmup,
         repeat=repeat,
         timer=timer,

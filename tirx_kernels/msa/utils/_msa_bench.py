@@ -12,7 +12,9 @@ MSA's own benchmarks add (``benchmarks/bench_sparse_attention_ops.py``).
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -83,6 +85,130 @@ def cutedsl_paths() -> list[str]:
     if not packages.is_dir():
         return []
     return [str(prefix), str(packages)]
+
+
+_MSA_THOR_TARGET: tuple[str, str] | None = None
+_THOR_TARGET_QUERY = """
+import json
+import sys
+
+sys.path[:0] = json.loads(sys.argv[1])
+from cuda.bindings import driver
+
+def forbid_cuda_init(*args, **kwargs):
+    raise RuntimeError("MSA target metadata query must not initialize CUDA")
+
+driver.cuInit = forbid_cuda_init
+import cutlass
+from cutlass.base_dsl.arch import Arch
+
+print(json.dumps({
+    "canonical": Arch.from_string("sm_110a").to_string(),
+    "requested": Arch.from_string(sys.argv[2]).to_string() if sys.argv[2] else None,
+    "module": cutlass.__file__,
+}))
+"""
+
+
+def _configure_msa_thor_target(paths: list[str]) -> None:
+    """Canonicalize Thor before the pinned CuTe runtime captures its target.
+
+    MSA's frozen 4.5.3 compiler uses the legacy name ``sm_101a`` for Thor,
+    while automatic device detection returns ``sm_110a``. Its Python Arch
+    parser knows the alias, but its native target pipeline cannot consume the
+    raw name. Query the selected compiler's parser, without hardcoding a CUDA
+    version mapping. Importing even ``cutlass.base_dsl.arch`` constructs CuTe's
+    singleton, so first-time discovery must happen in a separate interpreter.
+    The child only reads metadata and is forbidden to initialize CUDA.
+    """
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() != "sm_110a":
+        return
+
+    # Source builders normally arrive after prepare_data has allocated CUDA
+    # inputs. Reject a contradictory prepare override without initializing CUDA
+    # during metadata-only use, including on repeated adapter calls.
+    torch = sys.modules.get("torch")
+    if torch is not None and torch.cuda.is_initialized():
+        capability = tuple(torch.cuda.get_device_capability())
+        if capability != (11, 0):
+            raise RuntimeError(
+                f"MSA prepared Thor target requires CUDA capability (11, 0), got {capability}"
+            )
+
+    global _MSA_THOR_TARGET
+    if not paths:
+        raise RuntimeError(
+            "MSA Thor source requires its frozen CuTe-DSL 4.5.3 prefix; "
+            "install the MSA reference dependencies or set MSA_CUTEDSL_PATH"
+        )
+    paths = [str(Path(path).resolve()) for path in paths]
+    prefix = paths[0]
+    if _MSA_THOR_TARGET is not None:
+        if _MSA_THOR_TARGET != (prefix, os.environ.get("CUTE_DSL_ARCH")):
+            raise RuntimeError(
+                "MSA CuTe prefix or CUTE_DSL_ARCH changed after target configuration; "
+                "start a fresh worker"
+            )
+        return
+
+    # Benchmark builders also need the frozen pair, even when the correctness
+    # runner has not checked KERNEL_META's reference requirements first.
+    from importlib.metadata import distributions
+
+    installed = {dist.metadata["Name"]: dist.version for dist in distributions(path=[prefix])}
+    for package, version in (("nvidia-cutlass-dsl", "4.5.3"), ("quack-kernels", "0.5.0")):
+        if installed.get(package) != version:
+            raise RuntimeError(f"MSA Thor source requires {package}=={version} under {prefix}")
+
+    requested = os.environ.get("CUTE_DSL_ARCH", "")
+    if "cutlass" in sys.modules:
+        loaded = sys.modules["cutlass"]
+        if not Path(loaded.__file__).resolve().is_relative_to(prefix):
+            raise RuntimeError(
+                f"MSA cutlass was imported outside the pinned prefix: {loaded.__file__}"
+            )
+        from cutlass.base_dsl.arch import Arch
+        from cutlass.cutlass_dsl import CuTeDSL
+
+        canonical = Arch.from_string("sm_110a").to_string()
+        # Read only: rebuilding this singleton would invalidate native caches.
+        instance = CuTeDSL._instances.get(CuTeDSL)
+        if instance is None or instance.envar.arch != canonical or requested != canonical:
+            raise RuntimeError(
+                "MSA Thor target must be configured before importing cutlass; "
+                f"start a fresh worker with CUTE_DSL_ARCH={canonical} and the pinned MSA prefix"
+            )
+    else:
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", _THOR_TARGET_QUERY, json.dumps(paths), requested],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True,
+            )
+            metadata = json.loads(result.stdout.strip().splitlines()[-1])
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                "MSA CuTe target metadata query failed: " + (exc.stderr or "")[-2000:]
+            ) from exc
+        except (subprocess.TimeoutExpired, ValueError, IndexError) as exc:
+            raise RuntimeError(
+                "MSA CuTe target metadata query did not return a valid target"
+            ) from exc
+        if not Path(metadata["module"]).resolve().is_relative_to(prefix):
+            raise RuntimeError(
+                "MSA target metadata query imported cutlass outside the pinned prefix"
+            )
+        canonical = metadata["canonical"]
+        if metadata["requested"] not in (None, canonical):
+            raise RuntimeError(
+                f"CUTE_DSL_ARCH={requested} conflicts with prepared Thor target {canonical}"
+            )
+        os.environ["CUTE_DSL_ARCH"] = canonical
+    _MSA_THOR_TARGET = (prefix, canonical)
 
 
 # The import roots the MSA reference pulls in, and the only ones this recovery
@@ -216,6 +342,8 @@ def ensure_msa_importable() -> None:
     for entry in (str(root / "python" / "fmha_sm100" / "cute"), str(root / "python")):
         if entry not in sys.path:
             sys.path.insert(0, entry)
+
+    _configure_msa_thor_target(cutedsl_paths())
 
 
 def prepare_scheduler_module():
