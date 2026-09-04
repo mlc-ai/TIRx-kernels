@@ -15,10 +15,12 @@ token, ``min(d / 8, 1024)`` threads, 16-byte vectorized access, scalar
 remainder loop, and ``griddepcontrol`` PDL intrinsics.
 """
 
+import os
 from typing import Any
 
 import tirx_kernels.kern as K
 from tirx_kernels.runner import bench
+from tirx_kernels.target import prepare_cuda_arch
 
 KERNEL_META = {
     "name": "act_and_mul",
@@ -101,9 +103,17 @@ def _unpack_hi(word, dtype):
 def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     """Return the TIRx specialization for one (act, dtype, num_tokens, d) config."""
     _validate(act, dtype, d)
+    is_thor = prepare_cuda_arch() == "sm_110a"
+    thor_classic = is_thor and (act, dtype, num_tokens, d) == ("gelu_tanh", "float16", 8192, 11008)
+    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = "9" if thor_classic else "10"
     block_size = _block_size(d)
     n_vec = d // VEC_SIZE
-    rem = d % (block_size * VEC_SIZE)
+    source_rem = d % (block_size * VEC_SIZE)
+    # The vector loop covers all d / VEC_SIZE chunks because the source
+    # dispatch requires d % VEC_SIZE == 0.  FlashInfer's scalar remainder then
+    # replays the final source_rem elements.  Skip that idempotent work on Thor
+    # while retaining the source-shaped SM100a path.
+    rem = 0 if is_thor else source_rem
     rem_off = d - rem
 
     @K.kernel(warps=(block_size + 31) // 32, arch="sm_100a", grid=num_tokens)
