@@ -337,17 +337,7 @@ def make_kernel(M, N, KDIM):
     if (KDIM // 16) % 4 != 0:
         raise ValueError("K/16 must be divisible by four")
 
-    cfg = {**_DEFAULTS, **TIRX_CONFIGS.get((M, N, KDIM), {})}
-    is_thor = os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a"
-    if is_thor:
-        # The registry values launch one persistent CTA per B200 SM.  Match
-        # that policy on Thor rather than over-subscribing its 20-SM GPU with
-        # the B200-specific 148-CTA grid.
-        cfg["SM_COUNT"] = hardware_num_sms(default=20)
-        if (M, N, KDIM) == (4096, 4096, 4096):
-            # Traverse one M tile across N so A/SFA stay hot on Thor's
-            # smaller L2 without changing the B200 schedule.
-            cfg["L2_GROUP_SIZE"] = 1
+    cfg = _shape_config(M, N, KDIM)
     SM_COUNT = cfg["SM_COUNT"]
     CTA_GROUP = cfg["CTA_GROUP"]
     CLUSTER_M = cfg["CLUSTER_M"]
@@ -937,7 +927,18 @@ def _encode_tiled(dtype, tensor, *, dims, strides_bytes, box, swizzle):
 
 
 def _shape_config(M, N, K):
-    return {**_DEFAULTS, **TIRX_CONFIGS.get((M, N, K), {})}
+    cfg = {**_DEFAULTS, **TIRX_CONFIGS.get((M, N, K), {})}
+    if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+        # The registry values launch one persistent CTA per B200 SM. Match
+        # that policy on Thor without changing any SM100-family schedule.
+        cfg["SM_COUNT"] = hardware_num_sms(default=20)
+        if (M, N, K) == (4096, 4096, 4096):
+            # Keep A/SFA hot in Thor's smaller L2 and use the wider, legal
+            # writeback transaction. Tensor-map creation consumes this same
+            # config, so its box and swizzle always match the kernel.
+            cfg["L2_GROUP_SIZE"] = 1
+            cfg["EPI_TILE"] = 64
+    return cfg
 
 
 def _build_tensor_maps(M, N, K, A, B, SFA, SFB, D):

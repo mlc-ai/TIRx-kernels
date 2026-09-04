@@ -100,3 +100,21 @@ footprints, registers, stage completion timing, and issue counts. For an
 L2-only prefetch change, confirm that `UTMAL2CCTL.PF` disappears while
 descriptor prefetches, functional TMA loads, and barrier byte counts remain;
 then test both the changed specialization and unchanged prefetching guards.
+
+## Field evidence: NVFP4 writeback width on Thor
+
+For the `4096x4096x4096` NVFP4 GEMM on `sm_110a`, widening the output TMA box
+from 32 to 64 columns reduced executed warp instructions from about 2.487M to
+2.391M. The final kernel used 218 registers per thread and 227.520 KB of
+dynamic shared memory per CTA, with no local loads or stores. A 500-pair
+counterbalanced cold-cache run measured 391.379 us for TIRx versus 398.665 us
+for FlashInfer (`1.0186x`), with both launch orders above `1.017x`; the
+30-round suite measured 345.625 us versus 370.384 us.
+
+The first experiment changed the kernel-local epilogue width without changing
+the tensor-map builder and produced an invalid cosine similarity of 0.0053.
+The 64-column implementation itself was correct: when both paths consumed the
+same config, its output matched the 32-column path with cosine similarity 1.0.
+Treat transfer width, tensor-map box, and shared-memory swizzle as one config
+unit. Never specialize one of them in the kernel while descriptor construction
+still reads a different table.
