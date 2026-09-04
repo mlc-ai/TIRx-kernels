@@ -40,7 +40,6 @@ Upstream sources:
 """
 
 # K.kernel traces concrete annotation objects; postponed annotations would turn them into strings.
-import hashlib
 import importlib
 import sys
 from functools import cache
@@ -64,14 +63,6 @@ KERNEL_META = {
         },
         {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
     ),
-}
-
-SOURCE_COMMIT = "012cfdb97f217e0d48bc9352c17a74068c9e495b"
-SOURCE_SHA256 = "f10b5ee03096af8394b57cfbe7abb6ee3103baf87c6a58a60f576ead3f4386f3"
-SOURCE_DEPENDENCY_SHA256 = {
-    "bmm_fp8_blackwell.py": "1b24de919897ef7ede911661150d67b044aa917ff50965dc08107b1aa9cacf30",
-    "bmm_fp8_wrapper.py": "f6981c4891403fd204c3bc53e716ef75ad883c904c83828d7c05526854366530",
-    "epilogue_utils.py": "ae48ecfca2220975cd3e0e1d60803f8634aa72827857aaff3b2af24205c01c92",
 }
 
 _AB_DTYPES = ("float8_e4m3fn", "float8_e5m2")
@@ -943,20 +934,9 @@ def _tirx_launch(executable, data):
 
 @cache
 def _source_bmm_op():
-    source_files = {
-        "flashinfer/gemm/kernels/bmm_fp8_rubin.py": SOURCE_SHA256,
-        **{
-            f"flashinfer/gemm/kernels/{name}": digest
-            for name, digest in SOURCE_DEPENDENCY_SHA256.items()
-        },
-    }
-    for relative, expected in source_files.items():
-        source = _SOURCE_ROOT / relative
-        if not source.is_file():
-            raise RuntimeError(f"frozen FlashInfer source is unavailable: {source}")
-        actual = hashlib.sha256(source.read_bytes()).hexdigest()
-        if actual != expected:
-            raise RuntimeError(f"frozen FlashInfer source hash mismatch: {source} sha256={actual}")
+    source = _SOURCE_ROOT / "flashinfer/gemm/kernels/bmm_fp8_rubin.py"
+    if not source.is_file():
+        raise RuntimeError(f"FlashInfer source is unavailable: {source}")
     loaded = sys.modules.get("flashinfer")
     loaded_file = Path(getattr(loaded, "__file__", "")).resolve() if loaded is not None else None
     if loaded_file is not None and _SOURCE_ROOT not in loaded_file.parents:

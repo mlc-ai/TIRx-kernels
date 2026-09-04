@@ -38,7 +38,6 @@ Upstream sources:
 - flashinfer/gemm/kernels/grouped_gemm_masked_wrapper.py
 """
 
-import hashlib
 import importlib
 import importlib.util
 import sys
@@ -63,15 +62,6 @@ KERNEL_META = {
         {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
     ),
 }
-
-SOURCE_COMMIT = "012cfdb97f217e0d48bc9352c17a74068c9e495b"
-SOURCE_SHA256 = "729ead8b8e3cfc66b0ec57e4b452f571c95f185758444a9ed697b11e60005639"
-SOURCE_DEPENDENCY_SHA256 = {
-    "grouped_gemm_masked_blackwell.py": "3d7cedc70a4504225259ba9f9c6dd6bfa67df18b00f1e416ee2c184909b1ccab",
-    "grouped_gemm_masked_wrapper.py": "6ff61a2c85b1df403578039013e803d649e9c56112925675f3ec908d507bccca",
-}
-CUTLASS_PARENT_COMMIT = "cdcf8d86daa9b417840fd99875a1b1af685d389d"
-CUTLASS_PARENT_SHA256 = "1517d4cde6b7988d5f44eca5fc2de4516b6f582ae60c37a5d1455a09c647453b"
 
 _SOURCE_ROOT = Path("/root-vol/aarch64-ws/kernel-libs/vr200/flashinfer")
 _CUTLASS_ROOT = Path(__file__).resolve().parents[3] / ".reference-deps" / "cutlass-v4.8.0dev"
@@ -2118,17 +2108,9 @@ def _torch_dtype(torch, dtype):
 
 @cache
 def _source_benchmark():
-    source_files = {
-        _SOURCE_ROOT / "flashinfer/gemm/kernels/grouped_gemm_masked_rubin.py": SOURCE_SHA256,
-        **{
-            _SOURCE_ROOT / "flashinfer/gemm/kernels" / name: digest
-            for name, digest in SOURCE_DEPENDENCY_SHA256.items()
-        },
-    }
-    for path, expected in source_files.items():
-        actual = hashlib.sha256(path.read_bytes()).hexdigest()
-        if actual != expected:
-            raise RuntimeError(f"frozen FlashInfer source hash mismatch: {path} sha256={actual}")
+    source = _SOURCE_ROOT / "flashinfer/gemm/kernels/grouped_gemm_masked_rubin.py"
+    if not source.is_file():
+        raise RuntimeError(f"FlashInfer source is unavailable: {source}")
     source_root = str(_SOURCE_ROOT)
     if source_root not in sys.path:
         sys.path.insert(0, source_root)

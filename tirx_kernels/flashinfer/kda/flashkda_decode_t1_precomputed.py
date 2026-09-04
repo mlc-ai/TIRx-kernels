@@ -8,9 +8,8 @@
 
 Source: ``csrc/kda/flashkda_decode_d128_t1_precomputed_direct_split16.cu`` (and
 its ``_split8`` sibling), symbol ``kernel_flashinfer_recurrent_kda_t1_direct``.
-Both bodies are frozen machine-generated exports ("Generated from a recurrent-KDA
-Loom schedule"); FlashInfer asserts their SHA256 in
-``tests/jit/test_flash_kda_decode_jit.py``.
+Both bodies are machine-generated exports ("Generated from a recurrent-KDA Loom
+schedule").
 
 The two exports differ in exactly three lines -- ``value_splits``,
 ``tile_row_base``'s multiplier, and the ``row_block`` trip count -- so this module

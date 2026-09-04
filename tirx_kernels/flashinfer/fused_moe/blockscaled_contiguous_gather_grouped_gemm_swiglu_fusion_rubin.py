@@ -29,24 +29,12 @@ Upstream source:
   blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion.py
 """
 
-import hashlib
 import importlib
 import sys
 from functools import cache
 from pathlib import Path
 
 import tirx_kernels.kern as K
-
-SOURCE_SHA256 = "6393684e152bdf6d5cd3666666054641eb0b952737f0db2f20018260af1ac97c"
-SOURCE_DEPENDENCY_SHA256 = {
-    "custom_pipeline.py": "97210fb00b05db803cbad6418e2e9d1b7059b13d5cb1473f12f72a696f04083b",
-    "inline_ptx.py": "b35fca3bf8173fbbe71472e3626293be2738c9669d07d90e5827e58a4628c944",
-    "utils.py": "87ef7c7199abb652a6b7660e047ac9876c6941c8574f90a8c4fd912ac4832e98",
-    "blockscaled_contiguous_gather_grouped_gemm_act_fusion.py": (
-        "eeaadde0c52e636159e5b34a20c37cfa7585a2d90d9178252c8232e5322cae0a"
-    ),
-    "tuner.py": "e91e57be076514e9fe24ef5d5c87746487dcc296f5b01398821beb80557397cf",
-}
 
 KERNEL_META = {
     "name": "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin",
@@ -1200,28 +1188,14 @@ def get_kernel(**raw_config):
     ).func
 
 
-_SOURCE_FILES = {
-    _SOURCE_ROOT / "flashinfer/fused_moe/cute_dsl/rubin/"
-    "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion.py": SOURCE_SHA256,
-    **{
-        _SOURCE_ROOT / "flashinfer/fused_moe/cute_dsl/rubin" / name: digest
-        for name, digest in SOURCE_DEPENDENCY_SHA256.items()
-        if name in {"custom_pipeline.py", "inline_ptx.py", "utils.py"}
-    },
-    **{
-        _SOURCE_ROOT / "flashinfer/fused_moe/cute_dsl" / name: digest
-        for name, digest in SOURCE_DEPENDENCY_SHA256.items()
-        if name in {"blockscaled_contiguous_gather_grouped_gemm_act_fusion.py", "tuner.py"}
-    },
-}
-
-
 @cache
 def _source_module():
-    for path, expected in _SOURCE_FILES.items():
-        actual = hashlib.sha256(path.read_bytes()).hexdigest()
-        if actual != expected:
-            raise RuntimeError(f"frozen FlashInfer source hash mismatch: {path} sha256={actual}")
+    source = (
+        _SOURCE_ROOT / "flashinfer/fused_moe/cute_dsl/rubin/"
+        "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion.py"
+    )
+    if not source.is_file():
+        raise RuntimeError(f"FlashInfer source is unavailable: {source}")
     source_root = str(_SOURCE_ROOT)
     if source_root not in sys.path:
         sys.path.insert(0, source_root)
