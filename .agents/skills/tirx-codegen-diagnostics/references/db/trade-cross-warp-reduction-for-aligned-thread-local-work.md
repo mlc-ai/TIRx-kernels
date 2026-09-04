@@ -45,6 +45,16 @@ reference/port.  Two longer counterbalanced checks measured 1.0264-1.0364x on
 the original failing row and 1.0162-1.0328x on the scaled-input guard.  All 43
 correctness configurations passed.
 
+A later combined-branch audit exposed that the narrower entry's natural
+120-register allocation could fall back to 0.9855x even though it remained
+spill-free.  Capping that entry at 112 registers reduced dynamic warp
+instructions from 3,895,680 to 3,849,600 and predicated-on thread instructions
+from 118,859,520 to 117,384,960, with identical memory traffic and no local
+accesses.  The accepted 30-pair retest measured 1.0373x overall and 1.0206x /
+1.0543x in the two order subsets.  The cap did not change the two-CTA register
+occupancy limit; its measured mechanism was the allocation and instruction
+schedule, not additional residency.
+
 ## Boundary
 
 This is not a general preference for fewer warps.  The useful narrower block
@@ -54,6 +64,11 @@ opposite direction and remained at 0.9762x despite exposing more warps.  Do not
 use a block width that forces misaligned vector addresses, scalar tails, local
 memory traffic, or a register allocation cliff.  Scope the choice to the
 target and compile-time mode/output family that passed the matrix.
+Treat the register cap as part of that specialized launch: a three-block launch
+bound was not equivalent, and lower 104/96 caps produced inconsistent order
+subsets.  Recheck the cap after compiler or surrounding-kernel changes because
+its benefit depends on the realized schedule, not just the nominal register
+number.
 
 ## Verification
 

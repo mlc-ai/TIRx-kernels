@@ -517,8 +517,7 @@ def get_kernel(
     elif output_format == "mxfp8":
         sf_k_tiles = (_HIDDEN_SIZE + 127) // 128
 
-    @K.kernel(warps=num_warps, arch="sm_100a", grid="runtime_num_rows")
-    def flashinfer_fused_dit_layernorm(
+    def kernel_body(
         input_buffer: K.gptr[K.bf16],
         residual_buffer: K.gptr[K.bf16],
         gate_buffer: K.gptr[K.bf16],
@@ -921,6 +920,55 @@ def get_kernel(
                     tid,
                     runtime_num_rows,
                 )
+
+    @K.kernel(warps=num_warps, arch="sm_100a", grid="runtime_num_rows")
+    def flashinfer_fused_dit_layernorm(
+        input_buffer: K.gptr[K.bf16],
+        residual_buffer: K.gptr[K.bf16],
+        gate_buffer: K.gptr[K.bf16],
+        gate_bias_buffer: K.gptr[K.f32],
+        gamma_buffer: K.gptr[K.f32],
+        beta_buffer: K.gptr[K.f32],
+        scale_buffer: K.gptr[K.bf16],
+        scale_bias_buffer: K.gptr[K.f32],
+        shift_buffer: K.gptr[K.bf16],
+        shift_bias_buffer: K.gptr[K.f32],
+        residual_output_buffer: K.gptr[K.bf16],
+        norm_output_buffer: K.gptr[norm_dtype],
+        sf_output_buffer: K.gptr[K.u8],
+        output_sf_scale_buffer: K.gptr[K.f32],
+        input_sf_scale_buffer: K.gptr[K.f32],
+        runtime_batch_size: K.i32,
+        runtime_num_rows: K.i32,
+        runtime_epsilon: K.f32,
+        runtime_has_residual: K.i32,
+    ):
+        args = (
+            input_buffer,
+            residual_buffer,
+            gate_buffer,
+            gate_bias_buffer,
+            gamma_buffer,
+            beta_buffer,
+            scale_buffer,
+            scale_bias_buffer,
+            shift_buffer,
+            shift_bias_buffer,
+            residual_output_buffer,
+            norm_output_buffer,
+            sf_output_buffer,
+            output_sf_scale_buffer,
+            input_sf_scale_buffer,
+            runtime_batch_size,
+            runtime_num_rows,
+            runtime_epsilon,
+            runtime_has_residual,
+        )
+        if thor_block_192:
+            with K.attr({"tirx.max_registers": 112}):
+                kernel_body(*args)
+        else:
+            kernel_body(*args)
 
     return flashinfer_fused_dit_layernorm.func.with_attr(
         "tirx.kernel_launch_params", ["blockIdx.x", "threadIdx.x"]
