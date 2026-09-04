@@ -21,6 +21,10 @@ def _get_bench_configs(mod):
 
 def _find_bench_config(mod, label: str) -> dict:
     matches = [config for config in _get_bench_configs(mod) if config.get("label") == label]
+    if not matches:
+        # Explicit suite workloads may include correctness configurations beyond
+        # the module's default benchmark subset. Preserve BENCH_CONFIGS priority.
+        matches = [config for config in getattr(mod, "CONFIGS", []) if config.get("label") == label]
     if len(matches) != 1:
         raise KeyError(
             f"kernel {mod.KERNEL_META['name']!r} config {label!r}: "
