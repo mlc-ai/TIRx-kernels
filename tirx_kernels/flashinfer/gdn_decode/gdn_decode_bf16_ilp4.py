@@ -10,18 +10,19 @@ Upstream source: flashinfer/gdn_kernels/gdn_decode_bf16_state.py.
 
 import functools
 import math
+import os
 from typing import Any
 from unittest import SkipTest
 
 import torch
 
 import tirx_kernels.kern as TK
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import bench, prepare_cuda_arch
 
 KERNEL_META = {
     "name": "gdn_decode_bf16_ilp4",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -829,13 +830,29 @@ def _require_supported_config(config: dict[str, Any]) -> None:
             raise ValueError("accepted_steps values must be in [0, seq_len)")
 
 
+def _select_ptxas_reg_level(seq_len: int, num_heads: int, num_v_heads: int, tile_v: int) -> str:
+    """Select the measured Thor schedule without changing the SM100a path."""
+    if prepare_cuda_arch() == "sm_110a" and (seq_len, num_heads, num_v_heads, tile_v) == (
+        4,
+        8,
+        16,
+        16,
+    ):
+        return "5"
+    return "10"
+
+
 def get_kernel(**kwargs: Any):
     """Return the source-specialized TIRx PrimFunc."""
     config = dict(kwargs)
     _require_supported_config(config)
     seq_len = int(config["seq_len"])
+    num_heads = int(config["num_heads"])
     num_v_heads = int(config["num_v_heads"])
     tile_v = int(config["tile_v"])
+    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = _select_ptxas_reg_level(
+        seq_len, num_heads, num_v_heads, tile_v
+    )
     cache = bool(config.get("cache_intermediate_states", False))
     scatter = bool(config.get("per_token_pool_scatter", False))
     scatter_flat = scatter and not bool(config.get("padded_pool", False))
@@ -850,7 +867,7 @@ def get_kernel(**kwargs: Any):
     shared_bytes = 128 if seq_len == 1 else 1096 * seq_len + 128
     return _make_gdn_decode_bf16_ilp4(
         SEQ_LEN=seq_len,
-        NUM_HEADS=int(config["num_heads"]),
+        NUM_HEADS=num_heads,
         NUM_V_HEADS=num_v_heads,
         TILE_V=tile_v,
         NUM_V_TILES=V // tile_v,
@@ -962,6 +979,8 @@ def _make_qkv(
 
 
 def _device_from_config(config: dict[str, Any]) -> torch.device:
+    from tirx_kernels.runner import supports_sm100_kernel
+
     configured_device = config.get("device")
     device = (
         torch.device(configured_device)
@@ -971,8 +990,8 @@ def _device_from_config(config: dict[str, Any]) -> torch.device:
     if device.type != "cuda" or not torch.cuda.is_available():
         raise SkipTest("CUDA is required for BF16 ILP4 GDN decode")
     capability = torch.cuda.get_device_capability(device)
-    if capability[0] != 10:
-        raise SkipTest(f"BF16 ILP4 GDN decode requires SM100, got {capability}")
+    if not supports_sm100_kernel(capability):
+        raise SkipTest(f"BF16 ILP4 GDN decode requires SM100 or prepared Thor, got {capability}")
     return device
 
 

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +16,31 @@ def _meta(**updates):
     meta = {"name": "kernel", "category": "basic", "runtime_cuda_archs": ["sm_100a"]}
     meta.update(updates)
     return meta
+
+
+def test_metadata_discovery_does_not_import_gpu_runtimes():
+    script = """
+import importlib.abc
+import sys
+
+class ForbidGpuRuntime(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'tvm', 'torch', 'cutlass'}:
+            raise AssertionError(f'metadata discovery imported {fullname}')
+        return None
+
+sys.meta_path.insert(0, ForbidGpuRuntime())
+from tirx_kernels import registry
+assert registry.kernel_index(strict=True)
+assert not {'tvm', 'torch', 'cutlass'}.intersection(sys.modules)
+"""
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 @pytest.mark.parametrize(
@@ -49,13 +76,22 @@ def test_exact_architectures_are_stored_in_source_index():
     assert index["dense_blockscaled_gemm_sm107"].runtime_cuda_archs == ("sm_107a",)
     counts = {
         archs: sum(record.runtime_cuda_archs == archs for record in index.values())
-        for archs in (("sm_100a",), ("sm_103a",), ("sm_107a",), ("sm_100a", "sm_103a", "sm_107a"))
+        for archs in (
+            ("sm_100a",),
+            ("sm_100a", "sm_110a"),
+            ("sm_103a",),
+            ("sm_107a",),
+            ("sm_100a", "sm_103a", "sm_107a"),
+            ("sm_100a", "sm_103a", "sm_107a", "sm_110a"),
+        )
     }
     assert counts == {
-        ("sm_100a",): 11,
+        ("sm_100a",): 10,
         ("sm_103a",): 6,
         ("sm_107a",): 4,
-        ("sm_100a", "sm_103a", "sm_107a"): 90,
+        ("sm_100a", "sm_103a", "sm_107a"): 75,
+        ("sm_100a", "sm_103a", "sm_107a", "sm_110a"): 15,
+        ("sm_100a", "sm_110a"): 1,
     }
 
 
@@ -69,7 +105,6 @@ def test_reference_requirements_are_stored_in_source_index():
         "cudnn": ("nvidia-cudnn-frontend", "nvidia-cutlass-dsl"),
         "deepep": ("deep-ep",),
         "deepgemm": ("deep-gemm",),
-        "flashattention": ("flash-attn-4", "nvidia-cutlass-dsl"),
         "flashinfer": ("flashinfer-python", "nvidia-cutlass-dsl"),
         "msa": ("msa", "nvidia-cutlass-dsl", "quack-kernels"),
     }
@@ -112,6 +147,15 @@ def test_reference_requirements_are_stored_in_source_index():
         "sparse_flashmla_prefill_head128_phase1": (),
         "sparse_flashmla_prefill_head128_small_topk_phase1": (),
         "sparse_flashmla_prefill_head64_phase1": (),
+    }
+    assert {
+        name: packages(name)
+        for name, record in index.items()
+        if record.category == "flashattention"
+    } == {
+        "flash_attention4": ("flashinfer-python", "flash-attn-4", "nvidia-cutlass-dsl"),
+        "flash_attention4_fp4": ("flash-attn-4", "nvidia-cutlass-dsl", "flashinfer-python"),
+        "flash_attention_backward_sm100": ("flash-attn-4", "nvidia-cutlass-dsl"),
     }
 
     fla = index["agent_evolved_kda_forward_b1_t8192"].reference_requirements

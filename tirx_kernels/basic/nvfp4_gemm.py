@@ -14,7 +14,7 @@ from pathlib import Path
 
 import tirx_kernels.kern as K
 import tvm
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
+from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench, hardware_num_sms
 
 
 class WarpRole(IntEnum):
@@ -337,7 +337,7 @@ def make_kernel(M, N, KDIM):
     if (KDIM // 16) % 4 != 0:
         raise ValueError("K/16 must be divisible by four")
 
-    cfg = {**_DEFAULTS, **TIRX_CONFIGS.get((M, N, KDIM), {})}
+    cfg = _shape_config(M, N, KDIM)
     SM_COUNT = cfg["SM_COUNT"]
     CTA_GROUP = cfg["CTA_GROUP"]
     CLUSTER_M = cfg["CLUSTER_M"]
@@ -353,7 +353,6 @@ def make_kernel(M, N, KDIM):
     L2_GROUP_SIZE = cfg["L2_GROUP_SIZE"]
     NUM_WARPS = cfg["NUM_WARPS"]
     OVERLAP_EPI = cfg["OVERLAP_EPI"]
-
     CLUSTER_SIZE = CLUSTER_M * CLUSTER_N
     MMA_N = CTA_N * CTA_GROUP
     SFB_N = MMA_N
@@ -420,6 +419,7 @@ def make_kernel(M, N, KDIM):
         tile_scheduler.init(cta_idx // CLUSTER_SIZE)
         m_idx = tile_scheduler.m_idx
         n_idx = tile_scheduler.n_idx
+
         cta_m = m_idx * CLUSTER_M + cb_m
         cta_n = n_idx * CLUSTER_N + cb_n
         a_m = cta_m * CTA_M
@@ -927,7 +927,18 @@ def _encode_tiled(dtype, tensor, *, dims, strides_bytes, box, swizzle):
 
 
 def _shape_config(M, N, K):
-    return {**_DEFAULTS, **TIRX_CONFIGS.get((M, N, K), {})}
+    cfg = {**_DEFAULTS, **TIRX_CONFIGS.get((M, N, K), {})}
+    if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+        # The registry values launch one persistent CTA per B200 SM. Match
+        # that policy on Thor without changing any SM100-family schedule.
+        cfg["SM_COUNT"] = hardware_num_sms(default=20)
+        if (M, N, K) == (4096, 4096, 4096):
+            # Keep A/SFA hot in Thor's smaller L2 and use the wider, legal
+            # writeback transaction. Tensor-map creation consumes this same
+            # config, so its box and swizzle always match the kernel.
+            cfg["L2_GROUP_SIZE"] = 1
+            cfg["EPI_TILE"] = 64
+    return cfg
 
 
 def _build_tensor_maps(M, N, K, A, B, SFA, SFB, D):
@@ -992,7 +1003,7 @@ class _Runner:
 KERNEL_META = {
     "name": "nvfp4_gemm",
     "category": "basic",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",

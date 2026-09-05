@@ -520,3 +520,111 @@ Grouped workloads show one row per config and one timing column per implementati
 - `stable_sort_topk_by_value/f32_r4_k128`: prepare: RuntimeError: CPU prepare changed CUDA initialization state from False to True
 - `stable_sort_topk_by_value/f32_r64_k2048`: prepare: RuntimeError: CPU prepare changed CUDA initialization state from False to True
 - `stable_sort_topk_by_value/f32_r64_k256`: prepare: RuntimeError: CPU prepare changed CUDA initialization state from False to True
+
+<!-- additional-benchmark-reports -->
+
+## Thor performance
+
+- GPU: Jetson AGX Thor (`sm_110a`, 20 SM)
+- Timing: mean of 15 Proton rounds; 1000 ms warmup, 100 ms repeat, 1 s cooldown.
+
+Each row shows a recorded configuration using the same columns as above.
+
+### deepgemm_sm100_m_grouped_fp8_gemm_masked
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `g32_m192_n4096_k4096_bfp4` | tirx | 2093.8300 | deepgemm | 2111.8030 | 1.009 | — |
+| `g32_m192_n6144_k7168` | tirx | 6538.9748 | deepgemm | 6547.2118 | 1.001 | — |
+| `g6_m1024_n4096_k2048` | tirx | 578.8607 | deepgemm | 580.9034 | 1.004 | — |
+
+### fast_topk_clusters
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `f32_plain_b64_l16384_k256` | tirx | 79.0209 | flashinfer | 198.1499 | 2.508 | — |
+
+### filtered_topk
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `f32_plain_r64_l8192_k256` | tirx | 46.4895 | flashinfer | 52.6440 | 1.132 | — |
+
+### flash_attention4
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `s4096_h32kv4_causal` | tir | 899.9269 | flashattn_fa4_cutedsl | 948.0465 | 1.053 | — |
+
+### flashinfer_fused_add_rmsnorm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `fused_bf16_m32_h4096_xc_rc_pdl1` | tirx | 16.2287 | flashinfer_cutedsl | 16.4909 | 1.016 | — |
+
+### flashinfer_fused_dit_layernorm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `grgb_bf16_b1_r1920` | tirx | 395.5151 | flashinfer_cuda | 400.9981 | 1.014 | — |
+
+### flashinfer_layernorm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bf16_m128_h16384_xc_yc_pdl0_eps1e6` | tirx | 88.3574 | flashinfer_cutedsl | 90.8380 | 1.028 | — |
+
+### flashinfer_qk_rmsnorm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `rms_bf16_b32_n32_h128_xc_yc_pdl0` | tirx | 7.6711 | flashinfer_cutedsl | 7.6312 | 0.995 | — |
+
+### flashinfer_rmsnorm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `rms_bf16_m32_h4096_xc_yc_pdl1` | tirx | 12.0145 | flashinfer_cutedsl | 12.0185 | 1.000 | — |
+
+### fp16_bf16_gemm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bf16_4096x4096x4096` | tir | 1225.1170 | torch-cublas | 1535.7165 | 1.254 | — |
+| `fp16_4096x4096x4096` | tir | 1173.0723 | torch-cublas | 1473.2220 | 1.256 | — |
+
+### gdn_decode_bf16_ilp4
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `t4_b4_h8_hv16_tv16` | tirx | 94.7706 | flashinfer_cutedsl | 97.9446 | 1.033 | — |
+
+### mxfp4_quantize
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `fp16_linear_m4096_k4096` | tirx | 376.0318 | flashinfer | 393.4975 | 1.046 | — |
+
+### nvfp4_gemm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `4096x4096x4096` | tir | 417.2709 | flashinfer | 423.8742 | 1.016 | — |
+
+### radix_topk_multi_cta
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `f32_basic_r4_l115188_k256_ctas3` | tirx | 69.9353 | flashinfer | 71.2461 | 1.019 | — |
+
+### radix_topk_single_cta
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `f32_basic_r64_l32768_k512` | tirx | 186.3306 | flashinfer | 194.3710 | 1.043 | — |
+
+### selective_state_update_mtp_horizontal
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `b512_h64_d64_s128_t6_r8_statebf16_official` | tirx | 3528.1720 | flashinfer_cuda | 3830.2674 | 1.086 | — |

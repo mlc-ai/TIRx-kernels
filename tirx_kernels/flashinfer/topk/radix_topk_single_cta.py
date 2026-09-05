@@ -70,7 +70,7 @@ from tirx_kernels.runner import bench
 KERNEL_META = {
     "name": "radix_topk_single_cta",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -1369,6 +1369,10 @@ def _compare(
     """
     import torch
 
+    from tirx_kernels.flashinfer.utils.topk_harness import assert_valid_outputs
+
+    assert_valid_outputs(cfg, data, ref)
+    assert_valid_outputs(cfg, data, got)
     if cfg["deterministic"]:
         torch.testing.assert_close(got["indices"], ref["indices"], rtol=0, atol=0)
         if cfg["mode"] == "basic":
@@ -1378,12 +1382,6 @@ def _compare(
     ref_vals = _selected_values(cfg, data, ref["indices"])
     got_vals = _selected_values(cfg, data, got["indices"])
     torch.testing.assert_close(got_vals, ref_vals, rtol=0, atol=0)
-    if cfg["mode"] == "basic":
-        ref_out = torch.sort(ref["values"].to(torch.float32), dim=-1, descending=True).values
-        got_out = torch.sort(got["values"].to(torch.float32), dim=-1, descending=True).values
-        torch.testing.assert_close(got_out, ref_out, rtol=0, atol=0)
-        # The emitted values must be the scores at the emitted indices.
-        torch.testing.assert_close(got_out, got_vals, rtol=0, atol=0)
 
 
 def assert_reference_is_top_k(

@@ -23,7 +23,7 @@ from .selective_state_update_mtp_simple import _case, _shfl_down_f32
 KERNEL_META = {
     "name": "selective_state_update_mtp_horizontal",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -93,7 +93,7 @@ def _store_state_tile(
         packed_words = K.alloc_local((4,), "uint32")
         with K.unroll(4) as pair:
             packed = values[pair_base + pair]
-            K.ptx.cvt.rs.f16x2.f32(
+            K.idioms.cvt_rs_f16x2_f32(
                 packed_words[pair],
                 K.cuda.float2_y(packed),
                 K.cuda.float2_x(packed),

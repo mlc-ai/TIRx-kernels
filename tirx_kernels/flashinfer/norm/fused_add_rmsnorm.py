@@ -15,7 +15,7 @@ import contextlib
 from typing import Any
 
 import tirx_kernels.kern as K
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import bench, prepare_cluster_shape, prepare_cuda_arch
 
 from ._kern_helpers import (
     _add_f32,
@@ -38,7 +38,7 @@ from ._kern_helpers import (
 KERNEL_META = {
     "name": "flashinfer_fused_add_rmsnorm",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -105,17 +105,22 @@ def _estimate_smem(H: int, cluster_n: int) -> int:
     )
 
 
-def _source_config(H: int) -> dict[str, int | bool]:
+def _source_cluster_n(H: int) -> int:
     best_fit = 1
     for candidate in (1, 2, 4, 8, 16):
         if H % candidate != 0:
             continue
         required = _estimate_smem(H, candidate)
         if required <= _OPTIN_SMEM_BYTES // 2:
-            return _derived_config(H, candidate)
+            return candidate
         if required <= _OPTIN_SMEM_BYTES and best_fit == 1:
             best_fit = candidate
-    return _derived_config(H, best_fit)
+    return best_fit
+
+
+def _source_config(H: int) -> dict[str, int | bool]:
+    cluster_n = prepare_cluster_shape((1, _source_cluster_n(H)))[1]
+    return _derived_config(H, cluster_n)
 
 
 def _uses_rolled_fragment_loops(H: int) -> bool:
@@ -376,6 +381,13 @@ def get_kernel(
     roll_large_fragments = _uses_rolled_fragment_loops(H)
     packed_narrow = not (vec == 1 or (vec == 2 and vec_blocks == 3))
     weight_bias = 0.0 if variant == "fused_add_rmsnorm" else 1.0
+    thor_outer_output_guard = (
+        prepare_cuda_arch() == "sm_110a"
+        and compact
+        and H == 4096
+        and (variant == "fused_add_rmsnorm" or enable_pdl)
+    )
+    thor_outer_residual_guard = thor_outer_output_guard and variant == "gemma_fused_add_rmsnorm"
     copy_bytes = copy_bits // 8
     reduce_base = two_tile_bytes if use_async else 0
     reduce_count = rows * warps_per_row * cluster_n
@@ -399,12 +411,60 @@ def get_kernel(
             f"residual_row_stride={residual_row_stride_hint} must be divisible by vec={vec}"
         )
 
-    max_registers = 125 if compact and enable_pdl and H == 4096 else None
+    if compact and enable_pdl and H == 4096:
+        max_registers = (
+            126 if prepare_cuda_arch() == "sm_110a" and variant == "fused_add_rmsnorm" else 125
+        )
+    else:
+        max_registers = None
 
     def entry_registers():
         if max_registers is None:
             return contextlib.nullcontext()
         return K.attr({"tirx.max_registers": max_registers})
+
+    def store_fragment(
+        destination,
+        bits,
+        words,
+        row_i32,
+        row_i64,
+        row_valid,
+        thread_in_row,
+        block_y,
+        runtime_stride,
+        *,
+        outer_row_guard: bool,
+    ):
+        with fragment_range(vec_blocks) as vb:
+            local_col = K.local_scalar(
+                K.i32, init=(thread_in_row + vb * tpr) * vec, name="local_col"
+            )
+            absolute_col = K.local_scalar(
+                K.i32, init=block_y * cols + local_col, name="absolute_col"
+            )
+            col_valid = K.local_scalar("bool", init=absolute_col < H, name="col_valid")
+            if compact:
+                output_offset = K.local_scalar(
+                    K.i32, init=row_i32 * H + absolute_col, name="output_offset"
+                )
+            else:
+                output_offset = K.local_scalar(
+                    K.i64,
+                    init=row_i64 * runtime_stride + K.cast(absolute_col, "int64"),
+                    name="output_offset",
+                )
+            _store_global_fragment(
+                destination,
+                output_offset,
+                bits,
+                words,
+                col_valid if outer_row_guard else K.And(row_valid, col_valid),
+                vb * vec,
+                vb * vec // 2,
+                VEC=vec,
+                PACKED_NARROW=packed_narrow,
+            )
 
     def kernel_body(
         input_buffer, residual, weight, runtime_M, runtime_eps, x_row_stride, residual_row_stride
@@ -600,34 +660,32 @@ def get_kernel(
             with fragment_range(total_values) as value:
                 K.assign(residual_bits[value], _cvt_from_f32(h_f32[value], dtype))
 
-        with fragment_range(vec_blocks) as vb:
-            local_col = K.local_scalar(
-                K.i32, init=(thread_in_row + vb * tpr) * vec, name="local_col"
-            )
-            absolute_col = K.local_scalar(
-                K.i32, init=block_y * cols + local_col, name="absolute_col"
-            )
-            col_valid = K.local_scalar("bool", init=absolute_col < H, name="col_valid")
-            if compact:
-                residual_offset = K.local_scalar(
-                    K.i32, init=row_i32 * H + absolute_col, name="residual_offset"
+        if thor_outer_residual_guard:
+            with K.If(row_valid), K.Then():
+                store_fragment(
+                    residual,
+                    residual_bits,
+                    residual_words,
+                    row_i32,
+                    row_i64,
+                    row_valid,
+                    thread_in_row,
+                    block_y,
+                    residual_row_stride,
+                    outer_row_guard=True,
                 )
-            else:
-                residual_offset = K.local_scalar(
-                    K.i64,
-                    init=row_i64 * residual_row_stride + K.cast(absolute_col, "int64"),
-                    name="residual_offset",
-                )
-            _store_global_fragment(
+        else:
+            store_fragment(
                 residual,
-                residual_offset,
                 residual_bits,
                 residual_words,
-                K.And(row_valid, col_valid),
-                vb * vec,
-                vb * vec // 2,
-                VEC=vec,
-                PACKED_NARROW=packed_narrow,
+                row_i32,
+                row_i64,
+                row_valid,
+                thread_in_row,
+                block_y,
+                residual_row_stride,
+                outer_row_guard=False,
             )
 
         with fragment_range(packed_pairs) as pair:
@@ -783,32 +841,32 @@ def get_kernel(
             with fragment_range(total_values) as value:
                 K.assign(output_bits[value], _cvt_from_f32(normalized[value], dtype))
 
-        with fragment_range(vec_blocks) as vb:
-            local_col = K.local_scalar(
-                K.i32, init=(thread_in_row + vb * tpr) * vec, name="local_col"
-            )
-            absolute_col = K.local_scalar(
-                K.i32, init=block_y * cols + local_col, name="absolute_col"
-            )
-            col_valid = K.local_scalar("bool", init=absolute_col < H, name="col_valid")
-            if compact:
-                x_offset = K.local_scalar(K.i32, init=row_i32 * H + absolute_col, name="x_offset")
-            else:
-                x_offset = K.local_scalar(
-                    K.i64,
-                    init=row_i64 * x_row_stride + K.cast(absolute_col, "int64"),
-                    name="x_offset",
+        if thor_outer_output_guard:
+            with K.If(row_valid), K.Then():
+                store_fragment(
+                    input_buffer,
+                    output_bits,
+                    output_words,
+                    row_i32,
+                    row_i64,
+                    row_valid,
+                    thread_in_row,
+                    block_y,
+                    x_row_stride,
+                    outer_row_guard=True,
                 )
-            _store_global_fragment(
+        else:
+            store_fragment(
                 input_buffer,
-                x_offset,
                 output_bits,
                 output_words,
-                K.And(row_valid, col_valid),
-                vb * vec,
-                vb * vec // 2,
-                VEC=vec,
-                PACKED_NARROW=packed_narrow,
+                row_i32,
+                row_i64,
+                row_valid,
+                thread_in_row,
+                block_y,
+                x_row_stride,
+                outer_row_guard=False,
             )
 
         if enable_pdl:
@@ -1041,6 +1099,24 @@ def _flashinfer_api(variant: str, device):
     return getattr(flashinfer, variant), flashinfer_norm
 
 
+@contextlib.contextmanager
+def _thor_source_cluster_limit():
+    """Retarget the pinned CuTe schedule without changing its kernel body."""
+    if prepare_cuda_arch() != "sm_110a":
+        yield
+        return
+    from flashinfer.norm.kernels.fused_add_rmsnorm import FusedAddRMSNormKernel
+
+    original = FusedAddRMSNormKernel._compute_cluster_n
+    FusedAddRMSNormKernel._compute_cluster_n = staticmethod(
+        lambda H, dtype, sm_version: min(original(H, dtype, sm_version), 8)
+    )
+    try:
+        yield
+    finally:
+        FusedAddRMSNormKernel._compute_cluster_n = staticmethod(original)
+
+
 def _launch_tirx(executable, data: dict[str, Any], config: dict[str, Any]) -> None:
     M = int(config["M"])
     H = int(config["H"])
@@ -1096,13 +1172,14 @@ def run_test(**config: Any) -> None:
 
         flashinfer_norm.fused_add_rmsnorm_cute = tracked_cute
         try:
-            returned = api(
-                reference["input"],
-                reference["residual"],
-                reference["weight"],
-                eps,
-                enable_pdl=enable_pdl,
-            )
+            with _thor_source_cluster_limit():
+                returned = api(
+                    reference["input"],
+                    reference["residual"],
+                    reference["weight"],
+                    eps,
+                    enable_pdl=enable_pdl,
+                )
         finally:
             flashinfer_norm.fused_add_rmsnorm_cute = original_cute
         if returned is not None:
@@ -1171,13 +1248,14 @@ def run_gpu(
         api, _ = _flashinfer_api(variant, reference_data["input"].device)
 
         def flashinfer_launch():
-            return api(
-                reference_data["input"],
-                reference_data["residual"],
-                reference_data["weight"],
-                eps,
-                enable_pdl=enable_pdl,
-            )
+            with _thor_source_cluster_limit():
+                return api(
+                    reference_data["input"],
+                    reference_data["residual"],
+                    reference_data["weight"],
+                    eps,
+                    enable_pdl=enable_pdl,
+                )
 
         returned = flashinfer_launch()
         if returned is not None:

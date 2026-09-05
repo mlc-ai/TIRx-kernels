@@ -12,6 +12,9 @@ Usage:
 
 Default input: baseline.json in this directory
 Default output: baseline.md (next to the baseline)
+
+Additional architecture reports after the marker below are maintained separately
+from the canonical before baseline and retained when regenerating the view.
 """
 
 from __future__ import annotations
@@ -21,6 +24,8 @@ import json
 import re
 import sys
 from pathlib import Path
+
+ADDITIONAL_REPORTS_MARKER = "<!-- additional-benchmark-reports -->"
 
 try:
     from tirx_kernels.bench_suite.impls import is_our_impl, our_impls
@@ -149,6 +154,10 @@ def main() -> None:
         default_out = here / "baseline.md"
     md = render_markdown(payload, src_name)
     out_path = args.output if args.output else default_out
+    if out_path.exists():
+        _, marker, reports = out_path.read_text().partition(ADDITIONAL_REPORTS_MARKER)
+        if marker:
+            md = md.rstrip() + "\n\n" + marker + reports
     out_path.write_text(md)
     print(f"[baseline_view] written: {out_path}", file=sys.stderr)
     print(md[:1200])  # head preview to stdout

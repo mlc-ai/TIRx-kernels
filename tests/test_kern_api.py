@@ -46,6 +46,16 @@ def _calls_named(func, name):
     return calls
 
 
+def test_kernel_target_honors_prepare_arch_override(monkeypatch):
+    @K.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: K.gptr("float32")):
+        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+
+    assert probe.target().arch == "sm_100a"
+    monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_110a")
+    assert probe.target().arch == "sm_110a"
+
+
 def test_local_scalar_init_matches_declare_then_assign():
     def two_statement(out):
         x = K.local_scalar("float32")
@@ -101,6 +111,30 @@ def test_sigmoid_tanh_approx_f32_preserves_tanh_input():
 
     (tanh,) = _calls_named(probe.func, "tirx.ptx.tanh")
     assert float(tanh.args[1]) == 0.25
+
+
+def test_stochastic_f16x2_conversion_falls_back_off_supported_arches(monkeypatch):
+    def build():
+        @K.kernel(warps=1, arch="sm_100a", grid=False)
+        def probe(out: K.gptr("uint32")):
+            result = K.local_scalar("uint32")
+            K.idioms.cvt_rs_f16x2_f32(result, K.float32(1.0), K.float32(-1.0), K.uint32(0x12340567))
+            K.ptx.st.global_.b32(out.ptr_to([0]), result)
+
+        return probe
+
+    monkeypatch.delenv("TIRX_PREPARE_CUDA_ARCH", raising=False)
+    native = build()
+    assert len(_calls_named(native.func, "tirx.ptx.cvt_rs_f16x2_f32")) == 1
+
+    monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_103a")
+    native_sm103 = build()
+    assert len(_calls_named(native_sm103.func, "tirx.ptx.cvt_rs_f16x2_f32")) == 1
+
+    monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_110a")
+    fallback = build()
+    assert not _calls_named(fallback.func, "tirx.ptx.cvt_rs_f16x2_f32")
+    assert len(_calls_named(fallback.func, "tirx.ptx.mov")) == 1
 
 
 def test_mbarrier_arrive_forwards_count_and_predicate():

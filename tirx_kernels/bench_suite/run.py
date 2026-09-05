@@ -655,6 +655,9 @@ def gpu_compile_profile(indices: set[str]) -> dict:
             elif compute_capability == (10, 7):
                 cores_per_sm = 128
                 cuda_arch = "sm_107a"
+            elif compute_capability == (11, 0):
+                cores_per_sm = 128
+                cuda_arch = "sm_110a"
             else:
                 raise ValueError(
                     f"GPU {index} {name!r} has unsupported compile profile "
@@ -1744,8 +1747,14 @@ def run_scheduled_jobs(
     with_references: bool,
     max_prepare_processes: int | None = None,
     ready_backlog: int | None = None,
+    serial_prepare: bool = False,
 ) -> tuple[list[dict], list[dict[str, Any]], dict]:
-    """Run bounded CPU preparation and late-bound GPU stages."""
+    """Run bounded CPU preparation and late-bound GPU stages.
+
+    ``serial_prepare`` owns one child through preparation, GPU execution,
+    retries, and process exit. This prevents another child's host compilation
+    from contending with GPU work on systems with shared CPU/GPU memory.
+    """
     n_jobs = len(workloads)
     if not n_jobs:
         return [], [], {}
@@ -1842,6 +1851,7 @@ def run_scheduled_jobs(
     def spawn_available() -> None:
         while (
             pending
+            and (not serial_prepare or not active)
             and preparing_count() < max_prepare_processes
             and buffered_count() < ready_backlog
             and len(active) < ready_backlog + visible
@@ -1860,6 +1870,8 @@ def run_scheduled_jobs(
             log(f"[bench-suite] {now_iso()} prepare pid={item.process.pid} START {item.label}")
 
     def dispatch_ready() -> None:
+        if serial_prepare and preparing_count():
+            return
         ordered = sorted(
             ready,
             key=lambda item: (
@@ -2140,6 +2152,8 @@ def run_scheduled_jobs(
         "process_model": "one_shot_child_per_workload",
         "max_prepare_processes": max_prepare_processes,
         "ready_backlog": ready_backlog,
+        "serial_prepare": serial_prepare,
+        "max_active_children": 1 if serial_prepare else ready_backlog + visible,
         "measurement_protocol": {
             "rounds": rounds,
             "cooldown_s": cooldown,
@@ -2254,6 +2268,23 @@ def main() -> None:
         help=f"Seconds to sleep before every implementation (default {DEFAULT_COOLDOWN_S:g}).",
     )
     ap.add_argument(
+        "--timer",
+        choices=("event", "proton", "cudagraph_proton", "kineto", "megamoe", "e2e"),
+        default=None,
+        help=(
+            "Override every selected workload's timer. This is useful on platforms "
+            "where the default Proton/CUPTI timer is unavailable."
+        ),
+    )
+    ap.add_argument(
+        "--serial-prepare",
+        action="store_true",
+        help=(
+            "Run one child at a time through CPU preparation, GPU execution, and exit; "
+            "prevent host compilation from overlapping GPU work (off by default)"
+        ),
+    )
+    ap.add_argument(
         "--max-prepare-processes",
         type=int,
         default=None,
@@ -2315,6 +2346,8 @@ def main() -> None:
     workloads = load_workloads(workloads_path)
     if args.filter:
         workloads = [w for w in workloads if args.filter in w["kernel"]]
+    if args.timer is not None:
+        workloads = [{**workload, "timer": args.timer} for workload in workloads]
     if not workloads:
         print("[bench-suite] no workloads to run.", file=sys.stderr)
         sys.exit(2)
@@ -2323,6 +2356,8 @@ def main() -> None:
         "mode": "default" if args.workloads is None and args.filter is None else "targeted",
         "keys": [[workload["kernel"], workload["config"]] for workload in workloads],
     }
+    if args.timer is not None:
+        selection["timer_override"] = args.timer
 
     if args.check_imports:
         if args.ab_before:
@@ -2347,10 +2382,14 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.exit(2)
-        if args.max_prepare_processes is not None or args.ready_backlog is not None:
+        if (
+            args.max_prepare_processes is not None
+            or args.ready_backlog is not None
+            or args.serial_prepare
+        ):
             print(
                 "[bench-suite] --ab-before owns one one-shot child per GPU worker; "
-                "--max-prepare-processes/--ready-backlog do not apply",
+                "--max-prepare-processes/--ready-backlog/--serial-prepare do not apply",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -2503,7 +2542,7 @@ def main() -> None:
     print(
         f"[bench-suite] {len(workloads)} workloads, {n_gpus} probe-OK GPU(s) in pool, "
         f"one-shot prepared children, compile-profile={compile_profile}, "
-        f"label={label}{agg_note}",
+        f"serial-prepare={args.serial_prepare}, label={label}{agg_note}",
         flush=True,
     )
 
@@ -2517,6 +2556,7 @@ def main() -> None:
         with_references=args.with_references,
         max_prepare_processes=args.max_prepare_processes,
         ready_backlog=args.ready_backlog,
+        serial_prepare=args.serial_prepare,
     )
 
     if retry_log:

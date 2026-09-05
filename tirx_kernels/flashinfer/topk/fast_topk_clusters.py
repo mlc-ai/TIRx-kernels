@@ -58,12 +58,12 @@ import tirx_kernels.kern as K
 from tirx_kernels.flashinfer.utils import topk_radix as R
 from tirx_kernels.flashinfer.utils.filtered_topk_ops import st_global_bits
 from tirx_kernels.flashinfer.utils.topk_harness import source_module, torch_dtype
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import bench, hardware_num_sms, prepare_cuda_arch
 
 KERNEL_META = {
     "name": "fast_topk_clusters",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -162,6 +162,23 @@ def clusters_for(batch_size: int, seq_len: int) -> int:
     return 1
 
 
+def _tirx_clusters_for(batch_size: int, seq_len: int) -> int:
+    """Use row-level parallelism when it already supplies three Thor waves."""
+    source_clusters = clusters_for(batch_size, seq_len)
+    if (
+        prepare_cuda_arch() == "sm_110a"
+        and source_clusters > 1
+        and batch_size >= 3 * hardware_num_sms()
+        and seq_len <= 2 * SHORT_ROW_CLUSTER_LIMIT
+    ):
+        # Once independent rows already supply three grid waves, subdividing
+        # each row adds distributed reductions and cluster barriers without
+        # increasing total global load work. Keep long rows clustered because
+        # their per-CTA serial trip count still needs intra-row parallelism.
+        return 1
+    return source_clusters
+
+
 # Global memory goes through raw PTX, never TensorLoad/BufferStore: the repo's
 # low-level IR contract rejects the latter outright (db entry
 # `express-low-level-memory-access-through-raw-ptx`).
@@ -250,7 +267,7 @@ def get_kernel(
     is32 = dtype == "float32"
     rounds = 4 if is32 else 2  # NRemainingRounds + 1 (:90)
     lshift_start = 8 * (4 if is32 else 2) - 8  # (:91)
-    nc = clusters_for(batch, seq_len)
+    nc = _tirx_clusters_for(batch, seq_len)
     num_cached = num_cached_for_device(k)
     ovf_stride = seq_len // nc  # binding:47, from the row stride
     plain = mode == "plain"
@@ -1135,6 +1152,10 @@ def compare_outputs(data: dict[str, Any], mine: dict[str, Any], theirs: dict[str
             assert torch.equal(mine["indices"][row], theirs["indices"][row]), (
                 f"row {row}: the trivial branch is deterministic and must match positionally"
             )
+            if mode == "plain":
+                torch.testing.assert_close(
+                    mine["values"][row], theirs["values"][row], rtol=0, atol=0
+                )
             continue
         local = local_indices(data, mine["indices"][row], row).long()
         assert int(local.min()) >= 0 and int(local.max()) < row_len, (

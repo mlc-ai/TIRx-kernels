@@ -14,9 +14,10 @@ block scale via ``rcp.approx.ftz(6.0)``, and 32 e2m1 values packed into two
 ``st.global.u64`` stores.
 
 In-scope specialization: fp16/bf16 inputs, linear + swizzled 128x4/8x4 SF
-layouts, 1T/SF thread configuration (the source dispatches 4T/SF only when
-``num_sm <= 80``; B200 has 148 SMs, so 4T/SF is unreachable on the accepted
-target and is out of scope), ``enable_pdl=False`` (the griddepcontrol pair is
+layouts, 1T/SF thread configuration.  On low-SM devices such as Thor the
+FlashInfer reference dispatches its 4T/SF implementation; both paths implement
+the same quantization contract, so it remains the correctness oracle while
+TIRx runs the existing 1T/SF kernel.  ``enable_pdl=False`` (the griddepcontrol pair is
 ported behind the same compile-time knob; TVM launches do not carry the PDL
 launch attribute, so PDL stays off for test/bench parity on both sides).
 
@@ -50,7 +51,7 @@ from tirx_kernels.runner import bench
 KERNEL_META = {
     "name": "mxfp4_quantize",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -74,7 +75,6 @@ _LINEAR_WARPS = 16  # _LINEAR_WARPS_PER_BLOCK
 _LINEAR_SF_BLOCKS_PER_TB = 512  # _LINEAR_SF_BLOCKS_PER_TB (1T/SF)
 _MIN_THREADS = 128
 _MAX_THREADS = 512
-_LOW_SM_THRESHOLD = 80  # 4T/SF dispatch threshold (unreachable on B200)
 _ROW_TILE_128x4 = 128
 _ROW_TILE_8x4 = 8
 
@@ -105,8 +105,6 @@ def _validate(dtype: str, m: int, k: int, sf_layout: str) -> None:
         raise ValueError(f"m={m} must be >= 1")
     if k <= 0 or k % MXFP4_SF_VEC_SIZE != 0:
         raise ValueError(f"k={k} outside the source dispatch domain (k % 32 != 0)")
-    if _sm_count() <= _LOW_SM_THRESHOLD:
-        raise ValueError("sm_count <= 80 dispatches the out-of-scope 4T/SF source path")
 
 
 def _compute_optimal_threads(k: int) -> int:
@@ -539,7 +537,7 @@ def _cfg(dtype, m, k, sf_layout="128x4", enable_pdl=False):
 # swizzled multi-row vs needs_col_loop compile-time split (K/32 > 512);
 # padding-row and padding-column zero-fill paths (m % 128, m % 8,
 # k/32 % 4 != 0); minimal shapes; the PDL instruction variant.  All 1T/SF
-# (B200 has 148 SMs; the 4T/SF path requires num_sm <= 80).
+# The TIRx implementation is 1T/SF; a low-SM reference may use 4T/SF.
 CONFIGS = [
     _cfg("float16", 1, 32, "linear"),  # minimal
     _cfg("float16", 128, 1024, "linear"),

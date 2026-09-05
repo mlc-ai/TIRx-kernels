@@ -26,7 +26,7 @@ import torch
 import tirx_kernels.kern as K
 import tvm
 import tvm.testing
-from tirx_kernels.runner import bench, cuda_target
+from tirx_kernels.runner import bench, prepare_cuda_arch
 from tvm.tirx.cuda import iket
 from tvm.tirx.cuda.iket import IketProfiler
 
@@ -521,14 +521,18 @@ def make_kernel(
             K.ptx.mov.b32(out[idx + 1], combine_int_frac_ex2(xy_rounded[1], xy_frac_ex2[1]))
 
         # ---- roles — orig:L752/765/1060/1396 ---------------------------------
-        # The frozen kernel's register budget is exactly the 65536-register CTA
-        # file: 200*32*8 + 64*32*4 + 48*32*4 = 65536. K checks that, plus the
-        # exact partition of warps 0..15 and setmaxnreg warpgroup-uniformity;
-        # the original satisfies all three, verified nowhere.
+        # Both role splits consume the complete 65536-register CTA file.  Keep
+        # the frozen 200/64/48 split on SM100; the pinned reference source now
+        # uses 192/72/56 for causal D128.  K also checks the exact partition of
+        # warps 0..15 and setmaxnreg warpgroup-uniformity.
+        thor_causal_d128 = prepare_cuda_arch() == "sm_110a" and is_causal and HEAD_DIM == 128
+        softmax_regs = 192 if thor_causal_d128 else 200
+        correction_regs = 72 if thor_causal_d128 else 64
+        other_regs = 56 if thor_causal_d128 else 48
         sp = K.specialize(chain_dispatch=True)
-        r_softmax = sp.role("softmax", warps=[0, 1, 2, 3, 4, 5, 6, 7], regs=200)
-        r_correction = sp.role("correction", warps=[8, 9, 10, 11], regs=64)
-        wg3 = sp.warpgroup("wg3", warps=range(12, 16), regs=48)
+        r_softmax = sp.role("softmax", warps=[0, 1, 2, 3, 4, 5, 6, 7], regs=softmax_regs)
+        r_correction = sp.role("correction", warps=[8, 9, 10, 11], regs=correction_regs)
+        wg3 = sp.warpgroup("wg3", warps=range(12, 16), regs=other_regs)
         r_mma = sp.role("mma", warps=[12], group=wg3)
         r_load = sp.role("load", warps=[13], group=wg3)
         r_store = sp.role("store", warps=[14], group=wg3)
@@ -957,7 +961,19 @@ def make_kernel(
                     K.cuda.iket.range_end(softmax_fma_token[0])
                     softmax_exp2_token = iket_range("softmax-exp2", leader_only=True)
                     emu_pairs = EMU_PAIRS_CAUSAL if is_causal else EMU_PAIRS_NC
-                    emu_start = EMU_START_CAUSAL if is_causal else EMU_START_NC
+                    # The Thor CuTeDSL baseline starts causal D128 emulation at
+                    # fragment 1.  Keeping fragment 0 on native EX2 also avoids
+                    # an extra four polynomial pairs per softmax row on SM110.
+                    # The gain reproduces across 1K..8K for the representative
+                    # GQA=8 regime, while wider KV-head regimes regress.  Keep
+                    # those paths and the frozen SM100a schedule unchanged.
+                    emu_start = (
+                        1
+                        if thor_causal_d128 and GQA_RATIO == 8
+                        else EMU_START_CAUSAL
+                        if is_causal
+                        else EMU_START_NC
+                    )
                     for frag_idx in range(4):
                         for i in range(BLK_N // 4 // 2):
                             idx = frag_idx * BLK_N // 4 + 2 * i
@@ -1317,8 +1333,16 @@ def prepare_data(batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, 
 KERNEL_META = {
     "name": "flash_attention4",
     "category": "flashattention",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
+        {
+            "package": "flashinfer-python",
+            "git": {
+                "url": "https://github.com/flashinfer-ai/flashinfer.git",
+                "commit": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+            },
+            "import": "flashinfer",
+        },
         {
             "package": "flash-attn-4",
             "git": {
@@ -1487,111 +1511,139 @@ def run_gpu(
     )
     funcs = {"tir": launch}
 
-    def _flashattn_sm100():
-        # Flash-Attention SM100 (CuTeDSL FA4) baseline.
-        #
-        # CUTe-DSL hard rule (discovered by experiment): every `cute_tensor_like`
-        # call must happen BEFORE `cute.compile`. Wrapping new tensors after
-        # compile poisons the host-side `cuTensorMapEncodeTiled` path (it starts
-        # failing ~hundreds of launches later anywhere in the process, including
-        # in unrelated TIR kernels). So we wrap one FA tensor set up-front, then
-        # compile exactly once using it.
-        import cutlass
-        import cutlass.cute as cute
-        import cutlass.torch as cutlass_torch
-        from flash_attn.cute.flash_fwd_sm100 import FlashAttentionForwardSm100
-        from flash_attn.cute.utils import AuxData
+    def _flashinfer_fa2():
+        # Use FlashInfer's prebuilt low-level launch so JIT, temporary/output
+        # allocation, and Python backend selection stay outside the timed
+        # region, matching the pure-launch TIRx measurement boundary.
+        import flashinfer.prefill as flashinfer_prefill
+        from flashinfer.utils import MaskMode, PosEncodingMode, TensorLayout
 
-        Qi, Ki, Vi, _ = prepare_data(
-            batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim
+        q_fi = Q_cuda.squeeze(0)
+        k_fi = K_cuda.squeeze(0)
+        v_fi = V_cuda.squeeze(0)
+        o_fi = torch.empty_like(q_fi)
+        tmp_fi = torch.empty(
+            flashinfer_prefill.SINGLE_KERNEL_TMP_SIZE, dtype=torch.uint8, device=q_fi.device
         )
-        Qf = Qi.cuda().contiguous()
-        Kf = Ki.cuda().contiguous()
-        Vf = Vi.cuda().contiguous()
-        Of = torch.zeros_like(Qf)
-        q_t, q_th = cutlass_torch.cute_tensor_like(
-            Qf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
+        module = flashinfer_prefill.get_single_prefill_module(
+            "fa2",
+            q_fi.dtype,
+            k_fi.dtype,
+            o_fi.dtype,
+            head_dim,
+            head_dim,
+            PosEncodingMode.NONE.value,
+            False,  # sliding window
+            False,  # logits soft cap
+            False,  # FP16 QK reduction
         )
-        k_t, k_th = cutlass_torch.cute_tensor_like(
-            Kf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
-        )
-        v_t, v_th = cutlass_torch.cute_tensor_like(
-            Vf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
-        )
-        o_t, o_th = cutlass_torch.cute_tensor_like(
-            Of, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
-        )
+        mask_mode = MaskMode.CAUSAL.value if is_causal else MaskMode.NON_CAUSAL.value
+        softmax_scale = 1.0 / math.sqrt(head_dim)
 
-        fa_fwd = FlashAttentionForwardSm100(
-            head_dim=head_dim,
-            head_dim_v=head_dim,
-            qhead_per_kvhead=num_qo_heads // num_kv_heads,
-            is_causal=is_causal,
-            is_local=False,
-            pack_gqa=False,
-            m_block_size=128,
-            n_block_size=128,
-            is_persistent=True,
+        def run():
+            module.run(
+                q_fi,
+                k_fi,
+                v_fi,
+                tmp_fi,
+                o_fi,
+                None,  # LSE
+                mask_mode,
+                TensorLayout.NHD.value,
+                -1,  # window left
+                None,  # packed custom mask
+                None,  # ALiBi slopes
+                0.0,  # logits soft cap
+                softmax_scale,
+                None,  # Q scale
+                None,  # K scale
+                None,  # V scale
+                1.0,  # RoPE scale
+                1e4,  # RoPE theta
+                None,  # K cache scale factors
+                None,  # V cache scale factors
+            )
+
+        launch()
+        run()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(O_tir, o_fi.unsqueeze(0), rtol=0.01, atol=0.01)
+        run._flashinfer_keep_alive = (q_fi, k_fi, v_fi, o_fi, tmp_fi, module)
+        return run
+
+    def _flashinfer_cutedsl():
+        # FlashInfer's Blackwell CuTe-DSL prefill backend is a separate serving
+        # implementation from Dao-AILab FA4.  Keep it as a library baseline,
+        # while the upstream FA4 adapter below remains the like-for-like one.
+        import flashinfer
+
+        q_fi = Q_cuda.squeeze(0)
+        k_fi = K_cuda.squeeze(0)
+        v_fi = V_cuda.squeeze(0)
+        o_fi = torch.empty_like(q_fi)
+        workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=q_fi.device)
+        indptr = torch.tensor([0, seq_len], dtype=torch.int32, device=q_fi.device)
+        wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
+            workspace, kv_layout="NHD", backend="cute-dsl"
         )
-        _stream_fa = cutlass_torch.default_stream()
-        _scale_fa = 1.0 / math.sqrt(head_dim)
-        compiled_fa = cute.compile(
-            fa_fwd,
-            q_t,
-            k_t,
-            v_t,
-            o_t,
-            None,  # mLSE
-            _scale_fa,  # softmax_scale
-            None,  # mCuSeqlensQ
-            None,  # mCuSeqlensK
-            None,  # mSeqUsedQ
-            None,  # mSeqUsedK
-            None,  # mPageTable
-            None,  # window_size_left
-            None,  # window_size_right
-            None,  # learnable_sink
-            None,  # descale_tensors
-            None,  # blocksparse_tensors
-            AuxData(),  # aux_data (FA4 takes an AuxData, not None)
-            _stream_fa,  # stream (FA4 sm100 keeps stream as the LAST positional)
+        wrapper.plan(
+            indptr,
+            indptr,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            head_dim_vo=head_dim,
+            causal=is_causal,
+            q_data_type=q_fi.dtype,
+            kv_data_type=k_fi.dtype,
         )
 
         def run():
-            compiled_fa(
-                q_t,
-                k_t,
-                v_t,
-                o_t,
-                None,  # mLSE
-                _scale_fa,
-                None,  # mCuSeqlensQ
-                None,  # mCuSeqlensK
-                None,  # mSeqUsedQ
-                None,  # mSeqUsedK
-                None,  # mPageTable
-                None,  # window_size_left
-                None,  # window_size_right
-                None,  # learnable_sink
-                None,  # descale_tensors
-                None,  # blocksparse_tensors
-                AuxData(),  # aux_data (FA4 takes an AuxData, not None)
-                _stream_fa,  # stream (FA4 sm100 keeps stream as the LAST positional)
-            )
+            wrapper.run(q_fi, k_fi, v_fi, out=o_fi)
 
-        # Keep the backing torch storage alive for the run's lifetime
-        # (the cute tensors alias it).
-        run._fa_keep_alive = (q_th, k_th, v_th, o_th, Qf, Kf, Vf, Of)
+        launch()
+        run()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(O_tir.squeeze(0), o_fi, rtol=0.01, atol=0.01)
+        run._flashinfer_keep_alive = (q_fi, k_fi, v_fi, o_fi, workspace, indptr, wrapper)
         return run
 
-    return bench(
-        funcs,
-        warmup=warmup,
-        repeat=repeat,
-        timer=timer,
-        references={"flashattn_sm100": _flashattn_sm100},
-        **kwargs,
-    )
+    def _flashattn_fa4_cutedsl():
+        # Use the pinned upstream FA4 interface as the source-of-truth adapter.
+        # It owns the current CuTe-DSL compile ABI, selects SM110-family tuning,
+        # and caches compilation before timing begins.
+        from flash_attn.cute.interface import _flash_attn_fwd
+
+        out_fa4 = torch.empty_like(O_tir)
+        call_kwargs = {
+            "q": Q_cuda,
+            "k": K_cuda,
+            "v": V_cuda,
+            "out": out_fa4,
+            "softmax_scale": 1.0 / math.sqrt(head_dim),
+            "causal": is_causal,
+        }
+
+        def run():
+            _flash_attn_fwd(**call_kwargs)
+
+        launch()
+        run()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(O_tir, out_fa4, rtol=0.01, atol=0.01)
+        run._fa4_keep_alive = (out_fa4, call_kwargs)
+        return run
+
+    # Compare against both the previous-generation FlashInfer FA2 fallback and
+    # the like-for-like upstream FlashAttention-4 CuTe-DSL implementation.  The
+    # pinned FA4 source explicitly supports both SM100 and SM110 families.
+    references = {
+        "flashinfer_fa2": _flashinfer_fa2,
+        "flashinfer_cutedsl": _flashinfer_cutedsl,
+        "flashattn_fa4_cutedsl": _flashattn_fa4_cutedsl,
+    }
+
+    return bench(funcs, warmup=warmup, repeat=repeat, timer=timer, references=references, **kwargs)
 
 
 def run_bench(
@@ -1662,6 +1714,8 @@ def _profile_iket_workload(args: argparse.Namespace) -> None:
         args.head_dim,
         is_causal=args.causal,
     )
+    from tirx_kernels.runner import cuda_target
+
     executable = IketProfiler().compile(
         tvm.IRModule({"main": func}), target=cuda_target(), tir_pipeline="tirx"
     )

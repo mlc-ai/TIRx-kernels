@@ -15,6 +15,42 @@ class _Interrupted(BaseException):
     pass
 
 
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a", "sm_110a"])
+def test_prepare_arch_overrides_declared_cuda_arch(monkeypatch, arch):
+    monkeypatch.setenv(runner.PREPARE_CUDA_ARCH_ENV, arch)
+    assert runner.cuda_target(arch="sm_100a").arch == arch
+
+
+def test_thor_sm100_compatibility_requires_explicit_sm110a_prepare(monkeypatch):
+    from tirx_kernels.runner import supports_sm100_kernel
+
+    monkeypatch.delenv(runner.PREPARE_CUDA_ARCH_ENV, raising=False)
+    for capability in ((10, 0), (10, 3), (10, 7)):
+        assert supports_sm100_kernel(capability)
+    assert not supports_sm100_kernel((11, 0))
+    assert not supports_sm100_kernel((12, 0))
+
+    monkeypatch.setenv(runner.PREPARE_CUDA_ARCH_ENV, "sm_110a")
+    assert supports_sm100_kernel((11, 0))
+    assert not supports_sm100_kernel((12, 0))
+
+
+@pytest.mark.parametrize("arch", [None, "sm_100a", "sm_103a", "sm_107a"])
+def test_thor_cluster_shape_limit(monkeypatch, arch):
+    from tirx_kernels.runner import prepare_cluster_shape
+
+    if arch is None:
+        monkeypatch.delenv(runner.PREPARE_CUDA_ARCH_ENV, raising=False)
+    else:
+        monkeypatch.setenv(runner.PREPARE_CUDA_ARCH_ENV, arch)
+    assert prepare_cluster_shape((2, 8)) == (2, 8)
+    monkeypatch.setenv(runner.PREPARE_CUDA_ARCH_ENV, "sm_110a")
+    assert prepare_cluster_shape((2, 8)) == (2, 4)
+    assert prepare_cluster_shape((1, 16)) == (1, 8)
+    assert prepare_cluster_shape((16, 1)) == (8, 1)
+    assert prepare_cluster_shape((2, 4)) == (2, 4)
+
+
 @pytest.fixture
 def bench_child_handler():
     """Install the bench child's SIGUSR1 handler shape for the test's duration."""

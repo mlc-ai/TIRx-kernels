@@ -25,7 +25,7 @@ from ._sm100_fp8_fp4_gemm_1d1d import (
 KERNEL_META = {
     "name": "deepgemm_sm100_m_grouped_fp8_gemm_masked",
     "category": "deepgemm",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "deep-gemm",
@@ -191,10 +191,13 @@ def run_test(**config):
     """Compare only the valid rows of each group against DeepGEMM."""
     import torch
 
+    from tirx_kernels.runner import prepare_cuda_arch
+
     from ._sm100_fp8_fp4_gemm_1d1d.data import (
         assert_within_threshold,
         deepgemm_launch_m_grouped_masked,
         masked_slice_diff,
+        max_diff_threshold,
     )
 
     config.pop("label", None)
@@ -204,17 +207,25 @@ def run_test(**config):
     launch()
     torch.cuda.synchronize()
 
-    # DeepGEMM itself, on the same quantized operands, is the arbiter; only the
-    # `[g, :masked_m[g]]` rows are defined on either side.
-    _, deepgemm_out = deepgemm_launch_m_grouped_masked(data)
-    torch.cuda.synchronize()
+    def check(expected, threshold=None):
+        return assert_within_threshold(
+            masked_slice_diff(data["d"], expected, data["masked_m"]),
+            data,
+            kernel="deepgemm_sm100_m_grouped_fp8_gemm_masked",
+            detail=(
+                f"g={data['num_groups']} N={data['N']} K={data['K']} b_dtype={data['b_dtype']}"
+            ),
+            threshold=threshold,
+        )
 
-    return assert_within_threshold(
-        masked_slice_diff(data["d"], deepgemm_out, data["masked_m"]),
-        data,
-        kernel="deepgemm_sm100_m_grouped_fp8_gemm_masked",
-        detail=(f"g={data['num_groups']} N={data['N']} K={data['K']} b_dtype={data['b_dtype']}"),
-    )
+    if prepare_cuda_arch() == "sm_110a":
+        expected = data["ref"]
+        threshold = max_diff_threshold(data["a_dtype"], data["b_dtype"])
+        check(expected, threshold)
+
+    _, expected = deepgemm_launch_m_grouped_masked(data)
+    torch.cuda.synchronize()
+    return check(expected)
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):

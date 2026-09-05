@@ -11,15 +11,16 @@ The source implementation is ``RMSNormKernel`` plus its 2-D host dispatch in
 """
 
 import contextlib
+import os
 from typing import Any
 
 import tirx_kernels.kern as K
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import bench, prepare_cluster_shape, prepare_cuda_arch
 
 KERNEL_META = {
     "name": "flashinfer_rmsnorm",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -113,13 +114,41 @@ def _estimate_smem(H: int, cluster_n: int) -> int:
     )
 
 
-def _source_config(H: int) -> dict[str, int | bool]:
+def _source_cluster_n(H: int) -> int:
     cluster_n = 16
     for candidate in (1, 2, 4, 8, 16):
         if H % candidate == 0 and _estimate_smem(H, candidate) <= _OPTIN_SMEM_BYTES:
             cluster_n = candidate
             break
+    return cluster_n
+
+
+def _source_config(H: int) -> dict[str, int | bool]:
+    cluster_n = _source_cluster_n(H)
+    # Blackwell datacenter parts may launch the source schedule's 16-CTA
+    # cluster, while Thor supports at most eight CTAs per cluster.  Recompute
+    # the complete schedule after shrinking the launch shape so that all
+    # per-CTA slices and distributed reductions remain consistent.
+    cluster_n = prepare_cluster_shape((1, cluster_n))[1]
     return _derived_config(H, cluster_n)
+
+
+def _select_ptxas_reg_level(variant: str, H: int) -> str:
+    """Choose the measured Thor schedule while retaining the sm_100a default."""
+    if prepare_cuda_arch() != "sm_110a":
+        return "10"
+    if H == 4096:
+        return "6"
+    return "10"
+
+
+def _select_max_registers(threads: int, H: int, enable_pdl: bool) -> int | None:
+    """Choose the existing per-entry register budget."""
+    if threads != 128:
+        return None
+    if prepare_cuda_arch() == "sm_110a" and enable_pdl and H == 4096:
+        return 56
+    return 64 if enable_pdl else (96 if H == 8192 else 93)
 
 
 def _butterfly_sum_f32(acc, lane_xors: tuple[int, ...]) -> None:
@@ -453,6 +482,7 @@ def get_kernel(
 ):
     """Return the compact or explicit-i64-strided runtime-M specialization."""
     _validate(variant, dtype, M, H, input_layout, output_layout, eps)
+    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = _select_ptxas_reg_level(variant, H)
     compact = _uses_compact_specialization(M, H, input_layout, output_layout)
     source = _source_config(H)
     cluster_n = int(source["cluster_n"])
@@ -468,6 +498,15 @@ def get_kernel(
     use_async = bool(source["use_async"])
     smem_bytes = int(source["smem_bytes"])
     total_values = vec * vec_blocks
+    thor_predicated_async = prepare_cuda_arch() == "sm_110a"
+    thor_full_rows = (
+        thor_predicated_async
+        and compact
+        and variant == "rmsnorm"
+        and M == 32
+        and H == 4096
+        and enable_pdl
+    )
     packed_pairs = _ceil_div(total_values, 2)
     pair_values = packed_pairs * 2
     packed_narrow = not (vec == 1 or (vec == 2 and vec_blocks == 3))
@@ -493,9 +532,7 @@ def get_kernel(
 
     # A 128-thread entry caps its own allocation; the 256-thread entry pins one
     # CTA per SM instead, and the two spellings are mutually exclusive downstream.
-    max_registers = None
-    if threads == 128:
-        max_registers = 64 if enable_pdl else (96 if H == 8192 else 93)
+    max_registers = _select_max_registers(threads, H, enable_pdl)
 
     def entry_registers():
         if max_registers is None:
@@ -530,7 +567,9 @@ def get_kernel(
         # int32 value in a local first gives the cast a single Var to sit on.
         row_i32 = K.local_scalar(K.i32, init=block_x * rows + row_in_cta)
         row_i64 = K.cast(row_i32, "int64")
-        row_valid = row_i64 < runtime_M
+        # This exact static-M specialization launches a completely full grid.
+        # Folding the always-true guard avoids one reconvergence pair on Thor.
+        row_valid = K.bool(True) if thor_full_rows else row_i64 < runtime_M
         warp = tid // 32
         lane = tid % 32
         row_warp = warp // warps_per_row
@@ -577,15 +616,24 @@ def get_kernel(
                 x_offset = row_i64 * x_row_stride + K.cast(absolute_col, "int64")
 
             if use_async:
-                with K.If(row_valid), K.Then():
-                    # Ignore-src: an out-of-range column copies nothing and the
-                    # staged bytes read back as zero.
+                if thor_predicated_async:
                     K.ptx[_CP_ASYNC](
                         shared_raw.ptr_to([(row_in_cta * cols + local_col) * _ELEM_BYTES]),
                         x.ptr_to([x_offset]),
                         copy_bytes,
                         K.cast(K.if_then_else(col_valid, copy_bytes, 0), "uint32"),
+                        pred=row_valid,
                     )
+                else:
+                    with K.If(row_valid), K.Then():
+                        # Ignore-src: an out-of-range column copies nothing and the
+                        # staged bytes read back as zero.
+                        K.ptx[_CP_ASYNC](
+                            shared_raw.ptr_to([(row_in_cta * cols + local_col) * _ELEM_BYTES]),
+                            x.ptr_to([x_offset]),
+                            copy_bytes,
+                            K.cast(K.if_then_else(col_valid, copy_bytes, 0), "uint32"),
+                        )
             else:
                 with K.If(K.And(row_valid, col_valid)), K.Then():
                     _load_global_bits(x_bits, vb * vec, x, x_offset, vec)
@@ -977,6 +1025,24 @@ def _flashinfer_api(variant: str, device):
     return api, flashinfer_norm
 
 
+@contextlib.contextmanager
+def _thor_source_cluster_limit():
+    """Retarget the pinned CuTe schedule without changing its kernel body."""
+    if prepare_cuda_arch() != "sm_110a":
+        yield
+        return
+    from flashinfer.norm.kernels.rmsnorm import RMSNormKernel
+
+    original = RMSNormKernel._compute_cluster_n
+    RMSNormKernel._compute_cluster_n = staticmethod(
+        lambda H, dtype, sm_version: min(original(H, dtype, sm_version), 8)
+    )
+    try:
+        yield
+    finally:
+        RMSNormKernel._compute_cluster_n = staticmethod(original)
+
+
 def _launch_tirx(executable, data, output, config: dict[str, Any]) -> None:
     M = int(config["M"])
     H = int(config["H"])
@@ -1058,10 +1124,11 @@ def run_test(**config: Any) -> None:
 
     flashinfer_norm.rmsnorm_cute = tracked_cute
     try:
-        reference_implicit = api(data["x"], data["weight"], eps, enable_pdl=enable_pdl)
-        returned = api(
-            data["x"], data["weight"], eps, out=reference_out["view"], enable_pdl=enable_pdl
-        )
+        with _thor_source_cluster_limit():
+            reference_implicit = api(data["x"], data["weight"], eps, enable_pdl=enable_pdl)
+            returned = api(
+                data["x"], data["weight"], eps, out=reference_out["view"], enable_pdl=enable_pdl
+            )
     finally:
         flashinfer_norm.rmsnorm_cute = original_cute
     if cute_calls != 2:
@@ -1121,9 +1188,14 @@ def run_gpu(
         api, _ = _flashinfer_api(variant, data["x"].device)
 
         def flashinfer_launch():
-            return api(
-                data["x"], data["weight"], eps, out=flashinfer_output["view"], enable_pdl=enable_pdl
-            )
+            with _thor_source_cluster_limit():
+                return api(
+                    data["x"],
+                    data["weight"],
+                    eps,
+                    out=flashinfer_output["view"],
+                    enable_pdl=enable_pdl,
+                )
 
         returned = flashinfer_launch()
         if returned is not flashinfer_output["view"]:

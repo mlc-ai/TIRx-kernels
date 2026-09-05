@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Operand construction, scale-factor packing and the shared correctness gate.
+"""Operand construction, scale-factor packing and correctness gates.
 
 Everything here runs on the host, outside any timed closure.  The scale-factor
 layout is produced by DeepGEMM's own `transform_sf_into_required_layout`, so our
@@ -24,6 +24,8 @@ __all__ = [
     "assert_within_threshold",
     "bench_against_deepgemm",
     "calc_diff",
+    "dequantize",
+    "max_diff_threshold",
     "quantize_a",
     "quantize_b",
     "require_sm100",
@@ -37,17 +39,25 @@ def require_sm100() -> None:
 
     import torch
 
+    from tirx_kernels.runner import supports_sm100_kernel
+
     if not torch.cuda.is_available():
         raise SkipTest("no CUDA device")
-    if torch.cuda.get_device_capability()[0] != 10:
+    if not supports_sm100_kernel(torch.cuda.get_device_capability()):
         raise SkipTest(
-            f"needs SM100, got sm_{''.join(map(str, torch.cuda.get_device_capability()))}"
+            f"needs SM100 or prepared Thor, got sm_{''.join(map(str, torch.cuda.get_device_capability()))}"
         )
 
 
 def require_deep_gemm():
     """Return the `deep_gemm` module, or skip if it is not installed."""
     from unittest import SkipTest
+
+    from tirx_kernels.reference_requirements import load_reference
+    from tirx_kernels.runner import prepare_cuda_arch
+
+    if prepare_cuda_arch() == "sm_110a":
+        return load_reference("deep-gemm")
 
     try:
         import deep_gemm
@@ -77,6 +87,15 @@ def calc_diff(x, y) -> float:
 # dequantized-torch oracle.  1e-6 leaves ULP-level margin while staying three
 # orders tighter than DeepGEMM's own accuracy thresholds (1e-3 fp8, 1e-2 fp4).
 DIRECT_DIFF_THRESHOLD = 1e-6
+
+
+def max_diff_threshold(a_dtype: str, b_dtype: str) -> float:
+    """Return DeepGEMM's tolerance for a dequantized mathematical oracle."""
+    if a_dtype == "fp4" and b_dtype == "fp4":
+        return 0.02
+    if a_dtype == "fp4" or b_dtype == "fp4":
+        return 0.01
+    return 0.001
 
 
 def quantize_a(x, *, gran_k: int = 128, dtype: str = "fp8") -> tuple:
@@ -132,9 +151,28 @@ def transform_sf(sf, mn: int, k: int, recipe: tuple[int, int], num_groups: int |
     same bytes; `csrc/apis/layout.hpp:49-53` is the SM100 branch that runs.
     """
     deep_gemm = require_deep_gemm()
+    from tirx_kernels.runner import prepare_cuda_arch
+
+    if prepare_cuda_arch() == "sm_110a":
+        gran_mn, gran_k = recipe
+        if gran_k not in (32, 128):
+            raise ValueError(f"unsupported Thor scale K granularity: {gran_k}")
+        if gran_mn != 1:
+            import torch
+
+            rows = torch.arange(mn, device=sf.device).floor_divide_(gran_mn)
+            sf = sf.index_select(-2, rows)
+        return deep_gemm.get_mn_major_tma_aligned_packed_ue8m0_tensor(sf)
     if num_groups is None:
         return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe)
     return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe, num_groups)
+
+
+def broadcast_block_sf(sf, mn: int, gran_mn: int):
+    """Expand one block scale to every logical MN row."""
+    if gran_mn == 1:
+        return sf
+    return sf.repeat_interleave(gran_mn, dim=-2)[..., :mn, :]
 
 
 def to_major(x, major: str):
@@ -154,6 +192,18 @@ def to_major(x, major: str):
         # K-major everywhere on SM100, so this combination should never be built.
         raise ValueError("packed FP4 operands are K-major only")
     return x.t().contiguous().t()
+
+
+def dequantize(quantized, sf_raw, *, dtype: str, gran_k: int, gran_mn: int = 1):
+    """Reconstruct the exact quantized values consumed by the MMA."""
+    from deep_gemm.utils.math import cast_back_from_fp4, cast_back_from_fp8
+
+    sf_rows = broadcast_block_sf(sf_raw, quantized.size(-2), gran_mn)
+    if dtype == "fp8":
+        return cast_back_from_fp8(quantized, sf_rows, gran_k=gran_k)
+    if dtype == "fp4":
+        return cast_back_from_fp4(quantized, sf_rows, gran_k=gran_k)
+    raise ValueError(f"unsupported dtype: {dtype}")
 
 
 # --------------------------------------------------------------------------------------
@@ -256,6 +306,17 @@ def _quantize_grouped_b(b_bf16, *, gran_k: int, dtype: str, per_block: bool):
     data = torch.stack([g[0] for g in groups])
     sf = torch.stack([g[1] for g in groups])
     return data, sf
+
+
+def _dequantize_grouped_b(b_q, b_sf, *, dtype: str, gran_k: int, gran_mn: int):
+    import torch
+
+    return torch.stack(
+        [
+            dequantize(b_q[i], b_sf[i], dtype=dtype, gran_k=gran_k, gran_mn=gran_mn)
+            for i in range(b_q.size(0))
+        ]
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -428,6 +489,14 @@ def prepare_m_grouped_masked(
         b_bf16, gran_k=gran_k_b, dtype=b_dtype, per_block=recipe_b[0] != 1
     )
 
+    used_m = max(counts)
+    a_ref = dequantize(a_q_flat, a_sf_flat, dtype="fp8", gran_k=gran_k_a).view(
+        num_groups, max_m, K
+    )[:, :used_m]
+    b_ref = _dequantize_grouped_b(b_q, b_sf, dtype=b_dtype, gran_k=gran_k_b, gran_mn=recipe_b[0])
+    ref = torch.zeros((num_groups, max_m, N), device="cuda", dtype=torch.bfloat16)
+    ref[:, :used_m] = torch.einsum("gmk,gnk->gmn", a_ref.float(), b_ref.float()).to(torch.bfloat16)
+
     d = torch.empty((num_groups, max_m, N), device="cuda", dtype=torch.bfloat16)
 
     sfa = transform_sf(a_sf, max_m, K, recipe_for("fp8", gran_k_a, is_a=True), num_groups)
@@ -447,6 +516,7 @@ def prepare_m_grouped_masked(
         "masked_m": masked_m,
         "grouped_layout": masked_m,
         "d": d,
+        "ref": ref,
         "c": None,
         "a_dtype": "fp8",
         "b_dtype": b_dtype,
@@ -473,19 +543,19 @@ def prepare_m_grouped_masked(
 # keeps compilation and setup out of the timed region on both sides.
 
 
-def assert_within_threshold(diff, data, *, kernel: str, detail: str, **extra) -> dict:
+def assert_within_threshold(
+    diff, data, *, kernel: str, detail: str, threshold: float | None = None, **extra
+) -> dict:
     """Raise unless the TIRx-vs-DeepGEMM diff clears the direct threshold.
 
     Every entry module compares one number against `DIRECT_DIFF_THRESHOLD` and
     reports the same two keys, so the check lives here and each module supplies
     only its own identifying `detail`.
     """
-    del data
-    if not diff < DIRECT_DIFF_THRESHOLD:
-        raise AssertionError(
-            f"{kernel} {detail}: TIRx-vs-DeepGEMM diff {diff:.3e} >= {DIRECT_DIFF_THRESHOLD:.0e}"
-        )
-    return {"diff": diff, "threshold": DIRECT_DIFF_THRESHOLD, **extra}
+    threshold = DIRECT_DIFF_THRESHOLD if threshold is None else threshold
+    if not diff < threshold:
+        raise AssertionError(f"{kernel} {detail}: diff {diff:.3e} >= {threshold:.0e}")
+    return {"diff": diff, "threshold": threshold, **extra}
 
 
 def bench_against_deepgemm(
@@ -503,15 +573,19 @@ def bench_against_deepgemm(
         launch, _out = reference_launcher(data)
         return launch
 
+    from tirx_kernels.reference_requirements import reference_provenance
+
+    references = {"deepgemm": build_reference}
     result = bench(
         {"tirx": tirx_launch},
-        references={"deepgemm": build_reference},
+        references=references,
         warmup=warmup,
         repeat=repeat,
         timer=timer,
         rounds=rounds,
         cooldown_s=cooldown_s,
     )
+    result["reference_variant"] = reference_provenance("deep-gemm")
     result.update(extra)
     return result
 
