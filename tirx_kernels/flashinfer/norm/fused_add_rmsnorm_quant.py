@@ -1339,7 +1339,11 @@ def run_test(**config: Any) -> None:
 
     reference = None
     reference_output = None
-    if not _uses_rolled_fragment_loops(H):
+    # Both original rolled configurations run with the pinned CuTe source on Thor.
+    # Keep the source's raw FP8-byte check for these large fragments as well.
+    if not _uses_rolled_fragment_loops(H) or torch.cuda.get_device_capability(
+        data["input"].device
+    ) == (11, 0):
         reference = _prepare_tensors(config)
         reference_output = _prepare_output(
             M, H, reference["y_row_stride"], output_dtype, initialize_padding=True
@@ -1392,8 +1396,7 @@ def run_test(**config: Any) -> None:
             name="FlashInfer residual oracle",
         )
     else:
-        # The rolled-fragment rows exceed what the CuTe reference can run, so
-        # the FP32 oracle is the only available arbiter for them.
+        # Preserve the existing non-Thor rolled-fragment fallback.
         oracle_output, oracle_residual = _math_oracle(snapshot, eps, output_dtype)
         _assert_math_close(actual_output, oracle_output, name="independent FP32 output oracle")
         _assert_residual_close(

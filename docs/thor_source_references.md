@@ -85,6 +85,12 @@ The numerical contract remains explicit:
   metadata comparisons while retaining the Thor Torch oracle. Prefill checks
   all three public source outputs against the original oracle and TIRx on Thor.
   All existing per-output tolerances remain unchanged.
+- FlashInfer fused add RMSNorm FP8 quantization uses the original raw-byte
+  source comparison on Thor for the rolled fragments at `H=131073` and
+  `H=1048576`. Both original CuTe configurations compile and execute with the
+  pinned 4.8.0.dev0 dependency. Residual checks retain `rtol=atol=1e-3`, and
+  source failures propagate instead of falling back to the loose mathematical
+  output check. Other architecture paths and device functions are unchanged.
 
 Run the full required correctness and benchmark matrices on the integrated
 commit. Successful source import, source identity checks, or a diagnostic shape
