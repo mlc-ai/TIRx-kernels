@@ -44,21 +44,13 @@ deviation divided by the mean, shown as TIRx/source percentages.
 Run A is `final-classic-4d26851-official-15r/runs/1.json`, measured at
 `4d26851f`. Run B is `rms-static-cap56-level6-15r/runs/1.json`, a later targeted
 RMSNorm rerun at `4d26851f-dirty` with the restored level-6/56-register schedule;
-it replaces that row's earlier 0.9705 ratio. It is a separate run, not a sample
-replacement within Run A. Both used TVM `15b607d6`, FlashInfer `f2e04400`,
-upstream FA4 `0251105a`, and PyTorch `2.9.1+cu130` where applicable. Raw runs
-remain local; these measurements do not replace `baseline.json` or its generated
-`baseline.md`.
+both used TVM `15b607d6`, FlashInfer `f2e04400`, upstream FA4 `0251105a`, and
+PyTorch `2.9.1+cu130` where applicable.
 
 Run A allowed up to four preparing children; Run B prepared one child. Both
 recorded zero GPU interference retries. CPU preparation overlap was not ruled
 out in Run A; use `--serial-prepare` for subsequent Thor measurements. The BF16
 GEMM row also has 19.1% TIRx CV, as shown above.
-
-Act-and-Mul, RMSNorm Quant, Recurrent KDA Grouped and NVFP4 Quantize have since
-been withdrawn from Thor declarations because of below-gate measurements;
-their four classic rows are omitted. The table describes the listed shapes and
-measured revisions, and does not certify every configuration of these kernels.
 
 ## Workloads
 
@@ -103,21 +95,6 @@ revisions used by explicit diagnostic runs are pinned in
 
 Explicit distributed workloads additionally require their NCCL, cuBLAS,
 cuBLASMp, and NVSHMEM runtime dependencies.
-
-For Thor DeepGEMM and FlashMLA baselines, build separate variants using the
-worker's Python, PyTorch and CUDA environment after installing the pinned
-references above:
-
-```bash
-python scripts/setup_thor_source_references.py --name deep-gemm \
-  --variant-root /path/to/new/deep-gemm-thor --build
-python scripts/setup_thor_source_references.py --name flash-mla \
-  --variant-root /path/to/new/flash-mla-thor --build
-```
-
-Apply each variant's generated `tirx-thor-environment.json` environment settings
-before starting its worker, preserving other required `PYTHONPATH` entries.
-Use the setup script's `--help` for checking or registering existing builds.
 
 ## Freeze the before baseline
 

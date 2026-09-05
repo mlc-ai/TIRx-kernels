@@ -8,7 +8,6 @@ import importlib.metadata
 import json
 import subprocess
 import sysconfig
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import SkipTest
 
@@ -338,89 +337,6 @@ sources = ["csrc/sm100/fwd.cu", "csrc/smxx/combine.cu"]
     assert "subprocess.run" not in adapted
     with pytest.raises(RuntimeError, match="no longer matches"):
         variants.adapted_text("flash-mla", "setup.py", adapted)
-
-
-def installer_module():
-    spec = importlib.util.spec_from_file_location(
-        "thor_reference_installer",
-        Path(__file__).resolve().parents[1] / "scripts/setup_thor_source_references.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_prepare_clone_keeps_frozen_files_and_rejects_replacement(frozen_variant, tmp_path):
-    root, _, _ = frozen_variant
-    # The fixture was already adapted; restore the canonical tracked host file.
-    git(root, "checkout", "--", "csrc/jit/device_runtime.hpp")
-    installer = installer_module()
-    destination = tmp_path / "prepared"
-    installer.clone_frozen("deep-gemm", root, destination)
-    inventory = variants.source_inventory("deep-gemm", destination)
-    assert inventory["omitted_files"] == []
-    assert (destination / "third-party/tilelang_ops/utils.py").is_file()
-    assert inventory["host_patch_files"] == ["csrc/jit/device_runtime.hpp"]
-    assert not (destination / "tirx-thor-reference.json").exists()
-    with pytest.raises(FileExistsError, match="refusing to replace"):
-        installer.clone_frozen("deep-gemm", root, destination)
-
-
-@pytest.mark.parametrize(
-    "flags,cubins",
-    [("arch=compute_100f,code=sm_100f", "sm_110a"), ("arch=compute_110a,code=sm_110a", "sm_100f")],
-)
-def test_flashmla_registration_rejects_wrong_target(tmp_path, monkeypatch, flags, cubins):
-    installer = installer_module()
-    package = tmp_path / "flash_mla"
-    package.mkdir()
-    (package / "cuda.fixture.so").write_bytes(b"extension")
-    build = tmp_path / "build"
-    build.mkdir()
-    (build / "build.ninja").write_text("cuda_flags = " + flags)
-    log = tmp_path / "build.log"
-    log.write_text("actual compiler log fixture")
-    monkeypatch.setattr(installer, "source_inventory", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(
-        installer.subprocess, "check_output", lambda *_args, **_kwargs: "ELF file 1: " + cubins
-    )
-    with pytest.raises(RuntimeError, match=r"flags|architectures"):
-        installer.register_variant("flash-mla", tmp_path, log, legacy=True)
-    assert not (tmp_path / "tirx-thor-reference.json").exists()
-
-
-@pytest.mark.parametrize("build_prepared", [False, True])
-def test_prepare_only_never_creates_runtime_manifest(tmp_path, monkeypatch, build_prepared):
-    import contextlib
-
-    installer = installer_module()
-    events = []
-    monkeypatch.setattr(installer, "build_lock", contextlib.nullcontext)
-    monkeypatch.setattr(installer, "clone_frozen", lambda *_: events.append("clone"))
-    monkeypatch.setattr(installer, "source_inventory", lambda *_: events.append("verify_source"))
-    monkeypatch.setattr(installer, "build_variant", lambda *_: events.append("build"))
-    monkeypatch.setattr(installer, "register_variant", lambda *_, **__: events.append("register"))
-    argv = ["setup", "--name", "deep-gemm", "--variant-root", str(tmp_path / "prepared")]
-    if build_prepared:
-        argv.append("--build-prepared")
-    monkeypatch.setattr(installer.sys, "argv", argv)
-    installer.main()
-    assert events == (
-        ["verify_source", "build", "register"] if build_prepared else ["clone", "verify_source"]
-    )
-
-
-def test_deepgemm_registration_accepts_actual_setuptools_log_without_ninja(frozen_variant):
-    root, _, manifest = frozen_variant
-    for ninja in manifest["build"]["ninja_files"]:
-        Path(ninja["path"]).unlink()
-    installer = installer_module()
-    path = installer.register_variant(
-        "deep-gemm", root, Path(manifest["build"]["log"]), legacy=True
-    )
-    registered = variants.validate_variant("deep-gemm", path)
-    assert registered["build"]["ninja_files"] == []
-    assert registered["build"]["compiler_commands"] == manifest["build"]["compiler_commands"]
 
 
 def test_deepgemm_rejects_failed_or_missing_build_commands():

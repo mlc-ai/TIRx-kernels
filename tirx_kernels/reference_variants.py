@@ -244,7 +244,8 @@ def load_reference(name: str):
         return importlib.import_module(policy["import"])
     if not selected:
         raise RuntimeError(
-            f"Thor {name} requires {policy['environment']}; use scripts/setup_thor_source_references.py"
+            f"Thor {name} requires {policy['environment']} pointing to a verified sm_110a "
+            "source-reference build manifest"
         )
     if name in _loaded_manifests and selected != _loaded_manifests[name]["selected_environment"]:
         raise RuntimeError("reference variant cannot change within a running worker")
