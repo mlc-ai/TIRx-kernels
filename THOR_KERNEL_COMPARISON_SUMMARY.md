@@ -1,6 +1,8 @@
 # NVIDIA Thor 经典 Kernel 对比总结
 
-这是 2026-09-04 在单张 NVIDIA Jetson AGX Thor（`sm_110a`，20 SM）上完成的最终同卡对比。这里的“完整”指已选定的 20 个经典、contract-matched 代表 workload 全部跑完并通过数值检查；不是声称仓库全部 254 个 benchmark 都存在可在 Thor 启动的外部 baseline。
+> 历史阶段结果：以下数据来自 2026-09-04 的代码与测量环境，不代表当前 HEAD 的全库验收。全库验证与性能优化尚未完成，rebase 后的统一复测待做。
+
+这是 2026-09-04 在单张 NVIDIA Jetson AGX Thor（`sm_110a`，20 SM）上完成的阶段性同卡对比。这里的“完整”指当时选定的 20 个经典、contract-matched 代表 workload 全部跑完并通过数值检查；不是声称当时仓库全部 254 个 benchmark 都存在可在 Thor 启动的外部 baseline。
 
 Speedup 定义为 `baseline latency / TIRx latency`，大于 1.0 表示 TIRx 更快。
 
@@ -101,4 +103,3 @@ Fast TopK 的 15 轮完整受影响矩阵覆盖 5 个 dtype/k 组合，全部数
 - FA4 独立 15 轮：`/home/tlopexh/TIRx-kernels/.porting/flash_attention4/perf_gate/thor-upstream-regs-15r/runs/1.json`
 - Fast TopK 受影响 5 项 15 轮矩阵：`/home/tlopexh/TIRx-kernels/.porting/fast_topk_clusters/perf_gate/thor-row-parallel-15r/runs/1.json`
 - Fast TopK 代表项独立 30 轮：`/home/tlopexh/TIRx-kernels/.porting/fast_topk_clusters/perf_gate/thor-cluster1-30r/runs/1.json`
-- 更详细的 family、baseline 和 provenance 表见 [THOR_CLASSIC_BASELINE_RESULTS.md](THOR_CLASSIC_BASELINE_RESULTS.md)。
