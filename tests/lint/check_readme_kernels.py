@@ -23,8 +23,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 README = REPO_ROOT / "README.md"
-DEFAULT_ARCHS = ("sm_100a", "sm_103a", "sm_107a")
-ALL_ARCHS = (*DEFAULT_ARCHS, "sm_110a")
+DEFAULT_ARCHS = ("sm_100a", "sm_103a", "sm_107a", "sm_110a")
 
 _LINK = re.compile(r"\[`([^`]+)`\]\((tirx_kernels/[^)]+\.py)\)( \*\*\[([^\]\n]*)\]\*\*)?")
 _TABLE_ROW = re.compile(r"^\| `(sm_[0-9]+[af]?)`[^|]*\| (\d+) \|([^|]*)\|$", re.MULTILINE)
@@ -76,7 +75,7 @@ def main() -> int:
         arch: (int(count), set(re.findall(r"`([^`]+)`", names)))
         for arch, count, names in _TABLE_ROW.findall(text)
     }
-    for arch in ALL_ARCHS:
+    for arch in DEFAULT_ARCHS:
         count = sum(arch in archs for _, archs in kernels.values())
         only = {name for name, (_, archs) in kernels.items() if archs == (arch,)}
         if arch not in table:
