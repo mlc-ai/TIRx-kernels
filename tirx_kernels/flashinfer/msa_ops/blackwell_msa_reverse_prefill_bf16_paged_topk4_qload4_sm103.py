@@ -655,7 +655,7 @@ def _build_producer_kernel():
                     probability_addr, *(packed_probability[index] for index in range(32))
                 )
 
-                _tmem_load_x64(score1, score_addr + _u32(64))
+                # Keep the original tail scores: the P store has reused their TMEM columns.
                 with K.If(K.And(valid_cols > _i32(0), tail_valid < _i32(64))), K.Then():
                     _mask_64(score1, tail_valid)
                 for pair in range(32):

@@ -1,6 +1,6 @@
 # Reuse register-resident TMEM values instead of reloading
 
-**Symptoms:** `tmem_wait`, `long_scoreboard`, `exposed_load_latency`, `dispatch_specific_deficit`
+**Symptoms:** `tmem_wait`, `long_scoreboard`, `exposed_load_latency`, `dispatch_specific_deficit`, `data_dependent_correctness_failure`
 
 ## Symptom
 
@@ -10,12 +10,19 @@ synchronization window, and the specialization that exercises the path trails
 the reference at matched protocol. The source often carries the same redundant
 read, so instruction parity hides it.
 
+A numerical variant reloads cells after they were repurposed, although the
+consumer needs the earlier snapshot rather than their current value.
+
 ## What to change
 
 When no TMEM store to those cells intervenes between the first read and the
 reuse site -- same acquire, same release -- forward the live registers and
 delete the second load chain. The gate judges time, not fidelity to a
 redundancy the source happens to carry.
+
+If the consumer needs the earlier snapshot across a TMEM overwrite, retain the
+existing, unmodified register fragment and delete the reload of the overwritten
+cells. This is distinct from substituting stale registers for a current value.
 
 ```python
 # before: the snapshot path re-reads the cells the repack just read.
@@ -49,10 +56,20 @@ same warpgroup -- folding negations, de-duplicating a replicated register
 array, about 620K dynamic operations together -- measured neutral: that work
 sat in stall shadow.
 
+Preserving tail-score registers across an overlapping probability store fixed
+a sparse-prefill LSE error: maximum absolute error fell from 0.02354 to
+4.77e-7 against an independent oracle, also matched by three SM100 launches.
+Producer x64 TMEM-load sites fell from four to three, retaining 128 registers
+and zero spills on SM100 and SM103. Three paired 15-round SM100 workloads had
+after/before time ratios of 0.984-1.002; this is not an SM103 performance result.
+
 ## Boundary
 
-Valid only inside one synchronization window: any intervening TMEM store to the
-same cells, or a barrier that admits one, makes the registers stale.
+For current-value forwarding, an intervening TMEM store to the same cells, or a
+barrier that admits one, makes the registers stale. An earlier-snapshot consumer
+may cross that store only if the registers retain the required snapshot.
+Neither form establishes asynchronous memory ordering; required lifetime waits
+remain a separate obligation.
 Forwarding must not stretch the fragment's live range into a later region
 either -- keeping a wide fragment alive across an independent load batch pushed
 a warpgroup roughly sixty registers past its budget and spilled, regressing the
@@ -65,3 +82,5 @@ Confirm the `tcgen05.ld` site count drops in generated code for the affected
 specialization and that registers do not spill, then measure the affected and
 guard shapes; an instruction drop alone is not evidence, since shadowed-work
 removals measure neutral.
+For snapshots, also check numerical results with an overwrite between the
+original read and the consumer.
