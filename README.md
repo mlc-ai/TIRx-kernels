@@ -6,12 +6,11 @@ High-performance GPU kernels authored in
 
 ## Kernels
 
-Architecture tags specify runtime eligibility. Untagged kernels support
-`sm_100a` (B200), `sm_103a` (GB300), and `sm_107a` (Rubin). **[+sm_110a]** adds
-Thor to that set; other tags list the complete set, such as **[sm_103a]** or
-**[sm_100a, sm_110a]**.
-Each linked name is the public registry name accepted by `--kernel`; the link
-opens its implementation.
+Unless marked otherwise, every kernel below runs on `sm_100a` (B200), `sm_103a`
+(GB300) and `sm_107a` (Rubin). **[+sm_110a]** adds Thor support to this default
+set. A kernel restricted to specific architectures carries an inline tag such
+as **[sm_103a]** or **[sm_100a, sm_110a]**. Each linked name is the public registry
+name accepted by `--kernel`; the link opens its implementation.
 `KERNEL_META["runtime_cuda_archs"]` is the authority;
 `python -m tirx_kernels.registry --format json` prints it together with the
 config list, and `tests/lint/check_readme_kernels.py` keeps this section in sync
