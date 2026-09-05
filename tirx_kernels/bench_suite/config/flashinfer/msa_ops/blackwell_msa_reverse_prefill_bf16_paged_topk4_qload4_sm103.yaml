@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+kernel: blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103
+selection_rationale: The three defaults exercise the exact fixed GB300 route with both deterministic reverse schedules, identity and permuted pages, and optional LSE outputs; the non-default reused/negative-page row covers clamping and aliasing without expanding the default roster.
+defaults:
+  num_gpus: 1
+configs:
+  - {config: b3_q4096_kv8192_h8_hkv2_topk4_seed73_identity_nostats, default: true, selection_role: small}
+  - {config: b3_q4096_kv8192_h8_hkv2_topk4_seed101_identity_bothlse, default: true, selection_role: medium}
+  - {config: b3_q4096_kv8192_h8_hkv2_topk4_seed73_permuted_lse, default: true, selection_role: large}
+  - {config: b3_q4096_kv8192_h8_hkv2_topk4_seed101_reused_negative_tlse, default: false}

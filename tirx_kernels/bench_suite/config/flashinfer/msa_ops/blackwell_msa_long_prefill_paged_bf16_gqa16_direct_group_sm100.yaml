@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+kernel: blackwell_msa_long_prefill_paged_bf16_gqa16_direct_group_sm100
+default_suite: false
+defaults:
+  num_gpus: 1
+configs:
+  - {config: q8192_kv1048576_h16_hkv1_balanced, default: false}
+  - {config: q8193_kv1048576_h16_hkv1_tail, default: false}
+  - {config: q16384_kv1048576_h16_hkv1_balanced, default: false}
+  - {config: q32768_kv1048576_h16_hkv1_balanced, default: false}
+  - {config: q65536_kv1048576_h16_hkv1_balanced, default: false}
+  - {config: q8192_kv1048576_h64_hkv4_balanced, default: false}
+  - {config: q16384_kv1048576_h16_hkv1_hot_g128, default: false}
+  - {config: q16384_kv1048576_h16_hkv1_bucket_ladder, default: false}
+  - {config: q8192_kv8192_h16_hkv1_single_future_tlse, default: false}
+  - {config: q16384_kv1048576_h16_hkv1_balanced_permuted_pages, default: false}
