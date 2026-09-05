@@ -208,7 +208,7 @@ CONFIGS = DSA_INDEXER_LIKE_COVERAGE
 
 
 def load_deep_gemm_paged_mqa() -> tuple[Any, str]:
-    from tirx_kernels.reference_variants import load_reference
+    from tirx_kernels.reference_requirements import load_reference
     from tirx_kernels.target import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
@@ -1883,7 +1883,7 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         references={"deepgemm": _deepgemm},
     )
     result["max_diff"] = tirx_diff
-    from tirx_kernels.reference_variants import reference_provenance
+    from tirx_kernels.reference_requirements import reference_provenance
 
     result["reference_variant"] = reference_provenance("deep-gemm")
     return result

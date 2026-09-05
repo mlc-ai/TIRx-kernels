@@ -44,7 +44,7 @@ _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 
 
 def load_deep_gemm_mega() -> tuple[Any, str]:
-    from tirx_kernels.reference_variants import load_reference
+    from tirx_kernels.reference_requirements import load_reference
     from tirx_kernels.target import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
@@ -669,7 +669,7 @@ def _run_worker(
             missing = expected_impls - set(impls)
             if missing:
                 raise RuntimeError(f"Benchmark did not report timings for: {sorted(missing)}")
-            from tirx_kernels.reference_variants import reference_provenance
+            from tirx_kernels.reference_requirements import reference_provenance
 
             result = {
                 "status": "OK",

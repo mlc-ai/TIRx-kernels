@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +16,32 @@ def _meta(**updates):
     meta = {"name": "kernel", "category": "basic", "runtime_cuda_archs": ["sm_100a"]}
     meta.update(updates)
     return meta
+
+
+def test_metadata_discovery_does_not_import_gpu_runtimes():
+    script = """
+import importlib.abc
+import sys
+
+class ForbidGpuRuntime(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'tvm', 'torch', 'cutlass'}:
+            raise AssertionError(f'metadata discovery imported {fullname}')
+        return None
+
+sys.meta_path.insert(0, ForbidGpuRuntime())
+from tirx_kernels import registry, target
+assert registry.kernel_index(strict=True)
+assert target.prepare_cuda_arch('sm_100a')
+assert not {'tvm', 'torch', 'cutlass'}.intersection(sys.modules)
+"""
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 @pytest.mark.parametrize(

@@ -15,16 +15,18 @@ class _Interrupted(BaseException):
     pass
 
 
-def test_prepare_arch_overrides_declared_cuda_arch(monkeypatch):
-    monkeypatch.setenv(runner.PREPARE_CUDA_ARCH_ENV, "sm_110a")
-    assert runner.cuda_target(arch="sm_100a").arch == "sm_110a"
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a", "sm_110a"])
+def test_prepare_arch_overrides_declared_cuda_arch(monkeypatch, arch):
+    monkeypatch.setenv(runner.PREPARE_CUDA_ARCH_ENV, arch)
+    assert runner.cuda_target(arch="sm_100a").arch == arch
 
 
 def test_thor_sm100_compatibility_requires_explicit_sm110a_prepare(monkeypatch):
     from tirx_kernels.target import supports_sm100_kernel
 
     monkeypatch.delenv(runner.PREPARE_CUDA_ARCH_ENV, raising=False)
-    assert supports_sm100_kernel((10, 0))
+    for capability in ((10, 0), (10, 3), (10, 7)):
+        assert supports_sm100_kernel(capability)
     assert not supports_sm100_kernel((11, 0))
     assert not supports_sm100_kernel((12, 0))
 
@@ -33,10 +35,14 @@ def test_thor_sm100_compatibility_requires_explicit_sm110a_prepare(monkeypatch):
     assert not supports_sm100_kernel((12, 0))
 
 
-def test_thor_cluster_shape_limit(monkeypatch):
+@pytest.mark.parametrize("arch", [None, "sm_100a", "sm_103a", "sm_107a"])
+def test_thor_cluster_shape_limit(monkeypatch, arch):
     from tirx_kernels.target import prepare_cluster_shape
 
-    monkeypatch.delenv(runner.PREPARE_CUDA_ARCH_ENV, raising=False)
+    if arch is None:
+        monkeypatch.delenv(runner.PREPARE_CUDA_ARCH_ENV, raising=False)
+    else:
+        monkeypatch.setenv(runner.PREPARE_CUDA_ARCH_ENV, arch)
     assert prepare_cluster_shape((2, 8)) == (2, 8)
     monkeypatch.setenv(runner.PREPARE_CUDA_ARCH_ENV, "sm_110a")
     assert prepare_cluster_shape((2, 8)) == (2, 4)

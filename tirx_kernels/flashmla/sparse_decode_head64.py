@@ -3301,7 +3301,7 @@ def run_gpu(
         rounds=rounds,
         cooldown_s=cooldown_s,
     )
-    from tirx_kernels.reference_variants import reference_provenance
+    from tirx_kernels.reference_requirements import reference_provenance
 
     result["reference_variant"] = reference_provenance("flash-mla")
     return result

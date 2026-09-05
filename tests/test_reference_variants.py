@@ -13,7 +13,7 @@ from unittest import SkipTest
 
 import pytest
 
-from tirx_kernels import reference_variants as variants
+from tirx_kernels import reference_requirements as variants
 
 
 @pytest.fixture(autouse=True)
@@ -173,15 +173,29 @@ def test_thor_requires_explicit_manifest(monkeypatch):
         variants.load_reference("deep-gemm")
 
 
-def test_native_import_stays_native(monkeypatch):
-    monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_100a")
-    monkeypatch.delenv("TIRX_DEEP_GEMM_VARIANT_MANIFEST", raising=False)
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
+@pytest.mark.parametrize("name", ["deep-gemm", "flash-mla"])
+def test_native_import_stays_native(monkeypatch, arch, name):
+    policy = variants.VARIANTS[name]
+    monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", arch)
+    monkeypatch.delenv(policy["environment"], raising=False)
     module = object()
-    monkeypatch.setattr(variants.importlib, "import_module", lambda name: module)
-    assert variants.load_reference("deep-gemm") is module
-    monkeypatch.setenv("TIRX_DEEP_GEMM_VARIANT_MANIFEST", "not-valid-on-native")
+    imports = []
+
+    def import_module(import_name):
+        imports.append(import_name)
+        return module
+
+    monkeypatch.setattr(variants.importlib, "import_module", import_module)
+    monkeypatch.setattr(
+        variants, "validate_variant", lambda *_: pytest.fail("native import checked a Thor build")
+    )
+    assert variants.load_reference(name) is module
+    assert imports == [policy["import"]]
+    monkeypatch.setenv(policy["environment"], "not-valid-on-native")
     with pytest.raises(RuntimeError, match="only valid for sm_110a"):
-        variants.load_reference("deep-gemm")
+        variants.load_reference(name)
+    assert imports == [policy["import"]]
 
 
 def test_import_path_and_loaded_extension_must_match(frozen_variant, monkeypatch):

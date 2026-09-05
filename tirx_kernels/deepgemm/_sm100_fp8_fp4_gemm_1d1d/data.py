@@ -53,7 +53,7 @@ def require_deep_gemm():
     """Return the `deep_gemm` module, or skip if it is not installed."""
     from unittest import SkipTest
 
-    from tirx_kernels.reference_variants import load_reference
+    from tirx_kernels.reference_requirements import load_reference
     from tirx_kernels.target import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
@@ -599,7 +599,7 @@ def bench_against_deepgemm(
         launch, _out = reference_launcher(data)
         return launch
 
-    from tirx_kernels.reference_variants import reference_provenance
+    from tirx_kernels.reference_requirements import reference_provenance
 
     references = {"deepgemm": build_reference}
     result = bench(

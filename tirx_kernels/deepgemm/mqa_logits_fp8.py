@@ -246,7 +246,7 @@ CONFIGS = DEEPGEMM_TEST_COVERAGE
 
 
 def load_deep_gemm_mqa() -> tuple[Any, str]:
-    from tirx_kernels.reference_variants import load_reference
+    from tirx_kernels.reference_requirements import load_reference
     from tirx_kernels.target import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
@@ -1064,7 +1064,7 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         cooldown_s=_cooldown_s,
     )
     result["max_diff"] = max_diff
-    from tirx_kernels.reference_variants import reference_provenance
+    from tirx_kernels.reference_requirements import reference_provenance
 
     result["reference_variant"] = reference_provenance("deep-gemm")
     return result
