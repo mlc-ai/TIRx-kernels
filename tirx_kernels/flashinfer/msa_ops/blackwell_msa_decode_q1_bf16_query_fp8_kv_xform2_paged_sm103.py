@@ -339,6 +339,7 @@ def _build_kernel():
 
         with r_softmax:
             phase_s = [K.local_scalar("int32", init=_i32(0)) for _ in range(2)]
+            phase_o = K.local_scalar("int32", init=_i32(0))
             work_s = K.local_scalar("int32", init=first_work)
             with K.While(work_s < total_work):
                 instance = K.uniform(K.if_then_else(warp >= 4, _i32(1), _i32(0)))
@@ -364,13 +365,14 @@ def _build_kernel():
                     K.assign(corr_base, bar(_SMEM_CORR[1]))
                     K.assign(p_base, bar(_SMEM_P[1]))
 
-                for h in range(16):
+                # Each head's row state is owned by its corresponding lane.
+                with K.If(lane < 16), K.Then():
                     K.ptx.st.shared.b32(
-                        bar(_SMEM_ROW_MAX) + K.cast(row_base + h, "uint32") * _u32(4),
+                        bar(_SMEM_ROW_MAX) + K.cast(row_base + lane, "uint32") * _u32(4),
                         _f32(_NEG_INF),
                     )
                     K.ptx.st.shared.b32(
-                        bar(_SMEM_ROW_SUM) + K.cast(row_base + h, "uint32") * _u32(4), _f32(0.0)
+                        bar(_SMEM_ROW_SUM) + K.cast(row_base + lane, "uint32") * _u32(4), _f32(0.0)
                     )
 
                 pair = K.local_scalar("int32", init=_i32(0))
@@ -421,25 +423,30 @@ def _build_kernel():
                             _load_shared_f32(exch_base + K.cast(48 + lane, "uint32") * _u32(4)),
                         )
                         K.assign(tile_max_lane, _max_f32(max01, max23))
-                    tile_max = K.alloc_local((16,), "float32")
-                    for h in range(16):
-                        K.assign(tile_max[h], _shfl_idx_f32(tile_max_lane, h))
-
-                    acc_scale = K.alloc_local((16,), "float32")
-                    for h in range(16):
-                        state_addr = bar(_SMEM_ROW_MAX) + K.cast(row_base + h, "uint32") * _u32(4)
+                    new_max_lane = K.local_scalar("float32", init=_f32(_NEG_INF))
+                    acc_scale_lane = K.local_scalar("float32", init=_f32(1.0))
+                    with K.If(lane < 16), K.Then():
+                        state_addr = bar(_SMEM_ROW_MAX) + K.cast(row_base + lane, "uint32") * _u32(
+                            4
+                        )
                         old_max = _load_shared_f32(state_addr)
-                        new_max = _max_f32(old_max, tile_max[h])
-                        K.ptx.st.shared.b32(state_addr, new_max)
+                        K.assign(new_max_lane, _max_f32(old_max, tile_max_lane))
+                        K.ptx.st.shared.b32(state_addr, new_max_lane)
                         delta = K.local_scalar("float32")
-                        K.ptx.sub.rn.f32(delta, old_max, new_max)
+                        K.ptx.sub.rn.f32(delta, old_max, new_max_lane)
                         K.ptx.mul.rn.f32(delta, softmax_scale_log2, delta)
                         exp_delta = K.local_scalar("float32")
                         K.ptx.ex2.approx.ftz.f32(exp_delta, delta)
                         K.assign(
-                            acc_scale[h],
+                            acc_scale_lane,
                             K.if_then_else(old_max > _f32(_NEG_INF), exp_delta, _f32(1.0)),
                         )
+
+                    tile_max = K.alloc_local((16,), "float32")
+                    acc_scale = K.alloc_local((16,), "float32")
+                    for h in range(16):
+                        K.assign(tile_max[h], _shfl_idx_f32(new_max_lane, h))
+                        K.assign(acc_scale[h], _shfl_idx_f32(acc_scale_lane, h))
 
                     _tmem_store_x16(my_stats, acc_scale)
                     K.ptx.tcgen05.wait__st.sync.aligned()
@@ -456,9 +463,7 @@ def _build_kernel():
                             K.assign(score[h], _f32(_NEG_INF))
                     exp_values = K.alloc_local((16,), "float32")
                     for h in range(16):
-                        new_max = _load_shared_f32(
-                            bar(_SMEM_ROW_MAX) + K.cast(row_base + h, "uint32") * _u32(4)
-                        )
+                        new_max = tile_max[h]
                         safe_max = K.if_then_else(new_max == _f32(_NEG_INF), _f32(0.0), new_max)
                         max_scaled = K.local_scalar("float32")
                         K.ptx["mul.f32"](max_scaled, safe_max, softmax_scale_log2)
@@ -477,11 +482,12 @@ def _build_kernel():
                         for delta in (16, 8, 4, 2, 1):
                             shuffled = _shfl_xor_f32(exp_values[h], delta)
                             K.ptx.add.rn.f32(exp_values[h], exp_values[h], shuffled)
-                        sum_addr = bar(_SMEM_ROW_SUM) + K.cast(row_base + h, "uint32") * _u32(4)
-                        old_sum = _load_shared_f32(sum_addr)
-                        new_sum = K.local_scalar("float32")
-                        K.ptx.fma.rn.f32(new_sum, old_sum, acc_scale[h], exp_values[h])
-                        K.ptx.st.shared.b32(sum_addr, new_sum)
+                        with K.If(lane == h), K.Then():
+                            sum_addr = bar(_SMEM_ROW_SUM) + K.cast(row_base + h, "uint32") * _u32(4)
+                            old_sum = _load_shared_f32(sum_addr)
+                            new_sum = K.local_scalar("float32")
+                            K.ptx.fma.rn.f32(new_sum, old_sum, acc_scale[h], exp_values[h])
+                            K.ptx.st.shared.b32(sum_addr, new_sum)
                     K.ptx.fence.proxy.async_()
                     with K.If(instance == _i32(0)):
                         with K.Then():
@@ -537,6 +543,9 @@ def _build_kernel():
                         K.ptx.barrier.sync(8, 128)
                     with K.Else():
                         K.ptx.barrier.sync(9, 128)
+                # Final PV completion acknowledges consumption of the last correction signal.
+                _mbar_wait(bar(_MBAR_O_FULL), phase_o)
+                _flip(phase_o)
                 with K.If(instance == _i32(0)):
                     with K.Then():
                         _mbar_arrive(bar(_MBAR_CORR_SIG))
