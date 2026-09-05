@@ -6,10 +6,13 @@ High-performance GPU kernels authored in
 
 ## Kernels
 
-Unless marked otherwise, every kernel below runs on `sm_100a` (B200), `sm_103a`
-(GB300) and `sm_107a` (Rubin). A kernel restricted to one architecture carries an
-inline tag such as **[sm_103a]**. Each linked name is the public registry name
-accepted by `--kernel`; the link opens its implementation.
+Unless marked otherwise, every kernel below declares support for `sm_100a`
+(B200), `sm_103a` (GB300), `sm_107a` (Rubin), and `sm_110a` (Thor). A kernel
+restricted to a subset carries an inline tag listing that subset, such as
+**[sm_103a]** or **[sm_100a, sm_110a]**. These declarations describe architecture
+eligibility; they do not certify GPU correctness or performance validation.
+Each linked name is the public registry name accepted by `--kernel`; the link
+opens its implementation.
 `KERNEL_META["runtime_cuda_archs"]` is the authority;
 `python -m tirx_kernels.registry --format json` prints it together with the
 config list, and `tests/lint/check_readme_kernels.py` keeps this section in sync
@@ -17,9 +20,10 @@ with the registry.
 
 | Architecture | Kernels | Only on this architecture |
 |---|---:|---|
-| `sm_100a` (B200) | 101 | `allgather_gemm`, `blackwell_msa_decode_uniform_fp8_qkv_paged_sm100`, `blackwell_msa_long_prefill_paged_bf16_gqa16_direct_group_sm100`, `cake_vsa_blk128_compact_sm100`, `cake_vsa_longseq_sm100`, `cake_vsa_ultrasparse_bsr_sm100`, `deepep_combine`, `deepep_dispatch`, `flash_mla_sparse_fwd`, `flashinfer_fused_add_rmsnorm`, `gemm_reduce_scatter` |
+| `sm_100a` (B200) | 101 | `allgather_gemm`, `blackwell_msa_decode_uniform_fp8_qkv_paged_sm100`, `blackwell_msa_long_prefill_paged_bf16_gqa16_direct_group_sm100`, `cake_vsa_blk128_compact_sm100`, `cake_vsa_longseq_sm100`, `cake_vsa_ultrasparse_bsr_sm100`, `deepep_combine`, `deepep_dispatch`, `gemm_reduce_scatter` |
 | `sm_103a` (GB300) | 96 | `blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103`, `blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103`, `blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103`, `cake_vsa_longseq_sm103`, `fastcu_nvfp4_gemm_gb300`, `flash_attention4_fp4` |
 | `sm_107a` (Rubin) | 94 | `blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin`, `bmm_fp8_rubin`, `dense_blockscaled_gemm_sm107`, `grouped_gemm_masked_rubin` |
+| `sm_110a` (Thor) | 90 |  |
 
 ### Native TIRx
 
@@ -41,7 +45,7 @@ intermediate candidates remain outside this package. See the
 contract and results.
 
 - **KDA forward:**
-  [`agent_evolved_kda_forward_b1_t8192`](tirx_kernels/agent_evolved/kda_forward_b1_t8192.py)
+  [`agent_evolved_kda_forward_b1_t8192`](tirx_kernels/agent_evolved/kda_forward_b1_t8192.py) **[sm_100a, sm_103a, sm_107a]**
 
 ### cuDNN Frontend ports
 
@@ -61,7 +65,7 @@ contract and results.
   [`cudnn_sm100_gdn_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn_prefill_f16.py),
   [`cudnn_sm100_gdn_recompute_f16`](tirx_kernels/cudnn/linear_attention/gdn_recompute_f16.py),
   [`cudnn_sm100_gdn2_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn2_prefill_f16.py),
-  [`cudnn_sm100_gdn2_recompute_f16`](tirx_kernels/cudnn/linear_attention/gdn2_recompute_f16.py),
+  [`cudnn_sm100_gdn2_recompute_f16`](tirx_kernels/cudnn/linear_attention/gdn2_recompute_f16.py) **[sm_100a, sm_103a, sm_107a]**,
   [`cudnn_sm100_gdn2_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn2_bprop_f16.py),
   [`cudnn_sm100_gdn_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn_bprop_f16.py)
 - **CSA compression:**
@@ -100,7 +104,7 @@ Grouped by the FlashInfer Python entry point each port backs.
   [`flashinfer_rmsnorm_fp4quant`](tirx_kernels/flashinfer/norm/rmsnorm_fp4quant.py),
   [`flashinfer_add_rmsnorm_fp4quant`](tirx_kernels/flashinfer/norm/add_rmsnorm_fp4quant.py),
   [`flashinfer_layernorm`](tirx_kernels/flashinfer/norm/layernorm.py),
-  [`flashinfer_fused_add_rmsnorm`](tirx_kernels/flashinfer/norm/fused_add_rmsnorm.py) **[sm_100a]**,
+  [`flashinfer_fused_add_rmsnorm`](tirx_kernels/flashinfer/norm/fused_add_rmsnorm.py) **[sm_100a, sm_110a]**,
   [`flashinfer_fused_add_rmsnorm_quant`](tirx_kernels/flashinfer/norm/fused_add_rmsnorm_quant.py),
   [`flashinfer_fused_dit_layernorm`](tirx_kernels/flashinfer/norm/fused_dit_layernorm.py),
   [`flashinfer_qk_rmsnorm`](tirx_kernels/flashinfer/norm/qk_rmsnorm.py)
@@ -163,7 +167,7 @@ Grouped by the FlashInfer Python entry point each port backs.
 - **Sparse decode:**
   [`sparse_flashmla_decode_head64`](tirx_kernels/flashmla/sparse_decode_head64.py)
 - **Sparse forward:**
-  [`flash_mla_sparse_fwd`](tirx_kernels/flashmla/flash_mla_sparse_fwd.py) **[sm_100a]**
+  [`flash_mla_sparse_fwd`](tirx_kernels/flashmla/flash_mla_sparse_fwd.py) **[sm_100a, sm_110a]**
 
 ### DeepGEMM ports
 

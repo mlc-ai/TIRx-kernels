@@ -521,8 +521,8 @@ def _flashinfer_tinygemm2_spec():
         from flashinfer.jit.utils import write_if_different
 
         # The frozen device kernels run on Thor. Its original host check and
-        # binary targets predate that device; adapt only those in a separate JIT
-        # cache, after validating the complete original source above.
+        # binary targets predate that device; check the expected host guard and
+        # adapt only that guard and the target flags in a separate JIT cache.
         original = source.read_text()
         guard = "TVM_FFI_ICHECK(major == 10 && (minor == 0 || minor == 3))"
         if original.count(guard) != 1:
@@ -578,17 +578,13 @@ def _run_flashinfer(case: dict[str, Any], stage: int, use_pdl: bool, output: tor
 def _mathematical_reference(case: dict[str, Any]) -> torch.Tensor:
     """Independent FP32 GEMM plus bias, rounded once to the BF16 output type."""
     return (
-        case["input"].float() @ case["weight"].float().transpose(0, 1)
-        + case["bias"].float()
+        case["input"].float() @ case["weight"].float().transpose(0, 1) + case["bias"].float()
     ).to(case["out"].dtype)
 
 
 def _validate_mathematical_reference(case: dict[str, Any], output: torch.Tensor) -> None:
     torch.testing.assert_close(
-        output.float(),
-        _mathematical_reference(case).float(),
-        rtol=2.0**-7,
-        atol=2.0**-7,
+        output.float(), _mathematical_reference(case).float(), rtol=2.0**-7, atol=2.0**-7
     )
 
 

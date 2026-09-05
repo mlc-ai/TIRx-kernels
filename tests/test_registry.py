@@ -62,8 +62,8 @@ def test_exact_architectures_are_stored_in_source_index():
         ("sm_100a",): 9,
         ("sm_103a",): 6,
         ("sm_107a",): 4,
-        ("sm_100a", "sm_103a", "sm_107a"): 1,
-        ("sm_100a", "sm_103a", "sm_107a", "sm_110a"): 89,
+        ("sm_100a", "sm_103a", "sm_107a"): 2,
+        ("sm_100a", "sm_103a", "sm_107a", "sm_110a"): 88,
         ("sm_100a", "sm_110a"): 2,
     }
 
@@ -127,6 +127,7 @@ def test_reference_requirements_are_stored_in_source_index():
         if record.category == "flashattention"
     } == {
         "flash_attention4": ("flashinfer-python", "flash-attn-4", "nvidia-cutlass-dsl"),
+        "flash_attention4_fp4": ("flash-attn-4", "nvidia-cutlass-dsl", "flashinfer-python"),
         "flash_attention_backward_sm100": ("flash-attn-4", "nvidia-cutlass-dsl"),
     }
 

@@ -7,8 +7,9 @@
 Three things must hold:
 
 * every registered kernel is linked exactly once, and the link opens its module;
-* a kernel restricted to one CUDA architecture carries an inline ``**[sm_xxx]**``
-  tag after its link, and a kernel that runs everywhere carries none;
+* a kernel restricted to a subset of CUDA architectures carries an inline tag
+  such as ``**[sm_100a, sm_110a]**`` after its link; all-architecture kernels
+  carry none;
 * the architecture overview table lists the correct kernel count and the exact
   set of single-architecture kernels for each architecture.
 
@@ -23,9 +24,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 README = REPO_ROOT / "README.md"
-ALL_ARCHS = ("sm_100a", "sm_103a", "sm_107a")
+ALL_ARCHS = ("sm_100a", "sm_103a", "sm_107a", "sm_110a")
 
-_LINK = re.compile(r"\[`([^`]+)`\]\((tirx_kernels/[^)]+\.py)\)( \*\*\[(sm_[0-9]+[af]?)\]\*\*)?")
+_LINK = re.compile(r"\[`([^`]+)`\]\((tirx_kernels/[^)]+\.py)\)( \*\*\[([^\]\n]*)\]\*\*)?")
 _TABLE_ROW = re.compile(r"^\| `(sm_[0-9]+[af]?)`[^|]*\| (\d+) \|([^|]*)\|$", re.MULTILINE)
 
 
@@ -48,10 +49,10 @@ def main() -> int:
     errors: list[str] = []
 
     linked: dict[str, tuple[str, str | None]] = {}
-    for name, path, _, tag in _LINK.findall(text):
+    for name, path, tag_markup, tag in _LINK.findall(text):
         if name in linked:
             errors.append(f"{name}: linked more than once")
-        linked[name] = (path, tag or None)
+        linked[name] = (path, tag if tag_markup else None)
 
     for name, (path, archs) in sorted(kernels.items()):
         if name not in linked:
@@ -60,10 +61,8 @@ def main() -> int:
         readme_path, tag = linked[name]
         if readme_path != path:
             errors.append(f"{name}: README links {readme_path}, module is {path}")
-        expected_tag = None if archs == ALL_ARCHS else archs[0] if len(archs) == 1 else None
-        if archs != ALL_ARCHS and len(archs) != 1:
-            errors.append(f"{name}: runtime_cuda_archs {archs} needs a README convention")
-        elif tag != expected_tag:
+        expected_tag = None if archs == ALL_ARCHS else ", ".join(archs)
+        if tag != expected_tag:
             errors.append(
                 f"{name}: README tag is {tag}, runtime_cuda_archs {archs} needs {expected_tag}"
             )
