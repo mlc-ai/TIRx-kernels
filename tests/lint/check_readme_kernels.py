@@ -7,8 +7,8 @@
 Three things must hold:
 
 * every registered kernel is linked exactly once, and the link opens its module;
-* untagged kernels declare the three default CUDA architectures; ``**[+sm_110a]**``
-  adds Thor to that set, while other tags list the complete supported set;
+* untagged kernels declare the default CUDA architectures; tags list the complete
+  supported set whenever it differs from that default;
 * the architecture overview table lists the correct kernel count and the exact
   set of single-architecture kernels for each architecture.
 
@@ -63,8 +63,6 @@ def main() -> int:
             errors.append(f"{name}: README links {readme_path}, module is {path}")
         if archs == DEFAULT_ARCHS:
             expected_tag = None
-        elif archs == ALL_ARCHS:
-            expected_tag = "+sm_110a"
         else:
             expected_tag = ", ".join(archs)
         if tag != expected_tag:
