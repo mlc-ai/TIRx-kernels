@@ -72,28 +72,6 @@ def import_cutlass_reference():
             mlir_ir.register_attribute_builder = register_attribute_builder
 
 
-def from_dlpack_typed(tensor, *, assumed_align=16, leading_dim=None):
-    """Wrap CUDA tensors whose FP8/packed-FP4 dtypes DLPack cannot export."""
-    cutlass = import_cutlass_reference()
-    import torch
-    from cutlass.cute.runtime import from_dlpack
-
-    unsupported = {
-        torch.float4_e2m1fn_x2: cutlass.Float4E2M1FN,
-        torch.float8_e4m3fn: cutlass.Float8E4M3FN,
-        torch.float8_e5m2: cutlass.Float8E5M2,
-        torch.float8_e8m0fnu: cutlass.Float8E8M0FNU,
-    }
-    element_type = unsupported.get(tensor.dtype)
-    storage = tensor.view(torch.uint8) if element_type is not None else tensor
-    wrapped = from_dlpack(storage, assumed_align=assumed_align)
-    if leading_dim is not None:
-        wrapped = wrapped.mark_layout_dynamic(leading_dim=leading_dim)
-    if element_type is not None:
-        wrapped.element_type = element_type
-    return wrapped
-
-
 @cache
 def load_reference_module(name: str):
     """Import one cuDNN Frontend reference module from the pinned install."""

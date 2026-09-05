@@ -527,9 +527,7 @@ def compile_reference(data):
     import torch
     from cuda.bindings import driver as cuda
     from cutlass.cute.nvgpu import OperandMajorMode
-    from cutlass.cute.runtime import make_fake_stream
-
-    from tirx_kernels.cudnn._reference import from_dlpack_typed as from_dlpack
+    from cutlass.cute.runtime import from_dlpack, make_fake_stream
 
     if os.environ.get("CUDNNFE_CLUSTER_OVERLAP_MARGIN", "0") != "0":
         raise RuntimeError("CUDNNFE_CLUSTER_OVERLAP_MARGIN must be 0")

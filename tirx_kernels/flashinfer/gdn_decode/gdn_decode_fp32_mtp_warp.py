@@ -21,7 +21,7 @@ from tirx_kernels.runner import bench
 KERNEL_META = {
     "name": "gdn_decode_fp32_mtp_warp",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -1315,8 +1315,6 @@ def _make_qkv(
 
 
 def _device_from_config(config: dict[str, Any]) -> torch.device:
-    from tirx_kernels.runner import supports_sm100_kernel
-
     configured_device = config.get("device")
     device = (
         torch.device(configured_device)
@@ -1326,10 +1324,8 @@ def _device_from_config(config: dict[str, Any]) -> torch.device:
     if device.type != "cuda" or not torch.cuda.is_available():
         raise SkipTest("CUDA is required for FP32 MTP warp GDN decode")
     capability = torch.cuda.get_device_capability(device)
-    if not supports_sm100_kernel(capability):
-        raise SkipTest(
-            f"FP32 MTP warp GDN decode requires SM100 or prepared Thor, got {capability}"
-        )
+    if capability[0] != 10:
+        raise SkipTest(f"FP32 MTP warp GDN decode requires SM100, got {capability}")
     return device
 
 

@@ -38,7 +38,7 @@ from tirx_kernels.msa.utils._scalar_ops import (
 KERNEL_META = {
     "name": "msa_sparse_prepare_flat_schedule_sm100",
     "category": "msa",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "msa",
@@ -793,6 +793,7 @@ def run_test(**config):
     config.pop("label", None)
     data = prepare_data(**config)
 
+    # The source kernel over the same inputs, as the primary oracle.
     try:
         from tirx_kernels.msa.utils._msa_bench import compiled_flat_schedule
     except ImportError as exc:  # pragma: no cover - environment dependent

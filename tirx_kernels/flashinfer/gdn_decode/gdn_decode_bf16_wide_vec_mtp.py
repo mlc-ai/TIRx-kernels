@@ -21,7 +21,7 @@ from tirx_kernels.runner import bench
 KERNEL_META = {
     "name": "gdn_decode_bf16_wide_vec_mtp",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -1073,8 +1073,6 @@ def _make_qkv(
 
 
 def _device_from_config(config: dict[str, Any]) -> torch.device:
-    from tirx_kernels.runner import supports_sm100_kernel
-
     configured_device = config.get("device")
     device = (
         torch.device(configured_device)
@@ -1084,10 +1082,8 @@ def _device_from_config(config: dict[str, Any]) -> torch.device:
     if device.type != "cuda" or not torch.cuda.is_available():
         raise SkipTest("CUDA is required for BF16 wide-vector GDN MTP decode")
     capability = torch.cuda.get_device_capability(device)
-    if not supports_sm100_kernel(capability):
-        raise SkipTest(
-            f"BF16 wide-vector GDN MTP decode requires SM100 or prepared Thor, got {capability}"
-        )
+    if capability[0] != 10:
+        raise SkipTest(f"BF16 wide-vector GDN MTP decode requires SM100, got {capability}")
     return device
 
 

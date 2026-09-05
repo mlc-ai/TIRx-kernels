@@ -16,9 +16,7 @@ import math
 from typing import Any
 
 import tirx_kernels.kern as K
-from tirx_kernels.runner import bench, prepare_cluster_shape
-
-from .rmsnorm import _thor_source_cluster_limit
+from tirx_kernels.runner import bench
 
 KERNEL_META = {
     "name": "flashinfer_rmsnorm_quant",
@@ -99,17 +97,12 @@ def _estimate_smem(H: int, cluster_n: int) -> int:
     )
 
 
-def _source_cluster_n(H: int) -> int:
+def _source_config(H: int) -> dict[str, int | bool]:
     cluster_n = 16
     for candidate in (1, 2, 4, 8, 16):
         if H % candidate == 0 and _estimate_smem(H, candidate) <= _OPTIN_SMEM_BYTES:
             cluster_n = candidate
             break
-    return cluster_n
-
-
-def _source_config(H: int) -> dict[str, int | bool]:
-    cluster_n = prepare_cluster_shape((1, _source_cluster_n(H)))[1]
 
     source = _rmsnorm_derived_config(H, cluster_n)
     H_per_cta = source["H_per_cta"]
@@ -1721,15 +1714,14 @@ def run_test(**config: Any) -> None:
 
     flashinfer_norm.rmsnorm_quant_cute = tracked_cute
     try:
-        with _thor_source_cluster_limit():
-            reference_returned = api(
-                reference_output["view"],
-                data["x"],
-                data["weight"],
-                data["scale"],
-                eps,
-                enable_pdl=enable_pdl,
-            )
+        reference_returned = api(
+            reference_output["view"],
+            data["x"],
+            data["weight"],
+            data["scale"],
+            eps,
+            enable_pdl=enable_pdl,
+        )
     finally:
         flashinfer_norm.rmsnorm_quant_cute = original_cute
     if cute_calls != 1:
@@ -1810,8 +1802,7 @@ def run_gpu(
 
         flashinfer_norm.rmsnorm_quant_cute = tracked_cute
         try:
-            with _thor_source_cluster_limit():
-                returned = flashinfer_launch()
+            returned = flashinfer_launch()
         finally:
             flashinfer_norm.rmsnorm_quant_cute = original_cute
         if cute_calls != 1:

@@ -520,3 +520,66 @@ Grouped workloads show one row per config and one timing column per implementati
 - `stable_sort_topk_by_value/f32_r4_k128`: prepare: RuntimeError: CPU prepare changed CUDA initialization state from False to True
 - `stable_sort_topk_by_value/f32_r64_k2048`: prepare: RuntimeError: CPU prepare changed CUDA initialization state from False to True
 - `stable_sort_topk_by_value/f32_r64_k256`: prepare: RuntimeError: CPU prepare changed CUDA initialization state from False to True
+
+<!-- additional-benchmark-reports -->
+
+## Thor performance
+
+This batch contains 16 kernels with paired TIRx/source measurements for the 19
+configurations below on Jetson AGX Thor (`sm_110a`, 20 SM). A/B are historical
+representative configurations measured before the rebase; C covers all three
+bench-suite default configurations of masked GEMM at `bae52d60`. These results
+do not constitute full required-shape validation of the current revision.
+Unmeasured kernel adaptations are outside this batch.
+
+`Source/TIRx` divides external baseline latency by TIRx latency. Every listed
+row meets the requested `> 0.99` comparison threshold; values above 1 mean TIRx
+is faster. QK RMSNorm is 0.52% slower and falls within that threshold.
+This comparison is separate from the suite's direct before/after gate.
+
+Times are arithmetic means of 15 Proton rounds with 1000 ms warmup, 100 ms
+repeat, 1 s cooldown, and the standard suite cache policy. CV is population
+standard deviation / mean, shown as TIRx/source percentages. C used
+`--serial-prepare`; A allowed four preparation processes, so host compilation
+overlap was not excluded. All three runs recorded zero interference retries.
+The large CV in some rows limits conclusions about small speedups.
+
+| Kernel | Config | External baseline | TIRx (µs) | Source (µs) | Source/TIRx | CV (%) | Run |
+|---|---|---|---:|---:|---:|---:|:---:|
+| `deepgemm_sm100_m_grouped_fp8_gemm_masked` | `g32_m192_n4096_k4096_bfp4` | DeepGEMM | 2093.830 | 2111.803 | 1.0086 | 26.9/29.5 | C |
+| `deepgemm_sm100_m_grouped_fp8_gemm_masked` | `g32_m192_n6144_k7168` | DeepGEMM | 6538.975 | 6547.212 | 1.0013 | 0.6/0.5 | C |
+| `deepgemm_sm100_m_grouped_fp8_gemm_masked` | `g6_m1024_n4096_k2048` | DeepGEMM | 578.861 | 580.903 | 1.0035 | 7.1/6.9 | C |
+| `fast_topk_clusters` | `f32_plain_b64_l16384_k256` | FlashInfer | 79.021 | 198.150 | 2.5076 | 5.2/1.1 | A |
+| `filtered_topk` | `f32_plain_r64_l8192_k256` | FlashInfer | 46.489 | 52.644 | 1.1324 | 6.5/6.6 | A |
+| `flash_attention4` | `s4096_h32kv4_causal` | Upstream FA4 CuTeDSL | 899.927 | 948.046 | 1.0535 | 3.3/3.2 | A |
+| `flashinfer_fused_add_rmsnorm` | `fused_bf16_m32_h4096_xc_rc_pdl1` | FlashInfer CuTeDSL | 16.229 | 16.491 | 1.0162 | 5.5/3.5 | A |
+| `flashinfer_fused_dit_layernorm` | `grgb_bf16_b1_r1920` | FlashInfer CUDA | 395.515 | 400.998 | 1.0139 | 3.3/4.0 | A |
+| `flashinfer_layernorm` | `bf16_m128_h16384_xc_yc_pdl0_eps1e6` | FlashInfer CuTeDSL | 88.357 | 90.838 | 1.0281 | 5.0/2.9 | A |
+| `flashinfer_qk_rmsnorm` | `rms_bf16_b32_n32_h128_xc_yc_pdl0` | FlashInfer CuTeDSL | 7.671 | 7.631 | 0.9948 | 4.7/2.4 | A |
+| `flashinfer_rmsnorm` | `rms_bf16_m32_h4096_xc_yc_pdl1` | FlashInfer CuTeDSL | 12.014 | 12.018 | 1.0003 | 3.6/3.9 | B |
+| `fp16_bf16_gemm` | `bf16_4096x4096x4096` | cuBLAS | 1225.117 | 1535.717 | 1.2535 | 19.1/7.9 | A |
+| `fp16_bf16_gemm` | `fp16_4096x4096x4096` | cuBLAS | 1173.072 | 1473.222 | 1.2559 | 1.8/2.5 | A |
+| `gdn_decode_bf16_ilp4` | `t4_b4_h8_hv16_tv16` | FlashInfer CuTeDSL | 94.771 | 97.945 | 1.0335 | 4.0/2.2 | A |
+| `mxfp4_quantize` | `fp16_linear_m4096_k4096` | FlashInfer | 376.032 | 393.498 | 1.0464 | 9.0/7.0 | A |
+| `nvfp4_gemm` | `4096x4096x4096` | FlashInfer CUTLASS FP4 | 417.271 | 423.874 | 1.0158 | 2.0/3.5 | A |
+| `radix_topk_multi_cta` | `f32_basic_r4_l115188_k256_ctas3` | FlashInfer | 69.935 | 71.246 | 1.0187 | 4.3/4.2 | A |
+| `radix_topk_single_cta` | `f32_basic_r64_l32768_k512` | FlashInfer | 186.331 | 194.371 | 1.0432 | 0.5/0.6 | A |
+| `selective_state_update_mtp_horizontal` | `b512_h64_d64_s128_t6_r8_statebf16_official` | FlashInfer CUDA | 3528.172 | 3830.267 | 1.0856 | 0.0/0.0 | A |
+
+Run provenance (raw artifacts retained locally):
+
+| Run | Measured revision | Date (UTC) | Scope |
+|:---:|---|---|---|
+| A | `4d26851f` | 2026-09-04 | 15 retained representative rows from the classic run |
+| B | `4d26851f-dirty` | 2026-09-04 | RMSNorm level-6 schedule, register cap 56 |
+| C | `bae52d60` | 2026-09-05 | All 3 masked GEMM defaults; numerical/source checks passed |
+
+All runs used TVM `15b607d6`. A/B used FlashInfer `f2e04400`, FA4 `0251105a`,
+and PyTorch `2.9.1+cu130`. C used DeepGEMM `559d79fb` with unchanged device
+sources, a verified Thor host-dispatch adapter, and JIT compilation for the
+actual device architecture. Its source/build identity is recorded in the run's
+`reference_variant` field.
+
+- A: `/home/tlopexh/thor-validation/final-classic-4d26851-official-15r/runs/1.json`
+- B: `/home/tlopexh/thor-validation/rms-static-cap56-level6-15r/runs/1.json`
+- C: `/home/tlopexh/thor-validation/batch-default-bae52d6-15r-20260905-001/deepgemm_sm100_m_grouped_fp8_gemm_masked/attempt-00/suite/runs/1.json`

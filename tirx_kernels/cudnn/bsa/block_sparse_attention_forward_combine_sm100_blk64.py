@@ -49,7 +49,7 @@ import tirx_kernels.kern as K
 KERNEL_META = {
     "name": "cudnn_sm100_bsa_forward_combine_blk64",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -691,30 +691,6 @@ def _oracle(data):
     return out.to(torch.bfloat16), final_lse.float()
 
 
-def _assert_bf16_within_one_ulp(actual, expected):
-    """Keep the existing absolute floor and accept one BF16 step at scale."""
-    import torch
-
-    expected_f32 = expected.float()
-    upper = torch.nextafter(expected, torch.full_like(expected, float("inf"))).float()
-    lower = torch.nextafter(expected, torch.full_like(expected, float("-inf"))).float()
-    tolerance = torch.maximum((upper - expected_f32).abs(), (expected_f32 - lower).abs())
-    tolerance = tolerance.clamp_min(0.0078125)
-    error = (actual.float() - expected_f32).abs()
-    valid = error <= tolerance
-    if bool(torch.all(valid).item()):
-        return
-    excess = error - tolerance
-    worst = int(torch.argmax(excess).item())
-    raise AssertionError(
-        "source/oracle O differs by more than one BF16 ULP: "
-        f"value={float(actual.reshape(-1)[worst].item())}, "
-        f"oracle={float(expected.reshape(-1)[worst].item())}, "
-        f"absolute_error={float(error.reshape(-1)[worst].item())}, "
-        f"ulp={float(tolerance.reshape(-1)[worst].item())}"
-    )
-
-
 def _validate_outputs(data, *, with_oracle=True):
     import torch
 
@@ -741,7 +717,9 @@ def _validate_outputs(data, *, with_oracle=True):
 
     if with_oracle:
         oracle_o, oracle_lse = _oracle(data)
-        _assert_bf16_within_one_ulp(expected["out"], oracle_o)
+        torch.testing.assert_close(
+            expected["out"].float(), oracle_o.float(), rtol=0.0, atol=0.0078125, equal_nan=False
+        )
         finite = torch.isfinite(oracle_lse)
         if not torch.equal(torch.isneginf(expected["lse"]), torch.isneginf(oracle_lse)):
             raise AssertionError("source/oracle LSE -inf classification mismatch")

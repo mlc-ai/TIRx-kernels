@@ -24,7 +24,7 @@ from ._sparse_attention_backward import spec as _spec
 KERNEL_META = {
     "name": "cudnn_sm100_dsa_sparse_attention_backward",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -57,7 +57,7 @@ def prepare_data(**config):
 
 
 def run_test(**config):
-    """Compare all three gradients against the original source implementation."""
+    """Compare TIRx and the upstream kernel against the FP32 oracle."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
@@ -108,9 +108,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         source_launch = _data.compile_reference(data)
         source_launch()
         torch.cuda.synchronize()
-        _data.validate_outputs(data, sources=("tirx", "source"))
         references = {"cudnn_frontend": lambda: source_launch}
 
+    # The oracle is far more expensive than the kernels at the benchmark shapes;
+    # ``run_test`` carries it over the correctness matrix instead.
     _data.validate_outputs(data, sources=("tirx",), with_oracle=False)
     return bench(
         {"tirx": tirx_launch},

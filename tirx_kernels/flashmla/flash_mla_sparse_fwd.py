@@ -34,7 +34,7 @@ from tvm.tirx.cuda import iket
 KERNEL_META = {
     "name": "flash_mla_sparse_fwd",
     "category": "flashmla",
-    "runtime_cuda_archs": ["sm_100a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a"],
 }
 _HEAD64_NAME = _head64.KERNEL_META["name"]
 _HEAD128_NAME = _head128.KERNEL_META["name"]
@@ -270,9 +270,7 @@ def _profile_iket_workload(args: argparse.Namespace) -> None:
     if args.repeat <= 0:
         raise ValueError("--repeat must be positive")
 
-    from tirx_kernels.runner import cuda_target
-
-    target = cuda_target(arch="sm_100a")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
     launches = []
     for _name, config in _iket_configs(args):
         executable = iket.IketProfiler().compile(

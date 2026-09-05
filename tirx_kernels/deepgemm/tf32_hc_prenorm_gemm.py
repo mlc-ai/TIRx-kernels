@@ -4,7 +4,6 @@
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 import ctypes
-import math
 from dataclasses import asdict, dataclass
 from functools import cache
 from typing import Any
@@ -253,12 +252,6 @@ BENCH_CONFIGS = CONFIGS + LEGACY_CONFIGS
 
 
 def load_deep_gemm_hc() -> tuple[Any, str]:
-    from tirx_kernels.reference_requirements import load_reference
-    from tirx_kernels.runner import prepare_cuda_arch
-
-    if prepare_cuda_arch() == "sm_110a":
-        return load_reference("deep-gemm"), "verified_thor_variant"
-
     try:
         import deep_gemm as module
 
@@ -279,33 +272,6 @@ def _get_num_sms(default: int) -> int:
     return hardware_num_sms(default)
 
 
-def _round_to_tf32_rne(value: torch.Tensor) -> torch.Tensor:
-    """Represent FP32 values at the TFLOAT32 tensor-map input precision."""
-    if value.dtype != torch.float32:
-        raise TypeError("TF32 oracle input must be float32")
-    bits = value.contiguous().view(torch.int32)
-    rounded = ((bits + 0xFFF + ((bits >> 13) & 1)) & -0x2000).view(torch.float32)
-    return torch.where(torch.isfinite(value), rounded, value)
-
-
-def _reference_hc_output(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    from tirx_kernels.runner import prepare_cuda_arch
-
-    if prepare_cuda_arch() != "sm_110a":
-        return a.float() @ b.T
-    # Both implementations load B through a TFLOAT32 tensor map. Thor TMA
-    # rounds that input to nearest-even; A is BF16 and already exact in TF32.
-    # Merely allowing cuBLAS TF32 does not force it for skinny GEMMs, so make
-    # the operand precision explicit and accumulate the oracle in FP32.
-    rounded_b = _round_to_tf32_rne(b)
-    previous = torch.backends.cuda.matmul.allow_tf32
-    try:
-        torch.backends.cuda.matmul.allow_tf32 = False
-        return a.float() @ rounded_b.T
-    finally:
-        torch.backends.cuda.matmul.allow_tf32 = previous
-
-
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     deep_gemm, source = load_deep_gemm_hc()
     config = _make_config(**kwargs)
@@ -313,10 +279,8 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         torch.cuda.set_device(torch.cuda.current_device())
     else:
         raise SkipTest("CUDA is required for SM100 TF32 HC prenorm GEMM")
-    from tirx_kernels.runner import supports_sm100_kernel
-
-    if not supports_sm100_kernel(torch.cuda.get_device_capability()):
-        raise SkipTest("SM100 TF32 HC prenorm GEMM requires SM100 or prepared Thor")
+    if torch.cuda.get_device_capability()[0] < 10:
+        raise SkipTest("SM100 TF32 HC prenorm GEMM requires compute capability 10.x")
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -336,7 +300,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     sqr_deepgemm = torch.empty(config.sqr_sum_shape, dtype=torch.float32, device="cuda")
     d_tirx = torch.empty(config.d_shape, dtype=torch.float32, device="cuda")
     sqr_tirx = torch.empty(config.sqr_sum_shape, dtype=torch.float32, device="cuda")
-    reference_d = _reference_hc_output(a, b)
+    reference_d = a.float() @ b.T
     reference_sqr = a.float().square().sum(dim=-1)
     return {
         "config": runtime_config,
@@ -1067,8 +1031,7 @@ def _calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
     if denominator == 0:
         return 0.0
     sim = 2 * (x * y).sum() / denominator
-    diff = float((1 - sim).item())
-    return diff if math.isfinite(diff) else float("inf")
+    return float((1 - sim).item())
 
 
 def _assert_correct(
@@ -1098,6 +1061,8 @@ def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
     deepgemm_d, deepgemm_sqr = _run_deepgemm_hc(data)
     torch.cuda.synchronize()
+    # Library-anchored: the torch ref is a yardstick, not the arbiter --
+    # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
     deepgemm_diff = _assert_correct(data, deepgemm_d, deepgemm_sqr, name="DeepGEMM")
     tirx_d, tirx_sqr = _launch_tirx_hc(data)
     torch.cuda.synchronize()
@@ -1184,9 +1149,6 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     funcs = {"tirx": lambda: _bench_tirx_case(case, executable)}
 
     def _deepgemm():
-        source_d, source_sqr = _bench_deepgemm_case(case)
-        torch.cuda.synchronize()
-        _assert_correct_case(case, source_d, source_sqr, name="DeepGEMM")
         return lambda: _bench_deepgemm_case(case)
 
     references = {"deepgemm": _deepgemm}
@@ -1202,9 +1164,6 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     )
     result["tirx_diff"] = tirx_diff
     result["max_diff"] = tirx_diff
-    from tirx_kernels.reference_requirements import reference_provenance
-
-    result["reference_variant"] = reference_provenance("deep-gemm")
     return result
 
 

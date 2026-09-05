@@ -14,7 +14,6 @@ from functools import cache
 from itertools import combinations, product
 
 import tirx_kernels.kern as K
-from tirx_kernels.runner import prepare_cluster_shape
 
 _TRY_WAIT_TICKS = 10_000_000
 _SMEM_CAPACITY = 232_448
@@ -340,7 +339,7 @@ def _benchmark_configs():
 KERNEL_META = {
     "name": "cudnn_sm100_dense_gemm_persistent_swiglu",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -1521,7 +1520,6 @@ def get_kernel(
     alpha=None,
 ):
     del alpha
-    cluster_shape_mn = prepare_cluster_shape(cluster_shape_mn)
     return _make_kernel(
         M,
         N,
@@ -1627,33 +1625,25 @@ def _compile_reference(data, config):
     b = data["b"]["source"]
     ab12 = data["source_ab12"]["source"]
     c = data["source_c"]["source"]
-
-    def input_tensor(tensor, dtype, *, leading_dim):
-        storage = tensor.view(torch.uint8) if dtype.startswith("float8_") else tensor
-        wrapped = from_dlpack(storage, assumed_align=16)
-        if dtype.startswith("float8_"):
-            wrapped.element_type = {
-                "float8_e4m3fn": cutlass.Float8E4M3FN,
-                "float8_e5m2": cutlass.Float8E5M2,
-            }[dtype]
-        return wrapped.mark_layout_dynamic(leading_dim=leading_dim)
-
-    a_cute = input_tensor(a, config["ab_dtype"], leading_dim=0 if config["a_major"] == "m" else 1)
-    b_cute = input_tensor(b, config["ab_dtype"], leading_dim=0 if config["b_major"] == "n" else 1)
+    a_cute = from_dlpack(a, assumed_align=16).mark_layout_dynamic(
+        leading_dim=0 if config["a_major"] == "m" else 1
+    )
+    b_cute = from_dlpack(b, assumed_align=16).mark_layout_dynamic(
+        leading_dim=0 if config["b_major"] == "n" else 1
+    )
     ab12_cute = from_dlpack(ab12, assumed_align=16).mark_layout_dynamic(
         leading_dim=0 if config["c_major"] == "m" else 1
     )
     c_cute = from_dlpack(c, assumed_align=16).mark_layout_dynamic(
         leading_dim=0 if config["c_major"] == "m" else 1
     )
-    cluster_shape_mn = prepare_cluster_shape(config["cluster_shape_mn"])
     kernel = module.PersistentDenseGemmKernel(
         acc_dtype={"float16": cutlass.Float16, "float32": cutlass.Float32}[config["acc_dtype"]],
         use_2cta_instrs=config["mma_tiler_mn"][0] == 256,
         mma_tiler_mn=tuple(config["mma_tiler_mn"]),
-        cluster_shape_mn=cluster_shape_mn,
+        cluster_shape_mn=tuple(config["cluster_shape_mn"]),
     )
-    cluster_size = cluster_shape_mn[0] * cluster_shape_mn[1]
+    cluster_size = config["cluster_shape_mn"][0] * config["cluster_shape_mn"][1]
     max_active_clusters = cutlass.utils.HardwareInfo().get_max_active_clusters(cluster_size)
     executable = cute.compile(
         kernel,
@@ -1731,49 +1721,8 @@ def _validate_outputs(data, *, with_source):
     )
 
 
-def _upstream_disagrees_with_oracle(config):
-    """Whether the pinned source's batched N-major C store is unreliable.
-
-    The affected two-CTA specialization occasionally stores the other batch's
-    C value. Its AB12 output remains correct, and the TIRx result agrees with
-    the direct FP32 SwiGLU equation on every element.
-    """
-    return (
-        config["c_major"] == "n"
-        and config["L"] > 1
-        and config["mma_tiler_mn"][0] == 256
-        and config["acc_dtype"] == "float32"
-        and config["ab12_dtype"] == "float32"
-        and config["c_dtype"] == "float16"
-    )
-
-
-def _validate_with_oracle(data, alpha):
-    """Check both outputs against the dense FP32 equation."""
-    import torch
-
-    a = data["a"]["source"].float()
-    b = data["b"]["source"].float()
-    ab12_f32 = torch.einsum("mkl,nkl->mnl", a, b) * alpha
-    M, N, L = ab12_f32.shape
-    chunks = ab12_f32.reshape(M, N // 64, 64, L)
-    c_f32 = torch.cat(
-        [
-            chunks[:, chunk, :32, :] * torch.nn.functional.silu(chunks[:, chunk, 32:, :])
-            for chunk in range(N // 64)
-        ],
-        dim=1,
-    )
-    expected_ab12 = ab12_f32.to(data["tirx_ab12"]["source"].dtype).float()
-    expected_c = c_f32.to(data["tirx_c"]["source"].dtype).float()
-    _assert_close(
-        torch, data["tirx_ab12"]["source"], expected_ab12, label="TIRx AB12 versus FP32 oracle"
-    )
-    _assert_close(torch, data["tirx_c"]["source"], expected_c, label="TIRx C versus FP32 oracle")
-
-
 def run_test(**config):
-    """Compare TIRx with the pinned source, or its known-bad case with an oracle."""
+    """Compare TIRx with the cuDNN Frontend kernel on identical inputs."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
@@ -1783,18 +1732,12 @@ def run_test(**config):
     tirx_launch = _tirx_launch(
         compile_kernel(get_kernel(**kernel_config)), data, kernel_config["alpha"]
     )
+    source_launch = _compile_reference(data, kernel_config)
     tirx_launch()
-    if _upstream_disagrees_with_oracle(kernel_config):
-        torch.cuda.synchronize()
-        _validate_with_oracle(data, kernel_config["alpha"])
-        result = data["tirx_ab12"]["source"]
-    else:
-        source_launch = _compile_reference(data, kernel_config)
-        source_launch()
-        torch.cuda.synchronize()
-        _validate_outputs(data, with_source=True)
-        result = data["source_ab12"]["source"]
-    return {"max_abs": float(result.float().abs().amax().item())}
+    source_launch()
+    torch.cuda.synchronize()
+    _validate_outputs(data, with_source=True)
+    return {"max_abs": float(data["source_ab12"]["source"].float().abs().amax().item())}
 
 
 def prepare_bench(**config):

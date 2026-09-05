@@ -20,7 +20,7 @@ from . import selective_state_update_stp_simple as _simple
 KERNEL_META = {
     "name": "selective_state_update_stp_vertical",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -646,7 +646,7 @@ def get_kernel(**kwargs: Any):
                                         random13: K.uint32 = K.bitwise_and(
                                             random_words[e], K.uint32(0x1FFF)
                                         )
-                                        K.idioms.cvt_rs_f16x2_f32(
+                                        K.ptx.cvt.rs.f16x2.f32(
                                             sr_raw[e], K.float32(0.0), new_state, random13
                                         )
                                     else:

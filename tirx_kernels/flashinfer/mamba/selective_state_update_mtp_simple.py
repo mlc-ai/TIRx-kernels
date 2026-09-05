@@ -19,7 +19,7 @@ import tirx_kernels.kern as K
 KERNEL_META = {
     "name": "selective_state_update_mtp_simple",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -1175,7 +1175,7 @@ def get_kernel(**kwargs: Any):
                                                 K.ptx.mov.b32(random_words[2], c2)
                                                 K.ptx.mov.b32(random_words[3], c3)
                                             packed_f16 = K.local_scalar("uint32")
-                                            K.idioms.cvt_rs_f16x2_f32(
+                                            K.ptx.cvt.rs.f16x2.f32(
                                                 packed_f16,
                                                 K.cuda.float2_y(state_pair),
                                                 K.cuda.float2_x(state_pair),
@@ -1459,14 +1459,12 @@ def get_kernel(**kwargs: Any):
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     """Allocate deterministic, independent TIRx and FlashInfer MTP cases."""
-    from tirx_kernels.runner import supports_sm100_kernel
-
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for selective-state-update MTP simple")
     capability = torch.cuda.get_device_capability(device)
-    if not supports_sm100_kernel(capability):
-        raise SkipTest(f"MTP simple requires SM100 or prepared Thor, got {capability}")
+    if capability[0] != 10:
+        raise SkipTest(f"MTP simple SM100 requires compute capability 10.x, got {capability}")
 
     batch = int(kwargs["batch"])
     nheads = int(kwargs["nheads"])

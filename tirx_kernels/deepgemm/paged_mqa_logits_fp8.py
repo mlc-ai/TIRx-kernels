@@ -151,7 +151,7 @@ def _make_case(
 KERNEL_META = {
     "name": "deepgemm_sm100_fp8_paged_mqa_logits",
     "category": "deepgemm",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "deep-gemm",
@@ -342,12 +342,6 @@ CONFIGS = _SMOKE_CONFIGS + DSA_INDEXER_LIKE_COVERAGE + SGLANG_BENCH_CONFIGS
 
 
 def load_deep_gemm_paged_mqa() -> tuple[Any, str]:
-    from tirx_kernels.reference_requirements import load_reference
-    from tirx_kernels.runner import prepare_cuda_arch
-
-    if prepare_cuda_arch() == "sm_110a":
-        return load_reference("deep-gemm"), "verified_thor_variant"
-
     try:
         import deep_gemm as module
     except Exception as exc:
@@ -430,16 +424,6 @@ def _make_indices(config: PagedMQALogitsFP8Config) -> torch.Tensor | None:
     return indices.contiguous()
 
 
-def _make_schedule_meta(deep_gemm, context_lens, page_size: int, num_sms: int, indices=None):
-    from tirx_kernels.runner import prepare_cuda_arch
-
-    if prepare_cuda_arch() == "sm_110a":
-        from ._paged_mqa_schedule import make_schedule_metadata
-
-        return make_schedule_metadata(context_lens, num_sms, indices)
-    return deep_gemm.get_paged_mqa_logits_metadata(context_lens, page_size, num_sms, indices)
-
-
 def _make_fused_kv_cache(
     config: PagedMQALogitsFP8Config, *, keep_dequant: bool
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -502,10 +486,8 @@ def _prepare_data(config: PagedMQALogitsFP8Config, *, compute_reference: bool) -
     deep_gemm, source = load_deep_gemm_paged_mqa()
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for SM100 FP8 paged MQA logits")
-    from tirx_kernels.runner import supports_sm100_kernel
-
-    if not supports_sm100_kernel(torch.cuda.get_device_capability()):
-        raise SkipTest("SM100 FP8 paged MQA logits requires SM100 or prepared Thor")
+    if torch.cuda.get_device_capability()[0] < 10:
+        raise SkipTest("SM100 FP8 paged MQA logits requires compute capability 10.x")
 
     torch.manual_seed(config.seed)
     runtime_config = PagedMQALogitsFP8Config(
@@ -530,15 +512,15 @@ def _prepare_data(config: PagedMQALogitsFP8Config, *, compute_reference: bool) -
     context_lens = _make_context_lens(config)
     block_table = _make_block_table(config)
     indices = _make_indices(config)
-    schedule_meta = _make_schedule_meta(
-        deep_gemm, context_lens, config.page_size, runtime_config.num_sms, indices
+    schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
+        context_lens, config.page_size, runtime_config.num_sms, indices
     )
     tirx_schedule_meta = schedule_meta
     if not config.varlen and config.next_n >= 2:
         num_q_atoms = _align_up(config.next_n, 2) // 2
         atom_context_lens = context_lens[:, -1:].expand(config.batch_size, num_q_atoms).contiguous()
-        tirx_schedule_meta = _make_schedule_meta(
-            deep_gemm, atom_context_lens, config.page_size, runtime_config.num_sms
+        tirx_schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
+            atom_context_lens, config.page_size, runtime_config.num_sms
         )
         expected_end = config.batch_size * num_q_atoms
         if int(tirx_schedule_meta[-1, 0]) != expected_end:
@@ -1428,9 +1410,8 @@ def _compile_tirx_paged_mqa_for_config(
     indices_pair_stride: int,
 ) -> Any:
     import tvm
-    from tirx_kernels.runner import cuda_target
 
-    target = cuda_target(arch="sm_100f")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100f"})
     kernel = get_kernel(
         batch_size=batch_size,
         next_n=next_n,
@@ -1823,9 +1804,9 @@ def _assert_valid_correct(
 def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
     config: PagedMQALogitsFP8Config = data["config"]
-    from tirx_kernels.runner import prepare_cuda_arch
-
     deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
+    # Library-anchored: the torch ref is a yardstick, not the arbiter --
+    # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
     deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
     tirx_logits = _launch_tirx_paged_mqa(data)
     torch.cuda.synchronize()
@@ -1834,11 +1815,7 @@ def run_test(**kwargs: Any) -> None:
         raise AssertionError(
             f"TIRx diff {tirx_diff:.6g} is worse than DeepGEMM diff {deepgemm_diff:.6g}"
         )
-    if (
-        prepare_cuda_arch() != "sm_110a"
-        and config.context_pattern.startswith("sglang_")
-        and _sglang_cutedsl_available()
-    ):
+    if config.context_pattern.startswith("sglang_") and _sglang_cutedsl_available():
         cutedsl_runner = _make_sglang_cutedsl_runner(data)
         cutedsl_logits = cutedsl_runner()
         torch.cuda.synchronize()
@@ -1847,13 +1824,10 @@ def run_test(**kwargs: Any) -> None:
 
 def prepare_bench(**kwargs: Any):
     """Compile the paged MQA executable without allocating CUDA data."""
-    from tirx_kernels.runner import hardware_num_sms, prepared_gpu_benchmark
+    from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _make_config(**kwargs)
-    compile_config = PagedMQALogitsFP8Config(
-        **{**asdict(config), "num_sms": hardware_num_sms(config.num_sms)}
-    )
-    executable = _compile_tirx_paged_mqa(compile_config)
+    executable = _compile_tirx_paged_mqa(config)
     return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
 
 
@@ -1883,10 +1857,7 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     invocation = _prepare_tirx_invocation(data, executable=tirx_executable)
     deepgemm_logits = None
     max_diff = None
-    from tirx_kernels.runner import prepare_cuda_arch
-
-    use_external = external_references_enabled()
-    if use_external:
+    if external_references_enabled():
         deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
         tirx_logits = _run_tirx_invocation(data, invocation)
         torch.cuda.synchronize()
@@ -1908,10 +1879,6 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         )
         return cutedsl_runner
 
-    references = {"deepgemm": _deepgemm}
-    if prepare_cuda_arch() != "sm_110a":
-        references["sglang_cutedsl"] = _sglang_cutedsl
-
     result = bench(
         {"tirx": lambda: _run_tirx_invocation(data, invocation)},
         warmup=warmup,
@@ -1919,13 +1886,10 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         timer=timer,
         rounds=_rounds,
         cooldown_s=_cooldown_s,
-        references=references,
+        references={"deepgemm": _deepgemm, "sglang_cutedsl": _sglang_cutedsl},
     )
     if max_diff is not None:
         result["max_diff"] = max_diff
-    from tirx_kernels.reference_requirements import reference_provenance
-
-    result["reference_variant"] = reference_provenance("deep-gemm")
     return result
 
 

@@ -1641,7 +1641,7 @@ CONFIGS = [
 KERNEL_META = {
     "name": "gdn_prefill_sm100",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -1862,13 +1862,11 @@ def prepare_bench(**kwargs: Any):
 
 
 def run_test(**kwargs: Any) -> None:
-    from tirx_kernels.runner import supports_sm100_kernel
-
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for GDN prefill SM100")
     capability = torch.cuda.get_device_capability()
-    if not supports_sm100_kernel(capability):
-        raise SkipTest(f"GDN prefill requires SM100 or prepared Thor, got {capability}")
+    if capability[0] != 10:
+        raise SkipTest(f"GDN prefill SM100 requires compute capability 10.x, got {capability}")
 
     from tirx_kernels.runner import compile_kernel
 
@@ -1904,8 +1902,6 @@ def run_gpu(
     timer: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    from tirx_kernels.runner import supports_sm100_kernel
-
     config = dict(prepared["config"])
     config.update(kwargs)
     kwargs = config
@@ -1915,8 +1911,8 @@ def run_gpu(
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for GDN prefill SM100 benchmark")
     capability = torch.cuda.get_device_capability()
-    if not supports_sm100_kernel(capability):
-        raise SkipTest(f"GDN prefill requires SM100 or prepared Thor, got {capability}")
+    if capability[0] != 10:
+        raise SkipTest(f"GDN prefill SM100 requires compute capability 10.x, got {capability}")
 
     from tirx_kernels.runner import bench
 

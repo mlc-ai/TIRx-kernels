@@ -9,7 +9,6 @@ Upstream source: deep_gemm/include/deep_gemm/impls/sm100_mqa_logits.cuh.
 """
 
 import ctypes
-import math
 import os
 from dataclasses import asdict, dataclass
 from functools import cache
@@ -210,7 +209,7 @@ def _make_case(
 KERNEL_META = {
     "name": "deepgemm_sm100_fp8_mqa_logits",
     "category": "deepgemm",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "deep-gemm",
@@ -246,12 +245,6 @@ CONFIGS = DEEPGEMM_TEST_COVERAGE
 
 
 def load_deep_gemm_mqa() -> tuple[Any, str]:
-    from tirx_kernels.reference_requirements import load_reference
-    from tirx_kernels.runner import prepare_cuda_arch
-
-    if prepare_cuda_arch() == "sm_110a":
-        return load_reference("deep-gemm"), "verified_thor_variant"
-
     try:
         import deep_gemm as module
     except Exception as exc:
@@ -316,10 +309,8 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         torch.cuda.set_device(torch.cuda.current_device())
     else:
         raise SkipTest("CUDA is required for SM100 FP8 MQA logits")
-    from tirx_kernels.runner import supports_sm100_kernel
-
-    if not supports_sm100_kernel(torch.cuda.get_device_capability()):
-        raise SkipTest("SM100 FP8 MQA logits requires SM100 or prepared Thor")
+    if torch.cuda.get_device_capability()[0] < 10:
+        raise SkipTest("SM100 FP8 MQA logits requires compute capability 10.x")
 
     torch.manual_seed(config.seed)
     q = torch.randn(
@@ -828,9 +819,8 @@ def _compile_tirx_mqa_for_config(
     logits_stride_override: int | None,
 ) -> Any:
     import tvm
-    from tirx_kernels.runner import cuda_target
 
-    target = cuda_target(arch="sm_100f")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100f"})
     kernel = get_kernel(
         seq_len=seq_len,
         seq_len_kv=seq_len_kv,
@@ -985,8 +975,7 @@ def _calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
     if denominator == 0:
         return 0.0
     sim = 2 * (x * y).sum() / denominator
-    diff = float((1 - sim).item())
-    return diff if math.isfinite(diff) else float("inf")
+    return float((1 - sim).item())
 
 
 def _assert_correct(data: dict[str, Any], logits: torch.Tensor, *, name: str) -> float:
@@ -1006,6 +995,8 @@ def run_test(**kwargs: Any) -> None:
     config: MQALogitsFP8Config = data["config"]
     clean_logits = not config.compressed_logits
     deepgemm_logits = _run_deepgemm_mqa(data, clean_logits=clean_logits)
+    # Library-anchored: the torch ref is a yardstick, not the arbiter --
+    # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
     deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
     tirx_logits = _launch_tirx_mqa(data)
     torch.cuda.synchronize()
@@ -1064,9 +1055,6 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         cooldown_s=_cooldown_s,
     )
     result["max_diff"] = max_diff
-    from tirx_kernels.reference_requirements import reference_provenance
-
-    result["reference_variant"] = reference_provenance("deep-gemm")
     return result
 
 

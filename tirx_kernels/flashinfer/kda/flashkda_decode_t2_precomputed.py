@@ -323,7 +323,7 @@ CONFIGS = [dict(cfg) for cfg in BENCH_CONFIGS] + [
 KERNEL_META = {
     "name": "flashkda_decode_t2_precomputed",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -886,11 +886,9 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for FlashKDA cake T=2 decode")
-    from tirx_kernels.runner import supports_sm100_kernel
-
     capability = torch.cuda.get_device_capability(device)
-    if not supports_sm100_kernel(capability):
-        raise SkipTest(f"FlashKDA cake decode requires SM100 or prepared Thor, got {capability}")
+    if capability[0] != 10:
+        raise SkipTest(f"FlashKDA cake decode targets compute capability 10.x, got {capability}")
 
     spec = _specialization(kwargs)
     num_seqs = spec["NUM_SEQS"]
@@ -1015,7 +1013,7 @@ def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
     kernel-only and every metadata combination (negative slots, arbitrary
     num_accepted_tokens) is reachable.
     """
-    from ._source import get_decode_module
+    from flashinfer.jit.flash_kda_decode import get_flash_kda_decode_module
 
     device = case["device"]
     major, minor = torch.cuda.get_device_capability(device)
@@ -1025,12 +1023,10 @@ def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
         # Non-direct variants are not exported for sm103a
         # (flash_kda_decode.py:213-217).
         target = "sm100f"
-    elif (major, minor) == (11, 0):
-        target = "sm110a"
     else:
         raise SkipTest(f"FlashKDA cake decode has no export for compute capability {major}.{minor}")
 
-    module = get_decode_module("d128_t2_precomputed_split4", target)
+    module = get_flash_kda_decode_module("d128_t2_precomputed_split4", target)
     reference_out = torch.empty_like(case["tirx_out"])
     dummy_f32 = torch.ones(1, device=device, dtype=torch.float32)
 
@@ -1082,6 +1078,7 @@ def run_test(**kwargs: Any) -> None:
 
     tirx_out = case["tirx_out"]
     tirx_state = case["tirx_state_raw"].clone()
+
     # 1. the frozen cake export (the arbiter) itself, on an independent state pool
     reference_out = _flashinfer_reference(case)
     torch.testing.assert_close(

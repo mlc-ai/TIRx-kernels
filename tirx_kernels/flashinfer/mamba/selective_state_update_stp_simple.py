@@ -19,7 +19,7 @@ import tirx_kernels.kern as K
 KERNEL_META = {
     "name": "selective_state_update_stp_simple",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -787,7 +787,7 @@ def get_kernel(**kwargs: Any):
                                 random13: K.uint32 = K.bitwise_and(
                                     random_words[e % 4], K.uint32(0x1FFF)
                                 )
-                                K.idioms.cvt_rs_f16x2_f32(
+                                K.ptx.cvt.rs.f16x2.f32(
                                     sr_raw[e], K.float32(0.0), new_state, random13
                                 )
                             elif STATE_BYTES == 2:
@@ -1073,14 +1073,12 @@ def _index_tensor(
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     """Create independent mutable TIRx/source cases for one specialization."""
-    from tirx_kernels.runner import supports_sm100_kernel
-
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for selective-state-update STP simple")
     capability = torch.cuda.get_device_capability(device)
-    if not supports_sm100_kernel(capability):
-        raise SkipTest(f"STP simple requires SM100 or prepared Thor, got {capability}")
+    if capability[0] != 10:
+        raise SkipTest(f"STP simple SM100 requires compute capability 10.x, got {capability}")
 
     spec = _specialization(kwargs)
     batch = spec["BATCH"]

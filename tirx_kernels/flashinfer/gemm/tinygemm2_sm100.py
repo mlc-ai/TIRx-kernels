@@ -18,7 +18,6 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.kern as K
-from tirx_kernels.runner import prepare_cuda_arch
 
 KERNEL_META = {
     "name": "tinygemm2_sm100",
@@ -77,14 +76,12 @@ def _validate_problem(B: int, O: int, K: int) -> None:
 
 
 def _require_supported_arch() -> None:
-    from tirx_kernels.runner import supports_sm100_kernel
-
     if not torch.cuda.is_available():
         raise SkipTest("TinyGEMM2 SM100 requires CUDA")
     capability = torch.cuda.get_device_capability()
-    if not supports_sm100_kernel(capability):
+    if capability not in {(10, 0), (10, 3), (10, 7)}:
         raise SkipTest(
-            "TinyGEMM2 requires SM100, SM103, SM107, or explicitly prepared Thor, "
+            "TinyGEMM2 requires SM100/B200, SM103/GB300, or SM107, "
             f"got sm_{capability[0]}{capability[1]}"
         )
 
@@ -516,31 +513,6 @@ def _flashinfer_tinygemm2_spec():
         raise RuntimeError(
             "FlashInfer TinyGEMM2 source is unavailable; checked " + ", ".join(map(str, candidates))
         )
-    if prepare_cuda_arch() == "sm_110a":
-        from flashinfer.jit.core import common_nvcc_flags
-        from flashinfer.jit.utils import write_if_different
-
-        # The frozen device kernels run on Thor. Its original host check and
-        # binary targets predate that device; check the expected host guard and
-        # adapt only that guard and the target flags in a separate JIT cache.
-        original = source.read_text()
-        guard = "TVM_FFI_ICHECK(major == 10 && (minor == 0 || minor == 3))"
-        if original.count(guard) != 1:
-            raise RuntimeError("TinyGEMM2 frozen host architecture check changed")
-        adapted = original.replace(
-            guard,
-            "TVM_FFI_ICHECK((major == 10 && (minor == 0 || minor == 3)) || "
-            "(major == 11 && minor == 0))",
-        )
-        generated = jit_env.FLASHINFER_GEN_SRC_DIR / "tinygemm2_sm110a" / filename
-        generated.parent.mkdir(parents=True, exist_ok=True)
-        write_if_different(generated, adapted)
-        return gen_jit_spec(
-            "tinygemm2_sm110a",
-            [generated],
-            extra_cuda_cflags=["-gencode=arch=compute_110a,code=sm_110a", *common_nvcc_flags],
-            extra_include_paths=[source.parent, source.parent.parent / "include"],
-        )
     return gen_jit_spec(
         "tinygemm2_sm100",
         [source],
@@ -575,19 +547,6 @@ def _run_flashinfer(case: dict[str, Any], stage: int, use_pdl: bool, output: tor
     _flashinfer_variant(stage, use_pdl)(case["input"], case["weight"], case["bias"], output)
 
 
-def _mathematical_reference(case: dict[str, Any]) -> torch.Tensor:
-    """Independent FP32 GEMM plus bias, rounded once to the BF16 output type."""
-    return (
-        case["input"].float() @ case["weight"].float().transpose(0, 1) + case["bias"].float()
-    ).to(case["out"].dtype)
-
-
-def _validate_mathematical_reference(case: dict[str, Any], output: torch.Tensor) -> None:
-    torch.testing.assert_close(
-        output.float(), _mathematical_reference(case).float(), rtol=2.0**-7, atol=2.0**-7
-    )
-
-
 def run_test(B: int, O: int, K: int) -> None:
     _require_supported_arch()
     case = prepare_data(B, O, K)
@@ -596,12 +555,10 @@ def run_test(B: int, O: int, K: int) -> None:
 
     for use_pdl in (False, True):
         tirx_out = torch.zeros_like(case["out"])
-        _run_tirx(case, stage, use_pdl, tirx_out)
         flashinfer_out = torch.zeros_like(case["out"])
+        _run_tirx(case, stage, use_pdl, tirx_out)
         _run_flashinfer(case, stage, use_pdl, flashinfer_out)
         torch.cuda.synchronize()
-        if prepare_cuda_arch() == "sm_110a":
-            _validate_mathematical_reference(case, tirx_out)
         if not torch.equal(tirx_out, flashinfer_out):
             differing = int((tirx_out != flashinfer_out).sum().item())
             max_diff = float((tirx_out.float() - flashinfer_out.float()).abs().max().item())
@@ -645,10 +602,6 @@ def run_gpu(
     case = prepare_data(B, O, K)
     args = _tirx_args(case)
 
-    if prepare_cuda_arch() == "sm_110a":
-        executable(*args)
-        torch.cuda.synchronize()
-        _validate_mathematical_reference(case, case["out"])
     if external_references_enabled():
         reference_out = torch.zeros_like(case["out"])
         _run_flashinfer(case, stage, False, reference_out)

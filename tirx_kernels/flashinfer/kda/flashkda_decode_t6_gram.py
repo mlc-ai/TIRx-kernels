@@ -338,7 +338,7 @@ CONFIGS = [dict(cfg) for cfg in BENCH_CONFIGS] + [
 KERNEL_META = {
     "name": "flashkda_decode_t6_gram",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -1122,11 +1122,9 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for FlashKDA cake T=6 decode")
-    from tirx_kernels.runner import supports_sm100_kernel
-
     capability = torch.cuda.get_device_capability(device)
-    if not supports_sm100_kernel(capability):
-        raise SkipTest(f"FlashKDA cake decode requires SM100 or prepared Thor, got {capability}")
+    if capability[0] != 10:
+        raise SkipTest(f"FlashKDA cake decode targets compute capability 10.x, got {capability}")
 
     spec = _specialization({**kwargs, "device": device})
     num_seqs = spec["NUM_SEQS"]
@@ -1243,7 +1241,7 @@ def _variant_name(value_split: int) -> str:
 
 def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
     """Run the frozen cake export itself on the reference state pool."""
-    from ._source import get_decode_module
+    from flashinfer.jit.flash_kda_decode import get_flash_kda_decode_module
 
     device = case["device"]
     major, minor = torch.cuda.get_device_capability(device)
@@ -1251,12 +1249,10 @@ def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
         target = "sm100f" if torch.version.cuda and torch.version.cuda >= "12.9" else "sm100a"
     elif (major, minor) == (10, 3):
         target = "sm100f"  # non-direct variants are never built for sm103a
-    elif (major, minor) == (11, 0):
-        target = "sm110a"
     else:
         raise SkipTest(f"no FlashKDA cake export for compute capability {major}.{minor}")
 
-    module = get_decode_module(_variant_name(case["spec"]["VALUE_SPLIT"]), target)
+    module = get_flash_kda_decode_module(_variant_name(case["spec"]["VALUE_SPLIT"]), target)
     reference_out = torch.empty_like(case["tirx_out"])
     dummy_f32 = torch.ones(1, device=device, dtype=torch.float32)
 
@@ -1299,6 +1295,7 @@ def run_test(**kwargs: Any) -> None:
 
     tirx_out = case["tirx_out"]
     tirx_state = case["tirx_state_raw"].clone()
+
     # 1. the frozen cake export (the arbiter) itself, on an independent state pool
     reference_out = _flashinfer_reference(case)
     torch.testing.assert_close(

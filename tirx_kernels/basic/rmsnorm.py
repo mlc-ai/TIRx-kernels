@@ -31,7 +31,7 @@ def prepare_data(batch_size, dim):
 KERNEL_META = {
     "name": "rmsnorm",
     "category": "basic",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",

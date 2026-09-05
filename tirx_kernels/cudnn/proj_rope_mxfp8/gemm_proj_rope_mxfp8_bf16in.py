@@ -143,7 +143,7 @@ def _config(label, tokens, w_out_in):
 KERNEL_META = {
     "name": "cudnn_sm100_gemm_proj_rope_mxfp8_bf16in",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -760,10 +760,9 @@ def _tirx_launch(executable, data):
 
 
 def _compile_reference(data, config):
-    from tirx_kernels.cudnn._reference import from_dlpack_typed, load_reference_module
+    from tirx_kernels.cudnn._reference import load_reference_module
 
     module = load_reference_module("cudnn.gemm.cutedsl.dense.proj_rope_mxfp8.api")
-    module.from_dlpack = from_dlpack_typed
     output = data["source"]
     op = module.GemmProjRopeMxfp8Bf16InSm100(
         data["x"],

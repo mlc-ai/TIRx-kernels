@@ -22,7 +22,7 @@ from .selective_state_update_mtp_simple import _case, _shfl_down_f32
 KERNEL_META = {
     "name": "selective_state_update_mtp_vertical",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -214,8 +214,8 @@ def _store_state_row(
     if PHILOX_ROUNDS > 0:
         pair0 = K.local_scalar("uint32")
         pair1 = K.local_scalar("uint32")
-        K.idioms.cvt_rs_f16x2_f32(pair0, values[wr, 1], values[wr, 0], random_words[0])
-        K.idioms.cvt_rs_f16x2_f32(pair1, values[wr, 3], values[wr, 2], random_words[1])
+        K.ptx.cvt.rs.f16x2.f32(pair0, values[wr, 1], values[wr, 0], random_words[0])
+        K.ptx.cvt.rs.f16x2.f32(pair1, values[wr, 3], values[wr, 2], random_words[1])
         if HAS_INTERMEDIATE_STATES:
             K.ptx.st.global_.v2.b32(intermediate_states.ptr_to([intermediate_base]), pair0, pair1)
             with K.If(write_final != 0), K.Then():

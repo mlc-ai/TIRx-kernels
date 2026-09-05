@@ -15,7 +15,6 @@ from functools import cache
 from itertools import combinations, product
 
 import tirx_kernels.kern as K
-from tirx_kernels.runner import prepare_cluster_shape, prepare_cuda_arch
 
 _TRY_WAIT_TICKS = 10_000_000
 _SMEM_CAPACITY = 232_448
@@ -469,7 +468,7 @@ def _benchmark_configs():
 KERNEL_META = {
     "name": "cudnn_sm100_dense_blockscaled_gemm_persistent_swiglu_interleaved_quant",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -2254,7 +2253,7 @@ def _make_kernel(
                         execute_epilogue_pair(subtile, subtile // 2)
                         K.assign(subtile, subtile + 2)
                 if generate_amax:
-                    K.idioms.warp_reduce_max_nan_f32(warp_amax, tile_amax)
+                    K.ptx.redux_sync.max.NaN.f32(warp_amax, tile_amax, K.uint32(0xFFFFFFFF))
                     with K.If(lane == 0):
                         with K.Then():
                             K.ptx.st.shared.b32(smem.ptr_to([amax_offset + warp * 4]), warp_amax)
@@ -2353,7 +2352,6 @@ def get_kernel(
     alpha=None,
 ):
     del alpha
-    cluster_shape_mn = prepare_cluster_shape(cluster_shape_mn)
     return _make_kernel(
         M,
         N,
@@ -2497,15 +2495,13 @@ def _load_reference_source():
 
 
 def _compile_reference(data, config):
-    from tirx_kernels.cudnn._reference import from_dlpack_typed, import_cutlass_reference
+    from tirx_kernels.cudnn._reference import import_cutlass_reference
 
     cutlass = import_cutlass_reference()
     import cutlass.cute as cute
     import torch
     from cuda.bindings import driver as cuda
-    from cutlass.cute.runtime import make_fake_stream
-
-    from_dlpack = from_dlpack_typed
+    from cutlass.cute.runtime import from_dlpack, make_fake_stream
 
     module = _load_reference_source()
     config = _without_label(config)
@@ -2537,15 +2533,14 @@ def _compile_reference(data, config):
     amax_cute = from_dlpack(amax, assumed_align=16) if amax is not None else None
     sfc_cute = from_dlpack(sfc, assumed_align=16) if sfc is not None else None
     norm_const_cute = from_dlpack(norm_const, assumed_align=16) if norm_const is not None else None
-    cluster_shape_mn = prepare_cluster_shape(config["cluster_shape_mn"])
     kernel = module.Sm100BlockScaledPersistentDenseGemmKernel(
         sf_vec_size=config["sf_vec_size"],
         mma_tiler_mn=tuple(config["mma_tiler_mn"]),
-        cluster_shape_mn=cluster_shape_mn,
+        cluster_shape_mn=tuple(config["cluster_shape_mn"]),
         vector_f32=config["vector_f32"],
         ab12_stages=4,
     )
-    cluster_size = cluster_shape_mn[0] * cluster_shape_mn[1]
+    cluster_size = config["cluster_shape_mn"][0] * config["cluster_shape_mn"][1]
     max_active_clusters = cutlass.utils.HardwareInfo().get_max_active_clusters(cluster_size)
     executable = cute.compile(
         kernel,
@@ -2607,76 +2602,6 @@ def _assert_close(torch, actual, expected, *, atol, rtol, label):
         f"{label} mismatch: value={float(actual_f32.reshape(-1)[worst_index].item())}, "
         f"expected={float(expected.reshape(-1)[worst_index].item())}, "
         f"absolute_error={float(absolute_error.reshape(-1)[worst_index].item())}"
-    )
-
-
-def _upstream_ab12_store_is_flaky(config):
-    """Identify the two Thor schedules whose pinned source crosses AB12 tiles."""
-    if prepare_cuda_arch() != "sm_110a":
-        return False
-    signature = (
-        config["M"],
-        config["N"],
-        config["K"],
-        config["L"],
-        config["ab_dtype"],
-        config["ab12_dtype"],
-        config["c_dtype"],
-        config["a_major"],
-        config["b_major"],
-        config["c_major"],
-        tuple(config["mma_tiler_mn"]),
-        tuple(config["cluster_shape_mn"]),
-    )
-    return signature in {
-        (
-            512,
-            256,
-            256,
-            1,
-            "float8_e4m3fn",
-            "float8_e4m3fn",
-            "float16",
-            "k",
-            "k",
-            "n",
-            (256, 64),
-            (4, 4),
-        ),
-        (512, 256, 256, 2, "float8_e5m2", "float16", "float32", "m", "n", "m", (256, 64), (4, 2)),
-    }
-
-
-def _structured_expected(torch, data, config):
-    """Evaluate the deliberately structured GEMM inputs without the port."""
-    ab12_f32 = (
-        data["a"]["factors"][:, None, :]
-        * data["b"]["factors"][None, :, :]
-        * config["K"]
-        * data["input_scale"]
-        * config["alpha"]
-    )
-    # The two projections are interleaved in each 64-column epilogue tile:
-    # columns [0, 32) are ``up`` and [32, 64) are ``gate``.
-    blocks = ab12_f32.reshape(config["M"], config["N"] // 64, 64, config["L"])
-    up = blocks[:, :, :32, :].reshape(config["M"], config["N"] // 2, config["L"])
-    gate = blocks[:, :, 32:, :].reshape(config["M"], config["N"] // 2, config["L"])
-    c_f32 = up * torch.nn.functional.silu(gate)
-    return (
-        ab12_f32.to(_torch_dtype(torch, config["ab12_dtype"])),
-        c_f32.to(_torch_dtype(torch, config["c_dtype"])),
-    )
-
-
-def _validate_structured_outputs(data, config):
-    import torch
-
-    expected_ab12, expected_c = _structured_expected(torch, data, config)
-    torch.testing.assert_close(
-        data["tirx_ab12"]["source"].float(), expected_ab12.float(), atol=0.01, rtol=0.01
-    )
-    torch.testing.assert_close(
-        data["tirx_c"]["source"].float(), expected_c.float(), atol=0.01, rtol=0.01
     )
 
 
@@ -2754,15 +2679,10 @@ def run_test(**config):
     tirx_launch = _tirx_launch(
         compile_kernel(get_kernel(**kernel_config)), data, kernel_config["alpha"]
     )
+    source_launch = _compile_reference(data, kernel_config)
     tirx_launch()
-    source_flaky = _upstream_ab12_store_is_flaky(kernel_config)
-    if not source_flaky:
-        source_launch = _compile_reference(data, kernel_config)
-        source_launch()
+    source_launch()
     torch.cuda.synchronize()
-    if source_flaky:
-        _validate_structured_outputs(data, kernel_config)
-        return {"validation": "structured_fp32_oracle"}
     _validate_outputs(data, kernel_config, with_source=True)
     return {"max_abs": float(data["source_ab12"]["source"].float().abs().amax().item())}
 
@@ -2785,7 +2705,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
 
     config = {**prepared["config"], **kwargs}
     kernel_config = _without_label(config)
-    with_source = external_references_enabled() and not _upstream_ab12_store_is_flaky(kernel_config)
+    with_source = external_references_enabled()
     gpu_state = prepared.get("gpu_state")
     if gpu_state is None:
         data = prepare_data(**kernel_config)
@@ -2813,10 +2733,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
                     gpu_state["source_launch"] = source_launch
                 source_launch()
                 torch.cuda.synchronize()
-        if _upstream_ab12_store_is_flaky(kernel_config):
-            _validate_structured_outputs(data, kernel_config)
-        else:
-            _validate_outputs(data, kernel_config, with_source=with_source)
+        _validate_outputs(data, kernel_config, with_source=with_source)
         gpu_state["validated"] = True
     references = {"cudnn_frontend": lambda: source_launch} if source_launch is not None else None
     return bench(

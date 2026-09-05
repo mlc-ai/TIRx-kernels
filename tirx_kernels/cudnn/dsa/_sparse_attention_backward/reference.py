@@ -17,42 +17,15 @@ why the install replaces any such wheel with the pinned source tree (whose DSA
 kernel is byte-identical to the revision cited above).
 """
 
-import hashlib
-from pathlib import Path
-
 from tirx_kernels.cudnn._reference import load_reference_module
-from tirx_kernels.runner import prepare_cuda_arch
 
 _DSA_PACKAGE = "cudnn.deepseek_sparse_attention"
 _INTERFACE_MODULE = f"{_DSA_PACKAGE}.sparse_attention_backward._interface_sm100"
 _KERNEL_MODULE = f"{_DSA_PACKAGE}.sparse_attention_backward.dsa_bwd_sm100"
-_COMPILER_SHA256 = "d5943a7d9c11663bac98cb6d2a15c2b7226bb34b9dd3c9f0bc983336661ea17c"
-
-
-def _prepare_reference_target():
-    """Extend the frozen host target map for Thor without changing device code."""
-    if prepare_cuda_arch() != "sm_110a":
-        return
-    import torch
-
-    if torch.cuda.get_device_capability() != (11, 0):
-        raise RuntimeError("the Thor DSA source target requires an actual sm_110 GPU")
-    compiler = load_reference_module(f"{_DSA_PACKAGE}.utils.compiler")
-    if hashlib.sha256(Path(compiler.__file__).read_bytes()).hexdigest() != _COMPILER_SHA256:
-        raise RuntimeError("the Thor DSA source adapter requires the pinned compiler.py")
-    previous = compiler._ARCH_MAP.get((11, 0))
-    if previous not in (None, "sm_110a"):
-        raise RuntimeError(f"conflicting DSA source target for Thor: {previous!r}")
-    if previous is None:
-        # compile_options() looks up this map at compile time. All existing
-        # device mappings and the source kernel's options remain unchanged.
-        compiler._ARCH_MAP[(11, 0)] = "sm_110a"
-        compiler.gpu_arch_flag.cache_clear()
 
 
 def load_interface():
     """Import and return the upstream SM100 host wrapper module."""
-    _prepare_reference_target()
     return load_reference_module(_INTERFACE_MODULE)
 
 

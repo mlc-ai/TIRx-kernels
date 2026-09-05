@@ -9,7 +9,6 @@ import json
 import subprocess
 import sysconfig
 from types import SimpleNamespace
-from unittest import SkipTest
 
 import pytest
 
@@ -174,8 +173,8 @@ def test_thor_requires_explicit_manifest(monkeypatch):
 
 
 @pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
-@pytest.mark.parametrize("name", ["deep-gemm", "flash-mla"])
-def test_native_import_stays_native(monkeypatch, arch, name):
+def test_native_import_stays_native(monkeypatch, arch):
+    name = "deep-gemm"
     policy = variants.VARIANTS[name]
     monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", arch)
     monkeypatch.delenv(policy["environment"], raising=False)
@@ -229,72 +228,20 @@ def test_import_path_and_loaded_extension_must_match(frozen_variant, monkeypatch
         variants.load_reference("deep-gemm")
 
 
-def test_runtime_git_requirement_uses_selected_flashmla_source(tmp_path, monkeypatch):
-    from tirx_kernels.reference_requirements import unmet_reference_requirements
-
-    root = tmp_path / "flash-mla"
-    root.mkdir()
-    (root / "flash_mla").mkdir()
-    (root / "flash_mla/__init__.py").write_text("# fixture\n")
-    git(root, "init", "-q")
-    git(root, "add", ".")
-    git(
-        root,
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.invalid",
-        "commit",
-        "-qm",
-        "frozen",
-    )
-    policy = variants.VARIANTS["flash-mla"]
-    git(root, "remote", "add", "origin", policy["url"])
-    monkeypatch.syspath_prepend(str(root))
-    requirement = (
-        {
-            "package": "flash-mla",
-            "import": "flash_mla",
-            "git": {"url": policy["url"], "commit": git(root, "rev-parse", "HEAD")},
-        },
-    )
-    assert unmet_reference_requirements(requirement) == ()
-    requirement[0]["git"]["commit"] = "0" * 40
-    assert unmet_reference_requirements(requirement)
-
-
-def test_megamoe_thor_rejects_multi_gpu_before_allocation(monkeypatch):
+def test_thor_masked_gemm_keeps_math_and_strict_source_checks(monkeypatch):
     import torch
 
-    from tirx_kernels.deepgemm import sm100_fp8_fp4_mega_moe as module
-    from tirx_kernels.deepgemm._sm100_fp8_fp4_mega_moe import data
-    from tirx_kernels.deepgemm._sm100_fp8_fp4_mega_moe.spec import MegaMoeConfig
-
-    monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_110a")
-    monkeypatch.setattr(
-        torch.cuda, "device_count", lambda: pytest.fail("GPU probe before TP1 guard")
-    )
-    assert module._make_config().num_processes == 1
-    with pytest.raises(SkipTest, match="only num_processes=1"):
-        module._make_config(num_processes=2)
-    with pytest.raises(SkipTest, match="only num_processes=1"):
-        data._run_distributed(MegaMoeConfig(num_processes=2), "test")
-    monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_100a")
-    assert module._make_config(num_processes=2).num_processes == 2
-
-
-def test_thor_gemm_keeps_math_and_strict_source_checks(monkeypatch):
-    import torch
-
-    from tirx_kernels.deepgemm import fp8_gemm_1d1d as module
+    from tirx_kernels.deepgemm import m_grouped_fp8_gemm_masked as module
     from tirx_kernels.deepgemm._sm100_fp8_fp4_gemm_1d1d import data as helpers
 
     monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_110a")
     monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
     data = dict(
-        d=torch.zeros(1),
+        d=torch.zeros((1, 1, 1)),
         c=None,
-        ref=torch.ones(1),
+        ref=torch.ones((1, 1, 1)),
+        masked_m=torch.tensor([1], dtype=torch.int32),
+        num_groups=1,
         a_dtype="fp8",
         b_dtype="fp8",
         M=1,
@@ -315,42 +262,16 @@ def test_thor_gemm_keeps_math_and_strict_source_checks(monkeypatch):
         return original(diff, *args, **kwargs)
 
     monkeypatch.setattr(helpers, "assert_within_threshold", check)
-    monkeypatch.setattr(helpers, "deepgemm_launch_normal", lambda _: (None, torch.ones(1)))
+    monkeypatch.setattr(
+        helpers, "deepgemm_launch_m_grouped_masked", lambda _: (None, torch.ones((1, 1, 1)))
+    )
     module.run_test()
     assert thresholds == [helpers.max_diff_threshold("fp8", "fp8"), None]
-    monkeypatch.setattr(helpers, "deepgemm_launch_normal", lambda _: (None, torch.full((1,), 0.9)))
+    monkeypatch.setattr(
+        helpers, "deepgemm_launch_m_grouped_masked", lambda _: (None, torch.full((1, 1, 1), 0.9))
+    )
     with pytest.raises(AssertionError):
         module.run_test()
-
-
-@pytest.mark.parametrize("output_index", [0, 1, 2])
-def test_flashmla_prefill_source_gate_checks_every_output(monkeypatch, output_index):
-    import torch
-
-    from tirx_kernels.flashmla.utils import _flashmla_bench as helper
-
-    tensors = tuple(torch.ones(2) for _ in range(3))
-    case = dict(zip(("out", "max_logits", "lse"), tensors, strict=True))
-    source = [value.clone() for value in tensors]
-    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
-    monkeypatch.setattr(helper, "run_flashmla_sparse_prefill_outputs", lambda _: source)
-    helper.validate_flashmla_sparse_prefill(case, tensors, output_rtol=3.01 / 128)
-    source[output_index][0] = 0
-    with pytest.raises(AssertionError):
-        helper.validate_flashmla_sparse_prefill(case, tensors, output_rtol=3.01 / 128)
-
-
-def test_flashmla_host_patch_preserves_translation_unit_list():
-    source = """subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"])
-flags = ["-gencode", "arch=compute_100f,code=sm_100f"]
-sources = ["csrc/sm100/fwd.cu", "csrc/smxx/combine.cu"]
-"""
-    adapted = variants.adapted_text("flash-mla", "setup.py", source)
-    assert 'sources = ["csrc/sm100/fwd.cu", "csrc/smxx/combine.cu"]' in adapted
-    assert "arch=compute_110a,code=sm_110a" in adapted
-    assert "subprocess.run" not in adapted
-    with pytest.raises(RuntimeError, match="no longer matches"):
-        variants.adapted_text("flash-mla", "setup.py", adapted)
 
 
 def test_deepgemm_rejects_failed_or_missing_build_commands():

@@ -286,16 +286,7 @@ VARIANTS = {
             "third-party/tilelang_ops/swiglu_apply_weight_to_fp8.py",
             "third-party/tilelang_ops/utils.py",
         ),
-    },
-    "flash-mla": {
-        "import": "flash_mla",
-        "extension": "flash_mla.cuda",
-        "revision": "9241ae3ef9bac614dd25e45e507e089f888280e0",
-        "url": "https://github.com/deepseek-ai/FlashMLA.git",
-        "environment": "TIRX_FLASH_MLA_VARIANT_MANIFEST",
-        "device_root": "csrc/sm100",
-        "legacy_omissions": (),
-    },
+    }
 }
 
 
@@ -323,22 +314,7 @@ def adapted_text(name: str, relative: str, original: str) -> str:
                     "        return (major == 11 and minor == 0) ? 10 : major;",
                 ),
             )
-        },
-        "flash-mla": {
-            "csrc/api/common.h": (
-                ("return major == 10;", "return major == 10 || (major == 11 && minor == 0);"),
-            ),
-            "setup.py": (
-                (
-                    '["-gencode", "arch=compute_100f,code=sm_100f"]',
-                    '["-gencode", "arch=compute_110a,code=sm_110a"]',
-                ),
-                (
-                    'subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"])',
-                    'assert Path("csrc/cutlass/include").is_dir()',
-                ),
-            ),
-        },
+        }
     }
     for old, new in replacements[name].get(relative, ()):
         if original.count(old) != 1:
@@ -378,7 +354,7 @@ def source_inventory(name: str, root: Path, *, allow_legacy_omissions: bool = Fa
                 continue
             raise RuntimeError(f"missing frozen source file: {relative}")
         expected = original
-        if relative in {"csrc/jit/device_runtime.hpp", "csrc/api/common.h", "setup.py"}:
+        if relative == "csrc/jit/device_runtime.hpp":
             expected = adapted_text(name, relative, original.decode()).encode()
         actual = os.readlink(path).encode() if mode == "120000" else path.read_bytes()
         if actual != expected:
@@ -456,21 +432,9 @@ def validate_variant(name: str, manifest_path: Path) -> dict:
     build = manifest["build"]
     if sha256(Path(build["log"])) != build["log_sha256"]:
         raise RuntimeError("reference build log changed after registration")
-    if name == "flash-mla" and not build["ninja_files"]:
-        raise RuntimeError("reference build flags are missing")
     for ninja in build["ninja_files"]:
         if sha256(Path(ninja["path"])) != ninja["sha256"]:
             raise RuntimeError("reference build flags changed after registration")
-    if name == "flash-mla":
-        flags = "\n".join(Path(ninja["path"]).read_text() for ninja in build["ninja_files"])
-        if (
-            "arch=compute_110a,code=sm_110a" not in flags
-            or "code=sm_100f" in flags
-            or "code=sm_90a" in flags
-            or build.get("cubin_architectures") != ["sm_110a"]
-            or build.get("cubin_count", 0) < 1
-        ):
-            raise RuntimeError("FlashMLA reference has no verified isolated sm_110a build")
     if name == "deep-gemm":
         commands = deepgemm_build_commands(Path(build["log"]).read_text())
         if commands != build.get("compiler_commands"):

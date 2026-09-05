@@ -28,7 +28,7 @@ from ._sm100_fp8_fp4_gemm_1d1d import (
 KERNEL_META = {
     "name": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
     "category": "deepgemm",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "deep-gemm",
@@ -226,13 +226,10 @@ def run_test(**config):
     """Compile, launch and compare against DeepGEMM on the same operands."""
     import torch
 
-    from tirx_kernels.runner import prepare_cuda_arch
-
     from ._sm100_fp8_fp4_gemm_1d1d.data import (
         assert_within_threshold,
         calc_diff,
         deepgemm_launch_m_grouped_contiguous,
-        max_diff_threshold,
         psum_slice_diff,
     )
 
@@ -243,38 +240,31 @@ def run_test(**config):
     launch()
     torch.cuda.synchronize()
 
-    def check(expected, threshold=None):
-        if data["use_psum_layout"]:
-            diff = psum_slice_diff(
-                data["d"],
-                expected,
-                data["grouped_layout"],
-                data["alignment"],
-                zero_padding=data["ensure_zero_padding"],
-            )
-        else:
-            diff = calc_diff(data["d"], expected)
-        return assert_within_threshold(
-            diff,
-            data,
-            kernel="deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
-            detail=(
-                f"g={data['num_groups']} M={data['M']} N={data['N']} K={data['K']} "
-                f"psum={data['use_psum_layout']} zp={data['ensure_zero_padding']} "
-                f"b_dtype={data['b_dtype']}"
-            ),
-            threshold=threshold,
-            M=data["M"],
-        )
-
-    if prepare_cuda_arch() == "sm_110a":
-        expected = data["ref"]
-        threshold = max_diff_threshold(data["a_dtype"], data["b_dtype"])
-        check(expected, threshold)
-
-    _, expected = deepgemm_launch_m_grouped_contiguous(data)
+    # DeepGEMM itself, on the same quantized operands, is the arbiter.
+    _, deepgemm_out = deepgemm_launch_m_grouped_contiguous(data)
     torch.cuda.synchronize()
-    return check(expected)
+
+    if data["use_psum_layout"]:
+        diff = psum_slice_diff(
+            data["d"],
+            deepgemm_out,
+            data["grouped_layout"],
+            data["alignment"],
+            zero_padding=data["ensure_zero_padding"],
+        )
+    else:
+        diff = calc_diff(data["d"], deepgemm_out)
+    return assert_within_threshold(
+        diff,
+        data,
+        kernel="deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
+        detail=(
+            f"g={data['num_groups']} M={data['M']} N={data['N']} K={data['K']} "
+            f"psum={data['use_psum_layout']} zp={data['ensure_zero_padding']} "
+            f"b_dtype={data['b_dtype']}"
+        ),
+        M=data["M"],
+    )
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):

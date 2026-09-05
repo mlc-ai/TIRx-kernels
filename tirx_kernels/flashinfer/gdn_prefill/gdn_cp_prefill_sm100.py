@@ -49,7 +49,6 @@ import torch
 import torch.nn.functional as F
 
 import tirx_kernels.kern as K
-from tirx_kernels.runner import prepare_cuda_arch
 
 D_HEAD = 128
 T_BLOCK = 64
@@ -88,7 +87,7 @@ PREFILL_OPT_INITIAL_STATE_BARRIER = 4
 KERNEL_META = {
     "name": "gdn_cp_prefill_sm100",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -4129,17 +4128,14 @@ def get_kernel(**kwargs: Any) -> dict[str, Any]:
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     """Allocate a deterministic CP chain and all persistent workspaces."""
-    from tirx_kernels.runner import supports_sm100_kernel
-
     cfg = _cfg(**kwargs)
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for GDN CP prefill SM100")
     capability = torch.cuda.get_device_capability(device)
-    if not supports_sm100_kernel(capability):
+    if capability not in {(10, 0), (10, 3), (10, 7)}:
         raise SkipTest(
-            "GDN CP prefill requires SM100, SM103, SM107, or explicitly prepared Thor, "
-            f"got {capability}"
+            f"GDN CP prefill requires compute capability 10.0, 10.3, or 10.7, got {capability}"
         )
 
     spec = _specialization(cfg, device)
@@ -4309,20 +4305,9 @@ def _stage_args(case: dict[str, Any]) -> dict[str, tuple[Any, ...]]:
 
 @lru_cache(maxsize=1)
 def _load_oracle():
-    from flashinfer.gdn_kernels.blackwell import gdn_cp_prefill as source
+    from flashinfer.gdn_kernels.blackwell.gdn_cp_prefill import cp_delta_rule_dsl_sm100
 
-    if prepare_cuda_arch() == "sm_110a":
-        # The pinned source's sole architecture guard predates Thor.  Its CuTe
-        # DSL bodies are the source of this port and accept an explicit GPUArch;
-        # compile that unchanged body for Thor instead of claiming an SM100
-        # binary is reusable there.
-        def thor_compile_options(device):
-            del device
-            return source.cute.EnableTVMFFI(True), source.cute.GPUArch("sm_110a")
-
-        source._blackwell_compile_options = thor_compile_options
-
-    return source.cp_delta_rule_dsl_sm100
+    return cp_delta_rule_dsl_sm100
 
 
 def _run_oracle(

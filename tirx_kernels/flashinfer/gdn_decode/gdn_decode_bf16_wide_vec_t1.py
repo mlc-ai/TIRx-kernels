@@ -21,7 +21,7 @@ from tirx_kernels.runner import bench
 KERNEL_META = {
     "name": "gdn_decode_bf16_wide_vec_t1",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -769,18 +769,14 @@ def _make_qkv(
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     """Create deterministic independent mutable TIRx and FlashInfer cases."""
-    from tirx_kernels.runner import supports_sm100_kernel
-
     config = dict(kwargs)
     _require_supported_config(config)
     device = config.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for BF16 wide-vector GDN decode")
     capability = torch.cuda.get_device_capability(device)
-    if not supports_sm100_kernel(capability):
-        raise SkipTest(
-            f"BF16 wide-vector GDN decode requires SM100 or prepared Thor, got {capability}"
-        )
+    if capability[0] != 10:
+        raise SkipTest(f"BF16 wide-vector GDN decode requires SM100, got {capability}")
 
     batch = int(config["batch"])
     num_heads = int(config["num_heads"])

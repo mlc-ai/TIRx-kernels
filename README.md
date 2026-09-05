@@ -21,10 +21,10 @@ with the registry.
 
 | Architecture | Kernels | Only on this architecture |
 |---|---:|---|
-| `sm_100a` (B200) | 101 | `allgather_gemm`, `blackwell_msa_decode_uniform_fp8_qkv_paged_sm100`, `blackwell_msa_long_prefill_paged_bf16_gqa16_direct_group_sm100`, `cake_vsa_blk128_compact_sm100`, `cake_vsa_longseq_sm100`, `cake_vsa_ultrasparse_bsr_sm100`, `deepep_combine`, `deepep_dispatch`, `gemm_reduce_scatter` |
+| `sm_100a` (B200) | 101 | `allgather_gemm`, `blackwell_msa_decode_uniform_fp8_qkv_paged_sm100`, `blackwell_msa_long_prefill_paged_bf16_gqa16_direct_group_sm100`, `cake_vsa_blk128_compact_sm100`, `cake_vsa_longseq_sm100`, `cake_vsa_ultrasparse_bsr_sm100`, `deepep_combine`, `deepep_dispatch`, `flash_mla_sparse_fwd`, `gemm_reduce_scatter` |
 | `sm_103a` (GB300) | 96 | `blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103`, `blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103`, `blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103`, `cake_vsa_longseq_sm103`, `fastcu_nvfp4_gemm_gb300`, `flash_attention4_fp4` |
 | `sm_107a` (Rubin) | 94 | `blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin`, `bmm_fp8_rubin`, `dense_blockscaled_gemm_sm107`, `grouped_gemm_masked_rubin` |
-| `sm_110a` (Thor) | 82 |  |
+| `sm_110a` (Thor) | 16 |  |
 
 ### Native TIRx
 
@@ -32,7 +32,7 @@ with the registry.
   [`fp16_bf16_gemm`](tirx_kernels/basic/fp16_bf16_gemm.py) **[+sm_110a]**,
   [`nvfp4_gemm`](tirx_kernels/basic/nvfp4_gemm.py) **[+sm_110a]**
 - **Normalization:**
-  [`rmsnorm`](tirx_kernels/basic/rmsnorm.py) **[+sm_110a]**
+  [`rmsnorm`](tirx_kernels/basic/rmsnorm.py)
 - **Distributed:**
   [`allgather_gemm`](tirx_kernels/basic/allgather_gemm.py) **[sm_100a]**,
   [`gemm_reduce_scatter`](tirx_kernels/basic/gemm_reduce_scatter.py) **[sm_100a]**
@@ -51,32 +51,32 @@ contract and results.
 ### cuDNN Frontend ports
 
 - **Persistent GEMM:**
-  [`cudnn_sm100_dense_blockscaled_gemm_persistent_amax`](tirx_kernels/cudnn/amax/dense_blockscaled_gemm_persistent_amax.py) **[+sm_110a]**,
-  [`cudnn_sm100_dense_gemm_persistent_swiglu`](tirx_kernels/cudnn/swiglu/dense_gemm_persistent_swiglu.py) **[+sm_110a]**,
-  [`cudnn_sm100_dense_blockscaled_gemm_persistent_swiglu_interleaved_quant`](tirx_kernels/cudnn/swiglu/dense_blockscaled_gemm_persistent_swiglu_interleaved_quant.py) **[+sm_110a]**,
-  [`cudnn_sm100_dense_blockscaled_gemm_persistent_srelu_quant`](tirx_kernels/cudnn/srelu/dense_blockscaled_gemm_persistent_srelu_quant.py) **[+sm_110a]**,
-  [`cudnn_sm100_dense_blockscaled_gemm_persistent_dsrelu_quant`](tirx_kernels/cudnn/dsrelu/dense_blockscaled_gemm_persistent_dsrelu_quant.py) **[+sm_110a]**,
-  [`cudnn_sm100_gemm_proj_rope_mxfp8_bf16in`](tirx_kernels/cudnn/proj_rope_mxfp8/gemm_proj_rope_mxfp8_bf16in.py) **[+sm_110a]**,
-  [`cudnn_sm100_gemm_proj_rope_mxfp8_mxfp8in`](tirx_kernels/cudnn/proj_rope_mxfp8/gemm_proj_rope_mxfp8_mxfp8in.py) **[+sm_110a]**
+  [`cudnn_sm100_dense_blockscaled_gemm_persistent_amax`](tirx_kernels/cudnn/amax/dense_blockscaled_gemm_persistent_amax.py),
+  [`cudnn_sm100_dense_gemm_persistent_swiglu`](tirx_kernels/cudnn/swiglu/dense_gemm_persistent_swiglu.py),
+  [`cudnn_sm100_dense_blockscaled_gemm_persistent_swiglu_interleaved_quant`](tirx_kernels/cudnn/swiglu/dense_blockscaled_gemm_persistent_swiglu_interleaved_quant.py),
+  [`cudnn_sm100_dense_blockscaled_gemm_persistent_srelu_quant`](tirx_kernels/cudnn/srelu/dense_blockscaled_gemm_persistent_srelu_quant.py),
+  [`cudnn_sm100_dense_blockscaled_gemm_persistent_dsrelu_quant`](tirx_kernels/cudnn/dsrelu/dense_blockscaled_gemm_persistent_dsrelu_quant.py),
+  [`cudnn_sm100_gemm_proj_rope_mxfp8_bf16in`](tirx_kernels/cudnn/proj_rope_mxfp8/gemm_proj_rope_mxfp8_bf16in.py),
+  [`cudnn_sm100_gemm_proj_rope_mxfp8_mxfp8in`](tirx_kernels/cudnn/proj_rope_mxfp8/gemm_proj_rope_mxfp8_mxfp8in.py)
 - **Grouped GEMM:**
-  [`cudnn_sm100_moe_blockscaled_grouped_gemm_dglu_dbias`](tirx_kernels/cudnn/dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py) **[+sm_110a]**,
-  [`cudnn_sm100_moe_grouped_gemm_dglu_dbias`](tirx_kernels/cudnn/dglu/moe_grouped_gemm_dglu_dbias.py) **[+sm_110a]**
+  [`cudnn_sm100_moe_blockscaled_grouped_gemm_dglu_dbias`](tirx_kernels/cudnn/dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py),
+  [`cudnn_sm100_moe_grouped_gemm_dglu_dbias`](tirx_kernels/cudnn/dglu/moe_grouped_gemm_dglu_dbias.py)
 - **Linear attention:**
-  [`cudnn_sm100_kda_bprop_f16`](tirx_kernels/cudnn/linear_attention/kda_bprop_f16.py) **[+sm_110a]**,
-  [`cudnn_sm100_gdn_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn_prefill_f16.py) **[+sm_110a]**,
-  [`cudnn_sm100_gdn_recompute_f16`](tirx_kernels/cudnn/linear_attention/gdn_recompute_f16.py) **[+sm_110a]**,
-  [`cudnn_sm100_gdn2_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn2_prefill_f16.py) **[+sm_110a]**,
+  [`cudnn_sm100_kda_bprop_f16`](tirx_kernels/cudnn/linear_attention/kda_bprop_f16.py),
+  [`cudnn_sm100_gdn_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn_prefill_f16.py),
+  [`cudnn_sm100_gdn_recompute_f16`](tirx_kernels/cudnn/linear_attention/gdn_recompute_f16.py),
+  [`cudnn_sm100_gdn2_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn2_prefill_f16.py),
   [`cudnn_sm100_gdn2_recompute_f16`](tirx_kernels/cudnn/linear_attention/gdn2_recompute_f16.py),
-  [`cudnn_sm100_gdn2_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn2_bprop_f16.py) **[+sm_110a]**,
-  [`cudnn_sm100_gdn_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn_bprop_f16.py) **[+sm_110a]**
+  [`cudnn_sm100_gdn2_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn2_bprop_f16.py),
+  [`cudnn_sm100_gdn_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn_bprop_f16.py)
 - **CSA compression:**
-  [`cudnn_sm100_csa_compressor_fwd`](tirx_kernels/cudnn/csa/compressor_fwd_sm100.py) **[+sm_110a]**
+  [`cudnn_sm100_csa_compressor_fwd`](tirx_kernels/cudnn/csa/compressor_fwd_sm100.py)
 - **Sparse attention:**
-  [`cudnn_sm100_dsa_sparse_attention_backward`](tirx_kernels/cudnn/dsa/sparse_attention_backward.py) **[+sm_110a]**,
+  [`cudnn_sm100_dsa_sparse_attention_backward`](tirx_kernels/cudnn/dsa/sparse_attention_backward.py),
   [`cudnn_sm100_bsa_forward_blk128`](tirx_kernels/cudnn/bsa/block_sparse_attention_forward_sm100_blk128.py),
-  [`cudnn_sm100_bsa_forward_blk64`](tirx_kernels/cudnn/bsa/block_sparse_attention_forward_sm100_blk64.py) **[+sm_110a]**,
-  [`cudnn_sm100_bsa_forward_combine_blk64`](tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py) **[+sm_110a]**,
-  [`cudnn_sm100_bsa_backward_blk128`](tirx_kernels/cudnn/bsa/block_sparse_attention_backward_sm100_blk128.py) **[+sm_110a]**,
+  [`cudnn_sm100_bsa_forward_blk64`](tirx_kernels/cudnn/bsa/block_sparse_attention_forward_sm100_blk64.py),
+  [`cudnn_sm100_bsa_forward_combine_blk64`](tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py),
+  [`cudnn_sm100_bsa_backward_blk128`](tirx_kernels/cudnn/bsa/block_sparse_attention_backward_sm100_blk128.py),
   [`cudnn_sm100_bsa_backward_blk64`](tirx_kernels/cudnn/bsa/block_sparse_attention_backward_sm100_blk64.py)
 
 ### FlashAttention ports
@@ -85,7 +85,7 @@ contract and results.
   [`flash_attention4`](tirx_kernels/flashattention/flash_attention4.py) **[+sm_110a]**,
   [`flash_attention4_fp4`](tirx_kernels/flashattention/flash_attention4_fp4.py) **[sm_103a]**
 - **Backward:**
-  [`flash_attention_backward_sm100`](tirx_kernels/flashattention/flash_attention_backward.py) **[+sm_110a]**
+  [`flash_attention_backward_sm100`](tirx_kernels/flashattention/flash_attention_backward.py)
 
 ### FlashInfer ports
 
@@ -93,47 +93,47 @@ Grouped by the FlashInfer Python entry point each port backs.
 
 - **`flashinfer.activation`:**
   [`act_and_mul`](tirx_kernels/flashinfer/activation/act_and_mul.py),
-  [`silu_and_mul_nvfp4_experts_quantize`](tirx_kernels/flashinfer/activation/silu_and_mul_nvfp4_experts_quantize.py) **[+sm_110a]**
+  [`silu_and_mul_nvfp4_experts_quantize`](tirx_kernels/flashinfer/activation/silu_and_mul_nvfp4_experts_quantize.py)
 - **`flashinfer.quantization`:**
   [`nvfp4_quantize`](tirx_kernels/flashinfer/quantization/nvfp4_quantize.py),
-  [`nvfp4_quantize_per_token`](tirx_kernels/flashinfer/quantization/nvfp4_quantize_per_token.py) **[+sm_110a]**,
+  [`nvfp4_quantize_per_token`](tirx_kernels/flashinfer/quantization/nvfp4_quantize_per_token.py),
   [`mxfp4_quantize`](tirx_kernels/flashinfer/quantization/mxfp4_quantize.py) **[+sm_110a]**,
-  [`mxfp8_quantize`](tirx_kernels/flashinfer/quantization/mxfp8_quantize.py) **[+sm_110a]**
+  [`mxfp8_quantize`](tirx_kernels/flashinfer/quantization/mxfp8_quantize.py)
 - **`flashinfer.norm`:**
   [`flashinfer_rmsnorm`](tirx_kernels/flashinfer/norm/rmsnorm.py) **[+sm_110a]**,
   [`flashinfer_rmsnorm_quant`](tirx_kernels/flashinfer/norm/rmsnorm_quant.py),
-  [`flashinfer_rmsnorm_fp4quant`](tirx_kernels/flashinfer/norm/rmsnorm_fp4quant.py) **[+sm_110a]**,
-  [`flashinfer_add_rmsnorm_fp4quant`](tirx_kernels/flashinfer/norm/add_rmsnorm_fp4quant.py) **[+sm_110a]**,
+  [`flashinfer_rmsnorm_fp4quant`](tirx_kernels/flashinfer/norm/rmsnorm_fp4quant.py),
+  [`flashinfer_add_rmsnorm_fp4quant`](tirx_kernels/flashinfer/norm/add_rmsnorm_fp4quant.py),
   [`flashinfer_layernorm`](tirx_kernels/flashinfer/norm/layernorm.py) **[+sm_110a]**,
   [`flashinfer_fused_add_rmsnorm`](tirx_kernels/flashinfer/norm/fused_add_rmsnorm.py) **[sm_100a, sm_110a]**,
-  [`flashinfer_fused_add_rmsnorm_quant`](tirx_kernels/flashinfer/norm/fused_add_rmsnorm_quant.py) **[+sm_110a]**,
+  [`flashinfer_fused_add_rmsnorm_quant`](tirx_kernels/flashinfer/norm/fused_add_rmsnorm_quant.py),
   [`flashinfer_fused_dit_layernorm`](tirx_kernels/flashinfer/norm/fused_dit_layernorm.py) **[+sm_110a]**,
   [`flashinfer_qk_rmsnorm`](tirx_kernels/flashinfer/norm/qk_rmsnorm.py) **[+sm_110a]**
 - **`flashinfer.mamba`:**
-  [`selective_state_update_stp_simple`](tirx_kernels/flashinfer/mamba/selective_state_update_stp_simple.py) **[+sm_110a]**,
-  [`selective_state_update_stp_vertical`](tirx_kernels/flashinfer/mamba/selective_state_update_stp_vertical.py) **[+sm_110a]**,
-  [`selective_state_update_stp_horizontal`](tirx_kernels/flashinfer/mamba/selective_state_update_stp_horizontal.py) **[+sm_110a]**,
-  [`selective_state_update_mtp_simple`](tirx_kernels/flashinfer/mamba/selective_state_update_mtp_simple.py) **[+sm_110a]**,
-  [`selective_state_update_mtp_vertical`](tirx_kernels/flashinfer/mamba/selective_state_update_mtp_vertical.py) **[+sm_110a]**,
+  [`selective_state_update_stp_simple`](tirx_kernels/flashinfer/mamba/selective_state_update_stp_simple.py),
+  [`selective_state_update_stp_vertical`](tirx_kernels/flashinfer/mamba/selective_state_update_stp_vertical.py),
+  [`selective_state_update_stp_horizontal`](tirx_kernels/flashinfer/mamba/selective_state_update_stp_horizontal.py),
+  [`selective_state_update_mtp_simple`](tirx_kernels/flashinfer/mamba/selective_state_update_mtp_simple.py),
+  [`selective_state_update_mtp_vertical`](tirx_kernels/flashinfer/mamba/selective_state_update_mtp_vertical.py),
   [`selective_state_update_mtp_horizontal`](tirx_kernels/flashinfer/mamba/selective_state_update_mtp_horizontal.py) **[+sm_110a]**
 - **`flashinfer.kda`:**
-  [`flashkda_bf16_fused_m128`](tirx_kernels/flashinfer/kda/bf16_fused_m128.py) **[+sm_110a]**,
-  [`recurrent_kda_decode_one_warp`](tirx_kernels/flashinfer/kda/recurrent_kda_decode_one_warp.py) **[+sm_110a]**,
+  [`flashkda_bf16_fused_m128`](tirx_kernels/flashinfer/kda/bf16_fused_m128.py),
+  [`recurrent_kda_decode_one_warp`](tirx_kernels/flashinfer/kda/recurrent_kda_decode_one_warp.py),
   [`recurrent_kda_decode_grouped`](tirx_kernels/flashinfer/kda/recurrent_kda_decode_grouped.py),
-  [`flashkda_decode_t1_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t1_precomputed.py) **[+sm_110a]**,
-  [`flashkda_decode_t2_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t2_precomputed.py) **[+sm_110a]**,
-  [`flashkda_decode_t3_lower_bound`](tirx_kernels/flashinfer/kda/flashkda_decode_t3_lower_bound.py) **[+sm_110a]**,
-  [`flashkda_decode_t4_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t4_precomputed.py) **[+sm_110a]**,
-  [`flashkda_decode_t5_gram`](tirx_kernels/flashinfer/kda/flashkda_decode_t5_gram.py) **[+sm_110a]**,
-  [`flashkda_decode_t6_gram`](tirx_kernels/flashinfer/kda/flashkda_decode_t6_gram.py) **[+sm_110a]**
+  [`flashkda_decode_t1_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t1_precomputed.py),
+  [`flashkda_decode_t2_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t2_precomputed.py),
+  [`flashkda_decode_t3_lower_bound`](tirx_kernels/flashinfer/kda/flashkda_decode_t3_lower_bound.py),
+  [`flashkda_decode_t4_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t4_precomputed.py),
+  [`flashkda_decode_t5_gram`](tirx_kernels/flashinfer/kda/flashkda_decode_t5_gram.py),
+  [`flashkda_decode_t6_gram`](tirx_kernels/flashinfer/kda/flashkda_decode_t6_gram.py)
 - **`flashinfer.gdn_decode`:**
   [`gdn_decode_bf16_ilp4`](tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_ilp4.py) **[+sm_110a]**,
-  [`gdn_decode_bf16_wide_vec_t1`](tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_wide_vec_t1.py) **[+sm_110a]**,
-  [`gdn_decode_bf16_wide_vec_mtp`](tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_wide_vec_mtp.py) **[+sm_110a]**,
-  [`gdn_decode_fp32_mtp_warp`](tirx_kernels/flashinfer/gdn_decode/gdn_decode_fp32_mtp_warp.py) **[+sm_110a]**
+  [`gdn_decode_bf16_wide_vec_t1`](tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_wide_vec_t1.py),
+  [`gdn_decode_bf16_wide_vec_mtp`](tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_wide_vec_mtp.py),
+  [`gdn_decode_fp32_mtp_warp`](tirx_kernels/flashinfer/gdn_decode/gdn_decode_fp32_mtp_warp.py)
 - **`flashinfer.gdn_prefill`:**
-  [`gdn_prefill_sm100`](tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py) **[+sm_110a]**,
-  [`gdn_cp_prefill_sm100`](tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py) **[+sm_110a]**
+  [`gdn_prefill_sm100`](tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py),
+  [`gdn_cp_prefill_sm100`](tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py)
 - **`flashinfer.cake_vsa`:**
   [`cake_vsa_blk128_compact_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_blk128_compact_sm100.py) **[sm_100a]**,
   [`cake_vsa_ultrasparse_bsr_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_ultrasparse_bsr_sm100.py) **[sm_100a]**,
@@ -157,35 +157,35 @@ Grouped by the FlashInfer Python entry point each port backs.
   [`filtered_topk`](tirx_kernels/flashinfer/topk/filtered_topk.py) **[+sm_110a]**,
   [`radix_topk_multi_cta`](tirx_kernels/flashinfer/topk/radix_topk_multi_cta.py) **[+sm_110a]**,
   [`radix_topk_single_cta`](tirx_kernels/flashinfer/topk/radix_topk_single_cta.py) **[+sm_110a]**,
-  [`stable_sort_topk_by_value`](tirx_kernels/flashinfer/topk/stable_sort_topk_by_value.py) **[+sm_110a]**
+  [`stable_sort_topk_by_value`](tirx_kernels/flashinfer/topk/stable_sort_topk_by_value.py)
 
 ### FlashMLA ports
 
 - **Sparse prefill:**
-  [`sparse_flashmla_prefill_head64_phase1`](tirx_kernels/flashmla/sparse_prefill_head64_phase1.py) **[+sm_110a]**,
-  [`sparse_flashmla_prefill_head128_phase1`](tirx_kernels/flashmla/sparse_prefill_head128_phase1.py) **[+sm_110a]**,
-  [`sparse_flashmla_prefill_head128_small_topk_phase1`](tirx_kernels/flashmla/sparse_prefill_head128_small_topk_phase1.py) **[+sm_110a]**
+  [`sparse_flashmla_prefill_head64_phase1`](tirx_kernels/flashmla/sparse_prefill_head64_phase1.py),
+  [`sparse_flashmla_prefill_head128_phase1`](tirx_kernels/flashmla/sparse_prefill_head128_phase1.py),
+  [`sparse_flashmla_prefill_head128_small_topk_phase1`](tirx_kernels/flashmla/sparse_prefill_head128_small_topk_phase1.py)
 - **Sparse decode:**
-  [`sparse_flashmla_decode_head64`](tirx_kernels/flashmla/sparse_decode_head64.py) **[+sm_110a]**
+  [`sparse_flashmla_decode_head64`](tirx_kernels/flashmla/sparse_decode_head64.py)
 - **Sparse forward:**
-  [`flash_mla_sparse_fwd`](tirx_kernels/flashmla/flash_mla_sparse_fwd.py) **[sm_100a, sm_110a]**
+  [`flash_mla_sparse_fwd`](tirx_kernels/flashmla/flash_mla_sparse_fwd.py) **[sm_100a]**
 
 ### DeepGEMM ports
 
 - **Dense and grouped GEMM:**
-  [`deepgemm_sm100_fp8_gemm_1d1d`](tirx_kernels/deepgemm/fp8_gemm_1d1d.py) **[+sm_110a]**,
-  [`deepgemm_sm100_m_grouped_fp8_gemm_contiguous`](tirx_kernels/deepgemm/m_grouped_fp8_gemm_contiguous.py) **[+sm_110a]**,
+  [`deepgemm_sm100_fp8_gemm_1d1d`](tirx_kernels/deepgemm/fp8_gemm_1d1d.py),
+  [`deepgemm_sm100_m_grouped_fp8_gemm_contiguous`](tirx_kernels/deepgemm/m_grouped_fp8_gemm_contiguous.py),
   [`deepgemm_sm100_m_grouped_fp8_gemm_masked`](tirx_kernels/deepgemm/m_grouped_fp8_gemm_masked.py) **[+sm_110a]**,
-  [`deepgemm_sm100_k_grouped_fp8_gemm_contiguous`](tirx_kernels/deepgemm/k_grouped_fp8_gemm_contiguous.py) **[+sm_110a]**,
-  [`deepgemm_sm100_fp8_bmm`](tirx_kernels/deepgemm/fp8_bmm.py) **[+sm_110a]**,
+  [`deepgemm_sm100_k_grouped_fp8_gemm_contiguous`](tirx_kernels/deepgemm/k_grouped_fp8_gemm_contiguous.py),
+  [`deepgemm_sm100_fp8_bmm`](tirx_kernels/deepgemm/fp8_bmm.py),
   [`deepgemm_sm100_tf32_hc_prenorm_gemm`](tirx_kernels/deepgemm/tf32_hc_prenorm_gemm.py)
 - **MQA logits:**
-  [`deepgemm_sm100_fp4_mqa_logits`](tirx_kernels/deepgemm/mqa_logits_fp4.py) **[+sm_110a]**,
-  [`deepgemm_sm100_fp8_mqa_logits`](tirx_kernels/deepgemm/mqa_logits_fp8.py) **[+sm_110a]**,
-  [`deepgemm_sm100_fp4_paged_mqa_logits`](tirx_kernels/deepgemm/paged_mqa_logits_fp4.py) **[+sm_110a]**,
-  [`deepgemm_sm100_fp8_paged_mqa_logits`](tirx_kernels/deepgemm/paged_mqa_logits_fp8.py) **[+sm_110a]**
+  [`deepgemm_sm100_fp4_mqa_logits`](tirx_kernels/deepgemm/mqa_logits_fp4.py),
+  [`deepgemm_sm100_fp8_mqa_logits`](tirx_kernels/deepgemm/mqa_logits_fp8.py),
+  [`deepgemm_sm100_fp4_paged_mqa_logits`](tirx_kernels/deepgemm/paged_mqa_logits_fp4.py),
+  [`deepgemm_sm100_fp8_paged_mqa_logits`](tirx_kernels/deepgemm/paged_mqa_logits_fp8.py)
 - **MoE:**
-  [`sm100_fp8_fp4_mega_moe`](tirx_kernels/deepgemm/sm100_fp8_fp4_mega_moe.py) **[+sm_110a]**
+  [`sm100_fp8_fp4_mega_moe`](tirx_kernels/deepgemm/sm100_fp8_fp4_mega_moe.py)
 
 ### DeepEP ports
 
@@ -201,12 +201,12 @@ Grouped by the FlashInfer Python entry point each port backs.
 ### MSA ports
 
 - **Sparse-attention preparation:**
-  [`msa_sparse_prepare_flat_schedule_sm100`](tirx_kernels/msa/sparse_prepare_flat_schedule.py) **[+sm_110a]**,
-  [`msa_sparse_prepare_fwd_split_atomic_sm100`](tirx_kernels/msa/sparse_prepare_fwd_split_atomic.py) **[+sm_110a]**
+  [`msa_sparse_prepare_flat_schedule_sm100`](tirx_kernels/msa/sparse_prepare_flat_schedule.py),
+  [`msa_sparse_prepare_fwd_split_atomic_sm100`](tirx_kernels/msa/sparse_prepare_fwd_split_atomic.py)
 - **Sparse-attention forward:**
-  [`msa_sparse_atten_fwd_sm100`](tirx_kernels/msa/sparse_atten_fwd.py) **[+sm_110a]**,
-  [`msa_sparse_atten_fwd_nvfp4_kv_sm100`](tirx_kernels/msa/sparse_atten_fwd_nvfp4_kv.py) **[+sm_110a]**,
-  [`msa_sparse_atten_fwd_combine_sm100`](tirx_kernels/msa/sparse_atten_fwd_combine.py) **[+sm_110a]**
+  [`msa_sparse_atten_fwd_sm100`](tirx_kernels/msa/sparse_atten_fwd.py),
+  [`msa_sparse_atten_fwd_nvfp4_kv_sm100`](tirx_kernels/msa/sparse_atten_fwd_nvfp4_kv.py),
+  [`msa_sparse_atten_fwd_combine_sm100`](tirx_kernels/msa/sparse_atten_fwd_combine.py)
 
 ## Performance
 

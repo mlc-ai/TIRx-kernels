@@ -35,7 +35,7 @@ from tirx_kernels.msa.utils._scalar_ops import (
 KERNEL_META = {
     "name": "msa_sparse_atten_fwd_sm100",
     "category": "msa",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "msa",
@@ -3432,113 +3432,6 @@ def live_partial_mask(data: dict[str, Any]):
     return splits < per_head_q.unsqueeze(0)
 
 
-def torch_reference_partials(data: dict[str, Any]) -> dict[str, Any]:
-    """Compute every CSR edge independently with PyTorch.
-
-    The implementation follows MSA's public ``sparse_attention_ref`` math but
-    works row-by-row over K-to-Q CSR edges.  This avoids constructing the dense
-    Q-by-K mask while still checking the frozen split-slot and fake-column ABI.
-    """
-    import torch
-
-    from tirx_kernels.msa.sparse_prepare_flat_schedule import row_coords
-
-    expected = make_outputs(data)
-    batch_of_row, level_of_row = row_coords(data["seqlens_k"], data["blk_kv"])
-    cu_k = data["cu_seqlens_k"].to(torch.int64)
-    qh = data["qhead_per_kv"]
-    qk_fp8 = data["qk_dtype"] == "float8_e4m3"
-    pv_fp8 = data["pv_dtype"] == "float8_e4m3"
-    k_values = data.get("k_reference_flat", data["k_flat"] if qk_fp8 else data["k_dequantized"])
-    v_values = data.get("v_reference_flat", data["v_flat"] if pv_fp8 else data["v_dequantized"])
-    fake_columns = torch.tensor(
-        [_fake_col(data["partial_dtype"], column) for column in range(HEAD_DIM)],
-        dtype=torch.long,
-        device="cuda",
-    )
-
-    for head in range(data["head_kv"]):
-        head_start = head * qh
-        head_end = head_start + qh
-        row_ptr = data["k2q_row_ptr"][head]
-        for row, (batch, level) in enumerate(zip(batch_of_row, level_of_row, strict=True)):
-            edge_start = int(row_ptr[row])
-            edge_end = int(row_ptr[row + 1])
-            if edge_end == edge_start:
-                continue
-            q_local = data["k2q_q_indices"][head, edge_start:edge_end].to(torch.int64)
-            q_abs = data["q_abs_of_edge"][head, edge_start:edge_end].to(torch.int64)
-            packed = data["k2q_qsplit_indices"][head, edge_start:edge_end]
-            slots = torch.bitwise_right_shift(packed, SLOT_SHIFT).bitwise_and(SLOT_MASK).long()
-
-            token_start = int(cu_k[batch]) + level * data["blk_kv"]
-            token_end = min(token_start + data["blk_kv"], int(cu_k[batch + 1]))
-            token_count = token_end - token_start
-            k_tile = k_values[token_start:token_end, head].float()
-            v_tile = v_values[token_start:token_end, head].float()
-            query = data["q"][q_abs, head_start:head_end].float()
-            scores = torch.einsum("ehd,td->eht", query, k_tile) * data.get(
-                "reference_softmax_scale", data["softmax_scale"]
-            )
-
-            token_pos = level * data["blk_kv"] + torch.arange(
-                token_count, device="cuda", dtype=torch.int64
-            )
-            used_k = (
-                int(data["seqused_k"][batch])
-                if data["seqused_k"] is not None
-                else int(data["seqlens_k"][batch])
-            )
-            valid = token_pos.unsqueeze(0) < used_k
-            if data["causal"]:
-                causal_limit = q_local + used_k - int(data["seqlens_q"][batch])
-                valid = valid & (token_pos.unsqueeze(0) <= causal_limit.unsqueeze(1))
-            valid = valid.unsqueeze(1)
-            scores = scores.masked_fill(~valid, float("-inf"))
-            has_value = valid.any(dim=-1)
-            safe_scores = torch.where(has_value.unsqueeze(-1), scores, torch.zeros_like(scores))
-            row_max = safe_scores.max(dim=-1, keepdim=True).values
-            exponent = torch.exp(safe_scores - row_max)
-            exponent = torch.where(
-                valid & has_value.unsqueeze(-1), exponent, torch.zeros_like(exponent)
-            )
-            row_sum = exponent.sum(dim=-1, keepdim=True)
-            lse = torch.where(
-                has_value,
-                row_max.squeeze(-1) + torch.log(row_sum.squeeze(-1)),
-                torch.full_like(row_max.squeeze(-1), float("-inf")),
-            )
-
-            if pv_fp8:
-                probability = exponent.to(torch.float8_e4m3fn).float()
-                logical_out = torch.einsum("eht,td->ehd", probability, v_tile)
-                logical_out = logical_out / torch.where(
-                    row_sum > 0, row_sum, torch.ones_like(row_sum)
-                )
-            else:
-                probability = exponent / torch.where(row_sum > 0, row_sum, torch.ones_like(row_sum))
-                probability = probability.to(torch.bfloat16).float()
-                logical_out = torch.einsum("eht,td->ehd", probability, v_tile)
-            logical_out = torch.where(
-                has_value.unsqueeze(-1), logical_out, torch.zeros_like(logical_out)
-            )
-
-            physical_out = torch.empty_like(logical_out)
-            physical_out.index_copy_(-1, fake_columns, logical_out)
-            expected["o_partial"][slots, q_abs, head_start:head_end] = physical_out.to(
-                expected["o_partial"].dtype
-            )
-            expected["lse_partial"][slots, q_abs, head_start:head_end] = lse
-            if data["lse_temperature_scale"] is not None:
-                temperature_lse = torch.logsumexp(
-                    scores / float(data["lse_temperature_scale"]), dim=-1
-                )
-                expected["lse_temperature_partial"][slots, q_abs, head_start:head_end] = (
-                    temperature_lse
-                )
-    return expected
-
-
 def assert_partials_match(
     data: dict[str, Any],
     outputs: dict[str, Any],
@@ -3546,8 +3439,6 @@ def assert_partials_match(
     *,
     rtol: float = 0.0,
     atol: float = 0.0,
-    lse_rtol: float | None = None,
-    lse_atol: float | None = None,
 ) -> None:
     """Compare the live slots of both partial buffers."""
     import torch
@@ -3560,17 +3451,15 @@ def assert_partials_match(
         rtol=rtol,
         atol=atol,
     )
-    lse_rtol = rtol if lse_rtol is None else lse_rtol
-    lse_atol = atol if lse_atol is None else lse_atol
     torch.testing.assert_close(
-        outputs["lse_partial"][mask], expected["lse_partial"][mask], rtol=lse_rtol, atol=lse_atol
+        outputs["lse_partial"][mask], expected["lse_partial"][mask], rtol=rtol, atol=atol
     )
     if "lse_temperature_partial" in outputs:
         torch.testing.assert_close(
             outputs["lse_temperature_partial"][mask],
             expected["lse_temperature_partial"][mask],
-            rtol=lse_rtol,
-            atol=lse_atol,
+            rtol=rtol,
+            atol=atol,
         )
 
 
@@ -3592,6 +3481,7 @@ def run_test(**config):
         from tirx_kernels.msa.utils._msa_bench import compiled_sparse_atten_fwd
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+
     expected = make_outputs(data)
     try:
         compiled_sparse_atten_fwd(reference_case(data, expected))()

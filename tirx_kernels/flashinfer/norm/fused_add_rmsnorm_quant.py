@@ -37,7 +37,6 @@ from ._kern_helpers import (
     _threads_per_row,
 )
 from .fused_add_rmsnorm import _source_config as _fused_source_config
-from .fused_add_rmsnorm import _thor_source_cluster_limit
 from .rmsnorm_quant import (
     _cvt_fp8_pair,
     _maximum_f32,
@@ -49,7 +48,7 @@ from .rmsnorm_quant import (
 KERNEL_META = {
     "name": "flashinfer_fused_add_rmsnorm_quant",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -1339,11 +1338,7 @@ def run_test(**config: Any) -> None:
 
     reference = None
     reference_output = None
-    # Both original rolled configurations run with the pinned CuTe source on Thor.
-    # Keep the source's raw FP8-byte check for these large fragments as well.
-    if not _uses_rolled_fragment_loops(H) or torch.cuda.get_device_capability(
-        data["input"].device
-    ) == (11, 0):
+    if not _uses_rolled_fragment_loops(H):
         reference = _prepare_tensors(config)
         reference_output = _prepare_output(
             M, H, reference["y_row_stride"], output_dtype, initialize_padding=True
@@ -1359,16 +1354,15 @@ def run_test(**config: Any) -> None:
 
         flashinfer_norm.fused_add_rmsnorm_quant_cute = tracked_cute
         try:
-            with _thor_source_cluster_limit():
-                reference_returned = api(
-                    reference_output["view"],
-                    reference["input"],
-                    reference["residual"],
-                    reference["weight"],
-                    reference["scale"],
-                    eps,
-                    enable_pdl=enable_pdl,
-                )
+            reference_returned = api(
+                reference_output["view"],
+                reference["input"],
+                reference["residual"],
+                reference["weight"],
+                reference["scale"],
+                eps,
+                enable_pdl=enable_pdl,
+            )
         finally:
             flashinfer_norm.fused_add_rmsnorm_quant_cute = original_cute
         if cute_calls != 1:
@@ -1396,7 +1390,8 @@ def run_test(**config: Any) -> None:
             name="FlashInfer residual oracle",
         )
     else:
-        # Preserve the existing non-Thor rolled-fragment fallback.
+        # The rolled-fragment rows exceed what the CuTe reference can run, so
+        # the FP32 oracle is the only available arbiter for them.
         oracle_output, oracle_residual = _math_oracle(snapshot, eps, output_dtype)
         _assert_math_close(actual_output, oracle_output, name="independent FP32 output oracle")
         _assert_residual_close(
@@ -1493,8 +1488,7 @@ def run_gpu(
 
         flashinfer_norm.fused_add_rmsnorm_quant_cute = tracked_cute
         try:
-            with _thor_source_cluster_limit():
-                returned = flashinfer_launch()
+            returned = flashinfer_launch()
         finally:
             flashinfer_norm.fused_add_rmsnorm_quant_cute = original_cute
         if cute_calls != 1:
