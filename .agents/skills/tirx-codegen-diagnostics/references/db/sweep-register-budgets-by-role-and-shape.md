@@ -51,15 +51,6 @@ rows on two GPUs, retained zero failures across the correctness matrix, and
 helped the final 66-row suite clear its strict gate at a 0.9907x minimum. The
 same value had regressed other outputs when applied globally.
 
-Target-specific role redistribution can also restore parity without changing
-the total CTA budget. A causal head-dimension-128 FA4 port retained an older
-200/64/48 softmax/correction/other split while its current source used
-192/72/56. Both splits consume the same complete CTA register budget. Applying
-the current-source split only on `sm_110a` moved a prior 0.948x campaign to
-0.985x and 0.978x in two independent paired 15-round runs, with no spills, and
-all 16 affected causal configurations passed correctness. The original split
-was left unchanged on the `sm_100a` family.
-
 Budget redistribution can matter even when total allocation and spill counts
 stay fixed. One 16-warp pipeline kept its collective total at 2048 registers
 while changing three role budgets from 192/80/48 to 192/88/40. Both forms had

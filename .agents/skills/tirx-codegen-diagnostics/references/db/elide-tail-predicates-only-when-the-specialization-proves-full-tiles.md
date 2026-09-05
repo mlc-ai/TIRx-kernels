@@ -38,17 +38,6 @@ safe workload changed from 1642.624 us TIRx / 1616.763 us reference (ratio
 TIRx latency reduction.  The complete eleven-row matrix had minimum ratio
 0.994679.
 
-On Thor, the static `M=32`, `H=4096`, PDL RMSNorm specialization also launches
-an exactly full grid. Folding its row-valid predicate while retaining the
-measured ptxas level-6, 56-register schedule removed the redundant reconvergence
-pair. The final child allocated the same 56 registers and 17.536 KB shared memory
-as the source, had zero local traffic, and reduced dynamic warp instructions from
-44,800 to 44,288 and predicated-on thread instructions from 1,409,728 to
-1,391,488. Its paired NCU duration was 25.920 us versus 26.240 us for the source;
-the required 15-round bench-suite row measured 12.014 us versus 12.018 us (ratio
-1.0003x). Both the affected PDL shape and its non-PDL sibling passed the numerical
-oracle, and the SM100 selector defaults were checked unchanged.
-
 ## Boundary
 
 This is valid only when the compiled artifact is tied to the exact static shape

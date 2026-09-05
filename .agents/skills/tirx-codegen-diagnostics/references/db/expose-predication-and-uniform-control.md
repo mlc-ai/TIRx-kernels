@@ -223,16 +223,6 @@ non-protocol path but moved the dependency-protocol path from 3.386 to 3.425
 microseconds, so the shared rewrite was reverted. Match the source topology,
 then retain the hoist only on the paths where the gate confirms it.
 
-A row-level branch around a dense vector-store fragment can be specific to the
-fragment width, arithmetic mode, and dependency protocol. On one 20-SM target,
-a source-shaped final-output guard plus a path-specific register cap improved
-three affected paths by 2.3-4.2% in 1000-ms-warmup interleaved A/B tests and
-cleared a six-row source matrix at 1.003-1.026x. Extending the same guard to the
-twice-width fragment regressed it by roughly 2-4%, while enabling it for a
-non-protocol arithmetic sibling regressed about 5.3%. Select the control
-topology using compile-time fragment, protocol, and arithmetic identity; a
-source-level resemblance does not justify a family-wide rewrite.
-
 The grouping width itself is a scheduling parameter. In one asynchronous-copy
 path, merging guards across the complete copy group reduced control and address
 instructions but regressed every guarded shape by roughly 4.6-8.1%. Grouping

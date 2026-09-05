@@ -19,12 +19,3 @@ tools/cpusim/examples/bench_gen/
 
 # /file-bug skill backlog — transient per-machine bug folders
 /bugs/
-
-# Local Thor campaign reports; keep the canonical comparison summary tracked.
-/THOR_B200_PERFORMANCE.md
-/THOR_CLASSIC_BASELINE_RESULTS.md
-/THOR_CLASSIC_KERNEL_BASELINES.md
-/THOR_FLASHINFER_ATTENTION.md
-/THOR_NATIVE_BASELINE.md
-/THOR_SOURCE_BENCHMARK_AUDIT.md
-/THOR_VALIDATION.md
