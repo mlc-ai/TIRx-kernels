@@ -104,6 +104,21 @@ revisions used by explicit diagnostic runs are pinned in
 Explicit distributed workloads additionally require their NCCL, cuBLAS,
 cuBLASMp, and NVSHMEM runtime dependencies.
 
+For Thor DeepGEMM and FlashMLA baselines, build separate variants using the
+worker's Python, PyTorch and CUDA environment after installing the pinned
+references above:
+
+```bash
+python scripts/setup_thor_source_references.py --name deep-gemm \
+  --variant-root /path/to/new/deep-gemm-thor --build
+python scripts/setup_thor_source_references.py --name flash-mla \
+  --variant-root /path/to/new/flash-mla-thor --build
+```
+
+Apply each variant's generated `tirx-thor-environment.json` environment settings
+before starting its worker, preserving other required `PYTHONPATH` entries.
+Use the setup script's `--help` for checking or registering existing builds.
+
 ## Freeze the before baseline
 
 Freeze one complete clean run before changing kernels:
