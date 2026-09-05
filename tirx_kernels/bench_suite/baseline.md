@@ -528,8 +528,6 @@ Grouped workloads show one row per config and one timing column per implementati
 - GPU: Jetson AGX Thor (`sm_110a`, 20 SM)
 - Timing: mean of 15 Proton rounds; 1000 ms warmup, 100 ms repeat, 1 s cooldown.
 
-Each row shows a recorded configuration using the same columns as above.
-
 ### deepgemm_sm100_m_grouped_fp8_gemm_masked
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |

@@ -6,12 +6,10 @@ High-performance GPU kernels authored in
 
 ## Kernels
 
-Unless marked otherwise, every kernel below declares support for `sm_100a`
-(B200), `sm_103a` (GB300), and `sm_107a` (Rubin). **[+sm_110a]** explicitly adds
-Thor to those three architectures. Other tags list the complete supported set,
-such as **[sm_103a]** or **[sm_100a, sm_110a]**. Thor is supported only when
-`sm_110a` appears in the kernel's tag. These declarations describe architecture
-eligibility; they do not certify GPU correctness or performance validation.
+Architecture tags specify runtime eligibility. Untagged kernels support
+`sm_100a` (B200), `sm_103a` (GB300), and `sm_107a` (Rubin). **[+sm_110a]** adds
+Thor to that set; other tags list the complete set, such as **[sm_103a]** or
+**[sm_100a, sm_110a]**.
 Each linked name is the public registry name accepted by `--kernel`; the link
 opens its implementation.
 `KERNEL_META["runtime_cuda_archs"]` is the authority;

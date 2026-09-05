@@ -279,8 +279,7 @@ VARIANTS = {
         "url": "https://github.com/deepseek-ai/DeepGEMM.git",
         "environment": "TIRX_DEEP_GEMM_VARIANT_MANIFEST",
         "device_root": "deep_gemm/include/deep_gemm",
-        # The original private diagnostic copy omitted these unused Python files.
-        # New clones retain them; registration records omissions explicitly.
+        # Omissions of these optional helpers must be recorded in the manifest.
         "legacy_omissions": (
             "third-party/tilelang_ops/__init__.py",
             "third-party/tilelang_ops/swiglu_apply_weight_to_fp8.py",
@@ -303,7 +302,7 @@ def git_output(root: Path, *args: str) -> str:
 
 
 def adapted_text(name: str, relative: str, original: str) -> str:
-    """Apply only the host changes exercised by the pinned source probes."""
+    """Apply the supported host adaptation for a pinned source revision."""
     replacements = {
         "deep-gemm": {
             "csrc/jit/device_runtime.hpp": (
