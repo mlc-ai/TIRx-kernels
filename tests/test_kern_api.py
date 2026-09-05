@@ -46,6 +46,27 @@ def _calls_named(func, name):
     return calls
 
 
+def test_mma_desc_loop_invariance_handles_unstaged_and_staged_tiles():
+    import warnings
+
+    for mode in ("unstaged", "constant", "varying"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+
+            @K.kernel(warps=1, arch="sm_100a", grid=False)
+            def probe(out: K.gptr("uint64")):
+                shape = (16, 128) if mode == "unstaged" else (2, 16, 128)
+                tile = K.smem_pool().alloc(shape, K.bf16, swizzle=K.SW128B)
+                with K.serial(2) as i:
+                    view = tile if mode == "unstaged" else tile[i if mode == "varying" else 0]
+                    desc = view.mma_desc()
+                    K.ptx.st.global_.b64(out.ptr_to([i]), desc.value)
+
+        invariant = [w for w in caught if "encode is invariant" in str(w.message)]
+        assert len(invariant) == (0 if mode == "varying" else 1)
+        assert _calls_named(probe.func, "tirx.cuda.tcgen05_encode_matrix_descriptor")
+
+
 def test_local_scalar_init_matches_declare_then_assign():
     def two_statement(out):
         x = K.local_scalar("float32")
