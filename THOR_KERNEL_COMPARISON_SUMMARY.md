@@ -1,6 +1,8 @@
 # NVIDIA Thor 经典 Kernel 对比总结
 
 > 历史阶段结果：以下数据来自 2026-09-04 的代码与测量环境，不代表当前 HEAD 的全库验收。全库验证与性能优化尚未完成，rebase 后的统一复测待做。
+>
+> 2026-09-05：按用户要求，已将后续记录中未达到 `baseline/TIRx > 0.99` 的 BSA forward128、BSA backward64、HC、TinyGEMM2、Act-and-Mul、RMSNorm Quant、Recurrent KDA Grouped 和 NVFP4 Quantize 撤出 Thor 支持清单，并回退其中三项性能改动。以下表格保留历史结果，不能作为当前发布资格证明。
 
 这是 2026-09-04 在单张 NVIDIA Jetson AGX Thor（`sm_110a`，20 SM）上完成的阶段性同卡对比。这里的“完整”指当时选定的 20 个经典、contract-matched 代表 workload 全部跑完并通过数值检查；不是声称当时仓库全部 254 个 benchmark 都存在可在 Thor 启动的外部 baseline。
 

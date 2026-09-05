@@ -171,7 +171,7 @@ def _make_case(*, m: int, n: int, k: int, num_splits: int, seed: int) -> dict[st
 KERNEL_META = {
     "name": "deepgemm_sm100_tf32_hc_prenorm_gemm",
     "category": "deepgemm",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "deep-gemm",

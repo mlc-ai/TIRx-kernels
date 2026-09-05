@@ -23,7 +23,7 @@ from tirx_kernels.target import prepare_cuda_arch
 KERNEL_META = {
     "name": "tinygemm2_sm100",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",

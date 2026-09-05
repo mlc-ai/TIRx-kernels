@@ -17,14 +17,14 @@ from typing import Any
 
 import tirx_kernels.kern as K
 from tirx_kernels.runner import bench
-from tirx_kernels.target import prepare_cluster_shape, prepare_cuda_arch
+from tirx_kernels.target import prepare_cluster_shape
 
 from .rmsnorm import _thor_source_cluster_limit
 
 KERNEL_META = {
     "name": "flashinfer_rmsnorm_quant",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -669,7 +669,6 @@ def get_kernel(
     row_lane_xors = tuple(lane_xor for lane_xor in (1, 2, 4, 8, 16) if lane_xor < min(tpr, 32))
     full_lane_xors = (1, 2, 4, 8, 16)
     fp8_max = 448.0 if output_dtype == "float8_e4m3fn" else 57344.0
-    thor_predicated_async = prepare_cuda_arch() == "sm_110a" and H == 8192
 
     del kwargs
     x_row_stride_hint = H if x_row_stride is None else int(x_row_stride)
@@ -788,25 +787,12 @@ def get_kernel(
                             init=K.cast(K.if_then_else(col_valid, copy_bytes, 0), "uint32"),
                             name="source_bytes",
                         )
-                    if thor_predicated_async:
-                        K.ptx["cp.async.ca.shared.global"](
-                            shared_raw.ptr_to(
-                                [(row_in_cta * cols + local_col) * _INPUT_ELEM_BYTES]
-                            ),
-                            x.ptr_to([x_offset]),
-                            copy_bytes,
-                            source_bytes,
-                            pred=row_valid,
-                        )
-                    else:
-                        K.ptx["cp.async.ca.shared.global"](
-                            shared_raw.ptr_to(
-                                [(row_in_cta * cols + local_col) * _INPUT_ELEM_BYTES]
-                            ),
-                            x.ptr_to([x_offset]),
-                            copy_bytes,
-                            source_bytes,
-                        )
+                    K.ptx["cp.async.ca.shared.global"](
+                        shared_raw.ptr_to([(row_in_cta * cols + local_col) * _INPUT_ELEM_BYTES]),
+                        x.ptr_to([x_offset]),
+                        copy_bytes,
+                        source_bytes,
+                    )
         else:
             for vb in range(vec_blocks):
                 local_col = K.local_scalar(
