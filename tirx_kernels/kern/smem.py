@@ -168,7 +168,7 @@ def _lint_invariant_encode(stage):
         return
     if builder is None or not any(isinstance(f, ForFrame) for f in builder.frames):
         return
-    if not isinstance(stage, int) and undefined_vars(stage):
+    if stage is not None and not isinstance(stage, int) and undefined_vars(stage):
         return
     warnings.warn(
         "mma_desc: encode is invariant w.r.t. the enclosing loop; hoist it. "
