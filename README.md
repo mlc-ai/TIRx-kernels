@@ -6,10 +6,20 @@ High-performance GPU kernels authored in
 
 ## Kernels
 
-Registered kernels declare their CUDA target architecture in `KERNEL_META`.
-Each linked name below is the public registry name accepted by `--kernel`; the
-link opens its implementation. Run `python -m tirx_kernels.registry --format json`
-for the authoritative config list.
+Unless marked otherwise, every kernel below runs on `sm_100a` (B200), `sm_103a`
+(GB300) and `sm_107a` (Rubin). A kernel restricted to one architecture carries an
+inline tag such as **[sm_103a]**. Each linked name is the public registry name
+accepted by `--kernel`; the link opens its implementation.
+`KERNEL_META["runtime_cuda_archs"]` is the authority;
+`python -m tirx_kernels.registry --format json` prints it together with the
+config list, and `tests/lint/check_readme_kernels.py` keeps this section in sync
+with the registry.
+
+| Architecture | Kernels | Only on this architecture |
+|---|---:|---|
+| `sm_100a` (B200) | 101 | `allgather_gemm`, `blackwell_msa_decode_uniform_fp8_qkv_paged_sm100`, `blackwell_msa_long_prefill_paged_bf16_gqa16_direct_group_sm100`, `cake_vsa_blk128_compact_sm100`, `cake_vsa_longseq_sm100`, `cake_vsa_ultrasparse_bsr_sm100`, `deepep_combine`, `deepep_dispatch`, `flash_mla_sparse_fwd`, `flashinfer_fused_add_rmsnorm`, `gemm_reduce_scatter` |
+| `sm_103a` (GB300) | 96 | `blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103`, `blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103`, `blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103`, `cake_vsa_longseq_sm103`, `fastcu_nvfp4_gemm_gb300`, `flash_attention4_fp4` |
+| `sm_107a` (Rubin) | 94 | `blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin`, `bmm_fp8_rubin`, `dense_blockscaled_gemm_sm107`, `grouped_gemm_masked_rubin` |
 
 ### Native TIRx
 
@@ -19,8 +29,8 @@ for the authoritative config list.
 - **Normalization:**
   [`rmsnorm`](tirx_kernels/basic/rmsnorm.py)
 - **Distributed:**
-  [`allgather_gemm`](tirx_kernels/basic/allgather_gemm.py),
-  [`gemm_reduce_scatter`](tirx_kernels/basic/gemm_reduce_scatter.py)
+  [`allgather_gemm`](tirx_kernels/basic/allgather_gemm.py) **[sm_100a]**,
+  [`gemm_reduce_scatter`](tirx_kernels/basic/gemm_reduce_scatter.py) **[sm_100a]**
 
 ### Agent-evolved TIRx
 
@@ -67,7 +77,8 @@ contract and results.
 ### FlashAttention ports
 
 - **Forward:**
-  [`flash_attention4`](tirx_kernels/flashattention/flash_attention4.py)
+  [`flash_attention4`](tirx_kernels/flashattention/flash_attention4.py),
+  [`flash_attention4_fp4`](tirx_kernels/flashattention/flash_attention4_fp4.py) **[sm_103a]**
 - **Backward:**
   [`flash_attention_backward_sm100`](tirx_kernels/flashattention/flash_attention_backward.py)
 
@@ -89,7 +100,7 @@ Grouped by the FlashInfer Python entry point each port backs.
   [`flashinfer_rmsnorm_fp4quant`](tirx_kernels/flashinfer/norm/rmsnorm_fp4quant.py),
   [`flashinfer_add_rmsnorm_fp4quant`](tirx_kernels/flashinfer/norm/add_rmsnorm_fp4quant.py),
   [`flashinfer_layernorm`](tirx_kernels/flashinfer/norm/layernorm.py),
-  [`flashinfer_fused_add_rmsnorm`](tirx_kernels/flashinfer/norm/fused_add_rmsnorm.py),
+  [`flashinfer_fused_add_rmsnorm`](tirx_kernels/flashinfer/norm/fused_add_rmsnorm.py) **[sm_100a]**,
   [`flashinfer_fused_add_rmsnorm_quant`](tirx_kernels/flashinfer/norm/fused_add_rmsnorm_quant.py),
   [`flashinfer_fused_dit_layernorm`](tirx_kernels/flashinfer/norm/fused_dit_layernorm.py),
   [`flashinfer_qk_rmsnorm`](tirx_kernels/flashinfer/norm/qk_rmsnorm.py)
@@ -119,21 +130,23 @@ Grouped by the FlashInfer Python entry point each port backs.
   [`gdn_prefill_sm100`](tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py),
   [`gdn_cp_prefill_sm100`](tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py)
 - **`flashinfer.cake_vsa`:**
-  [`cake_vsa_blk128_compact_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_blk128_compact_sm100.py),
-  [`cake_vsa_ultrasparse_bsr_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_ultrasparse_bsr_sm100.py),
-  [`cake_vsa_longseq_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_longseq_sm100.py),
-  [`cake_vsa_longseq_sm103`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_longseq_sm103.py)
+  [`cake_vsa_blk128_compact_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_blk128_compact_sm100.py) **[sm_100a]**,
+  [`cake_vsa_ultrasparse_bsr_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_ultrasparse_bsr_sm100.py) **[sm_100a]**,
+  [`cake_vsa_longseq_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_longseq_sm100.py) **[sm_100a]**,
+  [`cake_vsa_longseq_sm103`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_longseq_sm103.py) **[sm_103a]**
 - **`flashinfer.msa_ops`:**
-  [`blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103.py),
-  [`blackwell_msa_decode_uniform_fp8_qkv_paged_sm100`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_decode_uniform_fp8_qkv_paged_sm100.py),
-  [`blackwell_msa_long_prefill_paged_bf16_gqa16_direct_group_sm100`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_long_prefill_paged_bf16_gqa16_direct_group_sm100.py),
-  [`blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103.py)
+  [`blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103.py) **[sm_103a]**,
+  [`blackwell_msa_decode_uniform_fp8_qkv_paged_sm100`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_decode_uniform_fp8_qkv_paged_sm100.py) **[sm_100a]**,
+  [`blackwell_msa_long_prefill_paged_bf16_gqa16_direct_group_sm100`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_long_prefill_paged_bf16_gqa16_direct_group_sm100.py) **[sm_100a]**,
+  [`blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103.py) **[sm_103a]**,
+  [`blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103.py) **[sm_103a]**
 - **`flashinfer.gemm`:**
   [`tinygemm2_sm100`](tirx_kernels/flashinfer/gemm/tinygemm2_sm100.py),
-  [`bmm_fp8_rubin`](tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py),
-  [`grouped_gemm_masked_rubin`](tirx_kernels/flashinfer/gemm/grouped_gemm_masked_rubin.py)
+  [`bmm_fp8_rubin`](tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py) **[sm_107a]**,
+  [`dense_blockscaled_gemm_sm107`](tirx_kernels/flashinfer/gemm/dense_blockscaled_gemm_sm107.py) **[sm_107a]**,
+  [`grouped_gemm_masked_rubin`](tirx_kernels/flashinfer/gemm/grouped_gemm_masked_rubin.py) **[sm_107a]**
 - **`flashinfer.fused_moe`:**
-  [`blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin`](tirx_kernels/flashinfer/fused_moe/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin.py)
+  [`blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin`](tirx_kernels/flashinfer/fused_moe/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin.py) **[sm_107a]**
 - **`flashinfer.topk`:**
   [`fast_topk_clusters`](tirx_kernels/flashinfer/topk/fast_topk_clusters.py),
   [`filtered_topk`](tirx_kernels/flashinfer/topk/filtered_topk.py),
@@ -150,7 +163,7 @@ Grouped by the FlashInfer Python entry point each port backs.
 - **Sparse decode:**
   [`sparse_flashmla_decode_head64`](tirx_kernels/flashmla/sparse_decode_head64.py)
 - **Sparse forward:**
-  [`flash_mla_sparse_fwd`](tirx_kernels/flashmla/flash_mla_sparse_fwd.py)
+  [`flash_mla_sparse_fwd`](tirx_kernels/flashmla/flash_mla_sparse_fwd.py) **[sm_100a]**
 
 ### DeepGEMM ports
 
@@ -172,8 +185,13 @@ Grouped by the FlashInfer Python entry point each port backs.
 ### DeepEP ports
 
 - **Elastic communication:**
-  [`deepep_dispatch`](tirx_kernels/deepep/dispatch.py),
-  [`deepep_combine`](tirx_kernels/deepep/combine.py)
+  [`deepep_dispatch`](tirx_kernels/deepep/dispatch.py) **[sm_100a]**,
+  [`deepep_combine`](tirx_kernels/deepep/combine.py) **[sm_100a]**
+
+### fast.cu ports
+
+- **NVFP4 GEMM:**
+  [`fastcu_nvfp4_gemm_gb300`](tirx_kernels/fastcu/nvfp4_gemm_gb300.py) **[sm_103a]**
 
 ### MSA ports
 
@@ -222,13 +240,13 @@ remain externally managed runtime/compiler dependencies.
 | `torch`          | all kernels                        | CUDA build matching your GPU.                          |
 | `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels and the MegaMoE timer. |
 | cuDNN Frontend (`cudnn`) | `cudnn_*` correctness and baselines | Source install pinned in the lock (v1.28.0); replaces any released `nvidia-cudnn-frontend` wheel, which lacks the CuTeDSL kernel sources. |
-| `flashinfer`     | `nvfp4_gemm` baseline | Used for reference implementations. |
+| `flashinfer`     | all `flashinfer.*` ports, `tinygemm2_sm100`, `nvfp4_gemm` and `rmsnorm` baselines | Correctness reference and optimized baseline. |
 | `flash-attn` + CUTLASS DSL | `flash_attention_backward_sm100` baseline | Current SM100 forward/backward reference. |
 | `sglang` (+ CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | Optional `sglang_cutedsl` benchmark reference. |
 | `flash_mla`      | `sparse_flashmla_*` / `flash_mla_sparse_fwd` baselines | Reference impls. |
 | `deep_ep`        | `deepep_*` correctness and baselines | Reference implementation. |
 | `flash-linear-attention` | `agent_evolved_kda_forward_b1_t8192` correctness | Independent FLA BF16/Triton chunk reference. |
-| `flash_kda`      | `flashkda_*` optional baselines | Raw FlashKDA benchmark peer. |
+| `flash_kda`      | `flashkda_*` and `agent_evolved_kda_forward_b1_t8192` optional baselines | Raw FlashKDA benchmark peer. |
 | `fmha_sm100` (MSA) | `msa_*` correctness and baselines | Reference implementation; set `MSA_PATH` to use a checkout elsewhere. |
 | NVSHMEM          | `allgather_gemm`, `gemm_reduce_scatter` | Required to compile/run the GemmComm kernels. |
 
@@ -289,7 +307,7 @@ License 2.0; see [LICENSE](LICENSE). Required Apache attribution notices are
 collected in [NOTICE](NOTICE).
 
 Every Python source file carries SPDX tags. Kernel ports derived from third-party projects
-(cuDNN Frontend, DeepGEMM, fast.cu, FlashMLA, flash-attention, flash-attention-fp4, FlashInfer, MSA) additionally cite the upstream
+(cuDNN Frontend, DeepGEMM, DeepEP, fast.cu, FlashMLA, flash-attention, flash-attention-fp4, FlashInfer, MSA) additionally cite the upstream
 project and the exact commit ported, retain the upstream copyright notice, and
 declare the combined terms — for example `Apache-2.0 AND MIT`. Where an upstream
 license requires its conditions text to travel with the source, that text is kept

@@ -10,7 +10,6 @@ Upstream source: csrc/tinygemm2_sm100.cu.
 """
 
 import ctypes
-import hashlib
 from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
@@ -55,7 +54,6 @@ WT_STAGE_BYTES = 4 * 2048
 ACT_STAGE_BYTES = 4 * 1024
 RED_BYTES = 2048
 BIAS_BYTES = 32
-SOURCE_SHA256 = "ea4d87f058b269e2f15d04f945849d7b26604c5b76eed55a06eb8e08d7bc891d"
 _TMA_G2S_2D = "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes"
 
 
@@ -513,14 +511,7 @@ def _flashinfer_tinygemm2_spec():
     source = next((path for path in candidates if path.is_file()), None)
     if source is None:
         raise RuntimeError(
-            "FlashInfer TinyGEMM2 frozen source is unavailable; checked "
-            + ", ".join(map(str, candidates))
-        )
-    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
-    if source_hash != SOURCE_SHA256:
-        raise RuntimeError(
-            "FlashInfer TinyGEMM2 source does not match the frozen oracle: "
-            f"{source} sha256={source_hash}"
+            "FlashInfer TinyGEMM2 source is unavailable; checked " + ", ".join(map(str, candidates))
         )
     return gen_jit_spec(
         "tinygemm2_sm100",

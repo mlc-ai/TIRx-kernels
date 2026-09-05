@@ -34,3 +34,9 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: check-readme-kernels
+        name: check README kernel listing
+        entry: python tests/lint/check_readme_kernels.py
+        language: system
+        pass_filenames: false
+        always_run: true

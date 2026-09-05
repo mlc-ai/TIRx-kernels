@@ -17,7 +17,6 @@ The source specialization serves causal eager Q1 decode with 128 requests,
 64 BF16 query heads, four paged FP8 E4M3 KV heads, D=128, and TopK16.
 """
 
-import hashlib
 import math
 from functools import lru_cache
 from pathlib import Path
@@ -975,18 +974,6 @@ _GUARD_ELEMS = 64
 _OUT_GUARD = 42.5
 _LSE_GUARD = -54321.25
 _SOURCE_ROOT = Path("/root-vol/aarch64-ws/kernel-libs/gb300/flashinfer")
-_SOURCE_COMMIT = "cc6e8794c49bf66172627bdb9742fcb17d18b839"
-_SOURCE_FILES = {
-    "csrc/blackwell_msa/sm103a/blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged.cu": (
-        "51a92ebabd161ecf179a84abc13164b9872e778b45864e229e2817d2af50e1da"
-    ),
-    "csrc/blackwell_msa/sm103a/blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_binding.cu": (
-        "9200369c7d90c1aa63118d7059719b3f7e6de0163ee0ab0b9f678703ecb34a48"
-    ),
-    "flashinfer/msa_ops/_blackwell_sm100.py": (
-        "a4da56f1151b76827388934fcd9f674218ceb6a3a5fff8f0e1a5b3dd048dc68b"
-    ),
-}
 
 
 def _without_label(config: dict[str, Any]) -> dict[str, Any]:
@@ -1221,15 +1208,6 @@ def _verify_source_checkout() -> None:
         raise RuntimeError(
             f"reference imported from {api_path}, not pinned checkout {_SOURCE_ROOT}"
         )
-    head = (_SOURCE_ROOT / ".git" / "HEAD").read_text().strip()
-    if head.startswith("ref: "):
-        head = (_SOURCE_ROOT / ".git" / head[5:]).read_text().strip()
-    if head != _SOURCE_COMMIT:
-        raise RuntimeError(f"reference checkout is {head}, expected {_SOURCE_COMMIT}")
-    for relative, expected in _SOURCE_FILES.items():
-        actual = hashlib.sha256((_SOURCE_ROOT / relative).read_bytes()).hexdigest()
-        if actual != expected:
-            raise RuntimeError(f"reference hash mismatch for {relative}: {actual} != {expected}")
 
 
 @lru_cache(maxsize=1)

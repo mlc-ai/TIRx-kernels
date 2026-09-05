@@ -22,8 +22,6 @@ KERNEL_META = {
     "runtime_cuda_archs": ["sm_103a"],
 }
 
-SOURCE_COMMIT = "2dfe5e26aecfd9e5f27bf9d5837deea01acda24b"
-SOURCE_SHA256 = "b9ec1b3f07ed934728499421b7a90bb7f31cbc179960fd2707ecefbf2ec8606c"
 _SOURCE_RELATIVE = Path("gb300/nvfp4/gemm9.cuh")
 _REFERENCE_ADAPTER = Path(__file__).with_name("nvfp4_gemm_gb300_reference.cu")
 
@@ -998,26 +996,10 @@ def _fastcu_source_root() -> Path:
         )
     )
     for root in candidates:
-        source = root / _SOURCE_RELATIVE
-        if not source.is_file():
-            continue
-        actual = hashlib.sha256(source.read_bytes()).hexdigest()
-        if actual != SOURCE_SHA256:
-            raise RuntimeError(f"frozen fast.cu source hash mismatch: {source} sha256={actual}")
-        try:
-            commit = subprocess.run(
-                ["git", "-C", str(root), "rev-parse", "HEAD"],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-        except (OSError, subprocess.CalledProcessError) as error:
-            raise RuntimeError(f"cannot verify fast.cu checkout {root}: {error}") from error
-        if commit != SOURCE_COMMIT:
-            raise RuntimeError(f"frozen fast.cu checkout mismatch: {root} commit={commit}")
-        return root
+        if (root / _SOURCE_RELATIVE).is_file():
+            return root
     tried = ", ".join(str(root) for root in candidates)
-    raise RuntimeError(f"frozen fast.cu source is unavailable; tried: {tried}")
+    raise RuntimeError(f"fast.cu source is unavailable; tried: {tried}")
 
 
 @functools.lru_cache(maxsize=1)

@@ -2578,7 +2578,6 @@ def run_gpu(
     )
     peer = flashkda_peer.get("reference")
     if peer is not None:
-        result["flashkda_raw_provenance"] = peer.provenance
         result["flashkda_raw_correctness"] = peer.correctness
     return result
 

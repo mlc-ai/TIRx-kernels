@@ -7,9 +7,8 @@
 """TIRx port of FlashInfer's FlashKDA "cake" T=2 precomputed-gate decode kernel.
 
 Source: ``csrc/kda/flashkda_decode_d128_t2_precomputed_split4.cu``, symbol
-``kernel_flashinfer_recurrent_kda_wy_vtile_short`` -- a frozen machine-generated
-export ("Generated from a recurrent-KDA Loom schedule") whose SHA256 it declares
-in its own header.
+``kernel_flashinfer_recurrent_kda_wy_vtile_short`` -- a machine-generated export
+("Generated from a recurrent-KDA Loom schedule").
 
 This is the WY-transform schedule: 2 warps, a 14720-byte shared-memory arena,
 ``ldmatrix`` + ``mma.sync`` tensor-core products, and a per-token checkpoint

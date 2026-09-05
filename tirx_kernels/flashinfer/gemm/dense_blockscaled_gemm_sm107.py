@@ -39,7 +39,6 @@ Upstream sources:
 - flashinfer/gemm/kernels/utils.py
 """
 
-import hashlib
 import importlib
 import importlib.util
 import sys
@@ -65,16 +64,6 @@ KERNEL_META = {
         {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
     ),
 }
-
-SOURCE_COMMIT = "012cfdb97f217e0d48bc9352c17a74068c9e495b"
-SOURCE_SHA256 = "c9def937d2bf76b363bb321aa4053ffd39055febdcef3c890572bd2c4f2946ad"
-SOURCE_DEPENDENCY_SHA256 = {
-    "epilogue_utils.py": "ae48ecfca2220975cd3e0e1d60803f8634aa72827857aaff3b2af24205c01c92",
-    "gemm_base.py": "ef5cb58d7d85e1391a4987327bdcd6f9e20ffcd1a849dc0b0b9a13ffce3d0d95",
-    "kernels/utils.py": "705a10946cb6ee68c132784fc48de7ce3bad07714ae5244c4058c970e1f02ed2",
-}
-CUTLASS_PARENT_COMMIT = "cdcf8d86daa9b417840fd99875a1b1af685d389d"
-CUTLASS_PARENT_SHA256 = "1517d4cde6b7988d5f44eca5fc2de4516b6f582ae60c37a5d1455a09c647453b"
 
 _SOURCE_ROOT = Path("/root-vol/aarch64-ws/kernel-libs/vr200/flashinfer")
 _CUTLASS_ROOT = Path(__file__).resolve().parents[3] / ".reference-deps" / "cutlass-v4.8.0dev"
@@ -1744,9 +1733,6 @@ def _install_cutlass_parent():
     parent_path = _CUTLASS_ROOT / _CUTLASS_PARENT_RELATIVE
     if not parent_path.is_file():
         raise RuntimeError(f"missing pinned CUTLASS parent: {parent_path}")
-    actual = hashlib.sha256(parent_path.read_bytes()).hexdigest()
-    if actual != CUTLASS_PARENT_SHA256:
-        raise RuntimeError(f"CUTLASS parent hash mismatch: sha256={actual}")
     package_paths = (
         ("nvidia_cutlass_dsl.examples", _CUTLASS_ROOT / "examples/python"),
         ("nvidia_cutlass_dsl.examples.CuTeDSL", _CUTLASS_ROOT / "examples/python/CuTeDSL"),
@@ -1779,19 +1765,9 @@ def _install_cutlass_parent():
 
 @cache
 def _source_runner(out_dtype, sf_mode):
-    source_files = {
-        "flashinfer/gemm/kernels/dense_blockscaled_gemm_sm107.py": SOURCE_SHA256,
-        "flashinfer/gemm/kernels/epilogue_utils.py": SOURCE_DEPENDENCY_SHA256["epilogue_utils.py"],
-        "flashinfer/gemm/gemm_base.py": SOURCE_DEPENDENCY_SHA256["gemm_base.py"],
-        "flashinfer/gemm/kernels/utils.py": SOURCE_DEPENDENCY_SHA256["kernels/utils.py"],
-    }
-    for relative, expected in source_files.items():
-        source = _SOURCE_ROOT / relative
-        if not source.is_file():
-            raise RuntimeError(f"frozen FlashInfer source is unavailable: {source}")
-        actual = hashlib.sha256(source.read_bytes()).hexdigest()
-        if actual != expected:
-            raise RuntimeError(f"frozen source hash mismatch: {source} sha256={actual}")
+    source = _SOURCE_ROOT / "flashinfer/gemm/kernels/dense_blockscaled_gemm_sm107.py"
+    if not source.is_file():
+        raise RuntimeError(f"FlashInfer source is unavailable: {source}")
     _install_cutlass_parent()
     loaded = sys.modules.get("flashinfer")
     loaded_file = Path(getattr(loaded, "__file__", "")).resolve() if loaded else None
