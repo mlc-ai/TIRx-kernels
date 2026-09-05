@@ -254,7 +254,7 @@ BENCH_CONFIGS = CONFIGS + LEGACY_CONFIGS
 
 def load_deep_gemm_hc() -> tuple[Any, str]:
     from tirx_kernels.reference_requirements import load_reference
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
         return load_reference("deep-gemm"), "verified_thor_variant"
@@ -289,7 +289,7 @@ def _round_to_tf32_rne(value: torch.Tensor) -> torch.Tensor:
 
 
 def _reference_hc_output(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() != "sm_110a":
         return a.float() @ b.T
@@ -313,7 +313,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         torch.cuda.set_device(torch.cuda.current_device())
     else:
         raise SkipTest("CUDA is required for SM100 TF32 HC prenorm GEMM")
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     if not supports_sm100_kernel(torch.cuda.get_device_capability()):
         raise SkipTest("SM100 TF32 HC prenorm GEMM requires SM100 or prepared Thor")

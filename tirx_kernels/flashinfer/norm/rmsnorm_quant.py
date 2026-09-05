@@ -16,8 +16,7 @@ import math
 from typing import Any
 
 import tirx_kernels.kern as K
-from tirx_kernels.runner import bench
-from tirx_kernels.target import prepare_cluster_shape
+from tirx_kernels.runner import bench, prepare_cluster_shape
 
 from .rmsnorm import _thor_source_cluster_limit
 

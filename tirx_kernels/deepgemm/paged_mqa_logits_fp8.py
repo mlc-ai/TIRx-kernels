@@ -343,7 +343,7 @@ CONFIGS = _SMOKE_CONFIGS + DSA_INDEXER_LIKE_COVERAGE + SGLANG_BENCH_CONFIGS
 
 def load_deep_gemm_paged_mqa() -> tuple[Any, str]:
     from tirx_kernels.reference_requirements import load_reference
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
         return load_reference("deep-gemm"), "verified_thor_variant"
@@ -431,7 +431,7 @@ def _make_indices(config: PagedMQALogitsFP8Config) -> torch.Tensor | None:
 
 
 def _make_schedule_meta(deep_gemm, context_lens, page_size: int, num_sms: int, indices=None):
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
         from ._paged_mqa_schedule import make_schedule_metadata
@@ -502,7 +502,7 @@ def _prepare_data(config: PagedMQALogitsFP8Config, *, compute_reference: bool) -
     deep_gemm, source = load_deep_gemm_paged_mqa()
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for SM100 FP8 paged MQA logits")
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     if not supports_sm100_kernel(torch.cuda.get_device_capability()):
         raise SkipTest("SM100 FP8 paged MQA logits requires SM100 or prepared Thor")
@@ -1823,7 +1823,7 @@ def _assert_valid_correct(
 def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
     config: PagedMQALogitsFP8Config = data["config"]
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
     deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
@@ -1883,7 +1883,7 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     invocation = _prepare_tirx_invocation(data, executable=tirx_executable)
     deepgemm_logits = None
     max_diff = None
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     use_external = external_references_enabled()
     if use_external:

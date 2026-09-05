@@ -58,8 +58,7 @@ import tirx_kernels.kern as K
 from tirx_kernels.flashinfer.utils import topk_radix as R
 from tirx_kernels.flashinfer.utils.filtered_topk_ops import st_global_bits
 from tirx_kernels.flashinfer.utils.topk_harness import source_module, torch_dtype
-from tirx_kernels.runner import bench, hardware_num_sms
-from tirx_kernels.target import prepare_cuda_arch
+from tirx_kernels.runner import bench, hardware_num_sms, prepare_cuda_arch
 
 KERNEL_META = {
     "name": "fast_topk_clusters",

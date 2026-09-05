@@ -128,7 +128,7 @@ class PreparedDistributedBench:
 def require_sm100(device_indices: Sequence[int]) -> None:
     """Reject unsupported hosts before compiling or spawning workers."""
 
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     indices = tuple(int(index) for index in device_indices)
     if not indices or len(set(indices)) != len(indices):

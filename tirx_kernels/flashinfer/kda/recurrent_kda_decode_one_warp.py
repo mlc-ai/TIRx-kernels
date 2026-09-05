@@ -780,7 +780,7 @@ def get_kernel(**kwargs: Any):
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     """Build one deterministic case with independent TIRx / reference state."""
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":

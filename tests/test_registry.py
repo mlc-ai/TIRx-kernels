@@ -30,9 +30,8 @@ class ForbidGpuRuntime(importlib.abc.MetaPathFinder):
         return None
 
 sys.meta_path.insert(0, ForbidGpuRuntime())
-from tirx_kernels import registry, target
+from tirx_kernels import registry
 assert registry.kernel_index(strict=True)
-assert target.prepare_cuda_arch('sm_100a')
 assert not {'tvm', 'torch', 'cutlass'}.intersection(sys.modules)
 """
     subprocess.run(

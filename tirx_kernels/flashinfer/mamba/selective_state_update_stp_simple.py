@@ -1073,7 +1073,7 @@ def _index_tensor(
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     """Create independent mutable TIRx/source cases for one specialization."""
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":

@@ -45,7 +45,7 @@ _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 
 def load_deep_gemm_mega() -> tuple[Any, str]:
     from tirx_kernels.reference_requirements import load_reference
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
         return load_reference("deep-gemm"), "verified_thor_variant"
@@ -788,7 +788,7 @@ def _run_distributed(
     device_uuids: tuple[str, ...] | None = None,
     **kwargs,
 ) -> dict[str, Any]:
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a" and config.num_processes != 1:
         raise SkipTest("Thor MegaMoE supports only num_processes=1; multi-GPU remains unvalidated")

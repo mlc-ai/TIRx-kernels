@@ -21,7 +21,7 @@ import hashlib
 from pathlib import Path
 
 from tirx_kernels.cudnn._reference import load_reference_module
-from tirx_kernels.target import prepare_cuda_arch
+from tirx_kernels.runner import prepare_cuda_arch
 
 _DSA_PACKAGE = "cudnn.deepseek_sparse_attention"
 _INTERFACE_MODULE = f"{_DSA_PACKAGE}.sparse_attention_backward._interface_sm100"

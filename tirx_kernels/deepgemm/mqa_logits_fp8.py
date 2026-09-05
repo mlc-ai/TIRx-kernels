@@ -247,7 +247,7 @@ CONFIGS = DEEPGEMM_TEST_COVERAGE
 
 def load_deep_gemm_mqa() -> tuple[Any, str]:
     from tirx_kernels.reference_requirements import load_reference
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
         return load_reference("deep-gemm"), "verified_thor_variant"
@@ -316,7 +316,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         torch.cuda.set_device(torch.cuda.current_device())
     else:
         raise SkipTest("CUDA is required for SM100 FP8 MQA logits")
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     if not supports_sm100_kernel(torch.cuda.get_device_capability()):
         raise SkipTest("SM100 FP8 MQA logits requires SM100 or prepared Thor")

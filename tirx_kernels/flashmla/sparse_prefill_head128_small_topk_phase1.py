@@ -1494,7 +1494,7 @@ def run_test(**kwargs: Any) -> None:
     torch.testing.assert_close(case["out"], ref_out, rtol=4.01 / 128, atol=5e-3)
     torch.testing.assert_close(case["max_logits"], ref_max_logits, rtol=2.01 / 65536, atol=1e-6)
     torch.testing.assert_close(case["lse"], ref_lse, rtol=2.01 / 65536, atol=1e-6)
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
         from tirx_kernels.flashmla.utils._flashmla_bench import validate_flashmla_sparse_prefill

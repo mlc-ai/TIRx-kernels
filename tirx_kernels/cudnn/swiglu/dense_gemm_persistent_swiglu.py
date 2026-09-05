@@ -14,7 +14,7 @@ from functools import cache
 from itertools import combinations, product
 
 import tirx_kernels.kern as K
-from tirx_kernels.target import prepare_cluster_shape
+from tirx_kernels.runner import prepare_cluster_shape
 
 _TRY_WAIT_TICKS = 10_000_000
 _SMEM_CAPACITY = 232_448
@@ -1627,6 +1627,7 @@ def _compile_reference(data, config):
     b = data["b"]["source"]
     ab12 = data["source_ab12"]["source"]
     c = data["source_c"]["source"]
+
     def input_tensor(tensor, dtype, *, leading_dim):
         storage = tensor.view(torch.uint8) if dtype.startswith("float8_") else tensor
         wrapped = from_dlpack(storage, assumed_align=16)
@@ -1637,12 +1638,8 @@ def _compile_reference(data, config):
             }[dtype]
         return wrapped.mark_layout_dynamic(leading_dim=leading_dim)
 
-    a_cute = input_tensor(
-        a, config["ab_dtype"], leading_dim=0 if config["a_major"] == "m" else 1
-    )
-    b_cute = input_tensor(
-        b, config["ab_dtype"], leading_dim=0 if config["b_major"] == "n" else 1
-    )
+    a_cute = input_tensor(a, config["ab_dtype"], leading_dim=0 if config["a_major"] == "m" else 1)
+    b_cute = input_tensor(b, config["ab_dtype"], leading_dim=0 if config["b_major"] == "n" else 1)
     ab12_cute = from_dlpack(ab12, assumed_align=16).mark_layout_dynamic(
         leading_dim=0 if config["c_major"] == "m" else 1
     )
@@ -1762,8 +1759,7 @@ def _validate_with_oracle(data, alpha):
     chunks = ab12_f32.reshape(M, N // 64, 64, L)
     c_f32 = torch.cat(
         [
-            chunks[:, chunk, :32, :]
-            * torch.nn.functional.silu(chunks[:, chunk, 32:, :])
+            chunks[:, chunk, :32, :] * torch.nn.functional.silu(chunks[:, chunk, 32:, :])
             for chunk in range(N // 64)
         ],
         dim=1,
@@ -1771,17 +1767,9 @@ def _validate_with_oracle(data, alpha):
     expected_ab12 = ab12_f32.to(data["tirx_ab12"]["source"].dtype).float()
     expected_c = c_f32.to(data["tirx_c"]["source"].dtype).float()
     _assert_close(
-        torch,
-        data["tirx_ab12"]["source"],
-        expected_ab12,
-        label="TIRx AB12 versus FP32 oracle",
+        torch, data["tirx_ab12"]["source"], expected_ab12, label="TIRx AB12 versus FP32 oracle"
     )
-    _assert_close(
-        torch,
-        data["tirx_c"]["source"],
-        expected_c,
-        label="TIRx C versus FP32 oracle",
-    )
+    _assert_close(torch, data["tirx_c"]["source"], expected_c, label="TIRx C versus FP32 oracle")
 
 
 def run_test(**config):

@@ -16,7 +16,7 @@ per-row ``dprob``, per-expert ``dbias`` and ``amax``, and FP8 row/column output
 scale factors.
 """
 
-from tirx_kernels.target import prepare_cluster_shape, prepare_cuda_arch
+from tirx_kernels.runner import prepare_cluster_shape, prepare_cuda_arch
 
 from ._moe_blockscaled_grouped_gemm_dglu_dbias import data as _data
 from ._moe_blockscaled_grouped_gemm_dglu_dbias import kernel as _kernel

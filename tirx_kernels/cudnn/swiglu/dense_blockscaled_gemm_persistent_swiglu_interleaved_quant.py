@@ -15,7 +15,7 @@ from functools import cache
 from itertools import combinations, product
 
 import tirx_kernels.kern as K
-from tirx_kernels.target import prepare_cluster_shape, prepare_cuda_arch
+from tirx_kernels.runner import prepare_cluster_shape, prepare_cuda_arch
 
 _TRY_WAIT_TICKS = 10_000_000
 _SMEM_CAPACITY = 232_448
@@ -2643,20 +2643,7 @@ def _upstream_ab12_store_is_flaky(config):
             (256, 64),
             (4, 4),
         ),
-        (
-            512,
-            256,
-            256,
-            2,
-            "float8_e5m2",
-            "float16",
-            "float32",
-            "m",
-            "n",
-            "m",
-            (256, 64),
-            (4, 2),
-        ),
+        (512, 256, 256, 2, "float8_e5m2", "float16", "float32", "m", "n", "m", (256, 64), (4, 2)),
     }
 
 
@@ -2686,10 +2673,7 @@ def _validate_structured_outputs(data, config):
 
     expected_ab12, expected_c = _structured_expected(torch, data, config)
     torch.testing.assert_close(
-        data["tirx_ab12"]["source"].float(),
-        expected_ab12.float(),
-        atol=0.01,
-        rtol=0.01,
+        data["tirx_ab12"]["source"].float(), expected_ab12.float(), atol=0.01, rtol=0.01
     )
     torch.testing.assert_close(
         data["tirx_c"]["source"].float(), expected_c.float(), atol=0.01, rtol=0.01
@@ -2801,9 +2785,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
 
     config = {**prepared["config"], **kwargs}
     kernel_config = _without_label(config)
-    with_source = external_references_enabled() and not _upstream_ab12_store_is_flaky(
-        kernel_config
-    )
+    with_source = external_references_enabled() and not _upstream_ab12_store_is_flaky(kernel_config)
     gpu_state = prepared.get("gpu_state")
     if gpu_state is None:
         data = prepare_data(**kernel_config)

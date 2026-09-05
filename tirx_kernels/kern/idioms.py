@@ -816,7 +816,7 @@ def cvt_e4m3x2_to_bf16x2(dst, value):
     in both intermediate formats, so the sequence preserves the native
     conversion's result.
     """
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch("sm_100a") == "sm_100a":
         T.evaluate(T.ptx.cvt.rn.bf16x2.e4m3x2(dst, value))
@@ -847,7 +847,7 @@ def cvt_rs_f16x2_f32(dst, a, b, rbits):
     high half and consumes bits 28:16 of *rbits*; ``b`` becomes the low half
     and consumes bits 12:0.
     """
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch("sm_100a") in {"sm_100a", "sm_103a"}:
         T.evaluate(T.ptx.cvt.rs.f16x2.f32(dst, a, b, rbits))
@@ -861,9 +861,7 @@ def cvt_rs_f16x2_f32(dst, a, b, rbits):
         abs_bits = T.bitwise_and(bits, T.uint32(0x7FFFFFFF)) + T.bitwise_and(
             random13, T.uint32(0x1FFF)
         )
-        f32_exp = T.bitwise_and(
-            T.shift_right(abs_bits, T.uint32(23)), T.uint32(0xFF)
-        )
+        f32_exp = T.bitwise_and(T.shift_right(abs_bits, T.uint32(23)), T.uint32(0xFF))
         f32_mantissa = T.bitwise_and(abs_bits, T.uint32(0x7FFFFF))
         normal = T.bitwise_or(
             T.shift_left(f32_exp - T.uint32(112), T.uint32(10)),
@@ -871,9 +869,7 @@ def cvt_rs_f16x2_f32(dst, a, b, rbits):
         )
         magnitude = T.if_then_else(
             f32_exp == T.uint32(0xFF),
-            T.if_then_else(
-                f32_mantissa != T.uint32(0), T.uint32(0x7E00), T.uint32(0x7C00)
-            ),
+            T.if_then_else(f32_mantissa != T.uint32(0), T.uint32(0x7E00), T.uint32(0x7C00)),
             T.if_then_else(
                 f32_exp > T.uint32(142),
                 T.uint32(0x7C00),
@@ -883,10 +879,7 @@ def cvt_rs_f16x2_f32(dst, a, b, rbits):
         return T.bitwise_or(T.shift_right(sign, T.uint32(16)), magnitude)
 
     lo = cvt_rs_f16_sw(b, T.bitwise_and(rbits, T.uint32(0x1FFF)))
-    hi = cvt_rs_f16_sw(
-        a,
-        T.bitwise_and(T.shift_right(rbits, T.uint32(16)), T.uint32(0x1FFF)),
-    )
+    hi = cvt_rs_f16_sw(a, T.bitwise_and(T.shift_right(rbits, T.uint32(16)), T.uint32(0x1FFF)))
     packed = T.bitwise_or(lo, T.shift_left(hi, T.uint32(16)))
     T.evaluate(T.ptx.mov.b32(dst, packed))
 
@@ -909,7 +902,7 @@ def warp_reduce_max_nan_f32(dst, value, membermask=FULL_MASK):
     convergent call site.  The expansion assumes a full 32-lane warp, matching
     the native instruction and all current callers.
     """
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch("sm_100a") == "sm_100a":
         T.evaluate(T.ptx.redux_sync.max.NaN.f32(dst, value, T.uint32(membermask)))

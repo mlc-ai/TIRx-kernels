@@ -15,7 +15,7 @@ back into ``C``'s 32-column interleaving together with the per-row ``dprob`` and
 the optional per-expert ``dbias``.
 """
 
-from tirx_kernels.target import prepare_cluster_shape
+from tirx_kernels.runner import prepare_cluster_shape
 
 from ._moe_grouped_gemm_dglu_dbias import data as _data
 from ._moe_grouped_gemm_dglu_dbias import kernel as _kernel

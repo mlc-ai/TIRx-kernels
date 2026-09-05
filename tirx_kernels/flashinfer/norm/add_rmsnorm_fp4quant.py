@@ -45,8 +45,7 @@ from tirx_kernels.flashinfer.norm.rmsnorm_fp4quant import (
     _widen_and_scale_16,
 )
 from tirx_kernels.flashinfer.utils.fp_quant import absmax_8, hmax2
-from tirx_kernels.runner import bench
-from tirx_kernels.target import prepare_cluster_shape
+from tirx_kernels.runner import bench, prepare_cluster_shape
 
 KERNEL_META = {
     "name": "flashinfer_add_rmsnorm_fp4quant",

@@ -11,7 +11,7 @@ from typing import Any
 
 def _import_flash_mla():
     from tirx_kernels.reference_requirements import load_reference
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
         return load_reference("flash-mla")

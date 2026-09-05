@@ -199,7 +199,7 @@ def run_test(**config):
     """Compile, launch and compare against DeepGEMM on the same operands."""
     import torch
 
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     from ._sm100_fp8_fp4_gemm_1d1d.data import (
         assert_within_threshold,

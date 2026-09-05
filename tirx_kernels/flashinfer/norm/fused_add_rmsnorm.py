@@ -15,8 +15,7 @@ import contextlib
 from typing import Any
 
 import tirx_kernels.kern as K
-from tirx_kernels.runner import bench
-from tirx_kernels.target import prepare_cluster_shape, prepare_cuda_arch
+from tirx_kernels.runner import bench, prepare_cluster_shape, prepare_cuda_arch
 
 from ._kern_helpers import (
     _add_f32,

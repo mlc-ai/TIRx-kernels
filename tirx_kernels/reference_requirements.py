@@ -485,7 +485,7 @@ _loaded_manifests: dict[str, dict] = {}
 
 def load_reference(name: str):
     """Import a canonical native source, or a verified explicitly selected Thor build."""
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     policy = VARIANTS[name]
     selected = os.environ.get(policy["environment"])

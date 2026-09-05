@@ -39,7 +39,7 @@ def require_sm100() -> None:
 
     import torch
 
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     if not torch.cuda.is_available():
         raise SkipTest("no CUDA device")
@@ -54,7 +54,7 @@ def require_deep_gemm():
     from unittest import SkipTest
 
     from tirx_kernels.reference_requirements import load_reference
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
         return load_reference("deep-gemm")
@@ -151,7 +151,7 @@ def transform_sf(sf, mn: int, k: int, recipe: tuple[int, int], num_groups: int |
     same bytes; `csrc/apis/layout.hpp:49-53` is the SM100 branch that runs.
     """
     deep_gemm = require_deep_gemm()
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
         gran_mn, gran_k = recipe
@@ -440,7 +440,7 @@ def transform_sf_psum(sf, mn: int, k: int, recipe, psum_layout, alignment: int |
     factors out on a different grid than A and D.
     """
     deep_gemm = require_deep_gemm()
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if alignment is not None:
         deep_gemm.set_mk_alignment_for_contiguous_layout(alignment)

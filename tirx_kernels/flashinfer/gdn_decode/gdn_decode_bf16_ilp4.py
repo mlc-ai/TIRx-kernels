@@ -17,8 +17,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.kern as TK
-from tirx_kernels.runner import bench
-from tirx_kernels.target import prepare_cuda_arch
+from tirx_kernels.runner import bench, prepare_cuda_arch
 
 KERNEL_META = {
     "name": "gdn_decode_bf16_ilp4",
@@ -980,7 +979,7 @@ def _make_qkv(
 
 
 def _device_from_config(config: dict[str, Any]) -> torch.device:
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     configured_device = config.get("device")
     device = (

@@ -22,7 +22,7 @@ def test_prepare_arch_overrides_declared_cuda_arch(monkeypatch, arch):
 
 
 def test_thor_sm100_compatibility_requires_explicit_sm110a_prepare(monkeypatch):
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     monkeypatch.delenv(runner.PREPARE_CUDA_ARCH_ENV, raising=False)
     for capability in ((10, 0), (10, 3), (10, 7)):
@@ -37,7 +37,7 @@ def test_thor_sm100_compatibility_requires_explicit_sm110a_prepare(monkeypatch):
 
 @pytest.mark.parametrize("arch", [None, "sm_100a", "sm_103a", "sm_107a"])
 def test_thor_cluster_shape_limit(monkeypatch, arch):
-    from tirx_kernels.target import prepare_cluster_shape
+    from tirx_kernels.runner import prepare_cluster_shape
 
     if arch is None:
         monkeypatch.delenv(runner.PREPARE_CUDA_ARCH_ENV, raising=False)

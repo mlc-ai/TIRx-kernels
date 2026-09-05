@@ -226,7 +226,7 @@ def _make_config(
         fast_math=fast_math,
     )
     config.validate()
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a" and config.num_processes != 1:
         raise SkipTest("Thor MegaMoE supports only num_processes=1; multi-GPU remains unvalidated")

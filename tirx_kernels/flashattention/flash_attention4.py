@@ -26,8 +26,7 @@ import torch
 import tirx_kernels.kern as K
 import tvm
 import tvm.testing
-from tirx_kernels.runner import bench
-from tirx_kernels.target import prepare_cuda_arch
+from tirx_kernels.runner import bench, prepare_cuda_arch
 from tvm.tirx.cuda import iket
 from tvm.tirx.cuda.iket import IketProfiler
 

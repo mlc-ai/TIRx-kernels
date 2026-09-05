@@ -3,16 +3,37 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from types import SimpleNamespace
 
 import pytest
 
-from tirx_kernels.bench_suite import ratio_diff
+from tirx_kernels.bench_suite import baseline_view, ratio_diff
 from tirx_kernels.bench_suite import run as bench_run
 
 _OUR_CHILD_PID = 4001
 _FOREIGN_PID = 9001
+
+
+def test_baseline_view_preserves_other_architecture_reports(tmp_path, monkeypatch):
+    source = tmp_path / "baseline.json"
+    output = tmp_path / "baseline.md"
+    payload = {"label": "new baseline", "results": []}
+    source.write_text(json.dumps(payload))
+    extra = (
+        baseline_view.ADDITIONAL_REPORTS_MARKER + "\n\n## Another architecture\n\nMeasured data.\n"
+    )
+    output.write_text("Old baseline text.\n\n" + extra)
+    monkeypatch.setattr(baseline_view, "__file__", str(tmp_path / "baseline_view.py"))
+    monkeypatch.setattr(sys, "argv", ["baseline_view.py"])
+
+    baseline_view.main()
+    expected = baseline_view.render_markdown(payload, "baseline.json").rstrip() + "\n\n" + extra
+    assert output.read_text() == expected
+    baseline_view.main()
+    assert output.read_text() == expected
+    assert json.loads(source.read_text()) == payload
 
 
 def _pool_with_fake_smi(monkeypatch, apps_rows: list[str]) -> bench_run.GpuPool:

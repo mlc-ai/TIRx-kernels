@@ -11,7 +11,7 @@ dense_blockscaled_gemm_persistent_dsrelu_quant.py.
 """
 
 import tirx_kernels.kern as K
-from tirx_kernels.target import prepare_cluster_shape, prepare_cuda_arch
+from tirx_kernels.runner import prepare_cluster_shape, prepare_cuda_arch
 
 _TRY_WAIT_TICKS = 10_000_000
 _SMEM_CAPACITY = 232_448
@@ -2333,9 +2333,7 @@ def _validate_with_oracle(data, config):
     expected_d_f32 = 2.0 * relu * c * prob
     expected_d = expected_d_f32.to(_torch_dtype(torch, config["d_dtype"]))
     expected_dprob = (relu.square() * c).sum(dim=1, keepdim=True)
-    d_atol, d_rtol = (
-        _FP32_TOLERANCE if config["d_dtype"] == "float32" else _LOW_PRECISION_TOLERANCE
-    )
+    d_atol, d_rtol = _FP32_TOLERANCE if config["d_dtype"] == "float32" else _LOW_PRECISION_TOLERANCE
     _assert_close(
         torch,
         data["tirx_d"]["source"],

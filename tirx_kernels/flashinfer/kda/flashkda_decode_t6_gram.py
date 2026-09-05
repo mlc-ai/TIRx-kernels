@@ -1122,7 +1122,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for FlashKDA cake T=6 decode")
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     capability = torch.cuda.get_device_capability(device)
     if not supports_sm100_kernel(capability):

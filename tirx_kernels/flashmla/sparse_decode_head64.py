@@ -2337,7 +2337,7 @@ def get_kernel(**kwargs: Any):
 
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     compact_kv = bool(kwargs.pop("_compact_kv", False))
     cfg = _cfg(**kwargs)
@@ -3228,7 +3228,7 @@ def run_test(**kwargs: Any) -> None:
         _import_flash_mla,
         run_flashmla_sparse_decode,
     )
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     flash_mla = _import_flash_mla()
     sched_meta, _ = flash_mla.get_mla_metadata()

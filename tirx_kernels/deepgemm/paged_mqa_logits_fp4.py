@@ -209,7 +209,7 @@ CONFIGS = DSA_INDEXER_LIKE_COVERAGE
 
 def load_deep_gemm_paged_mqa() -> tuple[Any, str]:
     from tirx_kernels.reference_requirements import load_reference
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
         return load_reference("deep-gemm"), "verified_thor_variant"
@@ -272,7 +272,7 @@ def _make_indices(config: PagedMQALogitsFP4Config) -> torch.Tensor | None:
 
 
 def _make_schedule_meta(deep_gemm, context_lens, page_size: int, num_sms: int, indices=None):
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() == "sm_110a":
         from ._paged_mqa_schedule import make_schedule_metadata
@@ -351,7 +351,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     config = _make_config(**kwargs)
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for SM100 FP4 paged MQA logits")
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     if not supports_sm100_kernel(torch.cuda.get_device_capability()):
         raise SkipTest("SM100 FP4 paged MQA logits requires SM100 or prepared Thor")

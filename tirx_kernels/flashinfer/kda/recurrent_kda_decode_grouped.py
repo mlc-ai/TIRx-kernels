@@ -826,7 +826,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
       ``[N, T]`` matrix ``base_rows * scratch_steps + arange(T)`` (``:293-296``),
       so its stride is the *allocated* step count, which may exceed ``T``.
     """
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":

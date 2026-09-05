@@ -23,7 +23,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.kern as K
-from tirx_kernels.target import prepare_cuda_arch
+from tirx_kernels.runner import prepare_cuda_arch
 
 D_HEAD = 128
 THREADS = 1024

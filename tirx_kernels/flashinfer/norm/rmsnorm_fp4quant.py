@@ -23,8 +23,7 @@ from tirx_kernels.flashinfer.utils.fp_quant import (
     pack_u32x2_to_u64,
     sf_offset_128x4,
 )
-from tirx_kernels.runner import bench
-from tirx_kernels.target import prepare_cluster_shape, prepare_cuda_arch
+from tirx_kernels.runner import bench, prepare_cluster_shape, prepare_cuda_arch
 
 KERNEL_META = {
     "name": "flashinfer_rmsnorm_fp4quant",

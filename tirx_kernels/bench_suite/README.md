@@ -9,49 +9,6 @@ report against `baseline.json`. References remain diagnostics — they never
 replace the direct verdict. The same flag exists on
 `python -m tirx_kernels.bench` for single-workload diagnostics.
 
-## Thor performance
-
-The following measurements cover 16 representative workloads from 15 kernels
-still declared for Jetson AGX Thor (`sm_110a`, 20 SM). They were collected on
-2026-09-04 before the rebase; full required-shape validation on the current
-revision is pending. `Source/TIRx` is the external baseline latency divided by
-TIRx latency, so values above 1 mean TIRx is faster. This comparison is separate
-from the suite's direct before/after gate.
-
-Each row reports arithmetic means from 15 Proton rounds on the same GPU, with
-1000 ms warmup, 100 ms repeat and 1 s cooldown. CV is the population standard
-deviation divided by the mean, shown as TIRx/source percentages.
-
-| Kernel | Config | External baseline | TIRx (µs) | Source (µs) | Source/TIRx | CV (%) | Run |
-|---|---|---|---:|---:|---:|---:|:---:|
-| `fast_topk_clusters` | `f32_plain_b64_l16384_k256` | FlashInfer | 79.021 | 198.150 | 2.5076 | 5.2/1.1 | A |
-| `filtered_topk` | `f32_plain_r64_l8192_k256` | FlashInfer | 46.489 | 52.644 | 1.1324 | 6.5/6.6 | A |
-| `flash_attention4` | `s4096_h32kv4_causal` | Upstream FA4 CuTeDSL | 899.927 | 948.046 | 1.0535 | 3.3/3.2 | A |
-| `flashinfer_fused_add_rmsnorm` | `fused_bf16_m32_h4096_xc_rc_pdl1` | FlashInfer CuTeDSL | 16.229 | 16.491 | 1.0162 | 5.5/3.5 | A |
-| `flashinfer_fused_dit_layernorm` | `grgb_bf16_b1_r1920` | FlashInfer CUDA | 395.515 | 400.998 | 1.0139 | 3.3/4.0 | A |
-| `flashinfer_layernorm` | `bf16_m128_h16384_xc_yc_pdl0_eps1e6` | FlashInfer CuTeDSL | 88.357 | 90.838 | 1.0281 | 5.0/2.9 | A |
-| `flashinfer_qk_rmsnorm` | `rms_bf16_b32_n32_h128_xc_yc_pdl0` | FlashInfer CuTeDSL | 7.671 | 7.631 | 0.9948 | 4.7/2.4 | A |
-| `flashinfer_rmsnorm` | `rms_bf16_m32_h4096_xc_yc_pdl1` | FlashInfer CuTeDSL | 12.014 | 12.018 | 1.0003 | 3.6/3.9 | B |
-| `fp16_bf16_gemm` | `bf16_4096x4096x4096` | cuBLAS | 1225.117 | 1535.717 | 1.2535 | 19.1/7.9 | A |
-| `fp16_bf16_gemm` | `fp16_4096x4096x4096` | cuBLAS | 1173.072 | 1473.222 | 1.2559 | 1.8/2.5 | A |
-| `gdn_decode_bf16_ilp4` | `t4_b4_h8_hv16_tv16` | FlashInfer CuTeDSL | 94.771 | 97.945 | 1.0335 | 4.0/2.2 | A |
-| `mxfp4_quantize` | `fp16_linear_m4096_k4096` | FlashInfer | 376.032 | 393.498 | 1.0464 | 9.0/7.0 | A |
-| `nvfp4_gemm` | `4096x4096x4096` | FlashInfer CUTLASS FP4 | 417.271 | 423.874 | 1.0158 | 2.0/3.5 | A |
-| `radix_topk_multi_cta` | `f32_basic_r4_l115188_k256_ctas3` | FlashInfer | 69.935 | 71.246 | 1.0187 | 4.3/4.2 | A |
-| `radix_topk_single_cta` | `f32_basic_r64_l32768_k512` | FlashInfer | 186.331 | 194.371 | 1.0432 | 0.5/0.6 | A |
-| `selective_state_update_mtp_horizontal` | `b512_h64_d64_s128_t6_r8_statebf16_official` | FlashInfer CUDA | 3528.172 | 3830.267 | 1.0856 | 0.0/0.0 | A |
-
-Run A is `final-classic-4d26851-official-15r/runs/1.json`, measured at
-`4d26851f`. Run B is `rms-static-cap56-level6-15r/runs/1.json`, a later targeted
-RMSNorm rerun at `4d26851f-dirty` with the restored level-6/56-register schedule;
-both used TVM `15b607d6`, FlashInfer `f2e04400`, upstream FA4 `0251105a`, and
-PyTorch `2.9.1+cu130` where applicable.
-
-Run A allowed up to four preparing children; Run B prepared one child. Both
-recorded zero GPU interference retries. CPU preparation overlap was not ruled
-out in Run A; use `--serial-prepare` for subsequent Thor measurements. The BF16
-GEMM row also has 19.1% TIRx CV, as shown above.
-
 ## Workloads
 
 `config/<category>/<kernel>.yaml` is the workload source of truth. Each

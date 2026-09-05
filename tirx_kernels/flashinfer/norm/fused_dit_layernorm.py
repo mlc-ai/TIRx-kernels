@@ -16,8 +16,7 @@ from typing import Any
 
 import tirx_kernels.kern as K
 from tirx_kernels.flashinfer.utils.fp_quant import cvt_e2m1x8
-from tirx_kernels.runner import bench
-from tirx_kernels.target import prepare_cuda_arch
+from tirx_kernels.runner import bench, prepare_cuda_arch
 
 KERNEL_META = {
     "name": "flashinfer_fused_dit_layernorm",

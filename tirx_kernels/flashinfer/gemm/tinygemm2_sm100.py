@@ -18,7 +18,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.kern as K
-from tirx_kernels.target import prepare_cuda_arch
+from tirx_kernels.runner import prepare_cuda_arch
 
 KERNEL_META = {
     "name": "tinygemm2_sm100",
@@ -77,7 +77,7 @@ def _validate_problem(B: int, O: int, K: int) -> None:
 
 
 def _require_supported_arch() -> None:
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     if not torch.cuda.is_available():
         raise SkipTest("TinyGEMM2 SM100 requires CUDA")

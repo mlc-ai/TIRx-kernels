@@ -121,7 +121,7 @@ def _configure_msa_thor_target(paths: list[str]) -> None:
     singleton, so first-time discovery must happen in a separate interpreter.
     The child only reads metadata and is forbidden to initialize CUDA.
     """
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepare_cuda_arch() != "sm_110a":
         return

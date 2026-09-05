@@ -49,7 +49,7 @@ import torch
 import torch.nn.functional as F
 
 import tirx_kernels.kern as K
-from tirx_kernels.target import prepare_cuda_arch
+from tirx_kernels.runner import prepare_cuda_arch
 
 D_HEAD = 128
 T_BLOCK = 64
@@ -4129,7 +4129,7 @@ def get_kernel(**kwargs: Any) -> dict[str, Any]:
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     """Allocate a deterministic CP chain and all persistent workspaces."""
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     cfg = _cfg(**kwargs)
     device = kwargs.get("device", "cuda")

@@ -61,7 +61,7 @@ class DistributedRuntime:
 def require_sm100(world_size: int) -> None:
     """Reject unsupported hosts before compiling or spawning workers."""
 
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     if not isinstance(world_size, int) or isinstance(world_size, bool) or world_size <= 0:
         raise ValueError("world_size must be a positive integer")

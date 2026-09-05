@@ -707,7 +707,7 @@ def run_gpu(prepared: PreparedBench, *, warmup=None, repeat=None, timer=None, **
     # cuBLAS path is architecture-generic and remains the exact Thor baseline.
     # Keep the additional DeepGEMM diagnostics unchanged on their supported
     # architectures instead of making an otherwise valid Thor comparison fail.
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.runner import prepare_cuda_arch
 
     if prepared.dtype == "bf16" and prepare_cuda_arch() != "sm_110a":
 

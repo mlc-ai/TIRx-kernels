@@ -1862,7 +1862,7 @@ def prepare_bench(**kwargs: Any):
 
 
 def run_test(**kwargs: Any) -> None:
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for GDN prefill SM100")
@@ -1904,7 +1904,7 @@ def run_gpu(
     timer: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    from tirx_kernels.target import supports_sm100_kernel
+    from tirx_kernels.runner import supports_sm100_kernel
 
     config = dict(prepared["config"])
     config.update(kwargs)
