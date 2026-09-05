@@ -7,9 +7,8 @@
 Three things must hold:
 
 * every registered kernel is linked exactly once, and the link opens its module;
-* a kernel restricted to a subset of CUDA architectures carries an inline tag
-  such as ``**[sm_100a, sm_110a]**`` after its link; all-architecture kernels
-  carry none;
+* untagged kernels declare the three default CUDA architectures; ``**[+sm_110a]**``
+  adds Thor to that set, while other tags list the complete supported set;
 * the architecture overview table lists the correct kernel count and the exact
   set of single-architecture kernels for each architecture.
 
@@ -24,7 +23,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 README = REPO_ROOT / "README.md"
-ALL_ARCHS = ("sm_100a", "sm_103a", "sm_107a", "sm_110a")
+DEFAULT_ARCHS = ("sm_100a", "sm_103a", "sm_107a")
+ALL_ARCHS = (*DEFAULT_ARCHS, "sm_110a")
 
 _LINK = re.compile(r"\[`([^`]+)`\]\((tirx_kernels/[^)]+\.py)\)( \*\*\[([^\]\n]*)\]\*\*)?")
 _TABLE_ROW = re.compile(r"^\| `(sm_[0-9]+[af]?)`[^|]*\| (\d+) \|([^|]*)\|$", re.MULTILINE)
@@ -61,7 +61,12 @@ def main() -> int:
         readme_path, tag = linked[name]
         if readme_path != path:
             errors.append(f"{name}: README links {readme_path}, module is {path}")
-        expected_tag = None if archs == ALL_ARCHS else ", ".join(archs)
+        if archs == DEFAULT_ARCHS:
+            expected_tag = None
+        elif archs == ALL_ARCHS:
+            expected_tag = "+sm_110a"
+        else:
+            expected_tag = ", ".join(archs)
         if tag != expected_tag:
             errors.append(
                 f"{name}: README tag is {tag}, runtime_cuda_archs {archs} needs {expected_tag}"
