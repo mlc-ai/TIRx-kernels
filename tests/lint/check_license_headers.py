@@ -115,6 +115,48 @@ FILE_OVERRIDES = {
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
+    "tirx_kernels/cudnn/flex_attention/forward_hd256_sm100.py": {
+        "spdx": "Apache-2.0 AND BSD-3-Clause",
+        "required_text": (
+            "Redistribution and use in source and binary forms",
+            'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+        ),
+    },
+    "tirx_kernels/cudnn/flex_attention/forward_sm103.py": {
+        "spdx": "Apache-2.0 AND BSD-3-Clause",
+        "required_text": (
+            "Redistribution and use in source and binary forms",
+            'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+        ),
+    },
+    "tirx_kernels/cudnn/flex_attention/flex_attention_backward_sm100.py": {
+        "spdx": "Apache-2.0 AND BSD-3-Clause",
+        "required_text": (
+            "Redistribution and use in source and binary forms",
+            'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+        ),
+    },
+    "tirx_kernels/cudnn/flex_attention/_flex_attention_backward_sm100/data.py": {
+        "spdx": "Apache-2.0 AND BSD-3-Clause",
+        "required_text": (
+            "Redistribution and use in source and binary forms",
+            'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+        ),
+    },
+    "tirx_kernels/cudnn/flex_attention/_flex_attention_backward_sm100/kernel.py": {
+        "spdx": "Apache-2.0 AND BSD-3-Clause",
+        "required_text": (
+            "Redistribution and use in source and binary forms",
+            'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+        ),
+    },
+    "tirx_kernels/cudnn/flex_attention/_flex_attention_backward_sm100/kernel_2cta.py": {
+        "spdx": "Apache-2.0 AND BSD-3-Clause",
+        "required_text": (
+            "Redistribution and use in source and binary forms",
+            'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+        ),
+    },
     "tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
@@ -280,6 +322,9 @@ def self_test() -> int:
     msa = dict(project="MSA", url="https://github.com/MiniMax-AI/MSA")
     fastcu = dict(project="fast.cu", url="https://github.com/pranjalssh/fast.cu")
     bsa_combine = "tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py"
+    flex_forward = "tirx_kernels/cudnn/flex_attention/forward_hd256_sm100.py"
+    flex_forward_sm103 = "tirx_kernels/cudnn/flex_attention/forward_sm103.py"
+    flex_backward = "tirx_kernels/cudnn/flex_attention/flex_attention_backward_sm100.py"
     gdn = "tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py"
     gdn_cp = "tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py"
     bmm_fp8_rubin = "tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py"
@@ -404,6 +449,69 @@ def self_test() -> int:
             "cudnn-frontend combine port missing BSD disclaimer",
             bsa_combine,
             bsd_port.format(spdx="Apache-2.0 AND MIT AND BSD-3-Clause", **cudnn).replace(
+                'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+                "missing disclaimer",
+            ),
+            True,
+        ),
+        (
+            "valid cudnn-frontend BSD flex-attention port",
+            flex_forward,
+            bsd_port.format(spdx="Apache-2.0 AND BSD-3-Clause", **cudnn),
+            False,
+        ),
+        (
+            "cudnn-frontend flex-attention port tagged plain Apache-2.0",
+            flex_forward,
+            bsd_port.format(spdx="Apache-2.0", **cudnn),
+            True,
+        ),
+        (
+            "cudnn-frontend flex-attention port missing BSD disclaimer",
+            flex_forward,
+            bsd_port.format(spdx="Apache-2.0 AND BSD-3-Clause", **cudnn).replace(
+                'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+                "missing disclaimer",
+            ),
+            True,
+        ),
+        (
+            "valid cudnn-frontend BSD generic flex-attention port",
+            flex_forward_sm103,
+            bsd_port.format(spdx="Apache-2.0 AND BSD-3-Clause", **cudnn),
+            False,
+        ),
+        (
+            "cudnn-frontend generic flex-attention port tagged plain Apache-2.0",
+            flex_forward_sm103,
+            bsd_port.format(spdx="Apache-2.0", **cudnn),
+            True,
+        ),
+        (
+            "cudnn-frontend generic flex-attention port missing BSD disclaimer",
+            flex_forward_sm103,
+            bsd_port.format(spdx="Apache-2.0 AND BSD-3-Clause", **cudnn).replace(
+                'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+                "missing disclaimer",
+            ),
+            True,
+        ),
+        (
+            "valid cudnn-frontend BSD flex-attention backward port",
+            flex_backward,
+            bsd_port.format(spdx="Apache-2.0 AND BSD-3-Clause", **cudnn),
+            False,
+        ),
+        (
+            "cudnn-frontend flex-attention backward port tagged plain Apache-2.0",
+            flex_backward,
+            bsd_port.format(spdx="Apache-2.0", **cudnn),
+            True,
+        ),
+        (
+            "cudnn-frontend flex-attention backward port missing BSD disclaimer",
+            flex_backward,
+            bsd_port.format(spdx="Apache-2.0 AND BSD-3-Clause", **cudnn).replace(
                 'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
                 "missing disclaimer",
             ),

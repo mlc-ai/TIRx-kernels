@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
 """FP4 instruction descriptors must encode SM107 v1 even for dense MMA."""
 
 from tirx_kernels.registry import load_kernel

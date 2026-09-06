@@ -71,6 +71,23 @@ for row in T.unroll(ROWS):
     _produce_output(row, _derive(metadata))
 ```
 
+When two same-shaped inputs exist only to form one output, reuse those inputs
+instead of allocating a third fragment. Scale or clear the first input in
+place, scale the second into its final temporary form, then accumulate it into
+the first.
+
+```python
+# before: three fragments are simultaneously live.
+combined = K.alloc_local((WIDTH,), "float32")
+_scale(values0, scale0, combined)
+_scale_add(values1, scale1, combined)
+
+# after: values0 is the combined result and values1 is the scaled temporary.
+_scale_in_place(values0, scale0)
+_scale_in_place(values1, scale1)
+_add_in_place(values0, values1)
+```
+
 ## Rationale
 
 One measured FP32 bias hoist regressed 6.6%; by contrast, staging a larger load
@@ -98,6 +115,14 @@ to 102, eliminated the stack and static local-memory instructions, and improved
 the same workloads by another 1.12% and 0.88%. Correctness passed for both output
 orientations after each rewrite.
 
+In a two-stream correction epilogue, three 16-float fragments plus a two-float
+temporary were live under a 64-register role budget. Reusing the two input
+fragments in place removed eighteen live FP32 values. Two representative paths
+improved from 87.407 to 80.320 us and from 64.513 to 49.870 us, moving their
+reference ratios from 0.953x to 1.039x and from 0.923x to 1.191x. Tight source
+and independent-oracle comparisons passed. The shorter lifetime also changed
+the best role-register split, so the neighboring budget sweep had to be repeated.
+
 ## Boundary
 
 Do not shorten a fragment lifetime across an ordering that belongs to the
@@ -124,9 +149,17 @@ profile from 23,294 to 22,771 cycles, but its critical benchmark ratio regressed
 from 0.987x to 0.986x. The shortest apparent lifetime was not the best accepted
 schedule; the final form kept reduction before publication.
 
+In-place reuse is legal only after every use of the overwritten input has been
+accounted for, including later scale, normalization, and packed-conversion
+branches. Preserve the original arithmetic and conversion order when tight
+comparison requires it; this transformation is about storage lifetime, not
+reassociation.
+
 ## Verification
 
 Compare registers and dynamic LDL/STL before instruction count, and sweep the
 tightest specialization where one spill can reverse the result. Verify the
 compute, reduction, first-publication, and release order in emitted PTX/SASS
-before treating a shorter lifetime as a legal candidate.
+before treating a shorter lifetime as a legal candidate. For in-place reuse,
+also test zero/nonzero scale branches and every output packing type, then repeat
+the role-budget sweep because the prior optimum may no longer apply.

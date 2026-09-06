@@ -220,16 +220,12 @@ def test_default_roster_is_available_on_sm103_and_sm107():
     def kernels(rows):
         return {workload["kernel"] for workload in rows}
 
-    # 262 rows run on these architectures; thirteen restricted kernels contribute three rows
-    # each: cake_vsa_{blk128_compact,longseq,ultrasparse_bsr}_sm100 (sm_100a),
-    # {bmm_fp8_rubin,dense_blockscaled_gemm_sm107,grouped_gemm_masked_rubin,
-    # blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin} (sm_107a), and
-    # blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103,
-    # blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103,
-    # blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103, cake_vsa_longseq_sm103,
-    # fastcu_nvfp4_gemm_gb300, and flash_attention4_fp4 (sm_103a).
+    # There are 310 default rows. The three FlexAttention kernels contribute three rows each:
+    # backward is sm_100a-only, forward_hd256 supports sm_100a/sm_103a, and generic forward is
+    # sm_103a-only. The exact compatible and incompatible rosters below also cover the existing
+    # single-architecture kernels from the mirror.
     assert len(sm107) == 274
-    assert len(sm107_incompatible) == 27
+    assert len(sm107_incompatible) == 36
     assert kernels(sm107_incompatible) == {
         "blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103",
         "blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103",
@@ -238,22 +234,26 @@ def test_default_roster_is_available_on_sm103_and_sm107():
         "cake_vsa_longseq_sm100",
         "cake_vsa_longseq_sm103",
         "cake_vsa_ultrasparse_bsr_sm100",
+        "cudnn_sm100_flex_attention_backward",
+        "cudnn_sm100_flex_attention_forward_hd256",
+        "cudnn_sm103_flex_attention_forward",
         "fastcu_nvfp4_gemm_gb300",
         "flash_attention4_fp4",
     }
-    assert len(sm103) == 280
-    assert len(sm103_incompatible) == 21
+    assert len(sm103) == 286
+    assert len(sm103_incompatible) == 24
     assert kernels(sm103_incompatible) == {
         "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin",
         "bmm_fp8_rubin",
         "cake_vsa_blk128_compact_sm100",
         "cake_vsa_longseq_sm100",
         "cake_vsa_ultrasparse_bsr_sm100",
+        "cudnn_sm100_flex_attention_backward",
         "dense_blockscaled_gemm_sm107",
         "grouped_gemm_masked_rubin",
     }
-    assert len(sm100) == 271
-    assert len(sm100_incompatible) == 30
+    assert len(sm100) == 277
+    assert len(sm100_incompatible) == 33
     assert kernels(sm100_incompatible) == {
         "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin",
         "blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103",
@@ -261,6 +261,7 @@ def test_default_roster_is_available_on_sm103_and_sm107():
         "bmm_fp8_rubin",
         "blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103",
         "cake_vsa_longseq_sm103",
+        "cudnn_sm103_flex_attention_forward",
         "dense_blockscaled_gemm_sm107",
         "grouped_gemm_masked_rubin",
         "fastcu_nvfp4_gemm_gb300",

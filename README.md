@@ -17,8 +17,8 @@ keeps them in sync.
 
 | Architecture | Kernels |
 |---|---:|
-| `sm_100a` | 101 |
-| `sm_103a` | 96 |
+| `sm_100a` | 103 |
+| `sm_103a` | 98 |
 | `sm_107a` | 94 |
 | `sm_110a` | 4 |
 
@@ -67,6 +67,10 @@ contract and results.
   [`cudnn_sm100_gdn_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn_bprop_f16.py)
 - **CSA compression:**
   [`cudnn_sm100_csa_compressor_fwd`](tirx_kernels/cudnn/csa/compressor_fwd_sm100.py)
+- **Flex attention:**
+  [`cudnn_sm100_flex_attention_forward_hd256`](tirx_kernels/cudnn/flex_attention/forward_hd256_sm100.py) ⟨sm_100a sm_103a⟩,
+  [`cudnn_sm103_flex_attention_forward`](tirx_kernels/cudnn/flex_attention/forward_sm103.py) ⟨sm_103a⟩,
+  [`cudnn_sm100_flex_attention_backward`](tirx_kernels/cudnn/flex_attention/flex_attention_backward_sm100.py) ⟨sm_100a⟩
 - **Sparse attention:**
   [`cudnn_sm100_dsa_sparse_attention_backward`](tirx_kernels/cudnn/dsa/sparse_attention_backward.py),
   [`cudnn_sm100_bsa_forward_blk128`](tirx_kernels/cudnn/bsa/block_sparse_attention_forward_sm100_blk128.py),
