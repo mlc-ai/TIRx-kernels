@@ -17,9 +17,9 @@ keeps them in sync.
 
 | Architecture | Kernels |
 |---|---:|
-| `sm_100a` | 103 |
-| `sm_103a` | 98 |
-| `sm_107a` | 94 |
+| `sm_100a` | 104 |
+| `sm_103a` | 99 |
+| `sm_107a` | 95 |
 | `sm_110a` | 12 |
 
 ### Native TIRx
@@ -94,6 +94,8 @@ Grouped by the FlashInfer Python entry point each port backs.
 - **`flashinfer.activation`:**
   [`act_and_mul`](tirx_kernels/flashinfer/activation/act_and_mul.py),
   [`silu_and_mul_nvfp4_experts_quantize`](tirx_kernels/flashinfer/activation/silu_and_mul_nvfp4_experts_quantize.py)
+- **`flashinfer.cascade`:**
+  [`merge_state`](tirx_kernels/flashinfer/cascade/merge_state.py)
 - **`flashinfer.quantization`:**
   [`nvfp4_quantize`](tirx_kernels/flashinfer/quantization/nvfp4_quantize.py),
   [`nvfp4_quantize_per_token`](tirx_kernels/flashinfer/quantization/nvfp4_quantize_per_token.py),
