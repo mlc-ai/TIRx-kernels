@@ -40,11 +40,6 @@ comparisons.
 | [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_uniform` | B200 | Proton | 212.998 | FlashKDA | 484.290 | 2.274x | `kda_forward-20260901-235533` v68 promotion rerun |
 | [`agent_evolved_moe_fp8_blockscale_dsv3`](moe_fp8_blockscale_dsv3.py) | `official_19_geomean` | B200 | CUPTI | 177.844 | FlashInfer TRT-LLM FP8 MoE | 265.982 | 1.496x | `moe-20260908-004417` full-sweep promotion run |
 
-The MoE row reports geometric means over all 19 official kcoral shapes from one
-candidate/reference sweep. T=32768 is a stress-only shape and is excluded from
-the geometric mean. All 20 rows passed 22 checks with repeatable output and
-matched ratio 1.0.
-
 ## Updating the table
 
 Run all registered agent-evolved workloads and their references through the
