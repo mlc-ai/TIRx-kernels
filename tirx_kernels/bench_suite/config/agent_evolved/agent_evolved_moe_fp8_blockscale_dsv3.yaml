@@ -1,3 +1,23 @@
 kernel: agent_evolved_moe_fp8_blockscale_dsv3
+selection_rationale: T=1, T=901, and T=14107 span the small, medium, and large official workloads; T=32768 remains an explicit non-default stress case.
 configs:
-  - {config: t14107, default: true, timer: proton}
+  - {config: t7, default: false, timer: proton}
+  - {config: t1, default: true, selection_role: small, timer: proton}
+  - {config: t32, default: false, timer: proton}
+  - {config: t80, default: false, timer: proton}
+  - {config: t901, default: true, selection_role: medium, timer: proton}
+  - {config: t16, default: false, timer: proton}
+  - {config: t15, default: false, timer: proton}
+  - {config: t14, default: false, timer: proton}
+  - {config: t14107, default: true, selection_role: large, timer: proton}
+  - {config: t11948, default: false, timer: proton}
+  - {config: t62, default: false, timer: proton}
+  - {config: t59, default: false, timer: proton}
+  - {config: t58, default: false, timer: proton}
+  - {config: t57, default: false, timer: proton}
+  - {config: t56, default: false, timer: proton}
+  - {config: t55, default: false, timer: proton}
+  - {config: t54, default: false, timer: proton}
+  - {config: t53, default: false, timer: proton}
+  - {config: t52, default: false, timer: proton}
+  - {config: t32768, default: false, timer: proton}

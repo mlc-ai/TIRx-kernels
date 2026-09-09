@@ -1777,14 +1777,38 @@ CONFIGS = [
     }
 ]
 
+_OFFICIAL_SEQ_LENS = (
+    7,
+    1,
+    32,
+    80,
+    901,
+    16,
+    15,
+    14,
+    14107,
+    11948,
+    62,
+    59,
+    58,
+    57,
+    56,
+    55,
+    54,
+    53,
+    52,
+)
+_STRESS_SEQ_LENS = (32768,)
+
 BENCH_CONFIGS = [
     {
-        "label": "t14107",
-        "seq_len": 14107,
+        "label": f"t{seq_len}",
+        "seq_len": seq_len,
         "seed": 0,
         "local_expert_offset": 0,
         "routed_scaling_factor": 2.5,
     }
+    for seq_len in (*_OFFICIAL_SEQ_LENS, *_STRESS_SEQ_LENS)
 ]
 
 
