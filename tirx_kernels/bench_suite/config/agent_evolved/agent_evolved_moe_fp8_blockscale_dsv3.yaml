@@ -1,0 +1,3 @@
+kernel: agent_evolved_moe_fp8_blockscale_dsv3
+configs:
+  - {config: t14107, default: true, timer: proton}
