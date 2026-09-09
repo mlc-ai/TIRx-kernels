@@ -220,11 +220,11 @@ def test_default_roster_is_available_on_sm103_and_sm107():
     def kernels(rows):
         return {workload["kernel"] for workload in rows}
 
-    # There are 310 default rows. The three FlexAttention kernels contribute three rows each:
+    # There are 313 default rows. The three FlexAttention kernels contribute three rows each:
     # backward is sm_100a-only, forward_hd256 supports sm_100a/sm_103a, and generic forward is
     # sm_103a-only. The exact compatible and incompatible rosters below also cover the existing
     # single-architecture kernels from the mirror.
-    assert len(sm107) == 274
+    assert len(sm107) == 277
     assert len(sm107_incompatible) == 36
     assert kernels(sm107_incompatible) == {
         "blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103",
@@ -240,7 +240,7 @@ def test_default_roster_is_available_on_sm103_and_sm107():
         "fastcu_nvfp4_gemm_gb300",
         "flash_attention4_fp4",
     }
-    assert len(sm103) == 286
+    assert len(sm103) == 289
     assert len(sm103_incompatible) == 24
     assert kernels(sm103_incompatible) == {
         "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin",
@@ -252,7 +252,7 @@ def test_default_roster_is_available_on_sm103_and_sm107():
         "dense_blockscaled_gemm_sm107",
         "grouped_gemm_masked_rubin",
     }
-    assert len(sm100) == 277
+    assert len(sm100) == 280
     assert len(sm100_incompatible) == 33
     assert kernels(sm100_incompatible) == {
         "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin",
