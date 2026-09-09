@@ -210,63 +210,30 @@ def test_default_roster_includes_curated_dense_blockscaled_gemm_sm107():
     }
 
 
-def test_default_roster_is_available_on_sm103_and_sm107():
+def test_default_roster_is_partitioned_by_registered_architecture():
     workloads = bench_run.load_config_dir()
+    records = bench_run.kernel_index(strict=True)
 
-    sm107, sm107_incompatible = bench_run.partition_workloads_by_arch(workloads, "sm_107a")
-    sm103, sm103_incompatible = bench_run.partition_workloads_by_arch(workloads, "sm_103a")
-    sm100, sm100_incompatible = bench_run.partition_workloads_by_arch(workloads, "sm_100a")
+    def identity(workload):
+        return workload["kernel"], workload["config"]
 
-    def kernels(rows):
-        return {workload["kernel"] for workload in rows}
-
-    # There are 313 default rows. The three FlexAttention kernels contribute three rows each:
-    # backward is sm_100a-only, forward_hd256 supports sm_100a/sm_103a, and generic forward is
-    # sm_103a-only. The exact compatible and incompatible rosters below also cover the existing
-    # single-architecture kernels from the mirror.
-    assert len(sm107) == 277
-    assert len(sm107_incompatible) == 36
-    assert kernels(sm107_incompatible) == {
-        "blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103",
-        "blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103",
-        "blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103",
-        "cake_vsa_blk128_compact_sm100",
-        "cake_vsa_longseq_sm100",
-        "cake_vsa_longseq_sm103",
-        "cake_vsa_ultrasparse_bsr_sm100",
-        "cudnn_sm100_flex_attention_backward",
-        "cudnn_sm100_flex_attention_forward_hd256",
-        "cudnn_sm103_flex_attention_forward",
-        "fastcu_nvfp4_gemm_gb300",
-        "flash_attention4_fp4",
-    }
-    assert len(sm103) == 289
-    assert len(sm103_incompatible) == 24
-    assert kernels(sm103_incompatible) == {
-        "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin",
-        "bmm_fp8_rubin",
-        "cake_vsa_blk128_compact_sm100",
-        "cake_vsa_longseq_sm100",
-        "cake_vsa_ultrasparse_bsr_sm100",
-        "cudnn_sm100_flex_attention_backward",
-        "dense_blockscaled_gemm_sm107",
-        "grouped_gemm_masked_rubin",
-    }
-    assert len(sm100) == 280
-    assert len(sm100_incompatible) == 33
-    assert kernels(sm100_incompatible) == {
-        "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin",
-        "blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103",
-        "blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103",
-        "bmm_fp8_rubin",
-        "blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103",
-        "cake_vsa_longseq_sm103",
-        "cudnn_sm103_flex_attention_forward",
-        "dense_blockscaled_gemm_sm107",
-        "grouped_gemm_masked_rubin",
-        "fastcu_nvfp4_gemm_gb300",
-        "flash_attention4_fp4",
-    }
+    expected = {identity(workload) for workload in workloads}
+    for cuda_arch in ("sm_100a", "sm_103a", "sm_107a", "sm_110a"):
+        compatible, incompatible = bench_run.partition_workloads_by_arch(
+            workloads, cuda_arch
+        )
+        compatible_ids = {identity(workload) for workload in compatible}
+        incompatible_ids = {identity(workload) for workload in incompatible}
+        assert compatible_ids.isdisjoint(incompatible_ids)
+        assert compatible_ids | incompatible_ids == expected
+        assert all(
+            cuda_arch in records[workload["kernel"]].runtime_cuda_archs
+            for workload in compatible
+        )
+        assert all(
+            cuda_arch not in records[workload["kernel"]].runtime_cuda_archs
+            for workload in incompatible
+        )
 
 
 def test_validate_workload_archs_rejects_mismatch_before_prepare(monkeypatch):

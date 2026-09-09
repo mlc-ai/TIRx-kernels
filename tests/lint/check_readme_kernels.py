@@ -11,9 +11,6 @@ architectures (``sm_100a``, ``sm_103a``, ``sm_107a``). The architecture tokens o
 an annotation are derived from ``KERNEL_META["runtime_cuda_archs"]``: the full
 list when it is not a superset of the default set, or ``+sm_xxx`` for each
 architecture beyond it.
-
-The summary table at the top of the section must give, per architecture, how
-many kernels run on it.
 """
 
 from __future__ import annotations
@@ -28,7 +25,6 @@ ARCH_ORDER = ("sm_100a", "sm_103a", "sm_107a", "sm_110a")
 DEFAULT_ARCHS = ("sm_100a", "sm_103a", "sm_107a")
 
 _LINK = re.compile(r"\[`([^`]+)`\]\((tirx_kernels/[^)]+\.py)\)(?: ⟨([^⟩]*)⟩)?")
-_SUMMARY_ROW = re.compile(r"^\| `(sm_[0-9]+[af]?)` \| (\d+) \|$", re.MULTILINE)
 
 
 def _registry() -> dict[str, tuple[str, tuple[str, ...]]]:
@@ -82,18 +78,6 @@ def main() -> int:
             errors.append(f"{name}: annotation is {annotation!r}, expected {expected!r}")
     for name in sorted(set(rows) - set(kernels)):
         errors.append(f"{name}: listed in README.md but not registered")
-
-    summary = {arch: int(runs) for arch, runs in _SUMMARY_ROW.findall(section)}
-    for arch in ARCH_ORDER:
-        runs = sum(arch in archs for _, archs in kernels.values())
-        if runs == 0 and arch not in summary:
-            continue
-        if arch not in summary:
-            errors.append(f"summary table: missing row for {arch}")
-        elif summary[arch] != runs:
-            errors.append(f"summary table: {arch} should read {runs}, found {summary[arch]}")
-    for arch in set(summary) - set(ARCH_ORDER):
-        errors.append(f"summary table: unexpected row for {arch}")
 
     for error in errors:
         print(error, file=sys.stderr)

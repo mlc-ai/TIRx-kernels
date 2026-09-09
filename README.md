@@ -15,13 +15,6 @@ runs on that architecture in addition to the default three. Annotations follow
 `KERNEL_META["runtime_cuda_archs"]` and `tests/lint/check_readme_kernels.py`
 keeps them in sync.
 
-| Architecture | Kernels |
-|---|---:|
-| `sm_100a` | 104 |
-| `sm_103a` | 99 |
-| `sm_107a` | 95 |
-| `sm_110a` | 12 |
-
 ### Native TIRx
 
 - **GEMM:**
@@ -43,6 +36,8 @@ contract and results.
 
 - **KDA forward:**
   [`agent_evolved_kda_forward_b1_t8192`](tirx_kernels/agent_evolved/kda_forward_b1_t8192.py)
+- **DeepSeek-V3 FP8 MoE:**
+  [`agent_evolved_moe_fp8_blockscale_dsv3`](tirx_kernels/agent_evolved/moe_fp8_blockscale_dsv3.py) ⟨sm_100a⟩
 
 ### cuDNN Frontend ports
 

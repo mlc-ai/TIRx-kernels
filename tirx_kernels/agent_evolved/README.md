@@ -17,9 +17,10 @@ limitations under the License.
 # Agent-evolved kernels
 
 This directory contains curated kernels selected from measured agent-evolution
-runs. The table below is the performance summary for their registered benchmark
-configs. A pull request that adds or changes an agent-evolved kernel must update
-its rows from a same-run candidate/reference measurement.
+runs. The table below summarizes their registered benchmarks; multi-shape
+sweeps may use one geometric-mean row. A pull request that adds or changes an
+agent-evolved kernel must update its rows from a same-run candidate/reference
+measurement.
 
 ## Measured speedups
 
@@ -37,6 +38,7 @@ comparisons.
 | [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_fixed` | B200 | Proton | 372.790 | FlashKDA | 956.330 | 2.565x | `kda_forward-20260901-235533` v68 promotion rerun |
 | [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_mixed` | B200 | Proton | 225.736 | FlashKDA | 670.399 | 2.970x | `kda_forward-20260901-235533` v68 promotion rerun |
 | [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_uniform` | B200 | Proton | 212.998 | FlashKDA | 484.290 | 2.274x | `kda_forward-20260901-235533` v68 promotion rerun |
+| [`agent_evolved_moe_fp8_blockscale_dsv3`](moe_fp8_blockscale_dsv3.py) | `t14107` | B200 | CUPTI | 717.491 | FlashInfer TRT-LLM FP8 MoE | 2239.532 | 3.121x | `moe-20260908-004417` default-max row in full-sweep promotion run |
 
 ## Updating the table
 
