@@ -38,7 +38,7 @@ comparisons.
 | [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_fixed` | B200 | Proton | 372.790 | FlashKDA | 956.330 | 2.565x | `kda_forward-20260901-235533` v68 promotion rerun |
 | [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_mixed` | B200 | Proton | 225.736 | FlashKDA | 670.399 | 2.970x | `kda_forward-20260901-235533` v68 promotion rerun |
 | [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_uniform` | B200 | Proton | 212.998 | FlashKDA | 484.290 | 2.274x | `kda_forward-20260901-235533` v68 promotion rerun |
-| [`agent_evolved_moe_fp8_blockscale_dsv3`](moe_fp8_blockscale_dsv3.py) | `official_19_geomean` | B200 | CUPTI | 177.844 | FlashInfer TRT-LLM FP8 MoE | 265.982 | 1.496x | `moe-20260908-004417` full-sweep promotion run |
+| [`agent_evolved_moe_fp8_blockscale_dsv3`](moe_fp8_blockscale_dsv3.py) | `t14107` | B200 | CUPTI | 717.491 | FlashInfer TRT-LLM FP8 MoE | 2239.532 | 3.121x | `moe-20260908-004417` default-max row in full-sweep promotion run |
 
 ## Updating the table
 
