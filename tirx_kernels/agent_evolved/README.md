@@ -45,15 +45,11 @@ the B200 run using FlashKDA commit `1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b`.
 | [`agent_evolved_kda_backward_packed`](kda_backward_packed.py) | `packed_1024x8_h96` | B200 | kcoral | 829.482 | FLA `chunk_kda_bwd` | 7695.851 | 9.278x | `kda-bwd-portfolio-carry-3` `fused-zfold` all-shape sweep |
 | [`agent_evolved_kda_backward_packed`](kda_backward_packed.py) | 17-workload geomean | B200 | kcoral | 249.000 | FLA `chunk_kda_bwd` | 2132.204 | 8.563x | `kda-bwd-portfolio-carry-3` `fused-zfold` all-shape sweep |
 
-The two KDA-backward rows are not yet bench-suite Proton measurements. Both
-come from one official all-shape scoring run of the evolution harness on the
-kcoral benchmark server, which reports GPU-only latency and measured candidate
-and reference in that same run. The first row is the primary
-`kda-bwd-packed-1024x8-h96` workload; the second aggregates all seventeen
-official workloads, and its speedup is the ratio of the two geometric means,
-not a mean of per-workload ratios. Per-workload figures for that run are in the
-run's `frontier/fused-zfold/VALIDATION.md`. Replace both rows with `Proton`
-rows from the command below the next time a B200 is available.
+For `kcoral` rows the timer is the evolution harness's benchmark server, which
+reports GPU-only latency for candidate and reference in one run. The
+`17-workload geomean` row aggregates all seventeen official KDA-backward
+workloads; its speedup is the ratio of the two geometric means, not a mean of
+per-workload ratios.
 
 ## Updating the table
 
