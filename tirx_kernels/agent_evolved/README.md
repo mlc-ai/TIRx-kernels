@@ -25,19 +25,22 @@ measurement.
 ## Measured speedups
 
 `Speedup` is `reference GPU time / TIRx GPU time`. Values greater than one mean
-TIRx is faster. For Proton rows, the timer reports the sum of GPU leaf-kernel
-durations in each scope; it excludes CPU launch time and gaps between kernels,
-so those rows are GPU kernel-time comparisons, not end-to-end operator latency
-comparisons.
+TIRx is faster. The KDA rows below use CUDA-event timings around the launched
+GPU work; they exclude compilation and host-side setup, so they are GPU
+kernel-time comparisons, not end-to-end operator latency comparisons. The PR
+kernel and FlashKDA used the same inputs, with five warmups and 30 timed
+iterations per configuration. The reported values are the median timings from
+the B200 run using FlashKDA commit `1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b`.
 
 | Kernel | Config | GPU | Timer | TIRx (us) | Reference | Reference (us) | Speedup | Evidence |
 |---|---|---|---|---:|---|---:|---:|---|
-| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h96_fixed` | B200 | Proton | 367.937 | FlashKDA | 1048.609 | 2.850x | `kda_forward-20260901-235533` v68 promotion rerun |
-| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h96_mixed` | B200 | Proton | 315.741 | FlashKDA | 889.884 | 2.818x | `kda_forward-20260901-235533` v68 promotion rerun |
-| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h96_uniform` | B200 | Proton | 313.221 | FlashKDA | 714.718 | 2.282x | `kda_forward-20260901-235533` v68 promotion rerun |
-| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_fixed` | B200 | Proton | 372.790 | FlashKDA | 956.330 | 2.565x | `kda_forward-20260901-235533` v68 promotion rerun |
-| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_mixed` | B200 | Proton | 225.736 | FlashKDA | 670.399 | 2.970x | `kda_forward-20260901-235533` v68 promotion rerun |
-| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_uniform` | B200 | Proton | 212.998 | FlashKDA | 484.290 | 2.274x | `kda_forward-20260901-235533` v68 promotion rerun |
+| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h96_fixed` | B200 | CUDA events | 354.700 | FlashKDA | 1081.000 | 3.048x | B200 run; 5 warmups, 30-event median |
+| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h96_mixed` | B200 | CUDA events | 296.500 | FlashKDA | 921.800 | 3.109x | B200 run; 5 warmups, 30-event median |
+| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h96_uniform` | B200 | CUDA events | 329.300 | FlashKDA | 747.100 | 2.268x | B200 run; 5 warmups, 30-event median |
+| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_fixed` | B200 | CUDA events | 353.500 | FlashKDA | 986.000 | 2.790x | B200 run; 5 warmups, 30-event median |
+| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_mixed` | B200 | CUDA events | 215.400 | FlashKDA | 700.300 | 3.251x | B200 run; 5 warmups, 30-event median |
+| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_uniform` | B200 | CUDA events | 240.500 | FlashKDA | 514.800 | 2.141x | B200 run; 5 warmups, 30-event median |
+| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `all-six-geomean` | B200 | CUDA events | 293.115 | FlashKDA | 801.260 | 2.734x | geometric mean of the six rows above |
 | [`agent_evolved_moe_fp8_blockscale_dsv3`](moe_fp8_blockscale_dsv3.py) | `t14107` | B200 | CUPTI | 717.491 | FlashInfer TRT-LLM FP8 MoE | 2239.532 | 3.121x | `moe-20260908-004417` default-max row in full-sweep promotion run |
 
 ## Updating the table
