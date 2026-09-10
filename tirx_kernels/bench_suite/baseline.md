@@ -577,6 +577,29 @@ Grouped workloads show one row per config and one timing column per implementati
 | `perf_b8_s8192_h64_nostate` | tirx | 48076.4737 | cudnn_frontend | 49628.3408 | 1.032 | — |
 | `perf_b8_s8192_h64_state` | tirx | 90596.7627 | cudnn_frontend | 91286.9752 | 1.008 | — |
 
+### cudnn_sm100_gdn2_recompute_f16
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `perf_b16_s8192_h64_nostate` | tirx | 155070.8620 | cudnn_frontend | 159703.9119 | 1.030 | — |
+| `perf_b16_s8192_h64_state` | tirx | 156298.5425 | cudnn_frontend | 161099.5008 | 1.031 | — |
+| `perf_b1_s8192_h64_nostate` | tirx | 11509.1100 | cudnn_frontend | 11647.3288 | 1.012 | — |
+| `perf_b1_s8192_h64_state` | tirx | 11614.8180 | cudnn_frontend | 11779.7155 | 1.014 | — |
+| `perf_b2_s8192_h64_nostate` | tirx | 23095.8568 | cudnn_frontend | 23228.4264 | 1.006 | — |
+| `perf_b2_s8192_h64_state` | tirx | 23240.6585 | cudnn_frontend | 23429.0805 | 1.008 | — |
+| `perf_b4_s16384_h64_nostate` | tirx | 77818.0166 | cudnn_frontend | 79805.2748 | 1.026 | — |
+| `perf_b4_s16384_h64_state` | tirx | 77934.0186 | cudnn_frontend | 79998.0010 | 1.026 | — |
+| `perf_b4_s2048_h64_nostate` | tirx | 11353.1798 | cudnn_frontend | 11619.6198 | 1.023 | — |
+| `perf_b4_s2048_h64_state` | tirx | 11764.0243 | cudnn_frontend | 11979.3038 | 1.018 | — |
+| `perf_b4_s32768_h64_nostate` | tirx | 155591.2415 | cudnn_frontend | 159374.3670 | 1.024 | — |
+| `perf_b4_s32768_h64_state` | tirx | 156032.5627 | cudnn_frontend | 159735.5274 | 1.024 | — |
+| `perf_b4_s4096_h64_nostate` | tirx | 22992.7032 | cudnn_frontend | 23278.9249 | 1.012 | — |
+| `perf_b4_s4096_h64_state` | tirx | 23258.3996 | cudnn_frontend | 23580.7693 | 1.014 | — |
+| `perf_b4_s8192_h64_nostate` | tirx | 45392.1619 | cudnn_frontend | 46261.4040 | 1.019 | — |
+| `perf_b4_s8192_h64_state` | tirx | 45835.6203 | cudnn_frontend | 46391.9832 | 1.012 | — |
+| `perf_b8_s8192_h64_nostate` | tirx | 77944.0310 | cudnn_frontend | 79614.7813 | 1.021 | — |
+| `perf_b8_s8192_h64_state` | tirx | 77929.7797 | cudnn_frontend | 80522.5522 | 1.033 | — |
+
 ### fast_topk_clusters
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
