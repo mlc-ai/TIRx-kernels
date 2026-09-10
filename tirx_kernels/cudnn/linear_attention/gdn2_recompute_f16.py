@@ -11,13 +11,16 @@ Upstream source:
 driven by ``chunk_gdn2_recompute_sm100``).
 """
 
+import os
+
 import tirx_kernels.kern as K
+from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, hardware_num_sms
 from tvm.ir.type import PointerType, PrimType
 
 KERNEL_META = {
     "name": "cudnn_sm100_gdn2_recompute_f16",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -2277,6 +2280,21 @@ def _make_main(
     return main
 
 
+def _default_num_sms(config) -> int:
+    if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+        count = hardware_num_sms()
+        if config.get("dynamic_scheduler", False):
+            short_nostate = (
+                tuple(config.get("seq_lens", (64,))) == (2048,) * 4
+                and int(config.get("heads", 1)) == 64
+                and not config.get("use_initial_state", False)
+                and not config.get("store_final_state", False)
+            )
+            return min(count, 8 if short_nostate else 12)
+        return count
+    return 148
+
+
 def _normalized_config(config):
     config = {key: value for key, value in config.items() if key != "label"}
     config.setdefault("seq_lens", (64,))
@@ -2287,7 +2305,7 @@ def _normalized_config(config):
     config.setdefault("io_dtype", "bfloat16")
     config.setdefault("state_dtype", "float32")
     config.setdefault("cu_dtype", "int32")
-    config.setdefault("num_sms", 148)
+    config.setdefault("num_sms", _default_num_sms(config))
     if "checkpoint_every_n_tokens" not in config:
         config["checkpoint_every_n_tokens"] = config.pop("checkpoint", 0)
     config.setdefault("gate_lower_bound", -5.0)

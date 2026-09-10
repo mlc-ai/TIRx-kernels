@@ -10,12 +10,15 @@ Upstream source:
 (``prologue_kernel``, ``kernel``, and the two-launch ``run_bwd`` entry).
 """
 
+import os
+
 import tirx_kernels.kern as K
+from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, hardware_num_sms
 
 KERNEL_META = {
     "name": "cudnn_sm100_kda_bprop_f16",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -532,7 +535,11 @@ def _tmem_cell(base, row, row_delta, column):
 
 
 def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out):
-    @K.kernel(warps=32, arch="sm_100a", grid=1)
+    prologue_warps = (
+        10 if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a" and not run_order else 32
+    )
+
+    @K.kernel(warps=prologue_warps, arch="sm_100a", grid=1)
     def prologue(
         base_q: K.gptr[K.i64],
         base_k: K.gptr[K.i64],
@@ -823,6 +830,11 @@ def _make_main(
     v_ratio,
 ):
     beta_dtype = K.bf16 if beta_sigmoid else K.f32
+    thor_state_path = os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a" and (
+        use_initial_state or use_dstate_in or use_dstate0
+    )
+    cg1_regs = 184 if thor_state_path else 168
+    support_regs = 40 if thor_state_path else 56
 
     @K.kernel(warps=16, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
     def main(
@@ -873,12 +885,12 @@ def _make_main(
         K.ptx.ld.global_.s32(total_tiles, work_count.ptr_to([0]))
         roles = K.specialize()
         cg0 = roles.role("cg0", warps=range(0, 4), regs=144)
-        cg1 = roles.role("cg1", warps=range(4, 8), regs=168)
+        cg1 = roles.role("cg1", warps=range(4, 8), regs=cg1_regs)
         cg2 = roles.role("cg2", warps=range(8, 12), regs=144)
-        super_mma = roles.role("super_mma", warps=[12], regs=56)
-        tcgen = roles.role("tcgen", warps=[13], regs=56)
-        tma = roles.role("tma", warps=[14], regs=56)
-        epilogue = roles.role("epilogue", warps=[15], regs=56)
+        super_mma = roles.role("super_mma", warps=[12], regs=support_regs)
+        tcgen = roles.role("tcgen", warps=[13], regs=support_regs)
+        tma = roles.role("tma", warps=[14], regs=support_regs)
+        epilogue = roles.role("epilogue", warps=[15], regs=support_regs)
         with tma:
             tile = K.local_scalar("int32", init=K.cta_id())
             raw = K.PipelineState(2, phase=1)
@@ -3438,6 +3450,15 @@ def _normalized_config(config):
     config.setdefault("q_heads", config["heads"])
     config.setdefault("k_heads", config["heads"])
     config.setdefault("v_heads", config["heads"])
+    if "num_sms" not in config and os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+        if config.get("beta_sigmoid", False):
+            config["num_sms"] = hardware_num_sms()
+        elif config.get("dynamic_scheduler", False) or config.get("run_order", False):
+            config["num_sms"] = min(hardware_num_sms(), 16)
+        else:
+            seq_lens = tuple(config.get("seq_lens", (64,)))
+            work_items = max(len(seq_lens) * int(config.get("heads", 1)), 1)
+            config["num_sms"] = min(work_items, 16) if len(seq_lens) > 1 else work_items
     config.setdefault("num_sms", 148)
     config.setdefault("scale", 1.0 / (_DK**0.5))
     for key in (
@@ -3879,15 +3900,34 @@ def _validate_outputs(data, *, sources):
         raise AssertionError(f"KDA backward validation failed for {config}: {failures}")
 
 
+def _compile_tirx(config):
+    from tirx_kernels.runner import compile_kernel
+
+    previous = os.environ.get("TVM_CUDA_PTXAS_REG_LEVEL")
+    state_path = bool(
+        config["use_initial_state"] or config["use_dstate_in"] or config["use_dstate0"]
+    )
+    if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+        if state_path:
+            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = "0"
+        elif config["beta_sigmoid"]:
+            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = "3"
+    try:
+        return [compile_kernel(func) for func in get_kernel(**config)]
+    finally:
+        if previous is None:
+            os.environ.pop("TVM_CUDA_PTXAS_REG_LEVEL", None)
+        else:
+            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = previous
+
+
 def run_test(**config):
     """Compare TIRx with the upstream kernel on identical inputs."""
     import torch
 
-    from tirx_kernels.runner import compile_kernel
-
     kernel_config = _normalized_config(config)
     data = _prepare_data(kernel_config)
-    executables = [compile_kernel(func) for func in get_kernel(**kernel_config)]
+    executables = _compile_tirx(kernel_config)
     tirx_launch = _tirx_launch(executables, data)
     source_launch = _source_launch(data)
     tirx_launch()
@@ -3899,13 +3939,10 @@ def run_test(**config):
 
 def prepare_bench(**config):
     """Compile the two TIRx launches without importing torch or touching CUDA."""
-    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
+    from tirx_kernels.runner import prepared_gpu_benchmark
 
     kernel_config = _normalized_config(config)
-    state = {
-        "config": kernel_config,
-        "executables": [compile_kernel(func) for func in get_kernel(**kernel_config)],
-    }
+    state = {"config": kernel_config, "executables": _compile_tirx(kernel_config)}
     return prepared_gpu_benchmark(run_gpu, state)
 
 
