@@ -38,6 +38,8 @@ contract and results.
   [`agent_evolved_kda_forward_b1_t8192`](tirx_kernels/agent_evolved/kda_forward_b1_t8192.py) ⟨+sm_110a⟩
 - **DeepSeek-V3 FP8 MoE:**
   [`agent_evolved_moe_fp8_blockscale_dsv3`](tirx_kernels/agent_evolved/moe_fp8_blockscale_dsv3.py) ⟨sm_100a⟩
+- **KDA backward:**
+  [`agent_evolved_kda_backward_packed`](tirx_kernels/agent_evolved/kda_backward_packed.py) ⟨sm_100a⟩
 
 ### cuDNN Frontend ports
 
@@ -247,7 +249,7 @@ remain externally managed runtime/compiler dependencies.
 | `sglang` (+ CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | Optional `sglang_cutedsl` benchmark reference. |
 | `flash_mla`      | `sparse_flashmla_*` / `flash_mla_sparse_fwd` baselines | Reference impls. |
 | `deep_ep`        | `deepep_*` correctness and baselines | Reference implementation. |
-| `flash-linear-attention` | `agent_evolved_kda_forward_b1_t8192` correctness | Independent FLA BF16/Triton chunk reference. |
+| `flash-linear-attention` | `agent_evolved_kda_forward_b1_t8192` and `agent_evolved_kda_backward_packed` correctness | Independent FLA BF16/Triton chunk reference. |
 | `flash_kda`      | `flashkda_*` and `agent_evolved_kda_forward_b1_t8192` optional baselines | Raw FlashKDA benchmark peer. |
 | `fmha_sm100` (MSA) | `msa_*` correctness and baselines | Reference implementation; set `MSA_PATH` to use a checkout elsewhere. |
 | NVSHMEM          | `allgather_gemm`, `gemm_reduce_scatter` | Required to compile/run the GemmComm kernels. |
