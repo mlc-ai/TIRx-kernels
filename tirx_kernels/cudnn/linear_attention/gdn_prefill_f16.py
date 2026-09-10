@@ -11,12 +11,14 @@ Upstream source:
 driven by the ``chunk_gdn_sm100`` THD/varlen host entry).
 """
 
+import os
+
 import tirx_kernels.kern as K
 
 KERNEL_META = {
     "name": "cudnn_sm100_gdn_prefill_f16",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -3343,15 +3345,28 @@ def _validate_outputs(data, *, sources):
         )
 
 
+def _compile_tirx(config):
+    from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, compile_kernel
+
+    previous = os.environ.get("TVM_CUDA_PTXAS_REG_LEVEL")
+    if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+        os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = "6"
+    try:
+        return [compile_kernel(func) for func in get_kernel(**config)]
+    finally:
+        if previous is None:
+            os.environ.pop("TVM_CUDA_PTXAS_REG_LEVEL", None)
+        else:
+            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = previous
+
+
 def run_test(**config):
     """Compare TIRx with the upstream kernel on identical inputs."""
     import torch
 
-    from tirx_kernels.runner import compile_kernel
-
     config = _normalized_config(config)
     data = _prepare_data(config)
-    executables = [compile_kernel(func) for func in get_kernel(**config)]
+    executables = _compile_tirx(config)
     tirx_launch = _tirx_launch(executables, data)
     source_launch = _source_launch(data)
     tirx_launch()
@@ -3363,13 +3378,10 @@ def run_test(**config):
 
 def prepare_bench(**config):
     """Compile both TIRx launches without importing torch or touching CUDA."""
-    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
+    from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _normalized_config(config)
-    state = {
-        "config": config,
-        "executables": [compile_kernel(func) for func in get_kernel(**config)],
-    }
+    state = {"config": config, "executables": _compile_tirx(config)}
     return prepared_gpu_benchmark(run_gpu, state)
 
 

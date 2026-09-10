@@ -16,6 +16,7 @@ annotations directly.
 
 import ctypes
 import math
+import os
 from functools import cache
 
 import torch
@@ -132,6 +133,7 @@ def build_preprocess(B, S, H, D):
     rows_per_wave = PRE_BLOCK // PRE_THREADS_PER_ROW
     row_iters = PRE_ROWS_PER_BLOCK // rows_per_wave
     nblk = S // PRE_ROWS_PER_BLOCK
+    thor = os.environ.get("TIRX_PREPARE_CUDA_ARCH") == "sm_110a"
 
     @K.kernel(warps=PRE_BLOCK // 32, arch="sm_100a", grid=(nblk, H, B))
     def preprocess_kernel(
@@ -155,22 +157,28 @@ def build_preprocess(B, S, H, D):
             rhs_words = K.alloc_local([4], "uint32")
             lhs_halves = K.alloc_local([2], "uint16")
             rhs_halves = K.alloc_local([2], "uint16")
-            lhs_value = K.alloc_local([2], "float32")
-            rhs_value = K.alloc_local([2], "float32")
+            if not thor:
+                lhs_value = K.alloc_local([2], "float32")
+                rhs_value = K.alloc_local([2], "float32")
             K.ptx.ld.global_.nc.v4.b32(lhs_words[0], lhs_words[1], lhs_words[2], lhs_words[3], lhs)
             K.ptx.ld.global_.nc.v4.b32(rhs_words[0], rhs_words[1], rhs_words[2], rhs_words[3], rhs)
             K.assign(dst[0], K.float32(0))
             for pair in range(4):
                 K.ptx.mov.b32(lhs_halves[0], lhs_halves[1], lhs_words[pair])
-                for element in range(2):
-                    K.ptx.cvt.f32.f16(lhs_value[element], lhs_halves[element])
+                if not thor:
+                    for element in range(2):
+                        K.ptx.cvt.f32.f16(lhs_value[element], lhs_halves[element])
                 K.ptx.mov.b32(rhs_halves[0], rhs_halves[1], rhs_words[pair])
-                for element in range(2):
-                    K.ptx.cvt.f32.f16(rhs_value[element], rhs_halves[element])
-                for element in range(2):
-                    # CUDA's default fast-math path lowers the original fmaf
-                    # chain with FTZ; spelling it keeps the same schedule.
-                    K.ptx.fma.rn.ftz.f32(dst[0], lhs_value[element], rhs_value[element], dst[0])
+                if thor:
+                    for element in range(2):
+                        K.ptx.fma.rn.f32.f16(
+                            dst[0], lhs_halves[element], rhs_halves[element], dst[0]
+                        )
+                else:
+                    for element in range(2):
+                        K.ptx.cvt.f32.f16(rhs_value[element], rhs_halves[element])
+                    for element in range(2):
+                        K.ptx.fma.rn.ftz.f32(dst[0], lhs_value[element], rhs_value[element], dst[0])
 
         # Overlap the independent LSE load with the O/dO dot products.
         lse_for_log2 = K.local_scalar("float32", init=K.float32(0))
@@ -229,8 +237,8 @@ def build_preprocess(B, S, H, D):
 # ---------------------------------------------------------------------------
 
 
-def build_cast_f32_to_f16(B, S, H, D, scale):
-    """Scale and transpose the head-major accumulator to sequence-major f16."""
+def _build_cast_f32_to_f16_default(B, S, H, D, scale):
+    """Build the original cast path used by the existing SM100 family."""
     groups_per_block = CAST_BLOCK * CAST_GROUPS_PER_THREAD
     num_groups = B * S * H * (D // CAST_GROUP_WIDTH)
     nblk = (num_groups + groups_per_block - 1) // groups_per_block
@@ -259,9 +267,6 @@ def build_cast_f32_to_f16(B, S, H, D, scale):
                 s = group // (D // CAST_GROUP_WIDTH * H) % S
                 b = group // (D // CAST_GROUP_WIDTH * H * S)
                 d = d_group * CAST_GROUP_WIDTH
-                # The raw tcgen05 dQ accumulator uses the physical 128x128
-                # C-fragment bit layout. Decode it while producing the public
-                # sequence-major dQ.
                 s_in_block = s % 128
                 src_s = (
                     s // 128 * 128
@@ -277,6 +282,80 @@ def build_cast_f32_to_f16(B, S, H, D, scale):
                 )
 
     return cast_kernel
+
+
+def _build_cast_f32_to_f16_thor(B, S, H, D, scale):
+    """Scale and transpose the head-major accumulator to sequence-major f16."""
+    if S % 128:
+        raise ValueError("the SM100 backward cast requires seq_len divisible by 128")
+
+    tile_rows = 128
+    tile_elements = tile_rows * D
+    groups_per_tile = tile_elements // CAST_GROUP_WIDTH
+
+    @K.kernel(warps=4, arch="sm_100a", grid=(S // tile_rows, H, B))
+    def cast_kernel(src: K.gptr[K.f32], dst: K.gptr[K.f16]):
+        bx, by, bz = K.cta_id()
+        tx = K.thread_id()
+        staging = K.alloc_buffer((tile_elements,), K.f32, scope="shared.dyn", align=1024)
+        values = K.alloc_local((4,), "float32")
+        scaled = K.alloc_local((4,), "float32")
+        packed = K.alloc_local((2,), "uint32")
+        tile_src = ((bz * H + by) * S + bx * tile_rows) * D
+
+        def staging_ptr(row, col):
+            # The TCGen05 fragment remap below makes one warp visit source rows
+            # 0,4,...,60,2,6,...,62 at a fixed four-float column.  Spread that
+            # permutation over all 32 vector banks while keeping the physical
+            # coalesced-load deposit conflict-free as well.
+            row_bank = (row // 4) % 16 + ((row // 2) % 2) * 16
+            group = K.bitwise_xor(col // CAST_GROUP_WIDTH, row_bank)
+            return staging.ptr_to([row * D + group * CAST_GROUP_WIDTH])
+
+        # Coalesce the physical accumulator read before remapping its TCGen05
+        # fragment layout.  This matches FA4's one-CTA-per-128-row staging.
+        for group_pass in range(groups_per_tile // 128):
+            group = group_pass * 128 + tx
+            element = group * CAST_GROUP_WIDTH
+            K.ptx.ld.global_.v4.f32(
+                values[0], values[1], values[2], values[3], src.ptr_to([tile_src + element])
+            )
+            K.ptx.st.shared.v4.f32(
+                staging_ptr(element // D, element % D), values[0], values[1], values[2], values[3]
+            )
+        K.cuda.cta_sync()
+
+        for group_pass in range(groups_per_tile // 128):
+            group = group_pass * 128 + tx
+            s_in_block = group // (D // CAST_GROUP_WIDTH)
+            d = group % (D // CAST_GROUP_WIDTH) * CAST_GROUP_WIDTH
+            src_s = (
+                ((s_in_block >> 5) & 1)
+                + (((d >> 6) & 1) << 1)
+                + (((d >> 2) & 15) << 2)
+                + (((s_in_block >> 6) & 1) << 6)
+            )
+            src_d = (s_in_block & 31) << 2
+            K.ptx.ld.shared.v4.f32(
+                values[0], values[1], values[2], values[3], staging_ptr(src_s, src_d)
+            )
+            for element in range(4):
+                K.ptx.mul.rn.f32(scaled[element], values[element], K.float32(scale))
+            K.ptx.cvt.rn.f16x2.f32(packed[0], scaled[1], scaled[0])
+            K.ptx.cvt.rn.f16x2.f32(packed[1], scaled[3], scaled[2])
+            output_s = bx * tile_rows + s_in_block
+            K.ptx.st.global_.v2.b32(
+                dst.ptr_to([((bz * S + output_s) * H + by) * D + d]), packed[0], packed[1]
+            )
+
+    return cast_kernel
+
+
+def build_cast_f32_to_f16(B, S, H, D, scale):
+    """Scale and transpose dQ, selecting Thor's coalesced staging schedule."""
+    if os.environ.get("TIRX_PREPARE_CUDA_ARCH") == "sm_110a":
+        return _build_cast_f32_to_f16_thor(B, S, H, D, scale)
+    return _build_cast_f32_to_f16_default(B, S, H, D, scale)
 
 
 # ---------------------------------------------------------------------------
@@ -579,8 +658,8 @@ def build_kernel(
         # ================================================================
         # roles. The original's `wg_id == 3` / `1 <= wg_id <= 2` / else split,
         # stated as the warp partition it is. kern checks the exact partition
-        # of 0..15, contiguity, regs 8-aligned in [24, 256], budget <= 65536
-        # (this kernel uses all of it), and setmaxnreg warpgroup-uniformity.
+        # of 0..15, contiguity, regs 8-aligned in [24, 256], budget <= 65536,
+        # and setmaxnreg warpgroup-uniformity.
         # ================================================================
         sp = K.specialize()
         mma = sp.role("mma", warps=[12], regs=104)
@@ -1317,11 +1396,19 @@ def build_kernel(
 
 @cache
 def _compile_pipeline(B: int, H: int, S: int, D: int, causal: bool, attention_scale: float):
-    return (
-        build_preprocess(B, S, H, D).compile(),
-        build_kernel(B, H, S, D, causal=causal, attention_scale=attention_scale).compile(),
-        build_cast_f32_to_f16(B, S, H, D, attention_scale).compile(),
-    )
+    preprocess = build_preprocess(B, S, H, D).compile()
+    previous_reg_level = os.environ.get("TVM_CUDA_PTXAS_REG_LEVEL")
+    if os.environ.get("TIRX_PREPARE_CUDA_ARCH") == "sm_110a" and S >= 8192:
+        os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = "5"
+    try:
+        core = build_kernel(B, H, S, D, causal=causal, attention_scale=attention_scale).compile()
+    finally:
+        if previous_reg_level is None:
+            os.environ.pop("TVM_CUDA_PTXAS_REG_LEVEL", None)
+        else:
+            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = previous_reg_level
+    cast = build_cast_f32_to_f16(B, S, H, D, attention_scale).compile()
+    return preprocess, core, cast
 
 
 def setup(data, B, H, S, D, *, executables=None):
@@ -1393,7 +1480,7 @@ def setup(data, B, H, S, D, *, executables=None):
 KERNEL_META = {
     "name": "flash_attention_backward_sm100",
     "category": "flashattention",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flash-attn-4",
