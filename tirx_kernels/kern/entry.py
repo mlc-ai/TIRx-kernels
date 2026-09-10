@@ -549,7 +549,11 @@ def kernel(
         with IRBuilder() as ib:
             with I.prim_func():
                 I.func_name(fn.__name__)
-                I.func_attr({"global_symbol": fn.__name__})
+                # Keep the authored/default target on the PrimFunc itself.
+                # Consumers such as NumSim receive ``Kernel.func`` rather than
+                # the wrapper, so ``Kernel.arch`` alone loses an ISA fact that
+                # affects SM100 versus SM107 descriptor decoding.
+                I.func_attr({"global_symbol": fn.__name__, "tirx.cuda_arch": arch})
                 args = []
                 scalar_params = {
                     pname: _scalar_param(pname, param.annotation)
