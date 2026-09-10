@@ -43,13 +43,11 @@ the B200 run using FlashKDA commit `1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b`.
 | [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `all-six-geomean` | B200 | CUDA events | 293.115 | FlashKDA | 801.260 | 2.734x | geometric mean of the six rows above |
 | [`agent_evolved_moe_fp8_blockscale_dsv3`](moe_fp8_blockscale_dsv3.py) | `t14107` | B200 | CUPTI | 717.491 | FlashInfer TRT-LLM FP8 MoE | 2239.532 | 3.121x | `moe-20260908-004417` default-max row in full-sweep promotion run |
 | [`agent_evolved_kda_backward_packed`](kda_backward_packed.py) | `packed_1024x8_h96` | B200 | kcoral | 829.482 | FLA `chunk_kda_bwd` | 7695.851 | 9.278x | `kda-bwd-portfolio-carry-3` `fused-zfold` all-shape sweep |
-| [`agent_evolved_kda_backward_packed`](kda_backward_packed.py) | 17-workload geomean | B200 | kcoral | 249.000 | FLA `chunk_kda_bwd` | 2132.204 | 8.563x | `kda-bwd-portfolio-carry-3` `fused-zfold` all-shape sweep |
+| [`agent_evolved_kda_backward_packed`](kda_backward_packed.py) | `all-seventeen-geomean` | B200 | kcoral | 249.000 | FLA `chunk_kda_bwd` | 2132.204 | 8.563x | geometric mean of the seventeen official workloads in that sweep |
 
 For `kcoral` rows the timer is the evolution harness's benchmark server, which
-reports GPU-only latency for candidate and reference in one run. The
-`17-workload geomean` row aggregates all seventeen official KDA-backward
-workloads; its speedup is the ratio of the two geometric means, not a mean of
-per-workload ratios.
+reports GPU-only latency for candidate and reference in one run. Geomean rows
+divide the two geometric means; they are not means of per-workload ratios.
 
 ## Updating the table
 
