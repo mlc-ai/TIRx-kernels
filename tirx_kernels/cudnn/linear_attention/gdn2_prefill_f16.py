@@ -10,12 +10,14 @@ Upstream source:
 (``prologue_kernel``, ``kernel``, and the two-launch ``run_prefill`` entry).
 """
 
+import os
+
 import tirx_kernels.kern as K
 
 KERNEL_META = {
     "name": "cudnn_sm100_gdn2_prefill_f16",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -638,11 +640,19 @@ def _tcgen_mma_ts(
 
 
 def _make_prologue(
-    *, run_order, order_generate, dynamic_scheduler, n_heads_out, checkpoints, cu_dtype
+    *,
+    run_order,
+    order_generate,
+    uniform_generated_order,
+    dynamic_scheduler,
+    n_heads_out,
+    checkpoints,
+    cu_dtype,
 ):
     cu_t = K.i64 if cu_dtype == "int64" else K.i32
+    prologue_warps = 8 if uniform_generated_order else 32
 
-    @K.kernel(warps=32, arch="sm_100a", grid=1)
+    @K.kernel(warps=prologue_warps, arch="sm_100a", grid=1)
     def prologue(
         base_q: K.gptr[K.i64],
         base_k: K.gptr[K.i64],
@@ -712,12 +722,14 @@ def _make_prologue(
                         K.ptx.ld.global_.s32(value, work_item_staging.ptr_to([source * 8 + field]))
                         K.ptx.st.global_.s32(work_items.ptr_to([destination * 8 + field]), value)
 
-            with K.If(item_count > 4096), K.Then():
+            direct_condition = K.bool(True) if uniform_generated_order else item_count > 4096
+            with K.If(direct_condition), K.Then():
                 item = K.local_scalar("int32", init=thread)
                 with K.While(item < item_count):
                     write_work_item(item, item)
-                    K.assign(item, item + 1024)
-            with K.If(item_count <= 4096), K.Then():
+                    K.assign(item, item + prologue_warps * 32)
+            sort_condition = K.bool(False) if uniform_generated_order else item_count <= 4096
+            with K.If(sort_condition), K.Then():
                 with K.If(thread == 0), K.Then():
                     K.ptx.st.shared.v2.u32(
                         order_arena.ptr_to([32_768]), K.uint32(2_147_483_647), K.uint32(0x80000000)
@@ -871,6 +883,9 @@ def _make_prologue(
 def _make_main(
     *,
     num_sms,
+    cg1_regs,
+    support_regs,
+    short_epilogue_live_ranges,
     io_dtype,
     state_dtype,
     cu_dtype,
@@ -972,11 +987,11 @@ def _make_main(
         K.ptx.ld.global_.s32(total_tiles, work_count.ptr_to([0]))
         roles = K.specialize()
         cg0 = roles.role("cg0", warps=range(0, 8), regs=160)
-        cg1 = roles.role("cg1", warps=range(8, 12), regs=136)
-        super_mma = roles.role("super_mma", warps=[12], regs=56)
-        tcgen = roles.role("tcgen", warps=[13], regs=56)
-        tma = roles.role("tma", warps=[14], regs=56)
-        epilogue = roles.role("epilogue", warps=[15], regs=56)
+        cg1 = roles.role("cg1", warps=range(8, 12), regs=cg1_regs)
+        super_mma = roles.role("super_mma", warps=[12], regs=support_regs)
+        tcgen = roles.role("tcgen", warps=[13], regs=support_regs)
+        tma = roles.role("tma", warps=[14], regs=support_regs)
+        epilogue = roles.role("epilogue", warps=[15], regs=support_regs)
 
         # Warp 14: descriptor acquire, six input TMA rings, scheduler producer.
         with tma:
@@ -1416,22 +1431,24 @@ def _make_main(
 
         # Warp 15: causal register MMA and one-behind checkpoint/O TMA drain.
         with epilogue:
-            rhs_row = lane % 8 + K.if_then_else(lane // 16 != 0, 8, 0)
-            rhs_col = K.if_then_else((lane // 8) % 2 != 0, 8, 0)
-            lhs_row = lane % 8 + K.if_then_else((lane // 8) % 2 != 0, 8, 0)
-            lhs_col = K.if_then_else(lane // 8 >= 2, 8, 0)
-            store_row = (lane & 7) + K.if_then_else((lane // 8) & 1 != 0, 8, 0)
-            store_col = K.if_then_else(lane // 8 >= 2, 8, 0)
-            store_linear = store_row * 16 + (store_col ^ 8)
-            store_swizzled = K.bitwise_xor(
-                store_linear,
-                K.shift_left(
-                    K.bitwise_and(K.shift_right(store_linear, K.uint32(6)), K.uint32(1)),
-                    K.uint32(3),
-                ),
-            )
-            row_lo = lane // 4
-            row_hi = row_lo + 8
+            if not short_epilogue_live_ranges:
+                mma_lane = lane
+                rhs_row = lane % 8 + K.if_then_else(lane // 16 != 0, 8, 0)
+                rhs_col = K.if_then_else((lane // 8) % 2 != 0, 8, 0)
+                lhs_row = lane % 8 + K.if_then_else((lane // 8) % 2 != 0, 8, 0)
+                lhs_col = K.if_then_else(lane // 8 >= 2, 8, 0)
+                store_row = (lane & 7) + K.if_then_else((lane // 8) & 1 != 0, 8, 0)
+                store_col = K.if_then_else(lane // 8 >= 2, 8, 0)
+                store_linear = store_row * 16 + (store_col ^ 8)
+                store_swizzled = K.bitwise_xor(
+                    store_linear,
+                    K.shift_left(
+                        K.bitwise_and(K.shift_right(store_linear, K.uint32(6)), K.uint32(1)),
+                        K.uint32(3),
+                    ),
+                )
+                row_lo = lane // 4
+                row_hi = row_lo + 8
             qk_scale = K.PipelineState(4, phase=0)
             checkpoint_ready = K.PipelineState(checkpoint_stages, phase=0)
             sched_consumer = K.PipelineState(8, phase=0)
@@ -1484,6 +1501,27 @@ def _make_main(
                     decay_stage = serial % 2
                     inter_stage = serial % 2
                     diag_stage = qk_scale.stage
+                    if short_epilogue_live_ranges:
+                        mma_lane = K.local_scalar("uint32")
+                        K.ptx.mov.b32(mma_lane, lane)
+                        rhs_row = mma_lane % 8 + K.if_then_else(mma_lane // 16 != 0, 8, 0)
+                        rhs_col = K.if_then_else((mma_lane // 8) % 2 != 0, 8, 0)
+                        lhs_row = mma_lane % 8 + K.if_then_else((mma_lane // 8) % 2 != 0, 8, 0)
+                        lhs_col = K.if_then_else(mma_lane // 8 >= 2, 8, 0)
+                        store_row = (mma_lane & 7) + K.if_then_else((mma_lane // 8) & 1 != 0, 8, 0)
+                        store_col = K.if_then_else(mma_lane // 8 >= 2, 8, 0)
+                        store_linear = store_row * 16 + (store_col ^ 8)
+                        store_swizzled = K.bitwise_xor(
+                            store_linear,
+                            K.shift_left(
+                                K.bitwise_and(
+                                    K.shift_right(store_linear, K.uint32(6)), K.uint32(1)
+                                ),
+                                K.uint32(3),
+                            ),
+                        )
+                        row_lo = mma_lane // 4
+                        row_hi = row_lo + 8
                     _wait_barrier(arena, protocol[16][0], diag_stage, qk_scale.phase)
                     a_acc = K.alloc_local((8,), "float32")
                     for accum in range(8):
@@ -1519,7 +1557,7 @@ def _make_main(
                         for parity in range(2):
                             accum = pair * 2 + parity
                             row_coord = row_hi if accum % 4 >= 2 else row_lo
-                            col_coord = (accum // 4) * 8 + 2 * (lane % 4) + (accum & 1)
+                            col_coord = (accum // 4) * 8 + 2 * (mma_lane % 4) + (accum & 1)
                             K.assign(
                                 a_acc[accum],
                                 K.if_then_else(
@@ -2637,6 +2675,8 @@ def _make_main(
 def _normalized_config(config):
     import math
 
+    from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, hardware_num_sms
+
     config = {key: value for key, value in config.items() if key != "label"}
     config.setdefault("seq_lens", (64,))
     config["seq_lens"] = tuple(int(value) for value in config["seq_lens"])
@@ -2647,9 +2687,36 @@ def _normalized_config(config):
     config.setdefault("io_dtype", "bfloat16")
     config.setdefault("state_dtype", "float32")
     config.setdefault("cu_dtype", "int32")
+    explicit_num_sms = "num_sms" in config
     config.setdefault("num_sms", 148)
     config.setdefault("scale", 1.0 / (_DK**0.5))
     config.setdefault("checkpoint_every_n_tokens", config.pop("checkpoint", 0))
+    if (
+        not explicit_num_sms
+        and os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a"
+        and int(config["checkpoint_every_n_tokens"]) > 0
+        and (
+            len(config["seq_lens"]) == 1
+            or (len(config["seq_lens"]) == 4 and config["seq_lens"][0] == 8_192)
+        )
+    ):
+        config["num_sms"] = max(1, 3 * hardware_num_sms() // 5)
+    elif (
+        not explicit_num_sms
+        and os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a"
+        and (
+            int(config["checkpoint_every_n_tokens"]) > 0
+            or len(config["seq_lens"]) <= 2
+            or len(config["seq_lens"]) >= 16
+        )
+    ):
+        config["num_sms"] = hardware_num_sms()
+    elif (
+        not explicit_num_sms
+        and os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a"
+        and len(config["seq_lens"]) == 8
+    ):
+        config["num_sms"] = 7 * hardware_num_sms()
     config.setdefault("gate_lower_bound", -5.0)
     config.setdefault("use_initial_state", False)
     config.setdefault("store_final_state", True)
@@ -2716,12 +2783,19 @@ def _work_rows(seq_lens, heads, *, split):
 
 def get_kernel(**config):
     """Return the source-ordered prologue and persistent main kernels."""
+    from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV
+
     config = _normalized_config(config)
     rows = _work_rows(config["seq_lens"], config["heads"], split=config["split"])
     num_ctas = min(int(config["num_sms"]), max(len(rows), 1))
+    thor = os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a"
+    tune_cg1 = thor and int(config["checkpoint_every_n_tokens"]) > 0
+    cg1_regs = 144 if tune_cg1 and len(config["seq_lens"]) >= 8 else 152 if tune_cg1 else 136
+    support_regs = 48 if cg1_regs == 144 else 40 if cg1_regs == 152 else 56
     prologue = _make_prologue(
         run_order=True,
         order_generate=bool(config["order_generate"]),
+        uniform_generated_order=thor and len(set(config["seq_lens"])) <= 1,
         dynamic_scheduler=bool(config["dynamic_scheduler"]),
         n_heads_out=int(config["heads"]),
         checkpoints=int(config["checkpoint_every_n_tokens"]) > 0,
@@ -2729,6 +2803,9 @@ def get_kernel(**config):
     )
     main = _make_main(
         num_sms=num_ctas,
+        cg1_regs=cg1_regs,
+        support_regs=support_regs,
+        short_epilogue_live_ranges=thor,
         io_dtype=config["io_dtype"],
         state_dtype=config["state_dtype"],
         cu_dtype=config["cu_dtype"],
@@ -3138,15 +3215,42 @@ def _validate_outputs(data, *, sources):
         )
 
 
+def _compile_tirx(config):
+    from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, compile_kernel
+
+    previous = os.environ.get("TVM_CUDA_PTXAS_REG_LEVEL")
+    if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+        has_checkpoints = int(config["checkpoint_every_n_tokens"]) > 0
+        batch = len(config["seq_lens"])
+        if has_checkpoints and (batch == 8 or (batch == 4 and config["seq_lens"][0] == 8_192)):
+            reg_level = "0"
+        elif has_checkpoints and batch >= 16:
+            reg_level = "2"
+        elif not has_checkpoints and batch == 4 and config["seq_lens"][0] == 16_384:
+            reg_level = "9"
+        elif not has_checkpoints and batch in (2, 8):
+            reg_level = "0"
+        elif not has_checkpoints and batch == 4:
+            reg_level = "1"
+        else:
+            reg_level = "5"
+        os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = reg_level
+    try:
+        return [compile_kernel(func) for func in get_kernel(**config)]
+    finally:
+        if previous is None:
+            os.environ.pop("TVM_CUDA_PTXAS_REG_LEVEL", None)
+        else:
+            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = previous
+
+
 def run_test(**config):
     """Compare TIRx with the upstream kernel on identical inputs."""
     import torch
 
-    from tirx_kernels.runner import compile_kernel
-
     config = _normalized_config(config)
     data = _prepare_data(config)
-    executables = [compile_kernel(func) for func in get_kernel(**config)]
+    executables = _compile_tirx(config)
     tirx_launch = _tirx_launch(executables, data)
     source_launch = _source_launch(data)
     tirx_launch()
@@ -3158,13 +3262,10 @@ def run_test(**config):
 
 def prepare_bench(**config):
     """Compile both TIRx launches without importing torch or touching CUDA."""
-    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
+    from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _normalized_config(config)
-    state = {
-        "config": config,
-        "executables": [compile_kernel(func) for func in get_kernel(**config)],
-    }
+    state = {"config": config, "executables": _compile_tirx(config)}
     return prepared_gpu_benchmark(run_gpu, state)
 
 

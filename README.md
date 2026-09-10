@@ -35,7 +35,7 @@ intermediate candidates remain outside this package. See the
 contract and results.
 
 - **KDA forward:**
-  [`agent_evolved_kda_forward_b1_t8192`](tirx_kernels/agent_evolved/kda_forward_b1_t8192.py)
+  [`agent_evolved_kda_forward_b1_t8192`](tirx_kernels/agent_evolved/kda_forward_b1_t8192.py) ⟨+sm_110a⟩
 - **DeepSeek-V3 FP8 MoE:**
   [`agent_evolved_moe_fp8_blockscale_dsv3`](tirx_kernels/agent_evolved/moe_fp8_blockscale_dsv3.py) ⟨sm_100a⟩
 
@@ -54,9 +54,9 @@ contract and results.
   [`cudnn_sm100_moe_grouped_gemm_dglu_dbias`](tirx_kernels/cudnn/dglu/moe_grouped_gemm_dglu_dbias.py)
 - **Linear attention:**
   [`cudnn_sm100_kda_bprop_f16`](tirx_kernels/cudnn/linear_attention/kda_bprop_f16.py),
-  [`cudnn_sm100_gdn_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn_prefill_f16.py),
+  [`cudnn_sm100_gdn_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn_prefill_f16.py) ⟨+sm_110a⟩,
   [`cudnn_sm100_gdn_recompute_f16`](tirx_kernels/cudnn/linear_attention/gdn_recompute_f16.py),
-  [`cudnn_sm100_gdn2_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn2_prefill_f16.py),
+  [`cudnn_sm100_gdn2_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn2_prefill_f16.py) ⟨+sm_110a⟩,
   [`cudnn_sm100_gdn2_recompute_f16`](tirx_kernels/cudnn/linear_attention/gdn2_recompute_f16.py),
   [`cudnn_sm100_gdn2_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn2_bprop_f16.py),
   [`cudnn_sm100_gdn_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn_bprop_f16.py)
@@ -80,7 +80,7 @@ contract and results.
   [`flash_attention4`](tirx_kernels/flashattention/flash_attention4.py) ⟨+sm_110a⟩,
   [`flash_attention4_fp4`](tirx_kernels/flashattention/flash_attention4_fp4.py) ⟨sm_103a⟩
 - **Backward:**
-  [`flash_attention_backward_sm100`](tirx_kernels/flashattention/flash_attention_backward.py)
+  [`flash_attention_backward_sm100`](tirx_kernels/flashattention/flash_attention_backward.py) ⟨+sm_110a⟩
 
 ### FlashInfer ports
 

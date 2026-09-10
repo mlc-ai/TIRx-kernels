@@ -2423,7 +2423,7 @@ CONFIGS = [
 KERNEL_META = {
     "name": "agent_evolved_kda_forward_b1_t8192",
     "category": "agent_evolved",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flash-linear-attention",
