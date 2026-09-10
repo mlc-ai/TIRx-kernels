@@ -431,10 +431,15 @@ def build_kernel(num_ctas):
         task_empty = K.MBarrier(smem, TASK_RING)
 
         roles = K.specialize(chain_dispatch=True)
-        prod_role = roles.role("prod", warps=[0], regs=REGS_WG0)
-        mma_role = roles.role("mma", warps=[1], regs=REGS_WG0)
-        aux_role = roles.role("aux", warps=[2, 3], regs=REGS_WG0)
-        math_role = roles.role("math", warps=range(MATH_WARP0, NWARPS), regs=REGS_MATH)
+        control_regs = roles.register_scope("control", warps=range(4), regs=REGS_WG0)
+        prod_role = roles.role("prod", warps=[0], register_scope=control_regs)
+        mma_role = roles.role("mma", warps=[1], register_scope=control_regs)
+        aux_role = roles.role("aux", warps=[2, 3], register_scope=control_regs)
+        # Math owns complete warpgroups. Keep the register target at each role
+        # entry so ptxas retains the math allocation for both G and F.
+        math_role = roles.role(
+            "math", warps=range(MATH_WARP0, NWARPS), regs=REGS_MATH
+        )
 
         K.ptx.barrier.cluster.arrive.relaxed.aligned()
         K.ptx.barrier.cluster.wait.acquire.aligned()
@@ -916,6 +921,8 @@ def build_kernel(num_ctas):
             load_regs(K.int32(0))
             with K.serial(0, nkb) as kb:
                 K.cuda.mbarrier_wait(sfempty_bar.ptr_to([sstate.stage]), sstate.phase ^ 1)
+                # Completed async TCGEN reads precede generic writes that reuse this stage.
+                K.ptx.fence.proxy.async_.shared__cta()
                 bpack0 = u32(
                     K.bitwise_or(
                         ue8m0_pack4(K.reinterpret("float32", raw[0])),
@@ -928,11 +935,18 @@ def build_kernel(num_ctas):
                         K.shift_left(ue8m0_pack4(K.reinterpret("float32", raw[3])), K.uint32(8)),
                     )
                 )
+                # Each v4 fills one TMEM lane's four 32-row scale columns.
+                # G1 half tiles put 64 up then 64 gate rows in each CTA's B.
+                split_g1 = K.And(kind == 0, half != 0)
+                first_upper = K.Select(split_g1, bpack1, bpack0)
+                second_lower = K.Select(split_g1, bpack0, bpack1)
                 K.ptx.st.shared.v4.u32(
-                    sfb_tile.ptr_to([sstate.stage, lane * 4]), bpack0, bpack0, bpack0, bpack0
+                    sfb_tile.ptr_to([sstate.stage, lane * 4]),
+                    bpack0, bpack0, first_upper, first_upper,
                 )
                 K.ptx.st.shared.v4.u32(
-                    sfb_tile.ptr_to([sstate.stage, 128 + lane * 4]), bpack1, bpack1, bpack1, bpack1
+                    sfb_tile.ptr_to([sstate.stage, 128 + lane * 4]),
+                    second_lower, second_lower, bpack1, bpack1,
                 )
                 K.cuda.warp_sync()
                 K.ptx.fence.proxy.async_.shared__cta()
@@ -942,6 +956,12 @@ def build_kernel(num_ctas):
                 with K.If(kb + 1 < nkb), K.Then():
                     load_regs(kb + 1)
             iket_end(tk_tile)
+
+        # The control roles split one warpgroup: release its registers together.
+        # Re-entering aux during finalization must not repeat this transition.
+        with K.If(warp < MATH_WARP0):
+            with K.Then():
+                control_regs.emit()
 
         with prod_role:
             K.ptx.fence.proxy.async_.global_()
@@ -1118,17 +1138,25 @@ def build_kernel(num_ctas):
                                         SF_DESC_BASE, sfb_smem + sf_stage * K.uint32(BN * 4)
                                     ),
                                 )
-                                K.ptx[UTCCP](tmem_base + K.uint32(SFB_TMEM_COL), desc_sf, pred=el)
-                                K.assign(
-                                    desc_sf,
-                                    with_smem_addr(
-                                        SF_DESC_BASE,
-                                        sfb_smem + sf_stage * K.uint32(BN * 4) + K.uint32(128 * 4),
-                                    ),
-                                )
-                                K.ptx[UTCCP](
-                                    tmem_base + K.uint32(SFB_TMEM_COL + 4), desc_sf, pred=el
-                                )
+                                with K.If(half != 0):
+                                    with K.Then():
+                                        # M128 uses a 2x2 SFB layout: the two N128 halves
+                                        # occupy TMEM lane partitions 0/1 and 2/3.
+                                        K.ptx["tcgen05.cp.cta_group::2.64x128b.warpx2::01_23"](
+                                            tmem_base + K.uint32(SFB_TMEM_COL), desc_sf, pred=el
+                                        )
+                                    with K.Else():
+                                        K.ptx[UTCCP](tmem_base + K.uint32(SFB_TMEM_COL), desc_sf, pred=el)
+                                        K.assign(
+                                            desc_sf,
+                                            with_smem_addr(
+                                                SF_DESC_BASE,
+                                                sfb_smem + sf_stage * K.uint32(BN * 4) + K.uint32(128 * 4),
+                                            ),
+                                        )
+                                        K.ptx[UTCCP](
+                                            tmem_base + K.uint32(SFB_TMEM_COL + 4), desc_sf, pred=el
+                                        )
                                 K.ptx.tcgen05.fence__before_thread_sync()
                                 K.cuda.warp_sync()
                                 K.ptx[COMMIT](

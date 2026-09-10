@@ -11,6 +11,7 @@ requires but nothing else verifies.
 from __future__ import annotations
 
 import tvm
+from tvm_ffi import structural_map
 from tvm.script import tirx as T
 
 from . import entry as _entry
@@ -374,14 +375,12 @@ class Specialize:
             return out if changed else None
 
         def postorder(stmt):
-            if not isinstance(stmt, tvm.tirx.SeqStmt):
-                return None
             new = rewrite(list(stmt.seq))
             if new is None:
-                return None
+                return stmt
             return new[0] if len(new) == 1 else tvm.tirx.SeqStmt(new, stmt.span)
 
-        body = tvm.tirx.stmt_functor.ir_transform(func.body, None, postorder)
+        body = structural_map(func.body, (tvm.tirx.SeqStmt, postorder))
         return func.with_body(body)
 
     def finalize(self):
