@@ -432,14 +432,13 @@ def build_kernel(num_ctas):
 
         roles = K.specialize(chain_dispatch=True)
         control_regs = roles.register_scope("control", warps=range(4), regs=REGS_WG0)
-        math_regs = roles.register_scope(
-            "math", warps=range(MATH_WARP0, NWARPS), regs=REGS_MATH
-        )
         prod_role = roles.role("prod", warps=[0], register_scope=control_regs)
         mma_role = roles.role("mma", warps=[1], register_scope=control_regs)
         aux_role = roles.role("aux", warps=[2, 3], register_scope=control_regs)
+        # Math owns complete warpgroups. Keep the register target at each role
+        # entry so ptxas retains the math allocation for both G and F.
         math_role = roles.role(
-            "math", warps=range(MATH_WARP0, NWARPS), register_scope=math_regs
+            "math", warps=range(MATH_WARP0, NWARPS), regs=REGS_MATH
         )
 
         K.ptx.barrier.cluster.arrive.relaxed.aligned()
@@ -958,13 +957,11 @@ def build_kernel(num_ctas):
                     load_regs(kb + 1)
             iket_end(tk_tile)
 
-        # Transition each complete warpgroup once. Functional roles are re-entered
-        # during finalization and must not repeat a partial-warpgroup transition.
+        # The control roles split one warpgroup: release its registers together.
+        # Re-entering aux during finalization must not repeat this transition.
         with K.If(warp < MATH_WARP0):
             with K.Then():
                 control_regs.emit()
-            with K.Else():
-                math_regs.emit()
 
         with prod_role:
             K.ptx.fence.proxy.async_.global_()
