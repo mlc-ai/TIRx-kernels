@@ -15,12 +15,15 @@ per-chunk recurrent-state checkpoint series a backward pass consumes; the query
 and output paths of the prefill kernel are absent.
 """
 
+import os
+
 import tirx_kernels.kern as K
+from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, hardware_num_sms
 
 KERNEL_META = {
     "name": "cudnn_sm100_gdn_recompute_f16",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -366,13 +369,15 @@ def _barrier_ptr(arena, byte_offset, stage=0):
 
 
 def _wait_barrier(arena, byte_offset, stage, phase):
+    barrier = _barrier_ptr(arena, byte_offset, stage)
+    if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+        barrier = K.local_scalar(
+            "uint32", init=K.cuda.cvta_generic_to_shared(barrier), name="barrier_addr"
+        )
     ready = K.local_scalar("uint32", init=K.uint32(0))
     with K.While(ready == K.uint32(0)):
         K.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
-            ready,
-            _barrier_ptr(arena, byte_offset, stage),
-            K.cast(phase, "uint32"),
-            K.uint32(_TRY_WAIT_TICKS),
+            ready, barrier, K.cast(phase, "uint32"), K.uint32(_TRY_WAIT_TICKS)
         )
 
 
@@ -591,6 +596,12 @@ def _shfl_up_f32(value, delta):
         shuffled, K.reinterpret("uint32", value), K.uint32(delta), K.uint32(0), K.uint32(0xFFFFFFFF)
     )
     return K.reinterpret("float32", shuffled)
+
+
+def _warp_uniform_i32(value):
+    uniform = K.local_scalar("int32")
+    K.ptx["shfl_sync.idx.b32"](uniform, value, K.uint32(0), K.uint32(31), K.uint32(0xFFFFFFFF))
+    return uniform
 
 
 def _raw_descriptor(arena, byte_offset, leading_bytes, stride_bytes, layout):
@@ -931,10 +942,13 @@ def _tcgen_mma_ts(dst, tmem_a, b_desc, idesc, *, leader, accumulate, b_step_unit
         )
 
 
-def _make_prologue(*, run_order, order_generate, n_heads_out, checkpoints, cu_dtype):
+def _make_prologue(
+    *, run_order, order_generate, uniform_generated_order, n_heads_out, checkpoints, cu_dtype
+):
     cu_t = K.i64 if cu_dtype == "int64" else K.i32
+    prologue_warps = 8 if uniform_generated_order else 32
 
-    @K.kernel(warps=32, arch="sm_100a", grid=1)
+    @K.kernel(warps=prologue_warps, arch="sm_100a", grid=1)
     def prologue(
         base_k: K.gptr[K.i64],
         base_v: K.gptr[K.i64],
@@ -992,12 +1006,14 @@ def _make_prologue(*, run_order, order_generate, n_heads_out, checkpoints, cu_dt
                         K.ptx.ld.global_.s32(value, work_item_staging.ptr_to([source * 8 + field]))
                         K.ptx.st.global_.s32(work_items.ptr_to([destination * 8 + field]), value)
 
-            with K.If(item_count > 4096), K.Then():
+            direct_condition = K.bool(True) if uniform_generated_order else item_count > 4096
+            with K.If(direct_condition), K.Then():
                 item = K.local_scalar("int32", init=thread)
                 with K.While(item < item_count):
                     write_work_item(item, item)
-                    K.assign(item, item + 1024)
-            with K.If(item_count <= 4096), K.Then():
+                    K.assign(item, item + prologue_warps * 32)
+            sort_condition = K.bool(False) if uniform_generated_order else item_count <= 4096
+            with K.If(sort_condition), K.Then():
                 with K.If(thread == 0), K.Then():
                     K.ptx.st.shared.v2.u32(
                         order_arena.ptr_to([32_768]), K.uint32(2_147_483_647), K.uint32(0x80000000)
@@ -1203,9 +1219,14 @@ def _make_main(
         # --- kernel body starts here ---
         arena = K.alloc_buffer((_ARENA_BYTES,), K.u8, scope="shared.dyn", align=1024)
         K.smem_pool(base=arena)
-        thread = K.thread_id()
-        warp = K.warp_id()
-        lane = K.lane_id()
+        if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+            thread = K.local_scalar("int32", init=K.thread_id(), name="thread")
+            warp = _warp_uniform_i32(thread >> 5)
+            lane = K.local_scalar("int32", init=thread & 31, name="lane")
+        else:
+            thread = K.thread_id()
+            warp = K.warp_id()
+            lane = K.lane_id()
 
         # Declaration-ordered physical mbarrier protocol; each row is
         # (byte offset, stages, arrive count, initializing warp).
@@ -2426,6 +2447,8 @@ def _normalized_config(config):
     config.setdefault("io_dtype", "bfloat16")
     config.setdefault("state_dtype", "float32")
     config.setdefault("cu_dtype", "int32")
+    if "num_sms" not in config and os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+        config["num_sms"] = hardware_num_sms()
     config.setdefault("num_sms", 148)
     # The backward plan's regen call: per-chunk checkpoints, no final state.
     config.setdefault("checkpoint_every_n_tokens", 64)
@@ -2499,9 +2522,15 @@ def get_kernel(**config):
     config = _normalized_config(config)
     rows = _work_rows(config["seq_lens"], config["heads"], split=config["split"])
     num_ctas = min(int(config["num_sms"]), max(len(rows), 1))
+    uniform_generated_order = (
+        os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a"
+        and bool(config["order_generate"])
+        and len(set(config["seq_lens"])) <= 1
+    )
     prologue = _make_prologue(
         run_order=bool(config["run_order"]),
         order_generate=bool(config["order_generate"]),
+        uniform_generated_order=uniform_generated_order,
         n_heads_out=int(config["heads"]),
         checkpoints=int(config["checkpoint_every_n_tokens"]) > 0,
         cu_dtype=config["cu_dtype"],
@@ -2903,15 +2932,29 @@ def _validate_outputs(data, *, sources):
         )
 
 
+def _compile_tirx(config):
+    from tirx_kernels.runner import compile_kernel
+
+    previous = os.environ.get("TVM_CUDA_PTXAS_REG_LEVEL")
+    if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+        large_initial_state = bool(config["use_initial_state"]) and len(config["seq_lens"]) >= 16
+        os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = "9" if large_initial_state else "6"
+    try:
+        return [compile_kernel(func) for func in get_kernel(**config)]
+    finally:
+        if previous is None:
+            os.environ.pop("TVM_CUDA_PTXAS_REG_LEVEL", None)
+        else:
+            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = previous
+
+
 def run_test(**config):
     """Compare TIRx with the upstream kernel on identical inputs."""
     import torch
 
-    from tirx_kernels.runner import compile_kernel
-
     config = _normalized_config(config)
     data = _prepare_data(config)
-    executables = [compile_kernel(func) for func in get_kernel(**config)]
+    executables = _compile_tirx(config)
     tirx_launch = _tirx_launch(executables, data)
     source_launch = _source_launch(data)
     tirx_launch()
@@ -2923,13 +2966,10 @@ def run_test(**config):
 
 def prepare_bench(**config):
     """Compile both TIRx launches without importing torch or touching CUDA."""
-    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
+    from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _normalized_config(config)
-    state = {
-        "config": config,
-        "executables": [compile_kernel(func) for func in get_kernel(**config)],
-    }
+    state = {"config": config, "executables": _compile_tirx(config)}
     return prepared_gpu_benchmark(run_gpu, state)
 
 

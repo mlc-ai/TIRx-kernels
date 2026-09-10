@@ -554,6 +554,29 @@ Grouped workloads show one row per config and one timing column per implementati
 | `perf_b8_s8192_h64_nostate` | tirx | 25599.3496 | cudnn_frontend | 27247.8958 | 1.064 | — |
 | `perf_b8_s8192_h64_state` | tirx | 41343.4019 | cudnn_frontend | 42291.6150 | 1.023 | — |
 
+### cudnn_sm100_gdn_recompute_f16
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `perf_b16_s8192_h64_nostate` | tirx | 51563.4015 | cudnn_frontend | 51890.5075 | 1.006 | — |
+| `perf_b16_s8192_h64_state` | tirx | 52091.0372 | cudnn_frontend | 53434.5061 | 1.026 | — |
+| `perf_b1_s8192_h64_nostate` | tirx | 3560.5046 | cudnn_frontend | 3576.3829 | 1.004 | — |
+| `perf_b1_s8192_h64_state` | tirx | 3646.1689 | cudnn_frontend | 3620.0551 | 0.993 | — |
+| `perf_b2_s8192_h64_nostate` | tirx | 6802.8386 | cudnn_frontend | 6826.4924 | 1.003 | — |
+| `perf_b2_s8192_h64_state` | tirx | 6944.0862 | cudnn_frontend | 6928.8139 | 0.998 | — |
+| `perf_b4_s16384_h64_nostate` | tirx | 26932.1542 | cudnn_frontend | 27432.9232 | 1.019 | — |
+| `perf_b4_s16384_h64_state` | tirx | 27199.4096 | cudnn_frontend | 27440.5896 | 1.009 | — |
+| `perf_b4_s2048_h64_nostate` | tirx | 3441.0070 | cudnn_frontend | 3470.7769 | 1.009 | — |
+| `perf_b4_s2048_h64_state` | tirx | 3735.2194 | cudnn_frontend | 3708.8900 | 0.993 | — |
+| `perf_b4_s32768_h64_nostate` | tirx | 52502.2674 | cudnn_frontend | 52159.2021 | 0.993 | — |
+| `perf_b4_s32768_h64_state` | tirx | 52732.7084 | cudnn_frontend | 52841.1621 | 1.002 | — |
+| `perf_b4_s4096_h64_nostate` | tirx | 6777.0646 | cudnn_frontend | 6826.0422 | 1.007 | — |
+| `perf_b4_s4096_h64_state` | tirx | 7101.6662 | cudnn_frontend | 7067.3028 | 0.995 | — |
+| `perf_b4_s8192_h64_nostate` | tirx | 13475.3379 | cudnn_frontend | 13466.7405 | 0.999 | — |
+| `perf_b4_s8192_h64_state` | tirx | 13876.2465 | cudnn_frontend | 13859.9543 | 0.999 | — |
+| `perf_b8_s8192_h64_nostate` | tirx | 27053.5586 | cudnn_frontend | 27221.8372 | 1.006 | — |
+| `perf_b8_s8192_h64_state` | tirx | 27272.9918 | cudnn_frontend | 27531.5697 | 1.009 | — |
+
 ### cudnn_sm100_gdn2_prefill_f16
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
@@ -599,6 +622,22 @@ Grouped workloads show one row per config and one timing column per implementati
 | `perf_b4_s8192_h64_state` | tirx | 45835.6203 | cudnn_frontend | 46391.9832 | 1.012 | — |
 | `perf_b8_s8192_h64_nostate` | tirx | 77944.0310 | cudnn_frontend | 79614.7813 | 1.021 | — |
 | `perf_b8_s8192_h64_state` | tirx | 77929.7797 | cudnn_frontend | 80522.5522 | 1.033 | — |
+
+### cudnn_sm100_kda_bprop_f16
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `perf_basic_b1_s2048_h16` | tirx | 1053.1860 | cudnn_frontend | 1046.4061 | 0.994 | — |
+| `perf_beta_b1_s8192_h16` | tirx | 3644.6299 | cudnn_frontend | 3629.0427 | 0.996 | — |
+| `perf_dynamic_b4_s2048_h64` | tirx | 1076.1847 | cudnn_frontend | 1285.1014 | 1.194 | — |
+| `perf_grouped_b1_s8192_h64_q64_k16_v32` | tirx | 14431.3196 | cudnn_frontend | 14572.8631 | 1.010 | — |
+| `perf_l2_b1_s8192_h16` | tirx | 3663.0313 | cudnn_frontend | 3636.2041 | 0.993 | — |
+| `perf_l2_b4_s8192_h64` | tirx | 45177.3357 | cudnn_frontend | 45790.6471 | 1.014 | — |
+| `perf_order_generate_b4_s2048_h64` | tirx | 14576.3662 | cudnn_frontend | 14495.2084 | 0.994 | — |
+| `perf_order_scratch_b4_s2048_h64` | tirx | 14596.3803 | cudnn_frontend | 14505.9977 | 0.994 | — |
+| `perf_safe_b1_s8192_h16` | tirx | 3637.7413 | cudnn_frontend | 3639.1145 | 1.000 | — |
+| `perf_state_b1_s8192_h16` | tirx | 3674.4352 | cudnn_frontend | 3675.0268 | 1.000 | — |
+| `perf_tail_b2_ragged_h16` | tirx | 2757.9099 | cudnn_frontend | 2780.4135 | 1.008 | — |
 
 ### fast_topk_clusters
 
