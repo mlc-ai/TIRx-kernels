@@ -202,8 +202,9 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
                     o_bits[4 * k + 3],
                 )
 
-            # ---- merged log2-sum-exp behind the source's null-pointer guard (L68-70) ----
-            with K.If(K.Not(K.isnullptr(s_merged.data))), K.Then():
+            # One thread per head owns the scalar output, even though every
+            # thread computed the same blend weights. Keep the optional-output guard.
+            with K.If(K.And(tx == 0, K.Not(K.isnullptr(s_merged.data)))), K.Then():
                 lg = K.local_scalar("float32")
                 lse = K.local_scalar("float32")
                 K.ptx.lg2.approx.ftz.f32(lg, denom)  # math::ptx_log2
