@@ -148,8 +148,10 @@ fails the pair; there is no retry. Artifacts are written under
 - One `POST /execute` request per workload: upload the tree and the worker shim
   (`_remote_shim.py`), `prepare` (registry lookup, config resolution,
   `prepare_bench` compilation) as a `cpu_only` function that releases the GPU
-  lease, then `run` (`run_gpu`) while holding it. `--prepare gpu` keeps the
-  lease during prepare, for a kernel whose prepare touches CUDA.
+  lease, then `run` (`run_gpu`) while holding it. A prepare that enters CUDA
+  fails the `cpu_only` guard (`gpu_access`); the suite resubmits that workload
+  once with prepare held on the lease and records it under
+  `remote.prepare_fallback`. `--prepare gpu` holds the lease for every prepare.
 - Each request gets a fresh worker process with one visible GPU; the server
   serializes GPU stages through its lease, so no interference detection or
   retry exists on the client. Per-request `lease_wait_ms` / `lease_held_ms`
