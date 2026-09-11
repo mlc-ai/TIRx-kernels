@@ -62,7 +62,29 @@ Do not add an occupancy constraint merely to satisfy a source-level register
 model: it activates a resource contract the original compiled kernel did not
 have, and the same requests can then genuinely overdraw the CTA register pool.
 
+Reentering a role that allocates registers also requires explicit
+synchronization of every participating warpgroup between successive
+`setmaxnreg` instructions,
+even when the requested count is unchanged. A barrier inside an optional work
+loop does not cover a CTA that skips that loop. Put the convergence outside
+the loop, within the owning compute or auxiliary cohort, before its next
+register transition.
+
+Do not assume that deleting the repeated instruction preserves compiler
+allocation. In a 12-warp persistent kernel, removing the second 208-register
+compute and 88-register auxiliary transitions grew the NVRTC stack from 16 to
+64 bytes. Retaining those transitions and adding explicit 256-thread compute
+and 128-thread auxiliary barriers preserved the 16-byte stack and register
+count. The repair passed complete synchronization and race checks on a CTA
+that skipped stream work, a GPU/NumSim/reference gradient comparison, and all
+17 production GPU correctness configurations. Production GQA compilations
+added 12 bytes of static spill stores while spill loads stayed unchanged;
+that resource result alone does not establish unchanged execution time.
+
 ## Verification
 
 Verify in the realized TIR that there is one producer `setmaxnreg` and that
 every warp of its warpgroup reaches it before any sub-role guard.
+For repeated role entries, also check the path that skips prior work and
+confirm that all warps in the cohort converge before the next register
+transition.

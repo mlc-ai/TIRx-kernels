@@ -9,9 +9,10 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from tvm_ffi import structural_visit
+
 import tvm
 from tvm import tirx
-from tvm.tirx.stmt_functor import StmtExprVisitor
 
 _FORBIDDEN_SCOPE_ROOTS = ("global", "shared")
 _ADDRESS_OF_OP = "tirx.address_of"
@@ -108,11 +109,10 @@ class LowLevelIRContractError(ValueError):
         super().__init__(report.summary())
 
 
-class _LowLevelIRVisitor(StmtExprVisitor):
+class _LowLevelIRInspector:
     """Collect forbidden operations from one pre-lowering ``PrimFunc`` body."""
 
     def __init__(self, function: str, allowed_func_calls: frozenset[str]):
-        super().__init__()
         self.function = function
         self.allowed_func_calls = allowed_func_calls
         self.violations: list[LowLevelIRFinding] = []
@@ -120,6 +120,18 @@ class _LowLevelIRVisitor(StmtExprVisitor):
         self.address_only_loads: list[LowLevelIRFinding] = []
         self.setmaxnreg_calls: list[LowLevelIRFinding] = []
         self.has_min_blocks_per_sm = False
+
+    def __call__(self, body: tirx.Stmt) -> None:
+        structural_visit(
+            body,
+            [
+                (tirx.TilePrimitiveCall, self._visit_tile_call),
+                (tirx.AttrStmt, self._visit_attribute),
+                (tvm.ir.TensorLoad, self._visit_load),
+                (tirx.BufferStore, self._visit_store),
+                (tvm.ir.Call, self._visit_call),
+            ],
+        )
 
     def _finding(
         self, node: Any, kind: str, scope: str | None = None, callee: str | None = None
@@ -133,31 +145,31 @@ class _LowLevelIRVisitor(StmtExprVisitor):
             span=_span_text(node),
         )
 
-    def visit_op_call_(self, op: Any) -> None:
+    def _visit_tile_call(self, op: Any, visitor: Any) -> None:
         self.violations.append(self._finding(op, "tile_primitive"))
-        super().visit_op_call_(op)
+        visitor.default_visit(op)
 
-    def visit_attr_(self, op: tirx.AttrStmt) -> None:
+    def _visit_attribute(self, op: tirx.AttrStmt, visitor: Any) -> None:
         if str(op.attr_key) == _MIN_BLOCKS_PER_SM_ATTR:
             self.has_min_blocks_per_sm = True
-        super().visit_attr_(op)
+        visitor.default_visit(op)
 
-    def visit_buffer_load_(self, op: tvm.ir.TensorLoad) -> None:
+    def _visit_load(self, op: tvm.ir.TensorLoad, visitor: Any) -> None:
         scope = str(op.source.scope())
         if _is_forbidden_scope(scope):
             self.violations.append(self._finding(op, "buffer_load", scope))
         for index in op.indices:
-            self.visit_expr(index)
+            visitor.visit(index)
 
-    def visit_buffer_store_(self, op: tirx.BufferStore) -> None:
+    def _visit_store(self, op: tirx.BufferStore, visitor: Any) -> None:
         scope = str(op.buffer.scope())
         if _is_forbidden_scope(scope):
             self.violations.append(self._finding(op, "buffer_store", scope))
-        self.visit_expr(op.value)
+        visitor.visit(op.value)
         for index in op.indices:
-            self.visit_expr(index)
+            visitor.visit(index)
 
-    def visit_call_(self, op: tvm.ir.Call) -> None:
+    def _visit_call(self, op: tvm.ir.Call, visitor: Any) -> None:
         op_name = getattr(op.op, "name", None)
         if op_name == _SETMAXNREG_OP:
             self.setmaxnreg_calls.append(self._finding(op, "setmaxnreg_without_min_blocks_per_sm"))
@@ -179,9 +191,9 @@ class _LowLevelIRVisitor(StmtExprVisitor):
                 # indices are still expressions, and any loads inside them remain
                 # real accesses that must be checked normally.
                 for index in addressed.indices:
-                    self.visit_expr(index)
+                    visitor.visit(index)
                 return
-        super().visit_call_(op)
+        visitor.default_visit(op)
 
 
 def _global_name(global_var: Any) -> str:
@@ -236,7 +248,7 @@ def inspect_low_level_ir(
 
     for path, prim_func in _iter_prim_funcs(value):
         checked_functions.append(path)
-        visitor = _LowLevelIRVisitor(path, allowed_func_calls)
+        visitor = _LowLevelIRInspector(path, allowed_func_calls)
         visitor(prim_func.body)
         if visitor.setmaxnreg_calls and not visitor.has_min_blocks_per_sm:
             visitor.violations.extend(visitor.setmaxnreg_calls)
