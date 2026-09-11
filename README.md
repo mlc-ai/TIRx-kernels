@@ -277,8 +277,9 @@ pytest -n 16 tests/test_correctness.py
 python -m tirx_kernels.bench --kernel nvfp4_gemm
 python -m tirx_kernels.bench --kernel nvfp4_gemm --with-references
 
-# Pre-commit regression benchmark sweep (see tirx_kernels/bench_suite/README.md)
-python -m tirx_kernels.bench_suite
+# Pre-commit regression benchmark sweep on the kcoral benchmark server
+# (see tirx_kernels/bench_suite/README.md; needs `pip install -e '.[remote]'`)
+python -m tirx_kernels.bench_suite --server http://127.0.0.1:8901
 ```
 
 ### Programmatic API

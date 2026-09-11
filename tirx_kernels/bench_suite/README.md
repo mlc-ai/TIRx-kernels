@@ -15,14 +15,14 @@ replace the direct verdict. The same flag exists on
 registered kernel has one file. Files with `default_suite: true` select one to
 three representative single-GPU rows with `default: true`; curated three-row
 files label them `small`, `medium`, and `large`. The current default roster is
-313 rows across 106 device kernels: 265 rows from 90 kernels validated on
+319 rows across 108 device kernels: 265 rows from 90 kernels validated on
 `sm_100a`, `sm_103a`, and `sm_107a`, three rows each from fifteen
 single-architecture kernels (`sm_107a`-only Rubin ports, `sm_100a`-only Cake
 VSA, MSA and FlexAttention backward ports, `sm_103a`-only Cake VSA longseq,
 fast.cu NVFP4 GEMM, FP4 FA4 forward, MSA and FlexAttention forward ports), and
 three rows from the `sm_100a`/`sm_103a` FlexAttention hd256 forward. Thus an
 SM107 run selects 277 rows, an SM103 run 289, and an SM100 run 280.
-GPU runs retain only rows registered for the pool's exact architecture.
+A run retains only rows registered for the server's exact architecture.
 
 With no `--workloads`, the suite writes the selected rows to
 `.bench-suite/workloads.generated.yaml`. Inspect that file before freezing a
@@ -38,21 +38,34 @@ architecture.
 
 ## Environment
 
-```bash
-pip install -e .
-python scripts/install_reference_dependencies.py
+The suite never touches a local GPU. Every workload is one request to a
+[kcoral](https://github.com/mlc-ai/kcoral) benchmark server, which owns GPU
+exclusivity (one lease per GPU, a fresh worker process per request, several
+workers per GPU so compilation overlaps measurement). Locally you need the
+client extra and a reachable server:
 
-export TVM_PATH=/path/to/tvm
-export PYTHONPATH="${TVM_PATH}/python"
-export TVM_LIBRARY_PATH="${TVM_PATH}/build/lib"
+```bash
+pip install -e '.[remote]'          # kcoral client (httpx, numpy, ml_dtypes)
+export TIRX_BENCH_SERVER=http://127.0.0.1:8901   # or pass --server URL
 ```
 
-Do not set `CUDA_VISIBLE_DEVICES`; the runner assigns physical GPUs. Reference
-revisions used by explicit diagnostic runs are pinned in
-`reference-dependencies.json`.
+The local `tirx_kernels/` tree is shipped with each request (a deterministic
+tar.gz, blob-cached on the server by SHA-256), so the kernels measured are the
+ones in this checkout. TVM, torch, triton and the reference packages are the
+server worker's; `/health` versions, the worker's TVM git HEAD and a content
+fingerprint of its `python/tvm/tirx` are recorded under `pipeline.server` and
+as `git.tir` / `kernel_tree` in every run. A local TVM checkout is never
+measured; changing the server's TVM makes `ratio_diff` refuse the comparison
+until the baseline is promoted again.
 
-Explicit distributed workloads additionally require their NCCL, cuBLAS,
-cuBLASMp, and NVSHMEM runtime dependencies.
+`--with-references` builds the reference implementations on the worker, so the
+worker environment needs the pinned packages from `reference-dependencies.json`
+and the `.reference-deps` checkouts. Pass the server-side path of that directory
+with `--reference-deps-dir` (or `TIRX_BENCH_REFERENCE_DEPS`); the worker links it
+next to the shipped tree. A missing enabled reference fails its workload.
+
+Multi-GPU workloads (`num_gpus > 1`) cannot run through the server (one GPU per
+worker); the suite rejects an explicit workload file that contains one.
 
 ## Freeze the before baseline
 
@@ -96,8 +109,9 @@ speedup = (before_us - after_us) / before_us
 pass iff speedup > -1%
 ```
 
-Equality at `-1%` fails. Missing, duplicate, failed, interfered, dirty, or
-otherwise incomparable rows fail. A complete matrix discovers crossings;
+Equality at `-1%` fails. Missing, duplicate, failed, dirty, or otherwise
+incomparable rows fail; the baseline and the run must come from the same
+execution mode, measurement protocol, and server TVM. A complete matrix discovers crossings;
 after that, rerun only configs that are missing, changed, failed, or polluted.
 An explicit workload file or filter records a targeted selection, so the gate
 requires exactly those after rows while still requiring the immutable before
@@ -119,19 +133,33 @@ python -m tirx_kernels.bench_suite \
 ```
 
 The current checkout is the after side and must be clean and committed. The
-suite runs the current benchmark harness against both kernel revisions. Each
-workload is assigned to one available physical GPU; its before and after sides
-run on that same GPU UUID, while other workloads may run concurrently on other
-GPUs. If either side observes interference, both samples are discarded and the
-pair is retried. Artifacts are written under `.bench-suite/ab/` and the direct
-gate remains strict `after/before < 1.01`.
+suite ships both revisions (the before tree with the current harness copied
+over it) and runs each workload as two requests, before and after, in
+alternating order. Both sides run on the server's GPU with a fresh worker
+process each; A/B campaigns default to `--max-in-flight 1` so the two sides of a
+pair are adjacent on the lease. A side that fails or lands on a different GPU
+fails the pair; there is no retry. Artifacts are written under
+`.bench-suite/ab/<stamp>-<name>/` (`campaign.json`, `before.json`, `after.json`,
+`bench.md`, `workloads/NNN/<side>.log`) and the direct gate remains strict
+`after/before < 1.01`.
 
 ## Execution model
 
-- One fresh child process prepares each workload before GPU assignment.
-- Compilation and host preparation remain outside the timed region.
-- GPU assignment is automatic and atomic for multi-GPU workloads.
-- Foreign activity discards and retries the affected sample in the same child.
+- One `POST /execute` request per workload: upload the tree and the worker shim
+  (`_remote_shim.py`), `prepare` (registry lookup, config resolution,
+  `prepare_bench` compilation) as a `cpu_only` function that releases the GPU
+  lease, then `run` (`run_gpu`) while holding it. `--prepare gpu` keeps the
+  lease during prepare, for a kernel whose prepare touches CUDA.
+- Each request gets a fresh worker process with one visible GPU; the server
+  serializes GPU stages through its lease, so no interference detection or
+  retry exists on the client. Per-request `lease_wait_ms` / `lease_held_ms`
+  are recorded under each row's `remote` entry.
+- Compilation uses `TVM_CUDA_COMPILE_MODE=nvcc` (the nvrtc path initializes
+  the driver, which the `cpu_only` guard rejects).
+- The worker shim points triton's proton at the libcupti copy that kcoral's
+  `cpu_only` guard already loaded (`TRITON_CUPTI_LIB_PATH`); two libcupti
+  copies in one process cannot both subscribe. The path used is recorded under
+  `remote.cupti`.
 - Standard workloads aggregate independent timer rounds with the arithmetic
   mean.
 - Terminal workload failures are collected without cancelling unrelated work;
@@ -145,8 +173,13 @@ Useful options:
 
 | Option | Meaning |
 |---|---|
+| `--server URL` | kcoral server (default `$TIRX_BENCH_SERVER` or `http://127.0.0.1:8901`) |
+| `--max-in-flight N` | Concurrent requests (default: the server's worker count; A/B: 1) |
+| `--request-timeout S` | Server execution timeout per workload, excluding queue wait (default 1800) |
+| `--prepare {cpu,gpu}` | Compile off the GPU lease (default) or while holding it |
+| `--reference-deps-dir P` | Server-side `.reference-deps` directory for `--with-references` |
 | `--workloads PATH` | Run an explicit workload list |
-| `--ab-before REV` | Run REV/current as a same-GPU paired campaign |
+| `--ab-before REV` | Run REV/current as a paired campaign on the server |
 | `--filter TEXT` | Keep selected kernel names containing `TEXT` |
 | `--rounds N` | Independent standard-timer samples |
 | `--cooldown S` | Delay before each implementation |
@@ -165,8 +198,10 @@ Useful options:
 | Canonical before baseline | `baseline.json`, `baseline.md` |
 | Baseline replacement | `promote_baseline.py` |
 | Direct gate | `ratio_diff.py` |
+| Worker shim | `_remote_shim.py` (uploaded verbatim with every request) |
+| Client backend | `remote.py` |
 | Raw runs | `.bench-suite/runs/<id>.json` |
-| Per-workload logs | `.bench-suite/logs/<id>/` |
+| Per-workload logs | `.bench-suite/logs/<kernel>__<config>.log` (server stdout/stderr, request id, timings) |
 | Reports | `.bench-suite/reports/<id>/bench.md` |
 
 ## Reading a ratio you do not trust

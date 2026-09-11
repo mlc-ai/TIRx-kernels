@@ -428,11 +428,15 @@ python -m tirx_kernels.bench_suite
 
 Suite rules:
 
-- Do not set `CUDA_VISIBLE_DEVICES`; the suite acquires and monitors GPUs atomically.
+- The suite runs on a kcoral benchmark server (`--server` / `$TIRX_BENCH_SERVER`,
+  client via `pip install -e '.[remote]'`); it never touches a local GPU. The
+  local `tirx_kernels/` tree is shipped with every request; TVM and the
+  reference packages are the server worker's.
+- Multi-GPU workloads cannot run through the suite; keep them `default: false`.
 - The default is five independent rounds with arithmetic-mean aggregation.
 - A workload benchmarks our implementation and every declared reference.
-- The first real `FAIL`, including a missing/failing reference, fail-fasts the sweep.
-- `INTERFERED` is requeued. `SKIP` is accepted without retry.
+- A `FAIL`, including a missing/failing reference, fails the sweep after every
+  workload has finished. `SKIP` is accepted.
 - Run JSON, logs, and reports live under `.bench-suite/` and are not committed.
 - Reference adapters may use the absolute `TIRX_BENCH_CACHE_DIR` supplied by the
   suite for version- and GPU-qualified caches.
@@ -446,14 +450,10 @@ python tirx_kernels/bench_suite/promote_baseline.py \
   .bench-suite/runs/<id>.json
 ```
 
-Promote a targeted run without dropping unrelated rows:
-
-```bash
-python tirx_kernels/bench_suite/promote_baseline.py \
-  .bench-suite/runs/<id>.json --merge
-```
-
-Both forms regenerate `baseline.md`. Never copy a run JSON over `baseline.json`.
+Incremental `--merge` promotion is disabled: only a complete default sweep may
+become the baseline, and it must come from the same server TVM and execution
+mode as the runs gated against it. Promotion regenerates `baseline.md`. Never
+copy a run JSON over `baseline.json`.
 
 ## 11. Review Checklist
 
