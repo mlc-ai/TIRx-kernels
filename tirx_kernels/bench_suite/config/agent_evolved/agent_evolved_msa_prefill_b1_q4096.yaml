@@ -1,0 +1,3 @@
+kernel: agent_evolved_msa_prefill_b1_q4096
+configs:
+  - {config: b1_q4096_kv4096_h64, default: true, timer: proton}
