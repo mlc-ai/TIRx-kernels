@@ -532,14 +532,10 @@ def test_submit_workload_falls_back_to_gpu_prepare():
         on_fallback=reasons.append,
     )
     assert spec["prepare_mode"] == "gpu"
-    assert reasons == ["called cudaGetDevice"]
+    assert reasons == ["gpu_access: called cudaGetDevice"]
     assert submission.outcome.status == "COMPLETED"
     assert submission.attempts == 2
-    assert submission.prepare_fallback == {
-        "from": "cpu",
-        "to": "gpu",
-        "reason": "called cudaGetDevice",
-    }
+    assert submission.prepare_fallback == {"from": "cpu", "to": "gpu", "reason": reasons[0]}
     first, second = client.calls
     assert first.instructions[2] == ("get_function", "prepare_fn", "prepare", True)
     assert second.instructions[2] == ("get_function", "prepare_fn", "prepare", False)

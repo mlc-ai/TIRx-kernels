@@ -527,13 +527,18 @@ def execute_with_retry(
 
 
 def prepare_violation(outcome: Any) -> str | None:
-    """The gpu_access message when ``outcome`` failed because prepare entered CUDA."""
+    """The failure message when ``outcome`` failed inside the cpu_only prepare stage.
+
+    Any prepare-stage failure is worth one retry with the lease held: the guard
+    rejects CUDA entry (``gpu_access``), and some kernels reject the nvcc
+    compile mode that off-lease prepare requires.
+    """
     if outcome is None or getattr(outcome, "status", None) != "FAILED":
         return None
     error = outcome.error or {}
-    if error.get("kind") == "gpu_access" and error.get("instruction_id") == "prepare":
-        return str(error.get("message") or "cpu_only prepare entered CUDA")
-    return None
+    if error.get("instruction_id") != "prepare":
+        return None
+    return f"{error.get('kind')}: {error.get('message') or 'prepare failed'}"
 
 
 def submit_workload(
@@ -548,7 +553,7 @@ def submit_workload(
     policy: RetryPolicy = RetryPolicy(),
     on_fallback: Callable[[str], None] | None = None,
 ) -> tuple[Submission, dict]:
-    """Execute one workload; retry once with on-lease prepare if cpu_only prepare touched CUDA.
+    """Execute one workload; retry once with on-lease prepare if cpu_only prepare failed.
 
     Returns the final submission and the spec it ran with (``prepare_mode`` may
     have changed to ``"gpu"``); the fallback reason is recorded on the submission.
