@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import copy
 import sys
-import threading
 from pathlib import Path
 from types import ModuleType
+
+import pytest
 
 from tirx_kernels.bench.__main__ import _find_bench_config
 from tirx_kernels.bench_suite import ab
@@ -40,9 +41,9 @@ def _row(kernel: str, config: str, gpu_uuid: str, samples: list[float]) -> dict:
         },
         "num_gpus": 1,
         "physical_gpu_uuids": [gpu_uuid],
-        "execution_mode": "pipeline",
-        "process_model": "one_shot_child_per_workload",
-        "retry_in_place": False,
+        "execution_mode": "remote",
+        "process_model": "kcoral_worker_per_request",
+        "remote": {"request_id": f"req-{kernel}-{config}"},
     }
 
 
@@ -60,11 +61,10 @@ def _payload(label: str, revision: str, rows: list[dict]) -> dict:
         "baselines": {"torch": {"version": "test"}},
         "selection": {"mode": "targeted", "keys": keys},
         "pipeline": {
-            "execution_mode": "pipeline",
-            "process_model": "one_shot_child_per_workload",
+            "execution_mode": "remote",
+            "process_model": "kcoral_worker_per_request",
             "measurement_protocol": {"rounds": 2, "cooldown_s": 0.0},
-            "interference_retry_count": 0,
-            "interference_retries": [],
+            "prepare_mode": "cpu",
         },
         "results": rows,
     }
@@ -126,36 +126,82 @@ def test_paired_report_rejects_a_cross_gpu_pair() -> None:
     assert "provenance field physical_gpu_uuids differs" in report
 
 
-def test_pair_restarts_both_sides_after_interference(monkeypatch, tmp_path) -> None:
-    calls: list[str] = []
+def test_pair_order_alternates_by_index(monkeypatch) -> None:
+    calls: list[tuple[int, str]] = []
 
-    def run_side(side, *_args, **_kwargs):
-        calls.append(side)
-        if calls == ["before", "after"]:
-            raise ab._InterferenceError("polluted")
-        return {"side": side}
+    def submit_side(side, index, workload, **_kwargs):
+        calls.append((index, side))
+        return _row(workload["kernel"], workload["config"], "GPU-0", [10.0, 10.0])
 
-    monkeypatch.setattr(ab, "_run_side", run_side)
-    rejected: list[dict] = []
-    result = ab._run_pair(
-        1,
-        {"kernel": "kernel", "config": "config", "num_gpus": 1},
-        gpu_index="3",
-        gpu_uuid="GPU-3",
-        campaign_root=tmp_path,
-        roots={"before": tmp_path, "after": tmp_path},
-        revisions={"before": "before", "after": "after"},
-        rounds=2,
-        cooldown=0.0,
-        util_threshold=0.0,
-        mem_threshold=0.0,
-        rejected=rejected,
-        rejected_lock=threading.Lock(),
-    )
+    monkeypatch.setattr(ab, "_submit_side", submit_side)
+    workload = {"kernel": "kernel", "config": "config", "num_gpus": 1}
+    odd = ab._run_pair(1, workload, campaign_root=Path("/unused"))
+    even = ab._run_pair(2, workload, campaign_root=Path("/unused"))
 
-    assert calls == ["before", "after", "before", "after"]
-    assert result.attempt == 2
-    assert len(rejected) == 1
+    assert calls == [(1, "before"), (1, "after"), (2, "after"), (2, "before")]
+    assert odd.order == ("before", "after")
+    assert even.order == ("after", "before")
+    assert odd.gpu_uuid == "GPU-0"
+    assert odd.before["status"] == "ok" and odd.after["status"] == "ok"
+
+
+def test_pair_rejects_cross_gpu_sides(monkeypatch) -> None:
+    def submit_side(side, index, workload, **_kwargs):
+        return _row(workload["kernel"], workload["config"], f"GPU-{side}", [10.0, 10.0])
+
+    monkeypatch.setattr(ab, "_submit_side", submit_side)
+    with pytest.raises(RuntimeError, match="before ran on"):
+        ab._run_pair(1, {"kernel": "kernel", "config": "config"})
+
+
+def test_validate_side_row_requires_ok_single_impl() -> None:
+    workload = {"kernel": "kernel", "config": "config"}
+    ab._validate_side_row("after", _row("kernel", "config", "GPU-0", [1.0, 1.0]), workload)
+    failed = _row("kernel", "config", "GPU-0", [1.0, 1.0])
+    failed.update({"status": "FAIL", "error": "gpu: runtime: boom"})
+    with pytest.raises(RuntimeError, match="gpu: runtime: boom"):
+        ab._validate_side_row("after", failed, workload)
+    two_impls = _row("kernel", "config", "GPU-0", [1.0, 1.0])
+    two_impls["round_samples"]["tir"] = [1.0, 1.0]
+    with pytest.raises(RuntimeError, match="one TIR/TIRx implementation"):
+        ab._validate_side_row("after", two_impls, workload)
+    wrong_identity = _row("other", "config", "GPU-0", [1.0, 1.0])
+    with pytest.raises(RuntimeError, match="identity differs"):
+        ab._validate_side_row("after", wrong_identity, workload)
+
+
+def test_aggregate_side_builds_gate_payload() -> None:
+    pairs = [
+        ab._PairResult(
+            index=1,
+            workload={"kernel": "kernel", "config": "config"},
+            order=("before", "after"),
+            gpu_uuid="GPU-0",
+            before=_row("kernel", "config", "GPU-0", [10.0, 10.0]),
+            after=_row("kernel", "config", "GPU-0", [10.05, 10.05]),
+        )
+    ]
+    common = {
+        "selection": {"mode": "targeted", "keys": [["kernel", "config"]], "cuda_arch": "sm_100a"},
+        "timestamp": "stamp",
+        "git": {"tir": "f6726b02", "tirx-kernels": "ignored", "tirx-bench-ci": None},
+        "kernel_tree": {"tir:python/tvm/tirx": "sha256:x", "tirx-kernels:tirx_kernels": "ignored"},
+        "probe": {"server": {}},
+        "pipeline": {
+            "execution_mode": "remote",
+            "process_model": "kcoral_worker_per_request",
+            "measurement_protocol": {"rounds": 2, "cooldown_s": 0.0},
+        },
+    }
+    before = ab._aggregate_side("before", pairs, revision="b" * 40, tree="before-tree", **common)
+    after = ab._aggregate_side("after", pairs, revision="a" * 40, tree="after-tree", **common)
+
+    assert before["git"] == {"tir": "f6726b02", "tirx-kernels": "b" * 8, "tirx-bench-ci": None}
+    assert after["kernel_tree"]["tirx-kernels:tirx_kernels"] == "after-tree"
+    assert before["results"][0]["impls"] == {"tirx": 10.0}
+    report, failures = build_report(before, after, paired=True)
+    assert failures == 0
+    assert "1/1 expected rows evaluated; 1 direct passes" in report
 
 
 def test_before_uses_current_config_with_own_run_gpu(monkeypatch, tmp_path) -> None:
@@ -201,15 +247,6 @@ def test_before_uses_current_config_with_own_run_gpu(monkeypatch, tmp_path) -> N
     }
     close_prepared_kernel_bench(prepared)
     assert closed == ["old"]
-
-
-def test_only_before_side_receives_current_benchmark_root(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv(AB_CURRENT_BENCHMARK_ROOT_ENV, "stale")
-    before = ab._side_environment(Path("/before"), "3", current_benchmark_root=tmp_path)
-    after = ab._side_environment(Path("/after"), "3")
-
-    assert before[AB_CURRENT_BENCHMARK_ROOT_ENV] == str(tmp_path)
-    assert AB_CURRENT_BENCHMARK_ROOT_ENV not in after
 
 
 def test_current_contract_uses_after_kern_without_rebinding_before_kern(monkeypatch, tmp_path):
