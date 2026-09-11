@@ -38,7 +38,11 @@ import time
 import traceback
 
 ROOT_PREFIX = "tirx-bench-suite-"
-STALE_ROOT_AGE_S = 6 * 3600
+# kcoral kills a request after at most 3600 s, so any root older than that is
+# dead.  A root outlives its request when the cpu_only guard rejects prepare:
+# the violation is raised after prepare returned, so neither prepare's cleanup
+# nor run() executes.
+STALE_ROOT_AGE_S = 3600 + 300
 CUPTI_TARGET_RELATIVE = ("nvidia", "cu13", "lib", "libcupti.so.13")
 
 _STATE: dict = {}
@@ -48,7 +52,7 @@ _STATE: dict = {}
 
 
 def _sweep_stale_roots() -> list[str]:
-    """Remove extraction roots older than ``STALE_ROOT_AGE_S`` (killed workers)."""
+    """Remove extraction roots older than ``STALE_ROOT_AGE_S`` (dead requests)."""
     removed: list[str] = []
     now = time.time()
     for path in glob.glob(os.path.join(tempfile.gettempdir(), ROOT_PREFIX + "*")):
