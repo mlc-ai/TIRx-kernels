@@ -232,6 +232,24 @@ def _apply_environment(spec: dict, *, tree_root: str, after_root: str | None) ->
     _install_tree(tree_root)
 
 
+def _bind_visible_device() -> dict:
+    """Install the runner's CUDA assignment for the worker's single visible GPU.
+
+    The old bench child always bound its assigned card before the GPU stage;
+    distributed-capable kernels (MegaMoE) require it even single-process.  A
+    failure is recorded, not fatal: kernels that need the assignment raise
+    their own clear error.
+    """
+    try:
+        from tirx_kernels.runner import bind_cuda_assignment, physical_cuda_uuids
+
+        uuids = physical_cuda_uuids((0,))
+        bound = bind_cuda_assignment((0,), uuids)
+        return {"indices": [0], "uuids": list(bound)}
+    except Exception as error:
+        return {"error": f"{type(error).__name__}: {error}"}
+
+
 # ── entry points ─────────────────────────────────────────────────────────────
 
 
@@ -382,6 +400,7 @@ def run(spec_json: str) -> str:
         bench_kwargs = {
             key: value for key, value in (spec.get("bench") or {}).items() if value is not None
         }
+        out["cuda_assignment"] = _bind_visible_device()
         try:
             try:
                 result = run_prepared_kernel_bench(prepared, **bench_kwargs)
