@@ -1079,6 +1079,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
 
 
 
+            # Converge even when this CTA starts with an item and skips streams.
+            K.ptx.bar.sync(K.uint32(6), K.uint32(256))
+
         with cg:
             tm = tmem_preamble()
             wr = K.warp_id_in_role()
@@ -2077,6 +2080,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                     K.ptx.bar.sync(K.uint32(5), K.uint32(384))
                     K.assign(kk_, kk_ + K.int32(1))
                     K.assign(cur, work_wait(kk_))
+
+            # All four auxiliary warps must synchronize before reallocating.
+            K.ptx.bar.sync(K.uint32(7), K.uint32(128))
 
         with auxg:
             with mma:
