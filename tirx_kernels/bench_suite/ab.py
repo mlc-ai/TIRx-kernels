@@ -140,15 +140,20 @@ def _submit_side(
         rounds=rounds,
         cooldown=cooldown,
     )
-    program = remote.build_workload_program(
-        api.Program(),
+    submission, spec = remote.submit_workload(
+        api,
+        clients.get(),
         tree=trees["after"],
         before_tree=trees["before"] if side == "before" else None,
         shim=shim,
         spec=spec,
-    )
-    submission = remote.execute_with_retry(
-        api, clients.get(), program, timeout_s=request_timeout_s, policy=policy
+        timeout_s=request_timeout_s,
+        policy=policy,
+        on_fallback=lambda reason: print(
+            f"[bench-suite ab] {index:03d} {side} {workload['kernel']}/{workload['config']}: "
+            f"retrying with --prepare gpu: {reason}",
+            flush=True,
+        ),
     )
     log_path = campaign_root / "workloads" / f"{index:03d}" / f"{side}.log"
     remote.write_request_log(log_path, workload=workload, submission=submission, side=side)
@@ -158,7 +163,7 @@ def _submit_side(
         profile=profile,
         tree_sha256=trees[side].sha256,
         before_tree_sha256=trees["before"].sha256 if side == "before" else None,
-        prepare_mode=prepare_mode,
+        prepare_mode=spec["prepare_mode"],
         rounds=rounds,
         cooldown=cooldown,
         references_enabled=False,

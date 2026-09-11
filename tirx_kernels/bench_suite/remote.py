@@ -455,6 +455,7 @@ class Submission:
     wall_s: float = 0.0
     sleeps: list[float] = field(default_factory=list)
     error_category: str | None = None  # "busy", "timeout", "transport", "protocol", "server"
+    prepare_fallback: dict | None = None  # set when cpu_only prepare fell back to on-lease
 
 
 def _jittered(seconds: float, jitter: float) -> float:
@@ -523,6 +524,56 @@ def execute_with_retry(
     submission.finished_at = now_iso()
     submission.wall_s = clock() - started
     return submission
+
+
+def prepare_violation(outcome: Any) -> str | None:
+    """The gpu_access message when ``outcome`` failed because prepare entered CUDA."""
+    if outcome is None or getattr(outcome, "status", None) != "FAILED":
+        return None
+    error = outcome.error or {}
+    if error.get("kind") == "gpu_access" and error.get("instruction_id") == "prepare":
+        return str(error.get("message") or "cpu_only prepare entered CUDA")
+    return None
+
+
+def submit_workload(
+    api: KcoralApi,
+    client: Any,
+    *,
+    tree: TreeArchive,
+    before_tree: TreeArchive | None,
+    shim: str,
+    spec: dict,
+    timeout_s: float,
+    policy: RetryPolicy = RetryPolicy(),
+    on_fallback: Callable[[str], None] | None = None,
+) -> tuple[Submission, dict]:
+    """Execute one workload; retry once with on-lease prepare if cpu_only prepare touched CUDA.
+
+    Returns the final submission and the spec it ran with (``prepare_mode`` may
+    have changed to ``"gpu"``); the fallback reason is recorded on the submission.
+    """
+    program = build_workload_program(
+        api.Program(), tree=tree, before_tree=before_tree, shim=shim, spec=spec
+    )
+    submission = execute_with_retry(api, client, program, timeout_s=timeout_s, policy=policy)
+    violation = prepare_violation(submission.outcome)
+    if violation is None or spec.get("prepare_mode") != "cpu":
+        return submission, spec
+    if on_fallback is not None:
+        on_fallback(violation)
+    fallback_spec = dict(spec, prepare_mode="gpu")
+    program = build_workload_program(
+        api.Program(), tree=tree, before_tree=before_tree, shim=shim, spec=fallback_spec
+    )
+    retried = execute_with_retry(api, client, program, timeout_s=timeout_s, policy=policy)
+    retried.attempts += submission.attempts
+    retried.busy_retries += submission.busy_retries
+    retried.transport_retries += submission.transport_retries
+    retried.started_at = submission.started_at
+    retried.wall_s += submission.wall_s
+    retried.prepare_fallback = {"from": "cpu", "to": "gpu", "reason": violation}
+    return retried, fallback_spec
 
 
 # ── Outcome → row ────────────────────────────────────────────────────────────
@@ -611,6 +662,8 @@ def outcome_to_record(
     }
     if side is not None:
         remote["side"] = side
+    if submission.prepare_fallback is not None:
+        remote["prepare_fallback"] = dict(submission.prepare_fallback)
     record: dict[str, Any] = {
         "kernel": kernel,
         "config": config,
@@ -717,6 +770,8 @@ def write_request_log(
     ]
     if submission.error is not None:
         lines.append(f"client_error: {type(submission.error).__name__}: {submission.error}")
+    if submission.prepare_fallback is not None:
+        lines.append(f"prepare_fallback: {json.dumps(submission.prepare_fallback)}")
     if outcome is not None:
         lines += [
             f"request_id: {outcome.request_id}",
@@ -834,12 +889,19 @@ def run_remote_jobs(
             cooldown=cooldown,
             reference_deps_dir=reference_deps_dir,
         )
-        program = build_workload_program(
-            api.Program(), tree=tree, before_tree=None, shim=shim, spec=spec
-        )
         log(f"[bench-suite] {now_iso()} SUBMIT {kernel}/{config}")
-        submission = execute_with_retry(
-            api, clients.get(), program, timeout_s=request_timeout_s, policy=policy
+        submission, spec = submit_workload(
+            api,
+            clients.get(),
+            tree=tree,
+            before_tree=None,
+            shim=shim,
+            spec=spec,
+            timeout_s=request_timeout_s,
+            policy=policy,
+            on_fallback=lambda reason: log(
+                f"[bench-suite] {now_iso()} retry {kernel}/{config} with --prepare gpu: {reason}"
+            ),
         )
         write_request_log(log_path, workload=workload, submission=submission)
         return outcome_to_record(
@@ -848,7 +910,7 @@ def run_remote_jobs(
             profile=profile,
             tree_sha256=tree.sha256,
             before_tree_sha256=None,
-            prepare_mode=prepare_mode,
+            prepare_mode=spec["prepare_mode"],
             rounds=rounds,
             cooldown=cooldown,
             references_enabled=with_references,
@@ -951,6 +1013,9 @@ def pipeline_metadata(
         "busy_retry_count": busy_retries,
         "transport_retry_count": transport_retries,
         "failure_count": sum(1 for record in records if record.get("status") == "FAIL"),
+        "prepare_fallback_count": sum(
+            1 for record in records if (record.get("remote") or {}).get("prepare_fallback")
+        ),
     }
 
 

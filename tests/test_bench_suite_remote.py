@@ -494,3 +494,69 @@ def test_run_reexports_provenance_helpers():
     assert bench_run.package_provenance is provenance.package_provenance
     assert bench_run.git_label is provenance.git_label
     assert bench_run._tir_repo_root is provenance.tir_repo_root
+
+
+def test_submit_workload_falls_back_to_gpu_prepare():
+    api = _api()
+    violation = _FakeOutcome(
+        "FAILED",
+        error={
+            "kind": "gpu_access",
+            "message": "called cudaGetDevice",
+            "instruction_id": "prepare",
+        },
+    )
+
+    class _Client:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, program, *, timeout_seconds, output_limit_bytes):
+            self.calls.append(program)
+            if len(self.calls) == 1:
+                return violation
+            return _FakeOutcome(
+                "COMPLETED", results={"result": json.dumps({"result": _bench_result()})}
+            )
+
+    client = _Client()
+    reasons = []
+    submission, spec = remote.submit_workload(
+        api,
+        client,
+        tree=_tree(),
+        before_tree=None,
+        shim="",
+        spec=_spec(prepare_mode="cpu"),
+        timeout_s=10,
+        on_fallback=reasons.append,
+    )
+    assert spec["prepare_mode"] == "gpu"
+    assert reasons == ["called cudaGetDevice"]
+    assert submission.outcome.status == "COMPLETED"
+    assert submission.attempts == 2
+    assert submission.prepare_fallback == {
+        "from": "cpu",
+        "to": "gpu",
+        "reason": "called cudaGetDevice",
+    }
+    first, second = client.calls
+    assert first.instructions[2] == ("get_function", "prepare_fn", "prepare", True)
+    assert second.instructions[2] == ("get_function", "prepare_fn", "prepare", False)
+    row = _record(submission, rounds=3, prepare_mode=spec["prepare_mode"])
+    assert row["status"] == "ok"
+    assert row["remote"]["prepare_fallback"]["to"] == "gpu"
+    assert row["remote"]["prepare_mode"] == "gpu"
+
+    # gpu mode never falls back; a non-prepare failure never falls back
+    client = _Client()
+    submission, spec = remote.submit_workload(
+        api,
+        client,
+        tree=_tree(),
+        before_tree=None,
+        shim="",
+        spec=_spec(prepare_mode="gpu"),
+        timeout_s=10,
+    )
+    assert len(client.calls) == 1 and submission.prepare_fallback is None
