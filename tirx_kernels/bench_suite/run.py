@@ -23,42 +23,35 @@ import argparse
 import json
 import math
 import os
-import random
-import select
-import shutil
-import signal
-import socket
 import statistics
-import subprocess
 import sys
-import tempfile
 import threading
-import time
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, ClassVar
 
 import yaml
 
-from tirx_kernels.bench_suite.provenance import (  # noqa: F401  (re-exported)
-    BASELINE_PACKAGES,
+from tirx_kernels.bench_suite.provenance import (  # re-exported for ab.py, tests, tvm
+    BASELINE_PACKAGES,  # noqa: F401
     collect_baseline_provenance,
     collect_kernel_fingerprint,
     collect_repo_git,
-    git_label,
-    package_provenance,
+    git_label,  # noqa: F401
+    package_provenance,  # noqa: F401
+)
+from tirx_kernels.bench_suite.provenance import module_repo_root as _module_repo_root  # noqa: F401
+from tirx_kernels.bench_suite.provenance import tir_repo_root as _tir_repo_root  # noqa: F401
+from tirx_kernels.bench_suite.remote import (
+    DEFAULT_REQUEST_TIMEOUT_S,
+    DEFAULT_SERVER_URL,
+    MAX_REQUEST_TIMEOUT_S,
+    PREPARE_MODES,
+    REFERENCE_DEPS_DIR_ENV,
+    SERVER_URL_ENV,
 )
 from tirx_kernels.registry import kernel_index
 from tirx_kernels.runner import DEFAULT_BENCH_COOLDOWN_S as DEFAULT_COOLDOWN_S
 from tirx_kernels.runner import DEFAULT_BENCH_ROUNDS as DEFAULT_ROUNDS
-from tirx_kernels.runner import (
-    PREPARE_CUDA_ARCH_ENV,
-    PREPARE_NUM_SMS_ENV,
-    TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV,
-)
 
 try:
     from tirx_kernels.bench_suite.impls import our_impls
@@ -87,35 +80,6 @@ DEFAULT_SELECTION_ROLES = ("small", "medium", "large")
 # report; they never replace the direct before/after verdict.
 DEFAULT_BASELINE = SCRIPT_DIR / "baseline.json"
 DEFAULT_REGRESSION_THRESHOLD = 1.0
-POLL_INTERVAL = 5.0  # seconds between GPU re-checks when none is free
-MONITOR_INTERVAL = 0.5  # seconds between nvidia-smi polls during a workload
-DEFAULT_UTIL_THRESHOLD = 0.0  # % GPU util above which a card counts as busy.
-DEFAULT_MEM_THRESHOLD = 0.0  # % physical memory above the idle floor that counts as busy.
-IDLE_GPU_MEMORY_FLOOR_MIB = 512.0
-
-
-# Tiny real workload used to decide whether a GPU is actually usable.
-# Catches: driver hangs, ECC errors when touching memory, cuBLAS init
-# failures, MIG/cgroup restrictions, fragmentation surprises — issues that
-# nvidia-smi "free" status alone won't surface.
-PROBE_SCRIPT = r"""
-import sys
-try:
-    import torch
-    if not torch.cuda.is_available():
-        print("PROBE_FAIL: torch.cuda.is_available()=False", file=sys.stderr)
-        sys.exit(1)
-    a = torch.randn(512, 512, device="cuda", dtype=torch.float16)
-    b = torch.randn(512, 512, device="cuda", dtype=torch.float16)
-    c = a @ b
-    torch.cuda.synchronize()
-    del a, b, c
-    torch.cuda.empty_cache()
-except Exception as e:
-    print(f"PROBE_FAIL: {type(e).__name__}: {e}", file=sys.stderr)
-    sys.exit(1)
-print("PROBE_OK")
-"""
 
 
 # ── Workload loading ─────────────────────────────────────────────────────────
@@ -306,252 +270,6 @@ def load_workloads(path: Path) -> list[dict]:
     return [_normalize_workload({**defaults, **entry}) for entry in data.get("workloads") or []]
 
 
-# ── GPU pool ─────────────────────────────────────────────────────────────────
-
-
-class GpuPool:
-    """Exclusive GPU resource pool for late assignment by the orchestrator.
-
-    A READY workload atomically acquires all required GPUs, holds them only for
-    its GPU stage, and releases them when RESULT reaches the parent. At most one
-    orchestrator GPU stage owns a card at a time, including multi-GPU jobs.
-
-    A card is ineligible when internally owned or when the background external
-    occupancy snapshot exceeds the utilization gate or the foreign-process
-    memory gate. Startup probing filters broken cards into `allowed` before the
-    pool is created.
-    """
-
-    def __init__(
-        self,
-        allowed: set[str] | None = None,
-        util_threshold: float = DEFAULT_UTIL_THRESHOLD,
-        mem_threshold: float = DEFAULT_MEM_THRESHOLD,
-    ):
-        self._owned: set[str] = set()
-        self._lock = threading.Lock()
-        self._changed = threading.Condition(self._lock)
-        self._allowed = allowed
-        self._known_indices: tuple[str, ...] = tuple(
-            sorted(allowed, key=int) if allowed is not None else ()
-        )
-        self._external_occupied: set[str] | None = None
-        self._change_generation = 0
-        self.util_threshold = util_threshold
-        self.mem_threshold = mem_threshold
-        self._mem_total_mib: dict[str, float] | None = None
-        self._index_by_uuid: dict[str, str] | None = None
-
-    @staticmethod
-    def _nvidia_smi(args: list[str]) -> list[str]:
-        try:
-            out = subprocess.run(
-                ["nvidia-smi", *args, "--format=csv,noheader,nounits"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except (subprocess.TimeoutExpired, OSError):
-            # Transient nvidia-smi stall under cluster load: degrade to an empty
-            # reading instead of killing the whole sweep. Callers treat an empty
-            # utilization map as "no occupancy info this tick"; a real co-run
-            # conflict is still caught by the per-PID interference check.
-            return []
-        return [line.strip() for line in out.stdout.splitlines() if line.strip()]
-
-    def _all_gpus(self) -> list[tuple[str, str]]:
-        rows = self._nvidia_smi(["--query-gpu=index,uuid"])
-        result = []
-        for line in rows:
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) >= 2:
-                result.append((parts[0], parts[1]))
-        return result
-
-    def _busy_indices(self) -> set[str]:
-        """GPU indices with physical VRAM above the idle-driver allowance."""
-        return {idx for idx, used_pct in self._mem_used_pct().items() if used_pct > 0.0}
-
-    def _utils(self) -> dict[str, float]:
-        """Map GPU index -> current utilization.gpu (percent)."""
-        rows = self._nvidia_smi(["--query-gpu=index,utilization.gpu"])
-        out: dict[str, float] = {}
-        for line in rows:
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) >= 2:
-                try:
-                    out[parts[0]] = float(parts[1])
-                except ValueError:
-                    pass
-        return out
-
-    def _mem_used_pct(self) -> dict[str, float]:
-        """Map GPU index -> physical VRAM above the idle floor / total (percent)."""
-        rows = self._nvidia_smi(["--query-gpu=index,memory.used,memory.total"])
-        out: dict[str, float] = {}
-        for line in rows:
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) >= 3:
-                try:
-                    used = max(0.0, float(parts[1]) - IDLE_GPU_MEMORY_FLOOR_MIB)
-                    total = float(parts[2])
-                    out[parts[0]] = 100.0 * used / total if total > 0 else 0.0
-                except ValueError:
-                    pass
-        return out
-
-    def _foreign_mem_pct(self) -> dict[str, float]:
-        """Map GPU index -> foreign compute-app VRAM above the idle floor (percent).
-
-        Only processes outside this orchestrator's tree count toward the memory
-        gate. An interference-parked bench child keeps a residual CUDA context
-        on its affinity card until it reacquires it; counting that residency as
-        external occupancy would permanently starve the exact card the child is
-        waiting for.
-        """
-        if self._mem_total_mib is None:
-            totals: dict[str, float] = {}
-            for line in self._nvidia_smi(["--query-gpu=index,memory.total"]):
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 2:
-                    try:
-                        totals[parts[0]] = float(parts[1])
-                    except ValueError:
-                        pass
-            if not totals:
-                return {}
-            self._mem_total_mib = totals
-        if self._index_by_uuid is None:
-            rows = self._all_gpus()
-            if not rows:
-                return {}
-            self._index_by_uuid = {uuid: index for index, uuid in rows}
-        foreign_mib = dict.fromkeys(self._mem_total_mib, 0.0)
-        ours = _our_pids()
-        for line in self._nvidia_smi(["--query-compute-apps=pid,gpu_uuid,used_memory"]):
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 3:
-                continue
-            try:
-                pid = int(parts[0])
-                used = float(parts[2])
-            except ValueError:
-                continue
-            index = self._index_by_uuid.get(parts[1])
-            if index is None or pid in ours:
-                continue
-            foreign_mib[index] = foreign_mib.get(index, 0.0) + used
-        return {
-            index: (
-                100.0 * max(0.0, foreign_mib.get(index, 0.0) - IDLE_GPU_MEMORY_FLOOR_MIB) / total
-                if total > 0
-                else 0.0
-            )
-            for index, total in self._mem_total_mib.items()
-        }
-
-    def _occupied_indices(self) -> set[str]:
-        """GPU indices over the configured SM or foreign-process memory threshold."""
-        util_busy = {idx for idx, u in self._utils().items() if u > self.util_threshold}
-        mem_busy = {idx for idx, m in self._foreign_mem_pct().items() if m > self.mem_threshold}
-        return util_busy | mem_busy
-
-    def total_visible(self) -> int:
-        gpus = self._all_gpus()
-        if self._allowed is not None:
-            gpus = [g for g in gpus if g[0] in self._allowed]
-        return len(gpus)
-
-    def try_acquire_many(self, count: int) -> tuple[str, ...] | None:
-        """Atomically claim currently eligible GPUs without waiting."""
-        if type(count) is not int or count < 1:
-            raise ValueError(f"GPU count must be a positive integer, got {count!r}")
-        with self._changed:
-            if self._external_occupied is None:
-                return None
-            free = [
-                idx
-                for idx in self._known_indices
-                if (self._allowed is None or idx in self._allowed)
-                and idx not in self._owned
-                and idx not in self._external_occupied
-            ]
-            if len(free) < count:
-                return None
-            selected = tuple(sorted(random.sample(free, count), key=int))
-            self._owned.update(selected)
-            return selected
-
-    def try_acquire_exact(self, indices: tuple[str, ...]) -> tuple[str, ...] | None:
-        """Atomically reclaim one exact previously assigned GPU set."""
-        if not indices or len(set(indices)) != len(indices):
-            raise ValueError(f"exact GPU claim must contain unique indices, got {indices!r}")
-        requested = tuple(indices)
-        with self._changed:
-            if self._external_occupied is None:
-                return None
-            if any(
-                idx not in self._known_indices
-                or (self._allowed is not None and idx not in self._allowed)
-                or idx in self._owned
-                or idx in self._external_occupied
-                for idx in requested
-            ):
-                return None
-            self._owned.update(requested)
-            return requested
-
-    def refresh_external_occupancy(self) -> set[str]:
-        """Poll foreign-visible occupancy and wake dispatch if eligibility changed."""
-        rows = self._all_gpus()
-        sampled = self._occupied_indices()
-        with self._changed:
-            if self._allowed is None:
-                self._known_indices = tuple(sorted((idx for idx, _uuid in rows), key=int))
-            previous = self._external_occupied or set()
-            # Aggregate utilization includes our RUNNING children (memory is
-            # already foreign-only per PID). Keep each internally-owned card's
-            # pre-claim external state; the per-PID monitor below detects new
-            # foreign activity on owned cards.
-            occupied = {
-                idx
-                for idx in self._known_indices
-                if (idx in previous if idx in self._owned else idx in sampled)
-            }
-            changed = occupied != self._external_occupied
-            self._external_occupied = occupied
-            if changed:
-                self._change_generation += 1
-                self._changed.notify_all()
-        return occupied
-
-    def release_many(self, indices: tuple[str, ...] | list[str]) -> None:
-        with self._changed:
-            previous = set(self._owned)
-            self._owned.difference_update(indices)
-            if self._owned != previous:
-                self._change_generation += 1
-                self._changed.notify_all()
-
-    def change_generation(self) -> int:
-        with self._changed:
-            return self._change_generation
-
-    def wait_for_change(self, generation: int, stop: threading.Event) -> int:
-        """Block a notifier thread until eligibility/ownership changes or stop."""
-        with self._changed:
-            self._changed.wait_for(lambda: self._change_generation != generation or stop.is_set())
-            return self._change_generation
-
-    def wake(self) -> None:
-        """Wake assignment waiters after cancellation or an internal event."""
-        with self._changed:
-            self._changed.notify_all()
-
-    def release(self, idx: str) -> None:
-        self.release_many((idx,))
-
-
 # ── Tee stdout → run log ─────────────────────────────────────────────────────
 
 
@@ -592,110 +310,7 @@ def log(msg: str) -> None:
         print(msg, flush=True)
 
 
-# ── GPU probe ────────────────────────────────────────────────────────────────
-
-
-def probe_gpu(idx: str, timeout: float = 60.0) -> tuple[bool, str]:
-    """Run PROBE_SCRIPT on a single GPU. Returns (ok, error_message)."""
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = idx
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-c", PROBE_SCRIPT],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return False, f"probe timed out after {timeout:.0f}s"
-    except Exception as e:
-        return False, repr(e)
-    if proc.returncode == 0 and "PROBE_OK" in proc.stdout:
-        return True, ""
-    msg = (proc.stderr or proc.stdout).strip().splitlines()
-    return False, msg[-1] if msg else f"exit {proc.returncode}"
-
-
-def detect_usable_gpus(
-    candidates: list[str], probe_timeout: float
-) -> tuple[set[str], dict[str, str]]:
-    """Probe candidates in parallel. Returns (usable_set, failures)."""
-    usable: set[str] = set()
-    failures: dict[str, str] = {}
-    if not candidates:
-        return usable, failures
-    with ThreadPoolExecutor(max_workers=len(candidates)) as ex:
-        futs = {ex.submit(probe_gpu, idx, probe_timeout): idx for idx in candidates}
-        for fut in as_completed(futs):
-            idx = futs[fut]
-            ok, err = fut.result()
-            if ok:
-                usable.add(idx)
-                log(f"[bench-suite]   gpu {idx}: ok")
-            else:
-                failures[idx] = err
-                log(f"[bench-suite]   gpu {idx}: FAIL — {err}")
-    return usable, failures
-
-
-def gpu_compile_profile(indices: set[str]) -> dict:
-    """Read the homogeneous compile profile for late-bindable GPUs via NVML."""
-    if not indices:
-        raise ValueError("cannot build a GPU compile profile for an empty GPU set")
-    try:
-        import pynvml
-
-        pynvml.nvmlInit()
-        profiles = []
-        for index in sorted(indices, key=int):
-            handle = pynvml.nvmlDeviceGetHandleByIndex(int(index))
-            name = str(pynvml.nvmlDeviceGetName(handle))
-            compute_capability = tuple(pynvml.nvmlDeviceGetCudaComputeCapability(handle))
-            core_count = int(pynvml.nvmlDeviceGetNumGpuCores(handle))
-            if compute_capability == (10, 0):
-                cores_per_sm = 128
-                cuda_arch = "sm_100a"
-            elif compute_capability == (10, 3):
-                cores_per_sm = 128
-                cuda_arch = "sm_103a"
-            elif compute_capability == (10, 7):
-                cores_per_sm = 128
-                cuda_arch = "sm_107a"
-            elif compute_capability == (11, 0):
-                cores_per_sm = 128
-                cuda_arch = "sm_110a"
-            else:
-                raise ValueError(
-                    f"GPU {index} {name!r} has unsupported compile profile "
-                    f"sm{compute_capability[0]}{compute_capability[1]}"
-                )
-            if core_count % cores_per_sm:
-                raise ValueError(
-                    f"GPU {index} {name!r} reports {core_count} cores, not divisible "
-                    f"by {cores_per_sm} cores/SM"
-                )
-            profiles.append(
-                {
-                    "name": name,
-                    "compute_capability": list(compute_capability),
-                    "cuda_arch": cuda_arch,
-                    "num_sms": core_count // cores_per_sm,
-                }
-            )
-    finally:
-        try:
-            pynvml.nvmlShutdown()
-        except Exception:
-            pass
-
-    first = profiles[0]
-    if any(profile != first for profile in profiles[1:]):
-        raise ValueError(
-            "eligible GPUs have heterogeneous compile profiles; late binding requires "
-            f"one profile per prepared child, got {profiles}"
-        )
-    return first
+# ── Workload architecture filtering ─────────────────────────────────────────
 
 
 def partition_workloads_by_arch(
@@ -726,407 +341,8 @@ def validate_workload_archs(workloads: list[dict], cuda_arch: str) -> None:
         )
 
 
-# ── Workload execution ───────────────────────────────────────────────────────
-
-
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _visible_gpu_rows(rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Apply the process CUDA visibility filter to physical NVML rows."""
-
-    configured = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if configured is None:
-        return rows
-    visible = {item.strip() for item in configured.split(",") if item.strip()}
-    return [(index, uuid) for index, uuid in rows if index in visible or uuid in visible]
-
-
-def _pid_sm_on_gpus(gpu_indices: tuple[str, ...]) -> dict[int, float] | None:
-    """Return the maximum per-process SM utilization on assigned GPUs.
-
-    ``None`` means the utilization snapshot failed and the caller must fail
-    closed.  Inactive rows use ``-`` for SM utilization and are equivalent to
-    zero, so a process that only keeps a CUDA context resident is shareable.
-    """
-    if not gpu_indices:
-        return {}
-    try:
-        import pynvml
-
-        pynvml.nvmlInit()
-        result: dict[int, float] = {}
-        # The API reports samples since a wall-clock timestamp in microseconds.
-        # A one-second window covers the monitor cadence without retaining stale
-        # activity long enough to delay a newly eligible assignment.
-        since_us = int((time.time() - 1.0) * 1_000_000)
-        for gpu_index in gpu_indices:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(int(gpu_index))
-            try:
-                samples = pynvml.nvmlDeviceGetProcessUtilization(handle, since_us)
-            except pynvml.NVMLError_NotFound:
-                samples = ()
-            for sample in samples:
-                pid = int(sample.pid)
-                result[pid] = max(result.get(pid, 0.0), float(sample.smUtil))
-        return result
-    except (ImportError, AttributeError, ValueError):
-        pass
-    except Exception:
-        # Keep the existing fail-closed subprocess sampler as a compatibility
-        # fallback for NVML versions without process-utilization support.
-        pass
-    try:
-        completed = subprocess.run(
-            ["nvidia-smi", "pmon", "-i", ",".join(gpu_indices), "-c", "1", "-s", "u"],
-            capture_output=True,
-            text=True,
-            timeout=8,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return None
-    if completed.returncode != 0:
-        return None
-
-    result: dict[int, float] = {}
-    assigned = set(gpu_indices)
-    for line in completed.stdout.splitlines():
-        fields = line.split()
-        if len(fields) < 4 or fields[0] not in assigned:
-            continue
-        try:
-            pid = int(fields[1])
-            sm = float(fields[3])
-        except ValueError:
-            continue
-        result[pid] = max(result.get(pid, 0.0), sm)
-    return result
-
-
-def _active_strangers(
-    gpu_indices: tuple[str, ...], our_pids: set[int], sm_threshold: float
-) -> dict[int, float] | None:
-    """Foreign PIDs whose sampled SM utilization exceeds the threshold."""
-    snapshot = _pid_sm_on_gpus(gpu_indices)
-    if snapshot is None:
-        return None
-    return {pid: sm for pid, sm in snapshot.items() if pid not in our_pids and sm > sm_threshold}
-
-
-class _BenchPidRegistry:
-    """Bench subprocess PIDs spawned by this orchestrator (register at Popen)."""
-
-    _lock = threading.Lock()
-    _roots: ClassVar[set[int]] = set()
-    _our_pids_cache: ClassVar[tuple[float, set[int]] | None] = None
-
-    @classmethod
-    def register(cls, pid: int) -> None:
-        with cls._lock:
-            cls._roots.add(pid)
-            cls._our_pids_cache = None
-
-    @classmethod
-    def unregister(cls, pid: int) -> None:
-        with cls._lock:
-            cls._roots.discard(pid)
-            cls._our_pids_cache = None
-
-
-def _proc_children_map() -> dict[int, list[int]]:
-    children: dict[int, list[int]] = {}
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        try:
-            pid = int(entry)
-            with open(f"/proc/{entry}/stat") as f:
-                data = f.read()
-            rparen = data.rfind(")")
-            fields = data[rparen + 2 :].split()
-            ppid = int(fields[1])
-            children.setdefault(ppid, []).append(pid)
-        except (OSError, ValueError, IndexError):
-            continue
-    return children
-
-
-def _descendants_of(roots: set[int]) -> set[int]:
-    if not roots:
-        return set()
-    children = _proc_children_map()
-    out: set[int] = set()
-    stack = list(roots)
-    while stack:
-        p = stack.pop()
-        for c in children.get(p, ()):
-            if c not in out:
-                out.add(c)
-                stack.append(c)
-    return out
-
-
-_OUR_PIDS_TTL = 0.25  # seconds; amortize /proc walks across pmon polls
-
-
-def _our_pids() -> set[int]:
-    """Orchestrator + every registered bench subprocess and its descendants."""
-    now = time.time()
-    with _BenchPidRegistry._lock:
-        hit = _BenchPidRegistry._our_pids_cache
-        if hit is not None and now - hit[0] < _OUR_PIDS_TTL:
-            return hit[1]
-        roots = set(_BenchPidRegistry._roots)
-    pids = {os.getpid()} | roots | _descendants_of(roots)
-    with _BenchPidRegistry._lock:
-        _BenchPidRegistry._our_pids_cache = (now, pids)
-    return pids
-
-
-def _terminate_subprocess(proc: subprocess.Popen) -> None:
-    """Terminate a bench process group, escalating to SIGKILL when needed."""
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        proc.wait()
-    except ProcessLookupError:
-        proc.wait()
-
-
-@dataclass
-class _PreparedAttempt:
-    """One process-local workload prepare and its GPU-attempt resources."""
-
-    workload: dict
-    attempt: int
-    process: subprocess.Popen
-    control: socket.socket
-    log_file: object
-    log_path: Path
-    workdir: str
-    started_at: float
-    state: str = "PREPARING_CPU"
-    buffer: bytearray = field(default_factory=bytearray)
-    gpus: tuple[str, ...] = ()
-    gpu_affinity: tuple[str, ...] = ()
-    physical_gpu_uuids: tuple[str, ...] = ()
-    nvml_owned_pids: set[int] = field(default_factory=set)
-    nvml_ownership_pending: bool = False
-    gpu_ownership_released: bool = False
-    pending_interference: dict[str, Any] | None = None
-    ready_since: float | None = None
-    interference_stop_deadline: float | None = None
-
-    @property
-    def label(self) -> str:
-        return f"{self.workload['kernel']}/{self.workload['config']}"
-
-
-def _attempt_strangers(
-    item: _PreparedAttempt, snapshot: dict[int, float], local_pids: set[int], sm_threshold: float
-) -> dict[int, float]:
-    """Classify active NVML PIDs for one GPU attempt.
-
-    NVML reports host PIDs, while ``/proc`` may expose only this container's PID
-    namespace. The pool proves the assigned GPU quiet before dispatch, so the
-    first active host-PID set belongs to the attempt. Later additions remain
-    interference. When the namespaces already match, preserve exact PID
-    matching and classify unknown PIDs immediately.
-    """
-
-    active = {pid: sm for pid, sm in snapshot.items() if sm > sm_threshold}
-    unknown = {pid: sm for pid, sm in active.items() if pid not in local_pids}
-    if not item.nvml_ownership_pending:
-        return {pid: sm for pid, sm in unknown.items() if pid not in item.nvml_owned_pids}
-    if active.keys() & local_pids:
-        item.nvml_ownership_pending = False
-        return unknown
-    if unknown:
-        item.nvml_owned_pids.update(unknown)
-        item.nvml_ownership_pending = False
-    return {}
-
-
-def _prepared_child_command(
-    workload: dict, *, control_fd: int, rounds: int, cooldown: float, with_references: bool
-) -> list[str]:
-    command = [
-        sys.executable,
-        "-m",
-        "tirx_kernels.bench",
-        "--kernel",
-        workload["kernel"],
-        "--config",
-        workload["config"],
-        "--prepared-control-fd",
-        str(control_fd),
-        "--prepared-num-gpus",
-        str(workload.get("num_gpus", 1)),
-        "--rounds",
-        str(rounds),
-        "--cooldown",
-        str(cooldown),
-    ]
-    if workload.get("warmup") is not None:
-        command += ["--warmup", str(workload["warmup"])]
-    if workload.get("repeat") is not None:
-        command += ["--repeat", str(workload["repeat"])]
-    if workload.get("timer") is not None:
-        command += ["--timer", workload["timer"]]
-    if with_references:
-        command.append("--with-references")
-    return command
-
-
-def _spawn_prepared_attempt(
-    workload: dict,
-    attempt: int,
-    log_dir: Path,
-    *,
-    rounds: int,
-    cooldown: float,
-    compile_profile: dict,
-    with_references: bool,
-) -> _PreparedAttempt:
-    """Spawn a GPU-unbound child that immediately begins CPU prepare."""
-    parent_control, child_control = socket.socketpair()
-    parent_control.setblocking(False)
-    kernel = workload["kernel"]
-    config = workload["config"]
-    log_path = log_dir / f"{kernel}__{config}__a{attempt}.log"
-    log_file = open(log_path, "w")
-    workdir = tempfile.mkdtemp(prefix=f"bench-suite-{kernel}-{config}-")
-    env = os.environ.copy()
-    env.pop("CUDA_VISIBLE_DEVICES", None)
-    env["TIRX_BENCH_JSON"] = "1"
-    env[TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV] = "1"
-    env[PREPARE_CUDA_ARCH_ENV] = str(compile_profile["cuda_arch"])
-    env[PREPARE_NUM_SMS_ENV] = str(compile_profile["num_sms"])
-    repo_root = str(_kernels_repo_root())
-    python_path = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = repo_root if not python_path else f"{repo_root}{os.pathsep}{python_path}"
-    configured_cache = env.get("TIRX_BENCH_CACHE_DIR")
-    if configured_cache:
-        cache_dir = Path(configured_cache).expanduser().resolve()
-    else:
-        user_cache = Path(env.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-        cache_dir = (user_cache / "tirx-kernels" / "bench-suite").resolve()
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    env["TIRX_BENCH_CACHE_DIR"] = str(cache_dir)
-    command = _prepared_child_command(
-        workload,
-        control_fd=child_control.fileno(),
-        rounds=rounds,
-        cooldown=cooldown,
-        with_references=with_references,
-    )
-    process_started = time.time()
-    try:
-        process = subprocess.Popen(
-            command,
-            env=env,
-            cwd=workdir,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            pass_fds=(child_control.fileno(),),
-            start_new_session=True,
-        )
-    except BaseException:
-        parent_control.close()
-        child_control.close()
-        log_file.close()
-        shutil.rmtree(workdir, ignore_errors=True)
-        raise
-    child_control.close()
-    _BenchPidRegistry.register(process.pid)
-    return _PreparedAttempt(
-        workload=workload,
-        attempt=attempt,
-        process=process,
-        control=parent_control,
-        log_file=log_file,
-        log_path=log_path,
-        workdir=workdir,
-        started_at=process_started,
-    )
-
-
-def _send_child(attempt: _PreparedAttempt, message: dict) -> None:
-    attempt.control.sendall(json.dumps(message, separators=(",", ":")).encode() + b"\n")
-
-
-def _receive_child_messages(attempt: _PreparedAttempt) -> tuple[list[dict], bool]:
-    """Drain complete control messages; return ``(messages, eof)``."""
-    eof = False
-    while True:
-        try:
-            chunk = attempt.control.recv(65536)
-        except BlockingIOError:
-            break
-        if not chunk:
-            eof = True
-            break
-        attempt.buffer.extend(chunk)
-    messages: list[dict] = []
-    while True:
-        newline = attempt.buffer.find(b"\n")
-        if newline < 0:
-            break
-        line = bytes(attempt.buffer[:newline])
-        del attempt.buffer[: newline + 1]
-        if line:
-            messages.append(json.loads(line))
-    if eof and attempt.buffer:
-        messages.append(json.loads(bytes(attempt.buffer)))
-        attempt.buffer.clear()
-    return messages, eof
-
-
-def _base_attempt_record(attempt: _PreparedAttempt) -> dict:
-    workload = attempt.workload
-    gpu_csv = ",".join(attempt.gpus)
-    return {
-        "kernel": workload["kernel"],
-        "config": workload["config"],
-        "label": workload["config"],
-        "gpu": gpu_csv,
-        "gpus": list(attempt.gpus),
-        "num_gpus": workload.get("num_gpus", 1),
-        "attempt": attempt.attempt,
-        "process_pid": attempt.process.pid,
-        "execution_mode": "pipeline",
-        "process_model": "one_shot_child_per_workload",
-        "started_at": datetime.fromtimestamp(attempt.started_at, timezone.utc).isoformat(
-            timespec="seconds"
-        ),
-        "retry_in_place": attempt.attempt > 1,
-    }
-
-
-def _finish_attempt_process(attempt: _PreparedAttempt) -> None:
-    """Close host resources after the already-reaped child."""
-    _BenchPidRegistry.unregister(attempt.process.pid)
-    try:
-        attempt.control.close()
-    finally:
-        attempt.log_file.close()
-        shutil.rmtree(attempt.workdir, ignore_errors=True)
-
-
-def _record_child_failure(attempt: _PreparedAttempt, message: dict | None = None) -> dict:
-    record = _base_attempt_record(attempt)
-    if message is None:
-        error = f"prepared child exited {attempt.process.returncode} without a terminal message"
-    else:
-        phase = message.get("phase", "unknown")
-        error = f"{phase}: {message.get('error', 'unknown child failure')}"
-        if message.get("traceback"):
-            error += "\n" + message["traceback"]
-    record.update({"status": "FAIL", "error": error, "finished_at": now_iso()})
-    return record
 
 
 # ── Output ───────────────────────────────────────────────────────────────────
@@ -1140,18 +356,32 @@ def write_run(
     *,
     selection: dict,
     references_enabled: bool,
+    git: dict | None = None,
+    kernel_tree: dict | None = None,
+    baselines: dict | None = None,
     probe: dict | None = None,
     pipeline: dict | None = None,
 ) -> Path:
+    """Write ``runs/<stamp>.json``.
+
+    Provenance defaults to this process (local git checkouts, locally importable
+    baseline packages); the remote backend passes the server's identity instead.
+    """
     runs_dir = out_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
+    if git is None:
+        git = collect_repo_git()
+    if kernel_tree is None:
+        kernel_tree = collect_kernel_fingerprint()
+    if baselines is None:
+        baselines = collect_baseline_provenance() if references_enabled else {}
     payload = {
         "timestamp": stamp,
         "label": label,
         "references_enabled": references_enabled,
-        "git": collect_repo_git(),
-        "kernel_tree": collect_kernel_fingerprint(),
-        "baselines": collect_baseline_provenance() if references_enabled else {},
+        "git": git,
+        "kernel_tree": kernel_tree,
+        "baselines": baselines,
         "selection": selection,
         "probe": probe or {},
         "pipeline": pipeline or {},
@@ -1449,428 +679,6 @@ def _finalize_bench_record(
     row["status"] = "ok"
 
 
-def run_scheduled_jobs(
-    workloads: list[dict],
-    pool: GpuPool,
-    log_dir: Path,
-    *,
-    rounds: int,
-    cooldown: float,
-    compile_profile: dict,
-    with_references: bool,
-    max_prepare_processes: int | None = None,
-    ready_backlog: int | None = None,
-) -> tuple[list[dict], list[dict[str, Any]], dict]:
-    """Run bounded CPU preparation and late-bound GPU stages."""
-    n_jobs = len(workloads)
-    if not n_jobs:
-        return [], [], {}
-
-    visible = pool.total_visible()
-    if max_prepare_processes is None:
-        max_prepare_processes = min(n_jobs, max(1, min(os.cpu_count() or 1, max(4, visible * 2))))
-    if ready_backlog is None:
-        ready_backlog = max(max_prepare_processes, visible * 2)
-    if max_prepare_processes < 1 or ready_backlog < max_prepare_processes:
-        raise ValueError("ready_backlog must be >= max_prepare_processes >= 1")
-
-    pending = deque(workloads)
-    active: dict[int, _PreparedAttempt] = {}
-    ready: deque[_PreparedAttempt] = deque()
-    records: list[dict] = []
-    retry_log: list[dict[str, Any]] = []
-    completed = 0
-    last_interference_poll = 0.0
-    physical_uuid_by_index = dict(pool._all_gpus())
-
-    def preparing_count() -> int:
-        return sum(item.state == "PREPARING_CPU" for item in active.values())
-
-    def buffered_count() -> int:
-        return sum(item.state in ("PREPARING_CPU", "READY") for item in active.values())
-
-    def remove_ready(item: _PreparedAttempt) -> None:
-        try:
-            ready.remove(item)
-        except ValueError:
-            pass
-
-    def release_gpus(item: _PreparedAttempt) -> None:
-        if item.gpus and not item.gpu_ownership_released:
-            pool.release_many(item.gpus)
-            item.gpu_ownership_released = True
-
-    def fail(item: _PreparedAttempt, message: dict | None = None) -> None:
-        nonlocal completed
-        if item.state == "FAILED":
-            return
-        item.state = "FAILED"
-        record = _record_child_failure(item, message)
-        records.append(record)
-        completed += 1
-        detail = record.get("error") or "unknown workload failure"
-        log(f"[bench-suite] >>> FAIL {item.label} attempt {item.attempt}: {detail[:160]} <<<")
-
-    def request_interference_stop(
-        item: _PreparedAttempt, intruders: list[int], detail: str
-    ) -> None:
-        if item.state not in ("ASSIGNED", "RUNNING_GPU") or item.pending_interference:
-            return
-        item.pending_interference = {"intruder_pids": intruders, "detail": detail[:240]}
-        item.interference_stop_deadline = time.monotonic() + 30.0
-        item.state = "STOPPING_INTERFERED_GPU"
-        log(
-            f"[bench-suite] >>> INTERFERED {item.label} attempt {item.attempt}: "
-            f"{detail[:160]}; retrying GPU stage in place <<<"
-        )
-        try:
-            os.kill(item.process.pid, signal.SIGUSR1)
-        except ProcessLookupError:
-            fail(item, {"phase": "interference", "error": "child exited before stop signal"})
-
-    def acknowledge_interference(item: _PreparedAttempt, message: dict) -> None:
-        pending_interference = item.pending_interference or {}
-        retry_log.append(
-            {
-                "kernel": item.workload["kernel"],
-                "config": item.workload["config"],
-                "attempt": item.attempt,
-                "intruder_pids": pending_interference.get("intruder_pids", []),
-                "detail": pending_interference.get("detail", "")[:240],
-                "resident_context_bytes_after_cleanup": message.get(
-                    "resident_context_bytes_after_cleanup", {}
-                ),
-                "retry_in_place": True,
-            }
-        )
-        release_gpus(item)
-        item.gpus = ()
-        item.physical_gpu_uuids = ()
-        item.nvml_owned_pids.clear()
-        item.nvml_ownership_pending = False
-        item.pending_interference = None
-        item.interference_stop_deadline = None
-        item.attempt += 1
-        item.state = "READY"
-        item.ready_since = time.time()
-        ready.append(item)
-
-    def spawn_available() -> None:
-        while (
-            pending
-            and preparing_count() < max_prepare_processes
-            and buffered_count() < ready_backlog
-            and len(active) < ready_backlog + visible
-        ):
-            workload = pending.popleft()
-            item = _spawn_prepared_attempt(
-                workload,
-                1,
-                log_dir,
-                rounds=rounds,
-                cooldown=cooldown,
-                compile_profile=compile_profile,
-                with_references=with_references,
-            )
-            active[item.control.fileno()] = item
-            log(f"[bench-suite] {now_iso()} prepare pid={item.process.pid} START {item.label}")
-
-    def dispatch_ready() -> None:
-        ordered = sorted(
-            ready,
-            key=lambda item: (
-                -item.workload.get("num_gpus", 1),
-                item.ready_since or item.started_at,
-            ),
-        )
-        for item in ordered:
-            count = item.workload.get("num_gpus", 1)
-            gpus = (
-                pool.try_acquire_exact(item.gpu_affinity)
-                if item.gpu_affinity
-                else pool.try_acquire_many(count)
-            )
-            if gpus is None:
-                continue
-            strangers = _active_strangers(gpus, _our_pids(), pool.util_threshold)
-            if strangers is None or strangers:
-                pool.release_many(gpus)
-                continue
-            remove_ready(item)
-            if not item.gpu_affinity:
-                item.gpu_affinity = gpus
-            item.gpus = gpus
-            item.nvml_owned_pids.clear()
-            item.nvml_ownership_pending = True
-            item.gpu_ownership_released = False
-            item.state = "ASSIGNED"
-            _send_child(
-                item,
-                {
-                    "type": "ASSIGN",
-                    "gpu_indices": list(gpus),
-                    "gpu_uuids": [physical_uuid_by_index[gpu] for gpu in gpus],
-                },
-            )
-
-    occupancy_stop = threading.Event()
-    dispatch_stop = threading.Event()
-    dispatch_reader, dispatch_writer = socket.socketpair()
-    dispatch_reader.setblocking(False)
-    dispatch_writer.setblocking(False)
-
-    def monitor_external_occupancy() -> None:
-        while not occupancy_stop.is_set():
-            pool.refresh_external_occupancy()
-            if occupancy_stop.wait(POLL_INTERVAL):
-                return
-
-    def notify_dispatch_on_pool_change() -> None:
-        generation = pool.change_generation()
-        while not dispatch_stop.is_set():
-            generation = pool.wait_for_change(generation, dispatch_stop)
-            if dispatch_stop.is_set():
-                return
-            try:
-                dispatch_writer.send(b"\0")
-            except BlockingIOError:
-                pass
-            except OSError:
-                return
-
-    occupancy_thread = threading.Thread(
-        target=monitor_external_occupancy, name="bench-gpu-occupancy", daemon=True
-    )
-    dispatch_thread = threading.Thread(
-        target=notify_dispatch_on_pool_change, name="bench-gpu-dispatch", daemon=True
-    )
-    occupancy_thread.start()
-    dispatch_thread.start()
-    try:
-        while completed < n_jobs:
-            spawn_available()
-            dispatch_ready()
-
-            now = time.monotonic()
-            if now - last_interference_poll >= MONITOR_INTERVAL:
-                last_interference_poll = now
-                for item in active.values():
-                    if item.state != "RUNNING_GPU" or not item.gpus:
-                        continue
-                    snapshot = _pid_sm_on_gpus(item.gpus)
-                    strangers = (
-                        None
-                        if snapshot is None
-                        else _attempt_strangers(item, snapshot, _our_pids(), pool.util_threshold)
-                    )
-                    if strangers is None or strangers:
-                        detail = (
-                            "could not sample assigned GPU utilization"
-                            if strangers is None
-                            else f"intruders {sorted(strangers)}"
-                        )
-                        request_interference_stop(item, sorted(strangers or {}), detail)
-
-            for item in active.values():
-                if (
-                    item.state == "STOPPING_INTERFERED_GPU"
-                    and item.interference_stop_deadline is not None
-                    and time.monotonic() >= item.interference_stop_deadline
-                ):
-                    fail(
-                        item,
-                        {
-                            "phase": "interference",
-                            "error": "GPU attempt did not acknowledge interruption within 30s",
-                        },
-                    )
-                    break
-
-            sockets = [dispatch_reader, *(item.control for item in active.values())]
-            readable, _, _ = select.select(sockets, [], [], 0.1)
-            if dispatch_reader in readable:
-                while True:
-                    try:
-                        if not dispatch_reader.recv(4096):
-                            break
-                    except BlockingIOError:
-                        break
-                readable.remove(dispatch_reader)
-
-            for control in readable:
-                item = active.get(control.fileno())
-                if item is None:
-                    continue
-                try:
-                    messages, eof = _receive_child_messages(item)
-                except (json.JSONDecodeError, OSError) as error:
-                    fail(item, {"phase": "protocol", "error": f"invalid control message: {error}"})
-                    break
-
-                for message in messages:
-                    message_type = message.get("type")
-                    if message_type == "READY" and item.state == "PREPARING_CPU":
-                        required = message.get("required_num_gpus")
-                        declared = item.workload.get("num_gpus", 1)
-                        if required != declared:
-                            fail(
-                                item,
-                                {
-                                    "phase": "prepare",
-                                    "error": (
-                                        f"READY requires {required!r} GPU(s), "
-                                        f"workload declares {declared!r}"
-                                    ),
-                                },
-                            )
-                            break
-                        item.ready_since = message.get("ready", time.time())
-                        item.state = "READY"
-                        ready.append(item)
-                        log(f"[bench-suite] {now_iso()} READY {item.label}")
-                    elif message_type == "RUNNING_GPU" and item.state == "ASSIGNED":
-                        actual_uuids = message.get("physical_gpu_uuids")
-                        expected_uuids = [physical_uuid_by_index[gpu] for gpu in item.gpus]
-                        if actual_uuids != expected_uuids:
-                            fail(
-                                item,
-                                {
-                                    "phase": "assignment",
-                                    "error": (
-                                        f"physical GPU UUID mismatch: expected {expected_uuids}, "
-                                        f"got {actual_uuids!r}"
-                                    ),
-                                },
-                            )
-                            break
-                        item.physical_gpu_uuids = tuple(actual_uuids)
-                        item.state = "RUNNING_GPU"
-                        log(
-                            f"[bench-suite] {now_iso()} gpus={','.join(item.gpus)} "
-                            f"GPU_START {item.label} (attempt {item.attempt})"
-                        )
-                    elif message_type == "INTERFERED" and item.state == "STOPPING_INTERFERED_GPU":
-                        acknowledge_interference(item, message)
-                    elif message_type == "RESULT_READY" and item.state in (
-                        "RUNNING_GPU",
-                        "STOPPING_INTERFERED_GPU",
-                    ):
-                        if item.state == "STOPPING_INTERFERED_GPU":
-                            acknowledge_interference(item, message)
-                            _send_child(item, {"type": "RETRY_GPU"})
-                            continue
-
-                        _send_child(item, {"type": "ACCEPT_RESULT"})
-                        release_gpus(item)
-                        record = _base_attempt_record(item)
-                        record["physical_gpu_uuids"] = list(item.physical_gpu_uuids)
-                        result = message.get("result") or {}
-                        status = result.get("status")
-                        if status in ("SKIP", "FAIL"):
-                            record.update(result)
-                        else:
-                            _finalize_bench_record(
-                                result,
-                                rounds=rounds,
-                                cooldown=cooldown,
-                                references_enabled=with_references,
-                            )
-                            record.update(result)
-                        record.setdefault("label", item.workload["config"])
-                        record["finished_at"] = now_iso()
-                        item.state = "RESULT"
-                        records.append(record)
-                        completed += 1
-                        impls = record.get("impls") or {}
-                        impl_str = ", ".join(
-                            f"{name}={value:.3f}µs" for name, value in impls.items()
-                        )
-                        log(
-                            f"[bench-suite] {record['finished_at']} "
-                            f"gpus={record.get('gpu') or '-'} {record.get('status', 'ok'):4s} "
-                            f"{item.label} {impl_str}"
-                        )
-                        if record.get("status") not in ("ok", "SKIP"):
-                            detail = record.get("error") or "unknown workload failure"
-                            log(
-                                f"[bench-suite] >>> FAIL {item.label} attempt {item.attempt}: "
-                                f"{detail[:160]} <<<"
-                            )
-                    elif message_type == "FAIL":
-                        fail(item, message)
-                        break
-                    else:
-                        fail(
-                            item,
-                            {
-                                "phase": "protocol",
-                                "error": f"unexpected {message_type!r} message in state {item.state}",
-                            },
-                        )
-                        break
-                if eof and item.state not in ("RESULT", "FAILED"):
-                    item.process.poll()
-                    fail(item)
-                    break
-
-            for item in list(active.values()):
-                if item.state == "FAILED":
-                    if item.process.poll() is None:
-                        _terminate_subprocess(item.process)
-                    release_gpus(item)
-                    fd = item.control.fileno()
-                    _finish_attempt_process(item)
-                    active.pop(fd, None)
-                elif item.state == "RESULT" and item.process.poll() is not None:
-                    fd = item.control.fileno()
-                    _finish_attempt_process(item)
-                    active.pop(fd, None)
-    finally:
-        occupancy_stop.set()
-        dispatch_stop.set()
-        pool.wake()
-        occupancy_thread.join(timeout=1.0)
-        dispatch_thread.join(timeout=1.0)
-        dispatch_reader.close()
-        dispatch_writer.close()
-        for item in list(active.values()):
-            fd = item.control.fileno()
-            if item.process.poll() is None and item.state == "RESULT":
-                try:
-                    item.process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    _terminate_subprocess(item.process)
-            elif item.process.poll() is None and item.state in ("PREPARING_CPU", "READY"):
-                try:
-                    _send_child(item, {"type": "CANCEL"})
-                except OSError:
-                    pass
-            if item.process.poll() is None:
-                _terminate_subprocess(item.process)
-            release_gpus(item)
-            _finish_attempt_process(item)
-            active.pop(fd, None)
-
-    pipeline = {
-        "execution_mode": "pipeline",
-        "process_model": "one_shot_child_per_workload",
-        "max_prepare_processes": max_prepare_processes,
-        "ready_backlog": ready_backlog,
-        "measurement_protocol": {
-            "rounds": rounds,
-            "cooldown_s": cooldown,
-            "default_rounds": DEFAULT_ROUNDS,
-            "default_cooldown_s": DEFAULT_COOLDOWN_S,
-            "is_default": rounds == DEFAULT_ROUNDS
-            and math.isclose(cooldown, DEFAULT_COOLDOWN_S, rel_tol=0.0, abs_tol=1e-9),
-        },
-        "interference_retry_count": len(retry_log),
-        "interference_retries": retry_log,
-        "failure_count": sum(record.get("status") == "FAIL" for record in records),
-    }
-    return records, retry_log, pipeline
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="bench-suite: pre-commit regression benchmark")
     ap.add_argument(
@@ -1898,16 +706,14 @@ def main() -> None:
         type=str,
         default=None,
         metavar="REV",
-        help=(
-            "Run REV and the current committed checkout as a paired A/B campaign; "
-            "each workload uses the same physical GPU on both sides"
-        ),
+        help="Run REV and the current committed checkout as a paired A/B campaign; "
+        "both sides of a workload run back to back on the benchmark server",
     )
     ap.add_argument(
         "--threshold",
         type=float,
         default=DEFAULT_REGRESSION_THRESHOLD,
-        help=f"Regression threshold in percent slowdown (default {DEFAULT_REGRESSION_THRESHOLD:g})",
+        help="Regression threshold in percent slowdown (default 1)",
     )
     ap.add_argument(
         "--filter",
@@ -1915,9 +721,6 @@ def main() -> None:
         default=None,
         help="Only keep workloads whose kernel contains this substring",
     )
-    # NOTE: there is intentionally no --gpus flag. GPU selection is automatic
-    # (util-gated probe + per-acquire utilization scan); a human pinning cards
-    # defeats that and can land work on a busy card. See acquire()/_occupied_indices.
     ap.add_argument(
         "--label",
         type=str,
@@ -1931,61 +734,54 @@ def main() -> None:
         help="Run and benchmark external reference implementations (off by default)",
     )
     ap.add_argument(
-        "--no-probe",
-        action="store_true",
-        help="Skip the per-GPU probe (use nvidia-smi free-status only)",
-    )
-    ap.add_argument(
-        "--probe-timeout",
-        type=float,
-        default=60.0,
-        help="Per-GPU probe timeout in seconds (default 60)",
-    )
-    ap.add_argument(
-        "--util-threshold",
-        type=float,
-        default=DEFAULT_UTIL_THRESHOLD,
-        help="%% GPU utilization above which assignment skips a card; during a run, "
-        "a foreign process above this per-PID SM utilization requeues the workload "
-        f"(default {DEFAULT_UTIL_THRESHOLD:g})",
-    )
-    ap.add_argument(
-        "--mem-threshold",
-        type=float,
-        default=DEFAULT_MEM_THRESHOLD,
-        help="%% GPU memory used by compute apps above which a card counts as occupied "
-        f"(default {DEFAULT_MEM_THRESHOLD:g})",
-    )
-    ap.add_argument(
         "--rounds",
         type=int,
         default=DEFAULT_ROUNDS,
-        help=f"Independent standard-timer samples per workload (default {DEFAULT_ROUNDS}). "
-        "Compile/prepare once; each round cools down and runs a complete timer call.",
+        help="Independent standard-timer samples per workload (default "
+        f"{DEFAULT_ROUNDS}). Compile/prepare once; each round cools down and runs "
+        "a complete timer call.",
     )
     ap.add_argument(
         "--cooldown",
         type=float,
         default=DEFAULT_COOLDOWN_S,
-        help=f"Seconds to sleep before every implementation (default {DEFAULT_COOLDOWN_S:g}).",
+        help=f"Seconds to sleep before every implementation (default {DEFAULT_COOLDOWN_S})",
     )
     ap.add_argument(
-        "--max-prepare-processes",
-        type=int,
-        default=None,
-        help=(
-            "Maximum concurrently CPU-preparing one-shot child processes "
-            "(default: host/GPU-derived bound)"
-        ),
+        "--server",
+        type=str,
+        default=os.environ.get(SERVER_URL_ENV, DEFAULT_SERVER_URL),
+        help=f"kcoral benchmark server URL (default: $TIRX_BENCH_SERVER or {DEFAULT_SERVER_URL})",
     )
     ap.add_argument(
-        "--ready-backlog",
+        "--max-in-flight",
         type=int,
         default=None,
-        help=(
-            "Maximum PREPARING+READY one-shot children waiting for GPU assignment "
-            "(default: at least max-prepare-processes and 2x visible GPUs)"
-        ),
+        help="Maximum concurrent requests to the server (default: the server's worker count; "
+        "A/B campaigns default to 1 so both sides of a pair run back to back)",
+    )
+    ap.add_argument(
+        "--request-timeout",
+        type=float,
+        default=DEFAULT_REQUEST_TIMEOUT_S,
+        help="Per-workload server execution timeout in seconds, excluding queue wait "
+        f"(default {DEFAULT_REQUEST_TIMEOUT_S:g}, max {MAX_REQUEST_TIMEOUT_S:g})",
+    )
+    ap.add_argument(
+        "--prepare",
+        choices=PREPARE_MODES,
+        default="cpu",
+        help="Where the worker compiles: 'cpu' releases the GPU lease during prepare "
+        "(default), 'gpu' keeps it (fallback if a prepare touches CUDA)",
+    )
+    ap.add_argument(
+        "--reference-deps-dir",
+        type=str,
+        default=os.environ.get(REFERENCE_DEPS_DIR_ENV),
+        metavar="SERVER_PATH",
+        help="Directory ON THE SERVER holding the pinned reference checkouts "
+        "(scripts/install_reference_dependencies.py output); linked next to the shipped "
+        f"tree as .reference-deps (default: ${REFERENCE_DEPS_DIR_ENV})",
     )
     ap.add_argument(
         "--check-imports",
@@ -1999,21 +795,14 @@ def main() -> None:
     if args.cooldown < 0:
         print("[bench-suite] --cooldown must be >= 0", file=sys.stderr)
         sys.exit(2)
-    if args.util_threshold < 0 or args.mem_threshold < 0:
-        print("[bench-suite] --util-threshold/--mem-threshold must be >= 0", file=sys.stderr)
+    if args.max_in_flight is not None and args.max_in_flight < 1:
+        print("[bench-suite] --max-in-flight must be >= 1", file=sys.stderr)
         sys.exit(2)
-    if args.max_prepare_processes is not None and args.max_prepare_processes < 1:
-        print("[bench-suite] --max-prepare-processes must be >= 1", file=sys.stderr)
-        sys.exit(2)
-    if args.ready_backlog is not None and args.ready_backlog < 1:
-        print("[bench-suite] --ready-backlog must be >= 1", file=sys.stderr)
-        sys.exit(2)
-    if (
-        args.max_prepare_processes is not None
-        and args.ready_backlog is not None
-        and args.ready_backlog < args.max_prepare_processes
-    ):
-        print("[bench-suite] --ready-backlog must be >= --max-prepare-processes", file=sys.stderr)
+    if not 0 < args.request_timeout <= MAX_REQUEST_TIMEOUT_S:
+        print(
+            f"[bench-suite] --request-timeout must be in (0, {MAX_REQUEST_TIMEOUT_S:g}]",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
     if args.workloads is None:
@@ -2033,6 +822,15 @@ def main() -> None:
         workloads = [w for w in workloads if args.filter in w["kernel"]]
     if not workloads:
         print("[bench-suite] no workloads to run.", file=sys.stderr)
+        sys.exit(2)
+    multi_gpu = [w for w in workloads if w.get("num_gpus", 1) != 1]
+    if multi_gpu and not args.check_imports:
+        names = sorted({f"{w['kernel']}/{w['config']}" for w in multi_gpu})
+        print(
+            "[bench-suite] multi-GPU workloads cannot run on the remote backend "
+            f"(one GPU per server worker): {', '.join(names)}",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
     selection = {
@@ -2063,13 +861,6 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.exit(2)
-        if args.max_prepare_processes is not None or args.ready_backlog is not None:
-            print(
-                "[bench-suite] --ab-before owns one one-shot child per GPU worker; "
-                "--max-prepare-processes/--ready-backlog do not apply",
-                file=sys.stderr,
-            )
-            sys.exit(2)
         from tirx_kernels.bench_suite.ab import run_ab
 
         try:
@@ -2082,11 +873,11 @@ def main() -> None:
                 threshold=args.threshold,
                 rounds=args.rounds,
                 cooldown=args.cooldown,
-                no_probe=args.no_probe,
-                probe_timeout=args.probe_timeout,
-                util_threshold=args.util_threshold,
-                mem_threshold=args.mem_threshold,
                 no_report=args.no_report,
+                server_url=args.server,
+                max_in_flight=args.max_in_flight,
+                request_timeout_s=args.request_timeout,
+                prepare_mode=args.prepare,
             )
         except ValueError as error:
             print(f"[bench-suite] invalid A/B configuration: {error}", file=sys.stderr)
@@ -2122,60 +913,24 @@ def main() -> None:
     print(f"[bench-suite]   tail : tail -f {latest_log}")
     print(f"[bench-suite] run id : {stamp}")
 
-    # ── Automatic GPU selection (no manual override on purpose) ──
-    # 1. Startup probe: run a tiny fp16 matmul on every visible card
-    #    (including busy ones — the probe is light, finishes fine on a
-    #    contended card; this catches broken drivers / ECC). Probe failures
-    #    are banned for the rest of the run.
-    # 2. Per-workload acquire: re-scan utilization/memory every time we need a card.
-    listing_pool = GpuPool(util_threshold=args.util_threshold, mem_threshold=args.mem_threshold)
-    in_filter = [idx for idx, _ in _visible_gpu_rows(listing_pool._all_gpus())]
-    if not in_filter:
-        print("[bench-suite] no visible GPUs.", file=sys.stderr)
+    # ── Benchmark server handshake ──
+    # The server owns GPU exclusivity: one lease per GPU, a fresh worker process
+    # per request. The suite never touches a local GPU.
+    from tirx_kernels.bench_suite import remote
+
+    try:
+        api = remote.load_kcoral()
+        client, health = remote.connect(api, args.server)
+    except remote.RemoteBenchError as error:
+        print(f"[bench-suite] {error}", file=sys.stderr)
         sys.exit(1)
-    utils_now = listing_pool._utils()
-    mem_now = listing_pool._mem_used_pct()
-    occupied_now = sorted(listing_pool._occupied_indices() & set(in_filter), key=int)
-    resident = sorted(listing_pool._busy_indices() & set(in_filter), key=int)
-    util_str = " ".join(f"{i}:{utils_now.get(i, 0):.0f}%" for i in sorted(in_filter, key=int))
-    mem_str = " ".join(f"{i}:{mem_now.get(i, 0):.1f}%" for i in sorted(in_filter, key=int))
+    cuda_arch = health["target"]["arch"]
     print(
-        f"[bench-suite] visible: {len(in_filter)} {sorted(in_filter, key=int)}; "
-        f"util now [{util_str}]; mem now [{mem_str}]",
+        f"[bench-suite] server {args.server}: arch={cuda_arch} gpus={health.get('gpu_count')} "
+        f"workers={len(health.get('workers') or [])} queue={health.get('queue_length')} "
+        f"versions={health.get('versions')}",
         flush=True,
     )
-    print(
-        f"[bench-suite] gate: util-threshold={args.util_threshold:g}%, "
-        f"mem-threshold={args.mem_threshold:g}% — "
-        f"occupied (skip): {occupied_now if occupied_now else 'none'}; "
-        f"shareable: "
-        f"{sorted((set(in_filter) - set(occupied_now)), key=int)} "
-        f"(resident-VRAM cards: {resident if resident else 'none'})",
-        flush=True,
-    )
-
-    if args.no_probe:
-        usable = set(in_filter)
-        probe_failures: dict[str, str] = {}
-    else:
-        print(
-            f"[bench-suite] probing {len(in_filter)} GPU(s) with fp16 512x512 matmul ...",
-            flush=True,
-        )
-        usable, probe_failures = detect_usable_gpus(in_filter, args.probe_timeout)
-
-    if not usable:
-        print("[bench-suite] no usable GPUs (all probes failed).", file=sys.stderr)
-        for idx, err in probe_failures.items():
-            print(f"[bench-suite]   gpu {idx}: {err}", file=sys.stderr)
-        sys.exit(1)
-
-    pool = GpuPool(
-        allowed=usable, util_threshold=args.util_threshold, mem_threshold=args.mem_threshold
-    )
-    n_gpus = len(usable)
-    compile_profile = gpu_compile_profile(usable)
-    cuda_arch = compile_profile["cuda_arch"]
     if selection["mode"] == "default":
         workloads, incompatible_workloads = partition_workloads_by_arch(workloads, cuda_arch)
         if not workloads:
@@ -2200,16 +955,45 @@ def main() -> None:
     selection["cuda_arch"] = cuda_arch
     selection["keys"] = [[workload["kernel"], workload["config"]] for workload in workloads]
 
-    max_required_gpus = max(workload.get("num_gpus", 1) for workload in workloads)
-    if max_required_gpus > len(usable):
-        print(
-            f"[bench-suite] workload requires {max_required_gpus} GPU(s), but only "
-            f"{len(usable)} passed the startup probe.",
-            file=sys.stderr,
+    tree = remote.build_tree_archive(_kernels_repo_root() / "tirx_kernels")
+    shim = remote.shim_source()
+    print(
+        f"[bench-suite] tree archive: {tree.file_count} files, {tree.byte_count} bytes -> "
+        f"{len(tree.data)} bytes gz, sha256={tree.sha256[:12]}",
+        flush=True,
+    )
+    try:
+        profile = remote.probe_server(
+            api,
+            client,
+            url=args.server,
+            health=health,
+            tree=tree,
+            shim=shim,
+            references_enabled=args.with_references,
+            timeout_s=min(args.request_timeout, remote.PROBE_TIMEOUT_S),
+            reference_deps_dir=args.reference_deps_dir,
         )
-        sys.exit(2)
-    _repo_git = collect_repo_git()
-    label = args.label or _repo_git.get("tirx-kernels") or _repo_git.get("tir") or "local"
+    except remote.RemoteBenchError as error:
+        print(f"[bench-suite] {error}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        client.close()
+    max_in_flight = args.max_in_flight or remote.default_max_in_flight(health)
+    device = profile.device
+    print(
+        f"[bench-suite] worker: {device.get('name')} uuid={device.get('uuid')} "
+        f"sms={device.get('multi_processor_count')} tvm={profile.tvm_label} "
+        f"tirx-tree={profile.tirx_tree[:19]} "
+        f"reference-deps={profile.probe.get('reference_deps_dir')}",
+        flush=True,
+    )
+
+    git = collect_repo_git()
+    git, kernel_tree = remote.merge_provenance(
+        profile, local_git=git, local_tree=collect_kernel_fingerprint()
+    )
+    label = args.label or git.get("tirx-kernels") or git.get("tir") or "local"
     agg_note = (
         f", {args.rounds} standard-timer round(s), aggregate=mean, "
         f"cooldown={args.cooldown:g}s before every impl/round"
@@ -2217,36 +1001,34 @@ def main() -> None:
         else ""
     )
     print(
-        f"[bench-suite] {len(workloads)} workloads, {n_gpus} probe-OK GPU(s) in pool, "
-        f"one-shot prepared children, compile-profile={compile_profile}, "
+        f"[bench-suite] {len(workloads)} workloads, max-in-flight={max_in_flight}, "
+        f"prepare={args.prepare}, request-timeout={args.request_timeout:g}s, "
         f"label={label}{agg_note}",
         flush=True,
     )
 
-    results, retry_log, pipeline_meta = run_scheduled_jobs(
+    results, pipeline_meta = remote.run_remote_jobs(
         workloads,
-        pool,
-        log_dir,
+        api=api,
+        url=args.server,
+        tree=tree,
+        shim=shim,
+        profile=profile,
+        log_dir=log_dir,
         rounds=args.rounds,
         cooldown=args.cooldown,
-        compile_profile=compile_profile,
         with_references=args.with_references,
-        max_prepare_processes=args.max_prepare_processes,
-        ready_backlog=args.ready_backlog,
+        max_in_flight=max_in_flight,
+        request_timeout_s=args.request_timeout,
+        prepare_mode=args.prepare,
+        reference_deps_dir=args.reference_deps_dir,
     )
 
-    if retry_log:
-        log(f"[bench-suite] interference retry summary: {len(retry_log)} attempt(s)")
-        for retry in retry_log:
-            log(
-                f"[bench-suite]   - {retry['kernel']}/{retry['config']}: "
-                f"attempt {retry['attempt']} → {retry['detail']}"
-            )
-    else:
-        log("[bench-suite] interference retry summary: none")
-
     results.sort(key=lambda r: (r["kernel"], r.get("label") or r.get("config")))
-    probe_meta = {"enabled": not args.no_probe, "usable": sorted(usable), "failed": probe_failures}
+    local_tvm = {
+        "git_label": collect_repo_git().get("tir"),
+        "tree": collect_kernel_fingerprint().get("tir:python/tvm/tirx"),
+    }
     run_path = write_run(
         out_dir,
         stamp,
@@ -2254,7 +1036,10 @@ def main() -> None:
         label,
         selection=selection,
         references_enabled=args.with_references,
-        probe=probe_meta,
+        git=git,
+        kernel_tree=kernel_tree,
+        baselines=profile.baselines,
+        probe=remote.probe_summary(profile, local_tvm=local_tvm),
         pipeline=pipeline_meta,
     )
     current = json.loads(run_path.read_text())

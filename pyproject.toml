@@ -13,6 +13,10 @@ license-files = ["LICENSE", "NOTICE", "licenses/*.txt"]
 # tvm, torch, triton are runtime dependencies managed externally (not on PyPI)
 dependencies = ["packaging>=23.0", "pyyaml>=6.0"]
 
+[project.optional-dependencies]
+# Client for the kcoral benchmark server used by `python -m tirx_kernels.bench_suite`.
+remote = ["kcoral @ git+https://github.com/mlc-ai/kcoral"]
+
 [tool.pytest.ini_options]
 addopts = "-n 16"
 testpaths = ["tests"]
