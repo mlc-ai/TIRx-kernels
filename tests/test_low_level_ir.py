@@ -8,6 +8,8 @@ import pytest
 import tirx_kernels.kern as K
 from tirx_kernels.kern.low_level_ir import LowLevelIRContractError, check_low_level_ir
 from tirx_kernels.runner import run_kernel_test
+from tvm.script import tirx as T
+from tvm.script.tirx import tile as Tx
 
 
 def _build_kernel_with_buffer_access(scope: str, access: str):
@@ -66,6 +68,30 @@ def test_address_of_tensor_load_is_not_a_memory_read(scope):
     assert [
         (finding.kind, finding.node_type, finding.scope) for finding in report.address_only_loads
     ] == [("address_only_buffer_load", "TensorLoad", scope)]
+
+
+def test_address_of_still_checks_memory_reads_in_its_index():
+    @K.kernel(warps=1, arch="sm_100a", grid=False, check_ir=False)
+    def probe(indices: K.gptr("int32"), values: K.gptr("float32")):
+        K.keep_alive(K.address_of(values[indices[0]]))
+
+    with pytest.raises(LowLevelIRContractError) as error:
+        check_low_level_ir(probe.func)
+
+    report = error.value.report
+    assert [(item.kind, item.scope) for item in report.violations] == [("buffer_load", "global")]
+    assert len(report.address_only_loads) == 1
+
+
+def test_tile_primitive_is_rejected_before_lowering():
+    @T.prim_func
+    def probe(a: T.Buffer((32,), "float32"), b: T.Buffer((32,), "float32")):
+        Tx.copy(b[:], a[:])
+
+    with pytest.raises(LowLevelIRContractError) as error:
+        check_low_level_ir(probe)
+
+    assert any(item.kind == "tile_primitive" for item in error.value.report.violations)
 
 
 def test_func_call_is_rejected_by_default_and_reports_callee():

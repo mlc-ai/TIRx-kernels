@@ -12,9 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from tvm_ffi import structural_walk
+
 import tvm
 from tirx_kernels.flashinfer.gdn_decode import gdn_decode_bf16_wide_vec_t1 as target
-from tvm.tirx.stmt_functor import StmtExprVisitor
 
 REPO = Path(__file__).resolve().parents[2]
 TARGET = REPO / "tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_wide_vec_t1.py"
@@ -219,23 +220,26 @@ def _source_findings() -> list[Finding]:
     return findings
 
 
-class _IRScanner(StmtExprVisitor):
+class _IRScanner:
     def __init__(self, specialization: str) -> None:
-        super().__init__()
         self.specialization = specialization
         self.findings: list[Finding] = []
+
+    def __call__(self, body) -> None:
+        structural_walk(
+            body, [(tvm.tirx.TilePrimitiveCall, self._visit_tile), (tvm.ir.Call, self._visit_call)]
+        )
 
     def _record(self, node: Any, detail: str) -> None:
         span = getattr(node, "span", None)
         suffix = f" span={span}" if span is not None else ""
         self.findings.append(Finding("IR", self.specialization, detail + suffix))
 
-    def visit_op_call_(self, op: Any) -> None:
+    def _visit_tile(self, op: Any) -> None:
         op_name = getattr(getattr(op, "op", None), "name", "<unknown>")
         self._record(op, f"TilePrimitiveCall op={op_name}")
-        super().visit_op_call_(op)
 
-    def visit_call_(self, call: tvm.ir.Call) -> None:
+    def _visit_call(self, call: tvm.ir.Call) -> None:
         op = getattr(call, "op", None)
         op_name = getattr(op, "name", None)
         category = op.get_attr("TIRxOpCategory") if isinstance(op, tvm.ir.Op) else None
@@ -243,7 +247,6 @@ class _IRScanner(StmtExprVisitor):
             self._record(call, f"forbidden operator {op_name}")
         elif category == "tile_primitive":
             self._record(call, f"operator {op_name} has TIRxOpCategory=tile_primitive")
-        super().visit_call_(call)
 
 
 def _ir_findings() -> list[Finding]:

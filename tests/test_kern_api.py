@@ -6,8 +6,10 @@
 # NOTE: no `from __future__ import annotations` — kern kernels trace at
 # decoration time and need live annotation objects (PEP 563 breaks them).
 
+from tvm_ffi import structural_walk
+
 import tirx_kernels.kern as K
-from tvm.tirx.stmt_functor import StmtExprVisitor
+from tvm import ir, tirx
 
 
 def test_kernel_target_honors_prepared_compile_arch(monkeypatch):
@@ -49,13 +51,11 @@ def _tir(build_body):
 def _calls_named(func, name):
     calls = []
 
-    class Scanner(StmtExprVisitor):
-        def visit_call_(self, op):
-            if getattr(op.op, "name", "") == name:
-                calls.append(op)
-            super().visit_call_(op)
+    def collect(op):
+        if getattr(op.op, "name", "") == name:
+            calls.append(op)
 
-    Scanner()(func.body)
+    structural_walk(func.body, (ir.Call, collect))
     return calls
 
 
@@ -106,25 +106,16 @@ def test_local_scalar_accepts_explicit_trace_name():
 
 
 def test_sigmoid_tanh_approx_f32_has_materialized_ptx_call_contract():
-    class Scanner(StmtExprVisitor):
-        def __init__(self):
-            super().__init__()
-            self.ptx_calls = []
-
-        def visit_call_(self, op):
-            name = getattr(op.op, "name", "")
-            if name.startswith("tirx.ptx."):
-                self.ptx_calls.append(name)
-            super().visit_call_(op)
-
     @K.kernel(warps=1, arch="sm_100a", grid=False)
     def probe(out: K.gptr("float32")):
         result = K.idioms.sigmoid_tanh_approx_f32(K.float32(1.0))
         K.ptx.st.global_.f32(out.ptr_to([0]), result)
 
-    scanner = Scanner()
-    scanner(probe.func.body)
-    assert scanner.ptx_calls == ["tirx.ptx.tanh", "tirx.ptx.fma", "tirx.ptx.st"]
+    names = []
+    structural_walk(probe.func.body, (ir.Call, lambda op: names.append(op.op.name)))
+    assert [name for name in names if name.startswith("tirx.ptx.")] == [
+        "tirx.ptx.tanh", "tirx.ptx.fma", "tirx.ptx.st"
+    ]
 
 
 def test_sigmoid_tanh_approx_f32_preserves_tanh_input():
@@ -168,46 +159,32 @@ def test_mbarrier_arrive_forwards_count_and_predicate():
 
 
 def test_stack_alloca_is_bound_exactly_once():
-    class Scanner(StmtExprVisitor):
-        def __init__(self):
-            super().__init__()
-            self.stack_binds = []
-
-        def visit_bind_(self, op):
-            if getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_stack_alloca":
-                self.stack_binds.append(op)
-            super().visit_bind_(op)
-
     @K.kernel(warps=1, arch="sm_100a", grid=False)
     def probe(out: K.gptr("float32")):
         handle = K.stack_alloca("tensormap", 1)
         K.keep_alive(handle)
         K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
 
-    scanner = Scanner()
-    scanner(probe.func.body)
-    assert len(scanner.stack_binds) == 1
+    statements = []
+    structural_walk(probe.func.body, (tirx.Bind, lambda op: statements.append(op)))
+    assert sum(
+        getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_stack_alloca"
+        for op in statements
+    ) == 1
 
 
 def test_call_packed_has_statement_semantics():
-    class Scanner(StmtExprVisitor):
-        def __init__(self):
-            super().__init__()
-            self.packed_evaluates = []
-
-        def visit_evaluate_(self, op):
-            if getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_call_packed":
-                self.packed_evaluates.append(op)
-            super().visit_evaluate_(op)
-
     @K.kernel(warps=1, arch="sm_100a", grid=False, check_ir=False)
     def probe(out: K.gptr("float32")):
         K.call_packed("runtime.probe", K.int32(1))
         K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
 
-    scanner = Scanner()
-    scanner(probe.func.body)
-    assert len(scanner.packed_evaluates) == 1
+    statements = []
+    structural_walk(probe.func.body, (tirx.Evaluate, lambda op: statements.append(op)))
+    assert sum(
+        getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_call_packed"
+        for op in statements
+    ) == 1
 
 
 def test_retired_binding_forms_are_rejected_with_guidance():
@@ -299,16 +276,6 @@ def test_thread_layout_is_not_a_kernel_entry_option():
 def test_entry_usage_cap_does_not_shrink_cta_register_pool():
     from tirx_kernels.kern.entry import cta_register_pool, entry_regs
 
-    class Scanner(StmtExprVisitor):
-        def __init__(self):
-            super().__init__()
-            self.calls = []
-
-        def visit_call_(self, op):
-            if getattr(op.op, "name", "") == "tirx.ptx.setmaxnreg":
-                self.calls.append((int(op.args[0]), op.args[1].value))
-            super().visit_call_(op)
-
     assert entry_regs(warps=4, min_blocks_per_sm=2) == 255
     assert cta_register_pool(warps=4, min_blocks_per_sm=2) == 32768
 
@@ -319,9 +286,8 @@ def test_entry_usage_cap_does_not_shrink_cta_register_pool():
         with compute:
             K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
 
-    scanner = Scanner()
-    scanner(probe.func.body)
-    assert scanner.calls == [(256, "inc")]
+    calls = _calls_named(probe.func, "tirx.ptx.setmaxnreg")
+    assert [(int(op.args[0]), op.args[1].value) for op in calls] == [(256, "inc")]
 
 
 def test_specialize_uses_rounded_cta_register_pool_as_ceiling():
