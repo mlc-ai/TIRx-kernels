@@ -105,8 +105,9 @@ ncu \
 Build with line information and retain the raw NCU reports plus the generated
 source, PTX, SASS, and lineinfo needed to trace observations back to source and
 TIRx operations. `TVM_KERNEL_DUMP=<absolute-directory>` may be used for generated
-code. Serialize NCU and benchmark commands through the repository's shared GPU
-lock, and reject contaminated measurements according to repository conventions.
+code. Bench-suite numbers come from the kcoral benchmark server, which serializes
+GPU work through its lease; run NCU locally on an idle GPU and reject
+contaminated measurements according to repository conventions.
 
 ### Preparation artifact and hard gate
 

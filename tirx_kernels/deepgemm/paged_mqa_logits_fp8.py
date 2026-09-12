@@ -4,13 +4,9 @@
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 import ctypes
-import importlib
-import sys
-import types
 from dataclasses import asdict, dataclass
 from functools import cache
 from importlib.util import find_spec
-from pathlib import Path
 from typing import Any
 from unittest import SkipTest
 
@@ -1477,42 +1473,27 @@ def _run_deepgemm_paged_mqa(data: dict[str, Any], *, clean_logits: bool = False)
 
 
 def _sglang_cutedsl_available() -> bool:
-    return find_spec("sglang") is not None and find_spec("cutlass") is not None
+    """The vendored SGLang CuTeDSL reference needs only CUTLASS DSL and torch."""
+    return find_spec("cutlass") is not None
 
 
-@cache
 def _load_sglang_cutedsl_reference() -> tuple[Any, Any]:
-    """Load SGLang's kernel modules without initializing its unrelated frontend."""
-    spec = find_spec("sglang")
-    if spec is None or not spec.submodule_search_locations:
-        raise ImportError("cannot find the pinned SGLang source checkout")
-    root = Path(next(iter(spec.submodule_search_locations)))
+    """Return ``(CuteDSLPagedMQALogitsRunner, pick_dsl_expand)`` from the vendored copy.
 
-    package_paths = {
-        "sglang": root,
-        "sglang.kernels": root / "kernels",
-        "sglang.kernels.ops": root / "kernels" / "ops",
-        "sglang.kernels.ops.attention": root / "kernels" / "ops" / "attention",
-        "sglang.kernels.ops.attention.dsa": root / "kernels" / "ops" / "attention" / "dsa",
-        "sglang.srt": root / "srt",
-    }
-    for name, path in package_paths.items():
-        package = types.ModuleType(name)
-        package.__package__ = name
-        package.__path__ = [str(path)]
-        # A spec-less module in sys.modules makes every later find_spec("sglang")
-        # raise ValueError, failing the availability probe of subsequent configs.
-        package.__spec__ = importlib.machinery.ModuleSpec(name, loader=None, is_package=True)
-        package.__spec__.submodule_search_locations = [str(path)]
-        sys.modules[name] = package
-
-    utils = types.ModuleType("sglang.srt.utils")
-    utils.is_sm100_supported = lambda: torch.cuda.get_device_capability()[0] == 10
-    utils.__spec__ = importlib.machinery.ModuleSpec(utils.__name__, loader=None)
-    sys.modules[utils.__name__] = utils
-
-    module = importlib.import_module("sglang.kernels.ops.attention.dsa.cutedsl_paged_mqa_logits")
-    return module.CuteDSLPagedMQALogitsRunner, module.pick_dsl_expand
+    The reference is a verbatim copy of SGLang's CuTeDSL paged MQA logits
+    kernels (``tirx_kernels/deepgemm/_sglang_cutedsl``), so importing the
+    SGLang package (and its serving-stack dependencies) is never required.
+    """
+    try:
+        from tirx_kernels.deepgemm._sglang_cutedsl.cutedsl_paged_mqa_logits import (
+            CuteDSLPagedMQALogitsRunner,
+            pick_dsl_expand,
+        )
+    except ImportError as error:
+        raise ImportError(
+            f"cannot import the vendored SGLang CuTeDSL paged MQA logits reference: {error}"
+        ) from error
+    return CuteDSLPagedMQALogitsRunner, pick_dsl_expand
 
 
 def _make_sglang_cutedsl_runner(data: dict[str, Any]) -> Any:

@@ -545,7 +545,12 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
             return lambda: kernel_fn(a, out_ref, sf_ref, m, total_sf, grid, gs)
         padded_m = _padded_m(m, sf_layout)
         grid, _, _ = _swizzled_launch(m, k, sf_layout)
-        return lambda: kernel_fn(a, out_ref, sf_ref, m, padded_m, grid, gs)
+        # The swizzled kernel takes a (K,) pre-quant (smooth-quant) scale tensor.
+        # With smooth_quant=False the kernel never reads it, and the public
+        # wrappers pass a K-wide view of the first input row as the dummy; do
+        # the same so what is measured stays the plain quantizer.
+        pre_quant_scale = a[0, :k]
+        return lambda: kernel_fn(a, out_ref, sf_ref, m, padded_m, grid, gs, pre_quant_scale)
 
     return bench(
         {"tirx": tirx_launch},

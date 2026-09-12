@@ -2847,13 +2847,15 @@ def _checkpoint_count(seq_lens, cadence):
 
 
 def _prepare_work_tables(torch, config):
+    from tirx_kernels.cudnn.linear_attention._frost import source_work_items
+
     base = torch.tensor(
         _work_rows(config["seq_lens"], config["heads"], split=config["split"]),
         dtype=torch.int32,
         device="cuda",
     )
 
-    def one_side():
+    def one_side(base):
         work_items = torch.empty_like(base)
         staging = None if config["order_generate"] else base.clone()
         return {
@@ -2867,7 +2869,7 @@ def _prepare_work_tables(torch, config):
             ),
         }
 
-    return {"tirx": one_side(), "source": one_side()}
+    return {"tirx": one_side(base), "source": one_side(source_work_items(torch, base, _BT))}
 
 
 def _new_outputs(torch, config, total_tokens):
@@ -3140,6 +3142,9 @@ def _source_launch(data):
     output = data["source"]
     work = data["work"]["source"]
     stream = int(torch.cuda.current_stream().cuda_stream)
+    from tirx_kernels.cudnn.linear_attention._frost import launch_device
+
+    device, num_sm = launch_device(torch)
 
     def launch():
         source.chunk_gdn2_sm100(
@@ -3158,15 +3163,20 @@ def _source_launch(data):
             output_state_checkpoints=output.get("checkpoints"),
             use_qk_l2norm_in_kernel=bool(config["l2norm"]),
             safe_gate=bool(config["safe_gate"]),
+            # The pinned 1.27 kernels only accepted natural-log gates; 1.29 made that
+            # selectable (``log_gate``), so pin the old ABI explicitly.
+            log_gate=True,
             gate_lower_bound=float(config["gate_lower_bound"]),
             a_log=data["a_log"],
             dt_bias=data["dt_bias"],
             use_beta_sigmoid=bool(config["beta_sigmoid"]),
             work_items=work["work_items"],
             work_count=work["work_count"],
-            sched_ctr=work["scheduler"],
+            scheduler_counter=work["scheduler"],
             work_item_scratch=work["staging"],
             tensormap_workspace=data["source_workspace"],
+            device=device,
+            num_sm=num_sm,
             stream=stream,
         )
 

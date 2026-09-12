@@ -13,6 +13,10 @@ license-files = ["LICENSE", "NOTICE", "licenses/*.txt"]
 # tvm, torch, triton are runtime dependencies managed externally (not on PyPI)
 dependencies = ["packaging>=23.0", "pyyaml>=6.0"]
 
+[project.optional-dependencies]
+# Client for the kcoral benchmark server used by `python -m tirx_kernels.bench_suite`.
+remote = ["kcoral @ git+https://github.com/mlc-ai/kcoral"]
+
 [tool.pytest.ini_options]
 addopts = "-n 16"
 testpaths = ["tests"]
@@ -49,6 +53,8 @@ unfixable = []
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402", "F401", "F403", "F405"]
 "tirx_kernels/**/*.py" = ["E501", "E741", "F821", "F823", "F841", "F842"]
+# Verbatim vendored SGLang reference kernels keep their upstream comments and class layout.
+"tirx_kernels/deepgemm/_sglang_cutedsl/*.py" = ["E501", "E741", "F821", "F823", "F841", "F842", "RUF003", "RUF012"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["tvm", "tirx_kernels"]

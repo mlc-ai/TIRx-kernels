@@ -250,7 +250,7 @@ remain externally managed runtime/compiler dependencies.
 | cuDNN Frontend (`cudnn`) | `cudnn_*` correctness and baselines | Source install pinned in the lock (v1.28.0); replaces any released `nvidia-cudnn-frontend` wheel, which lacks the CuTeDSL kernel sources. |
 | `flashinfer`     | all `flashinfer.*` ports, `tinygemm2_sm100`, `nvfp4_gemm` and `rmsnorm` baselines | Correctness reference and optimized baseline. |
 | `flash-attn` + CUTLASS DSL | `flash_attention_backward_sm100` baseline | Current SM100 forward/backward reference. |
-| `sglang` (+ CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | Optional `sglang_cutedsl` benchmark reference. |
+| SGLang CuTeDSL kernels (vendored, + CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | `sglang_cutedsl` benchmark reference; copied into `tirx_kernels/deepgemm/_sglang_cutedsl/`, no SGLang install needed. |
 | `flash_mla`      | `sparse_flashmla_*` / `flash_mla_sparse_fwd` baselines | Reference impls. |
 | `deep_ep`        | `deepep_*` correctness and baselines | Reference implementation. |
 | `flash-linear-attention` | `agent_evolved_kda_forward_b1_t8192` and `agent_evolved_kda_backward_packed` correctness | Independent FLA BF16/Triton chunk reference. |
@@ -281,8 +281,9 @@ pytest -n 16 tests/test_correctness.py
 python -m tirx_kernels.bench --kernel nvfp4_gemm
 python -m tirx_kernels.bench --kernel nvfp4_gemm --with-references
 
-# Pre-commit regression benchmark sweep (see tirx_kernels/bench_suite/README.md)
-python -m tirx_kernels.bench_suite
+# Pre-commit regression benchmark sweep on the kcoral benchmark server
+# (see tirx_kernels/bench_suite/README.md; needs `pip install -e '.[remote]'`)
+python -m tirx_kernels.bench_suite --server http://127.0.0.1:8901
 ```
 
 ### Programmatic API

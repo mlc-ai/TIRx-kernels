@@ -20,5 +20,11 @@ This product includes modified software from DeepEP
 DeepEP
 Copyright (c) 2025 DeepSeek
 
+This product includes software from SGLang
+(https://github.com/sgl-project/sglang):
+
+SGLang CuTeDSL FP8 paged MQA logits kernels
+Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
 Additional third-party copyright notices and license terms are provided in
 the LICENSE file and the licenses/ directory.

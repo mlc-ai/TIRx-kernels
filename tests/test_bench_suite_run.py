@@ -3,143 +3,12 @@
 
 from __future__ import annotations
 
-import sys
 from types import SimpleNamespace
 
 import pytest
 
 from tirx_kernels.bench_suite import ratio_diff
 from tirx_kernels.bench_suite import run as bench_run
-
-_OUR_CHILD_PID = 4001
-_FOREIGN_PID = 9001
-
-
-def _pool_with_fake_smi(monkeypatch, apps_rows: list[str]) -> bench_run.GpuPool:
-    def fake_smi(args: list[str]) -> list[str]:
-        query = args[0]
-        if query == "--query-gpu=index,utilization.gpu":
-            return ["0, 0", "1, 0"]
-        if query == "--query-gpu=index,memory.used,memory.total":
-            return ["0, 7000, 180000", "1, 400, 180000"]
-        if query == "--query-gpu=index,memory.total":
-            return ["0, 180000", "1, 180000"]
-        if query == "--query-gpu=index,uuid":
-            return ["0, GPU-aaa", "1, GPU-bbb"]
-        if query == "--query-compute-apps=pid,gpu_uuid,used_memory":
-            return apps_rows
-        raise AssertionError(f"unexpected nvidia-smi query: {args!r}")
-
-    monkeypatch.setattr(bench_run.GpuPool, "_nvidia_smi", staticmethod(fake_smi))
-    monkeypatch.setattr(bench_run, "_our_pids", lambda: {_OUR_CHILD_PID})
-    return bench_run.GpuPool(allowed={"0", "1"})
-
-
-def test_parked_own_child_does_not_occupy_its_affinity_card(monkeypatch):
-    """An interference-parked bench child's residual context must not mark the
-    card externally occupied, or the child starves waiting to reacquire it."""
-    pool = _pool_with_fake_smi(monkeypatch, [f"{_OUR_CHILD_PID}, GPU-aaa, 7000"])
-    assert pool._occupied_indices() == set()
-    assert pool.try_acquire_exact(("0",)) is None  # occupancy not refreshed yet
-    pool.refresh_external_occupancy()
-    assert pool.try_acquire_exact(("0",)) == ("0",)
-
-
-def test_foreign_resident_memory_occupies_card(monkeypatch):
-    pool = _pool_with_fake_smi(monkeypatch, [f"{_FOREIGN_PID}, GPU-aaa, 53000"])
-    assert pool._occupied_indices() == {"0"}
-    pool.refresh_external_occupancy()
-    assert pool.try_acquire_exact(("0",)) is None
-    assert pool.try_acquire_exact(("1",)) == ("1",)
-
-
-def test_small_foreign_residual_is_forgiven_by_idle_floor(monkeypatch):
-    pool = _pool_with_fake_smi(monkeypatch, [f"{_FOREIGN_PID}, GPU-aaa, 300"])
-    assert pool._occupied_indices() == set()
-
-
-def test_mixed_own_and_foreign_memory_counts_only_foreign(monkeypatch):
-    pool = _pool_with_fake_smi(
-        monkeypatch,
-        [
-            f"{_OUR_CHILD_PID}, GPU-aaa, 4000",
-            f"{_FOREIGN_PID}, GPU-aaa, 2000",
-            f"{_OUR_CHILD_PID}, GPU-bbb, 6000",
-        ],
-    )
-    assert pool._occupied_indices() == {"0"}
-
-
-def test_gpu_compile_profile_supports_sm107(monkeypatch):
-    fake_nvml = SimpleNamespace(
-        nvmlInit=lambda: None,
-        nvmlShutdown=lambda: None,
-        nvmlDeviceGetHandleByIndex=lambda index: index,
-        nvmlDeviceGetName=lambda _handle: "NVIDIA Graphics Device",
-        nvmlDeviceGetCudaComputeCapability=lambda _handle: (10, 7),
-        nvmlDeviceGetNumGpuCores=lambda _handle: 216 * 128,
-    )
-    monkeypatch.setitem(sys.modules, "pynvml", fake_nvml)
-
-    assert bench_run.gpu_compile_profile({"0", "1"}) == {
-        "name": "NVIDIA Graphics Device",
-        "compute_capability": [10, 7],
-        "cuda_arch": "sm_107a",
-        "num_sms": 216,
-    }
-
-
-def test_gpu_compile_profile_supports_sm103(monkeypatch):
-    fake_nvml = SimpleNamespace(
-        nvmlInit=lambda: None,
-        nvmlShutdown=lambda: None,
-        nvmlDeviceGetHandleByIndex=lambda index: index,
-        nvmlDeviceGetName=lambda _handle: "NVIDIA GB300",
-        nvmlDeviceGetCudaComputeCapability=lambda _handle: (10, 3),
-        nvmlDeviceGetNumGpuCores=lambda _handle: 152 * 128,
-    )
-    monkeypatch.setitem(sys.modules, "pynvml", fake_nvml)
-
-    assert bench_run.gpu_compile_profile({"0", "1"}) == {
-        "name": "NVIDIA GB300",
-        "compute_capability": [10, 3],
-        "cuda_arch": "sm_103a",
-        "num_sms": 152,
-    }
-
-
-def test_gpu_compile_profile_supports_sm110(monkeypatch):
-    fake_nvml = SimpleNamespace(
-        nvmlInit=lambda: None,
-        nvmlShutdown=lambda: None,
-        nvmlDeviceGetHandleByIndex=lambda index: index,
-        nvmlDeviceGetName=lambda _handle: "NVIDIA Thor",
-        nvmlDeviceGetCudaComputeCapability=lambda _handle: (11, 0),
-        nvmlDeviceGetNumGpuCores=lambda _handle: 20 * 128,
-    )
-    monkeypatch.setitem(sys.modules, "pynvml", fake_nvml)
-
-    assert bench_run.gpu_compile_profile({"0"}) == {
-        "name": "NVIDIA Thor",
-        "compute_capability": [11, 0],
-        "cuda_arch": "sm_110a",
-        "num_sms": 20,
-    }
-
-
-def test_gpu_compile_profile_rejects_mixed_arch_pool(monkeypatch):
-    fake_nvml = SimpleNamespace(
-        nvmlInit=lambda: None,
-        nvmlShutdown=lambda: None,
-        nvmlDeviceGetHandleByIndex=lambda index: index,
-        nvmlDeviceGetName=lambda handle: f"GPU {handle}",
-        nvmlDeviceGetCudaComputeCapability=lambda handle: (10, 0) if handle == 0 else (10, 7),
-        nvmlDeviceGetNumGpuCores=lambda handle: (148 if handle == 0 else 216) * 128,
-    )
-    monkeypatch.setitem(sys.modules, "pynvml", fake_nvml)
-
-    with pytest.raises(ValueError, match="heterogeneous compile profiles"):
-        bench_run.gpu_compile_profile({"0", "1"})
 
 
 def test_validate_workload_archs_accepts_exact_arch(monkeypatch):
@@ -219,16 +88,13 @@ def test_default_roster_is_partitioned_by_registered_architecture():
 
     expected = {identity(workload) for workload in workloads}
     for cuda_arch in ("sm_100a", "sm_103a", "sm_107a", "sm_110a"):
-        compatible, incompatible = bench_run.partition_workloads_by_arch(
-            workloads, cuda_arch
-        )
+        compatible, incompatible = bench_run.partition_workloads_by_arch(workloads, cuda_arch)
         compatible_ids = {identity(workload) for workload in compatible}
         incompatible_ids = {identity(workload) for workload in incompatible}
         assert compatible_ids.isdisjoint(incompatible_ids)
         assert compatible_ids | incompatible_ids == expected
         assert all(
-            cuda_arch in records[workload["kernel"]].runtime_cuda_archs
-            for workload in compatible
+            cuda_arch in records[workload["kernel"]].runtime_cuda_archs for workload in compatible
         )
         assert all(
             cuda_arch not in records[workload["kernel"]].runtime_cuda_archs
