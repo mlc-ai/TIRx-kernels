@@ -1460,6 +1460,7 @@ def _flashinfer_compiled(
     output_both_sf_layouts: bool,
     enable_pdl: bool,
     output_norm: bool,
+    launch_config: tuple[int, int, int],
 ):
     from flashinfer.cute_dsl.add_rmsnorm_fp4quant import _get_compiled_kernel
 
@@ -1467,12 +1468,37 @@ def _flashinfer_compiled(
         H,
         block_size,
         input_dtype == "float16",
-        100,
+        _FLASHINFER_SM_VERSION,
         scale_format,
         swizzled,
+        launch_config,
         output_both_sf_layouts,
         enable_pdl,
         output_norm,
+    )
+
+
+# The source hard-codes its sm_version query per device; the suite targets B200.
+_FLASHINFER_SM_VERSION = 100
+
+
+def _flashinfer_launch_config(H: int, M: int, input_dtype: str) -> tuple[int, int, int]:
+    """Mirror the public wrapper's (cluster_n, threads_per_row, num_threads) choice.
+
+    The source selects its launch config from ``(H, M)`` and caches the compiled
+    kernel on that tuple rather than on ``M``, so batch sizes that map to the same
+    config share one compilation.
+    """
+    import cutlass
+    from flashinfer.cute_dsl.add_rmsnorm_fp4quant import AddRMSNormFP4QuantKernel
+
+    return tuple(
+        AddRMSNormFP4QuantKernel._compute_launch_config(
+            H,
+            M,
+            cutlass.Float16 if input_dtype == "float16" else cutlass.BFloat16,
+            _FLASHINFER_SM_VERSION,
+        )
     )
 
 
@@ -1486,6 +1512,7 @@ def _launch_flashinfer(data, output, config: dict[str, Any]):
         bool(config["output_both_sf_layouts"]),
         bool(config["enable_pdl"]),
         bool(config["output_norm"]),
+        _flashinfer_launch_config(int(config["H"]), int(config["M"]), str(config["input_dtype"])),
     )
     return kernel(
         data["x2d"],

@@ -3845,13 +3845,15 @@ def _checkpoint_count(seq_lens):
 
 
 def _prepare_work_tables(torch, config):
+    from tirx_kernels.cudnn.linear_attention._frost import source_work_items
+
     base = torch.tensor(
         _work_rows(config["seq_lens"], config["heads"], split=config["split"]),
         dtype=torch.int32,
         device="cuda",
     )
 
-    def one_side():
+    def one_side(base):
         work_items = torch.empty_like(base) if config["run_order"] else base.clone()
         staging = None
         if config["run_order"] and not config["order_generate"]:
@@ -3865,7 +3867,7 @@ def _prepare_work_tables(torch, config):
             "scheduler": sched_all[:2] if config["dynamic_scheduler"] else None,
         }
 
-    return {"tirx": one_side(), "source": one_side()}
+    return {"tirx": one_side(base), "source": one_side(source_work_items(torch, base, _BT))}
 
 
 def _guarded_full(torch, shape, value, *, dtype):
@@ -3914,17 +3916,23 @@ def _prepare_state_checkpoints(data):
 
     config = data["config"]
     source = _load_recompute_source()
+    from tirx_kernels.cudnn.linear_attention._frost import WORK_ITEM_FIELDS
+
     rows = torch.empty(
-        (len(config["seq_lens"]) * config["heads"], 8), dtype=torch.int32, device="cuda"
+        (len(config["seq_lens"]) * config["heads"], WORK_ITEM_FIELDS),
+        dtype=torch.int32,
+        device="cuda",
     )
     count = torch.tensor([rows.shape[0]], dtype=torch.int32, device="cuda")
     sched_all = torch.zeros(4, dtype=torch.int32, device="cuda")
     stream = int(torch.cuda.current_stream().cuda_stream)
+    from tirx_kernels.cudnn.linear_attention._frost import launch_device
+
+    device, num_sm = launch_device(torch)
     source.chunk_gdn_recompute_sm100(
         data["k"],
         data["v"],
         data["gate"],
-        data["beta"],
         data["cu_seqlens"],
         data["initial_state"],
         None,
@@ -3932,16 +3940,19 @@ def _prepare_state_checkpoints(data):
         output_state_checkpoints=data["checkpoints"],
         work_items=rows,
         work_count=count,
-        sched_ctr=None,
-        sched_all=sched_all,
+        scheduler_counter=None,
+        scheduler_all=sched_all,
         work_item_scratch=None,
         order_in_prologue=True,
         log_gate=bool(config["log_gate"]),
         safe_gate=bool(config["safe_gate"]),
         a_log=data["a_log"],
         dt_bias=data["dt_bias"],
+        beta=data["beta"],
         use_beta_sigmoid=bool(config["beta_sigmoid"]),
         workspace=data["checkpoint_workspace"],
+        device=device,
+        num_sm=num_sm,
         stream=stream,
     )
     data["_checkpoint_keep_alive"] = (rows, count, sched_all)
@@ -4193,6 +4204,9 @@ def _source_launch(data):
     output = data["source"]
     work = data["work"]["source"]
     stream = int(torch.cuda.current_stream().cuda_stream)
+    from tirx_kernels.cudnn.linear_attention._frost import launch_device
+
+    device, num_sm = launch_device(torch)
 
     def launch():
         source.chunk_gdn_bwd_sm100(
@@ -4215,8 +4229,8 @@ def _source_launch(data):
             d_final_state=data["d_final_state"],
             work_items=work["work_items"],
             work_count=work["work_count"],
-            sched_ctr=work["scheduler"],
-            sched_all=work["sched_all"],
+            scheduler_counter=work["scheduler"],
+            scheduler_all=work["sched_all"],
             work_item_scratch=work["staging"],
             order_in_prologue=bool(config["run_order"]),
             log_gate=bool(config["log_gate"]),
@@ -4225,6 +4239,8 @@ def _source_launch(data):
             dt_bias=data["dt_bias"],
             use_beta_sigmoid=bool(config["beta_sigmoid"]),
             workspace=data["source_workspace"],
+            device=device,
+            num_sm=num_sm,
             stream=stream,
         )
 

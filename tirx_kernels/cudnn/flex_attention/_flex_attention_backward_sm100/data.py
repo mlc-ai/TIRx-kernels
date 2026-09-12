@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import inspect
 import math
 import os
 import random
@@ -145,12 +146,25 @@ def _prepare_source_ptx92():
     ptxas = load_reference_module("cudnn.flex_attention.runtime.ptxas")
     ptxas.CUTE_DSL_PTXAS_PATH = str(_SOURCE_PTXAS)
 
+    # CuTe-DSL reads CUTE_DSL_KEEP_PTX / CUTE_DSL_DUMP_DIR once, when its DSL
+    # singleton is constructed; a process that imported cutlass before this
+    # function ran would otherwise never dump the PTX the audit below needs.
+    from cutlass.base_dsl.dsl import BaseDSL
+
+    for dsl in list(type(BaseDSL)._instances.values()):
+        envar = dsl.envar
+        envar.keep_tokens = frozenset(set(envar.keep_tokens) | {"ptx"})
+        envar.keep_ptx = True
+        envar.dump_dir = _SOURCE_PTX_DUMP.name
+
     if not getattr(ptxas, "_tirx_ptx92_patched", False):
         original_compile = ptxas._compile_ptx
 
         def compile_ptx92(ptx_path, ptx_content):
             versions = re.findall(r"(?m)^\.version\s+([0-9]+\.[0-9]+)\s*$", ptx_content)
-            if len(versions) != 1 or versions[0] not in {_SOURCE_PTX_VERSION, "9.4"}:
+            # Raw directives seen from the pinned CuTe-DSL releases (4.6 emitted
+            # 9.4, 4.7 emits 9.3); every one is canonicalized to ISA 9.2 below.
+            if len(versions) != 1 or versions[0] not in {_SOURCE_PTX_VERSION, "9.3", "9.4"}:
                 raise RuntimeError(f"unexpected source PTX version directives: {versions!r}")
             canonical, replacements = re.subn(
                 r"(?m)^\.version\s+[0-9]+\.[0-9]+\s*$",
@@ -182,42 +196,70 @@ def _prepare_source_ptx92():
         ptxas._tirx_ptx92_audit = []
         ptxas._compile_ptx = compile_ptx92
         from cutlass._mlir import ir
-        from cutlass.base_dsl.dsl import BaseDSL
 
-        original_build_jit_function = BaseDSL._build_jit_function
-
-        def build_jit_function_ptx92(self, *args, **kwargs):
-            # TVM-FFI source callables bypass CudaDialectJitCompiledFunction.to(),
-            # so replace their already-lowered embedded binary immediately
-            # before the wrapper creates its execution engine.
-            module = args[1]
-            ptx_path = self.compile_options.full_ptx_path
-            if ptx_path and Path(ptx_path).is_file():
-                canonical_cubin = ptxas._compile_ptx(
-                    Path(ptx_path), Path(ptx_path).read_text().rstrip("\x00")
+        def canonicalize_embedded_binary(dsl, module):
+            # TVM-FFI source callables bypass CudaDialectJitCompiledFunction.to()
+            # and export the lowered module into their own execution engine, so
+            # replace the already-lowered embedded binary immediately before the
+            # wrapper is constructed from that module.
+            ptx_path = dsl.compile_options.full_ptx_path
+            if not (ptx_path and Path(ptx_path).is_file()):
+                return
+            canonical_cubin = ptxas._compile_ptx(
+                Path(ptx_path), Path(ptx_path).read_text().rstrip("\x00")
+            )
+            binary_globals = []
+            for operation in module.body.operations:
+                if str(operation.operation.name) != "llvm.mlir.global":
+                    continue
+                attributes = operation.operation.attributes
+                symbol = str(attributes["sym_name"].value)
+                if symbol.endswith("_binary"):
+                    binary_globals.append(operation)
+            if len(binary_globals) != 1:
+                raise RuntimeError(
+                    f"expected one embedded source CUDA binary, got {len(binary_globals)}"
                 )
-                binary_globals = []
-                for operation in module.body.operations:
-                    if str(operation.operation.name) != "llvm.mlir.global":
-                        continue
-                    attributes = operation.operation.attributes
-                    symbol = str(attributes["sym_name"].value)
-                    if symbol.endswith("_binary"):
-                        binary_globals.append(operation)
-                if len(binary_globals) != 1:
-                    raise RuntimeError(
-                        f"expected one embedded source CUDA binary, got {len(binary_globals)}"
-                    )
-                with module.context:
-                    binary_global = binary_globals[0].operation
-                    binary_global.attributes["value"] = ir.StringAttr.get(canonical_cubin)
-                    binary_global.attributes["global_type"] = ir.TypeAttr.get(
-                        ir.Type.parse(f"!llvm.array<{len(canonical_cubin)} x i8>")
-                    )
-                    module.operation.verify()
-            return original_build_jit_function(self, *args, **kwargs)
+            with module.context:
+                binary_global = binary_globals[0].operation
+                binary_global.attributes["value"] = ir.StringAttr.get(canonical_cubin)
+                binary_global.attributes["global_type"] = ir.TypeAttr.get(
+                    ir.Type.parse(f"!llvm.array<{len(canonical_cubin)} x i8>")
+                )
+                module.operation.verify()
 
-        BaseDSL._build_jit_function = build_jit_function_ptx92
+        # CuTe-DSL 4.7 dropped the BaseDSL._build_jit_function helper: the
+        # wrapper is now constructed inline at the end of compile_and_cache as
+        # ``func_type(module, engine, ...)`` on the lowered module. Intercept
+        # ``func_type`` so the binary replacement keeps the same insertion point.
+        original_compile_and_cache = BaseDSL.compile_and_cache
+        compile_and_cache_params = list(inspect.signature(original_compile_and_cache).parameters)
+        func_type_index = compile_and_cache_params.index("func_type") - 1  # without self
+        default_func_type = (
+            inspect.signature(original_compile_and_cache).parameters["func_type"].default
+        )
+
+        def compile_and_cache_ptx92(self, *args, **kwargs):
+            if len(args) > func_type_index:
+                func_type = args[func_type_index]
+            else:
+                func_type = kwargs.pop("func_type", default_func_type)
+
+            def build_jit_function_ptx92(module, *build_args, **build_kwargs):
+                canonicalize_embedded_binary(self, module)
+                return func_type(module, *build_args, **build_kwargs)
+
+            if len(args) > func_type_index:
+                args = (
+                    *args[:func_type_index],
+                    build_jit_function_ptx92,
+                    *args[func_type_index + 1 :],
+                )
+            else:
+                kwargs["func_type"] = build_jit_function_ptx92
+            return original_compile_and_cache(self, *args, **kwargs)
+
+        BaseDSL.compile_and_cache = compile_and_cache_ptx92
         compiled_cls = ptxas.cutlass.cutlass_dsl.cuda_jit_executor.CudaDialectJitCompiledFunction
         if compiled_cls._load_cuda_library is not ptxas._patched_load_cuda_library:
             ptxas.patch()

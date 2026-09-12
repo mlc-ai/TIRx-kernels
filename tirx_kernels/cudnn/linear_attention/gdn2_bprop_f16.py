@@ -4029,9 +4029,11 @@ def _new_outputs(torch, config, total_tokens):
 
 
 def _prepare_work_tables(torch, config):
+    from tirx_kernels.cudnn.linear_attention._frost import source_work_items
+
     base = _make_work_items(torch, config["seq_lens"], config["heads"])
 
-    def one_side():
+    def one_side(base):
         if config["run_order"]:
             work_items = torch.empty_like(base)
             staging = None if config["order_generate"] else base.clone()
@@ -4052,7 +4054,7 @@ def _prepare_work_tables(torch, config):
             ),
         }
 
-    return {"tirx": one_side(), "source": one_side()}
+    return {"tirx": one_side(base), "source": one_side(source_work_items(torch, base, _BT))}
 
 
 def _prepare_data(config):
@@ -4327,6 +4329,9 @@ def _source_launch(data):
     output = data["source"]
     work = data["work"]["source"]
     stream = int(torch.cuda.current_stream().cuda_stream)
+    from tirx_kernels.cudnn.linear_attention._frost import launch_device
+
+    device, num_sm = launch_device(torch)
 
     def launch():
         source.chunk_gdn2_bwd_sm100(
@@ -4351,17 +4356,22 @@ def _source_launch(data):
             d_final_state=data["d_final_state"],
             use_qk_l2norm_in_kernel=config["l2norm"],
             safe_gate=config["safe_gate"],
+            # The pinned 1.27 kernels only accepted natural-log gates; 1.29 made that
+            # selectable (``log_gate``), so pin the old ABI explicitly.
+            log_gate=True,
             gate_lower_bound=-5.0,
             a_log=data["a_log"],
             dt_bias=data["dt_bias"],
             use_beta_sigmoid=config["beta_sigmoid"],
             work_items=work["work_items"],
             work_count=work["work_count"],
-            sched_ctr=work["sched_ctr"],
-            sched_all=work["sched_all"],
+            scheduler_counter=work["sched_ctr"],
+            scheduler_all=work["sched_all"],
             work_item_scratch=work["staging"],
             order_in_prologue=config["run_order"],
             tensormap_workspace=data["source_workspace"],
+            device=device,
+            num_sm=num_sm,
             stream=stream,
         )
 

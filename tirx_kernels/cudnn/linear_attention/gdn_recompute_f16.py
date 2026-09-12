@@ -2575,13 +2575,15 @@ def _checkpoint_count(seq_lens, cadence):
 
 
 def _prepare_work_tables(torch, config):
+    from tirx_kernels.cudnn.linear_attention._frost import source_work_items
+
     base = torch.tensor(
         _work_rows(config["seq_lens"], config["heads"], split=config["split"]),
         dtype=torch.int32,
         device="cuda",
     )
 
-    def one_side():
+    def one_side(base):
         # Without the order pass the caller owns an already-ordered table.
         work_items = torch.empty_like(base) if config["run_order"] else base.clone()
         staging = None if config["order_generate"] else base.clone()
@@ -2596,7 +2598,7 @@ def _prepare_work_tables(torch, config):
             "scheduler": sched_all[:1] if config["dynamic_scheduler"] else None,
         }
 
-    return {"tirx": one_side(), "source": one_side()}
+    return {"tirx": one_side(base), "source": one_side(source_work_items(torch, base, _BT))}
 
 
 def _new_outputs(torch, config):
@@ -2847,13 +2849,15 @@ def _source_launch(data):
     io_t = torch.float16 if config["io_dtype"] == "float16" else torch.bfloat16
     beta = data["beta"].to(io_t) if config["beta_sigmoid"] else data["beta"]
     stream = int(torch.cuda.current_stream().cuda_stream)
+    from tirx_kernels.cudnn.linear_attention._frost import launch_device
+
+    device, num_sm = launch_device(torch)
 
     def launch():
         source.chunk_gdn_recompute_sm100(
             data["k"],
             data["v"],
             data["gate"],
-            beta,
             data["cu_seqlens"],
             data["initial_state"],
             output.get("final_state"),
@@ -2861,16 +2865,19 @@ def _source_launch(data):
             output_state_checkpoints=output.get("checkpoints"),
             work_items=work["work_items"],
             work_count=work["work_count"],
-            sched_ctr=work["scheduler"],
-            sched_all=work["sched_all"] if config["run_order"] else None,
+            scheduler_counter=work["scheduler"],
+            scheduler_all=work["sched_all"] if config["run_order"] else None,
             work_item_scratch=work["staging"],
             order_in_prologue=bool(config["run_order"]),
             log_gate=bool(config["log_gate"]),
             safe_gate=bool(config["safe_gate"]),
             a_log=data["a_log"],
             dt_bias=data["dt_bias"],
+            beta=beta,
             use_beta_sigmoid=bool(config["beta_sigmoid"]),
             workspace=data["source_workspace"],
+            device=device,
+            num_sm=num_sm,
             stream=stream,
         )
 

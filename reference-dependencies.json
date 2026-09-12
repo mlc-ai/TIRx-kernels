@@ -39,7 +39,7 @@
       "name": "flashinfer",
       "import_name": "flashinfer",
       "url": "https://github.com/flashinfer-ai/flashinfer.git",
-      "revision": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+      "revision": "13099a68b2f663cea0400a2c161d5264010dfc9c",
       "install_subdirectory": "."
     },
     {
@@ -102,7 +102,7 @@
       "name": "cudnn-frontend",
       "import_name": "cudnn",
       "url": "https://github.com/NVIDIA/cudnn-frontend.git",
-      "revision": "aded9909c3c2a897fdbc7b5fd79fa53bc915f4f5",
+      "revision": "1dbd2c09432dfd6cbf13a0ad85a071446398c082",
       "install_subdirectory": ".",
       "build_requirements": [
         "pybind11==2.13.6",

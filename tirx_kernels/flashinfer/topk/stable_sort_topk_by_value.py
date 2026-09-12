@@ -405,8 +405,11 @@ def load_reference_ext():
         "-U__CUDA_NO_HALF_CONVERSIONS__",
         "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
         "-U__CUDA_NO_HALF2_OPERATORS__",
-        # The rest mirrors gen_topk_module() over gen_jit_spec()'s common set.
-        "-std=c++17",
+        # The rest mirrors gen_topk_module() over gen_jit_spec()'s common set,
+        # except the C++ standard: FlashInfer's JIT builds against tvm-ffi and
+        # stays on c++17, but this extension includes ATen, which torch >= 2.14
+        # refuses to compile below c++20 (torch 2.13 accepts c++20 as well).
+        "-std=c++20",
         "-use_fast_math",
         "-Xfatbin=-compress-all",
         "-DFLASHINFER_ENABLE_F16",
@@ -438,7 +441,7 @@ def load_reference_ext():
                 f"{data}/cccl/libcudacxx/include",
                 f"{data}/cccl/thrust",
             ],
-            extra_cflags=["-O3", "-std=c++17"],
+            extra_cflags=["-O3", "-std=c++20"],
             extra_cuda_cflags=cuda_flags,
             build_directory=str(build_directory),
             verbose=False,
