@@ -2263,9 +2263,38 @@ def run_test(**kwargs: Any) -> None:
     torch.testing.assert_close(actual, reference, atol=5e-2, rtol=5e-2)
 
 
+def _launch_kernel_args(cfg: KDAForwardConfig) -> dict[str, Any]:
+    """The ``_get_kernel`` arguments ``run`` derives for this configuration's tensors.
+
+    Mirrors the dispatch in ``run`` from config metadata alone, so the module
+    cache can be primed before the workload owns a GPU.
+    """
+    if not cfg.packed:
+        num_seqs, direct, fixed_shape, mixed_shape = 1, True, True, False
+    else:
+        num_seqs = cfg.num_seqs
+        direct = num_seqs == 1 or num_seqs == 8 or num_seqs > 32
+        fixed_shape = False
+        mixed_shape = num_seqs == 6
+    return {
+        "H": cfg.num_heads,
+        "direct": direct,
+        "num_seqs": num_seqs,
+        "T": cfg.total_tokens,
+        "fixed_shape": fixed_shape,
+        "mixed_shape": mixed_shape,
+    }
+
+
 def prepare_bench(**kwargs: Any):
+    """Compile into the module cache before the workload receives a GPU.
+
+    ``run`` compiles lazily through ``_KERNELS``; priming exactly the entry the
+    GPU stage will look up keeps ``run_gpu`` free of ``tvm.compile``.
+    """
     from tirx_kernels.runner import prepared_gpu_benchmark
 
+    _get_kernel(**_launch_kernel_args(_cfg(**kwargs)))
     return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs)})
 
 
@@ -2293,7 +2322,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs: Any) ->
     def _flashkda_builder():
         from tirx_kernels.flashinfer.utils._flashkda_bench import prepare_flashkda_raw_reference
 
-        return prepare_flashkda_raw_reference(case).launch
+        # The FlashKDA peer takes dt_bias as [H, D]; this kernel consumes it flat.
+        reference_case = dict(case)
+        reference_case["dt_bias"] = case["dt_bias"].view(case["config"].num_heads, 128)
+        return prepare_flashkda_raw_reference(reference_case).launch
 
     return bench(
         {"tirx": lambda: run(*args)},
