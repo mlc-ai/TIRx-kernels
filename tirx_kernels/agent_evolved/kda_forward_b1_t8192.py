@@ -22,12 +22,14 @@ from tvm.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint3
 
 BT, BC, D = 64, 16, 128
 RCP_LN2 = 1.0 / math.log(2.0)
-GATE_C = -2.5 * RCP_LN2  # gl = GATE_C * (tanh(x/2) + 1) = -5*RCP_LN2*sigmoid(x)
+GATE_C = -2.5 * RCP_LN2
 EPS = 1e-6
 
 MMA = "tcgen05.mma.cta_group::1.kind::f16"
-TMA3 = "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::1"
-TMA2 = "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::1"
+TMA3 = "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::1.L2::cache_hint"
+TMA2 = "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::1.L2::cache_hint"
+CACHE_EVICT_FIRST = K.uint64(0x12F0000000000000)
+CACHE_EVICT_LAST = K.uint64(0x14F0000000000000)
 PREF3 = "cp.async.bulk.prefetch.tensor.3d.L2.global.tile"
 COMMIT = "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64"
 LD32x64 = "tcgen05.ld.sync.aligned.32x32b.x64.b32"
@@ -35,7 +37,10 @@ ST32x64 = "tcgen05.st.sync.aligned.32x32b.x64.b32"
 ST32x32 = "tcgen05.st.sync.aligned.32x32b.x32.b32"
 ST32x16 = "tcgen05.st.sync.aligned.32x32b.x16.b32"
 LD16x8 = "tcgen05.ld.sync.aligned.16x256b.x8.b32"
-TMA_S2G3 = "cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"
+TMA_S2G3 = "cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group.L2::cache_hint"
+TMA_REDUCE_S2G3 = (
+    "cp.reduce.async.bulk.tensor.3d.global.shared::cta.add.tile.bulk_group.L2::cache_hint"
+)
 LD16x2 = "tcgen05.ld.sync.aligned.16x256b.x2.b32"
 LD32x32 = "tcgen05.ld.sync.aligned.32x32b.x32.b32"
 TMEM_ALLOC = "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"
@@ -44,9 +49,11 @@ TMEM_RELINQ = "tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"
 FENCE_AFTER = "tcgen05.fence::after_thread_sync"
 FENCE_BEFORE = "tcgen05.fence::before_thread_sync"
 
+
 # TMEM column map (512 columns); AA buffers hold the round accumulators, later u^T / v_new^T; GACC = (S k2^T)^T, GBF its bf16 copy
 C_SACC, C_SBF, C_VNBF, C_OACC, C_GACC, C_AA0, C_GBF = 0, 128, 192, 224, 288, 352, 480
 N_COLS = 512
+
 
 # instruction descriptors (M, N, K, d, a, b, trans_a, trans_b)
 F32, BF = "float32", "bfloat16"
@@ -64,6 +71,8 @@ W_PREP = list(range(12, 20))
 NWARPS = 20
 
 NB_PREP, NB_INTRA, NB_STATE = 1, 2, 3
+
+
 # mbarrier waits poll; try_wait already parks the warp until the phase flips,
 # so the old nanosleep back-off only added latency after a near-miss.
 WAIT_HINT = 0x989680
@@ -160,8 +169,16 @@ def build_kernel(
     event_mode: int = 0,
     sready_stages: int = 1,
     split_rounds: bool = False,
+    lite_ring: bool = True,
     probe: int = 0,
     pad: tuple = (0, 0, 0, 0),
+    split: bool = False,
+    split_parts: int = 2,
+    check_grid: int = 0,
+    spec_split: int = 0,
+    spec_perm: bool = True,
+    spec_diag_exit: bool = False,
+    spec_const: bool = True,
 ):
     """One CTA per (sequence, head); CTA b handles head b % H of the (b // H)-th longest sequence (longest-first dispatch)."""
     DBG = debug
@@ -170,8 +187,10 @@ def build_kernel(
     MERGE_DELTA = event_mode >= 1
     MERGE_GVN = event_mode >= 2
     SPLIT_RD = bool(split_rounds)
+    RING3 = bool(lite_ring)
     assert sready_stages in (1, 2, 4)
     SR_ST = int(sready_stages)
+
     # `probe` is a measurement-only bitmask that drops prep's input waits
     # (1 kA_free, 2 aa_r, 4 oi_done, 8 dvec_free, 16 T_ready) or one of its
     # transcendental streams (32 the 2^-cs reciprocal, 64 the gate tanh, 128 the
@@ -181,6 +200,24 @@ def build_kernel(
     # separate "prep is waiting" from "prep is working" and to measure which
     # pipe its span is actually bound by.
     assert 0 <= probe < 1024
+    SPLIT = bool(split) and not fixed_tokens
+    SPLIT_PARTS = int(split_parts) if SPLIT else 2
+    MULTIPART_SPLIT = SPLIT and SPLIT_PARTS > 2
+    assert SPLIT_PARTS >= 2
+
+    SPEC = int(spec_split) > 0
+    SPEC_A = int(spec_split)
+    if SPEC:
+        assert fixed_tokens > 0 and fixed_tokens % BT == 0 and direct and full_chunks
+        assert not fixed_nt and not SPLIT
+        assert 0 < SPEC_A < fixed_tokens // BT
+    CONST_CTX = bool(fixed_tokens) and not SPEC
+    SPEC_PERM = int(spec_perm) if SPEC else 0
+    SPEC_DIAG_EXIT = SPEC and bool(spec_diag_exit)
+
+    SPEC_CONST = SPEC and bool(spec_const)
+    SPEC_VAR = {"mode": None}
+    SPEC_NT_TOT = fixed_tokens // BT if fixed_tokens else 0
 
     assert not fixed_tokens or direct
     assert not fixed_nt or (
@@ -203,15 +240,104 @@ def build_kernel(
         cu_seqlens,
         num_seqs,
         num_ctas,
+        sms,
+        split_mode,
+        state_x,
+        flags,
         dbg,
         dbg_c,
+        vz_map,
+        r_map,
+        init_x,
     ):
         cta = K.cta_id()
         warp = K.warp_id()
         lane = K.lane_id()
         tid = K.thread_id()
-        h = K.local_scalar("int32", init=cta % H)
-        rank = K.local_scalar("int32", init=cta // H)
+        if SPLIT:
+            total = K.local_scalar("int32", init=num_seqs * H)
+            nsplit = K.local_scalar("int32", init=split_mode)
+            if MULTIPART_SPLIT:
+                pred0 = cta < nsplit
+                is_part = pred0
+                part_expr = K.Select(pred0, K.int32(0), K.int32(-1))
+                part_item = cta
+                reserved_expr = nsplit
+                for p in range(1, SPLIT_PARTS):
+                    base = p * sms + p * nsplit
+                    pred = tvm.tirx.all(cta >= base, cta < base + nsplit)
+                    is_part = tvm.tirx.any(is_part, pred)
+                    part_expr = K.Select(pred, K.int32(p), part_expr)
+                    part_item = K.Select(pred, cta - base, part_item)
+                    reserved_expr = K.Select(cta >= base + nsplit, (p + 1) * nsplit, reserved_expr)
+                half = K.local_scalar("int32", init=part_expr)
+                qitem = K.local_scalar("int32", init=part_item)
+                reserved = K.local_scalar("int32", init=reserved_expr)
+                item = K.local_scalar(
+                    "int32", init=K.Select(is_part, qitem, nsplit + cta - reserved)
+                )
+            else:
+                item = K.local_scalar("int32", init=K.Select(cta < total, cta, cta - total))
+                half = K.local_scalar(
+                    "int32",
+                    init=K.Select(
+                        cta >= total, K.int32(1), K.Select(cta < nsplit, K.int32(0), K.int32(-1))
+                    ),
+                )
+            h = K.local_scalar("int32", init=item % H)
+            rank = K.local_scalar("int32", init=item // H)
+        elif SPEC_PERM == 2:
+            W = K.local_scalar("int32", init=K.min(sms, K.int32(2 * H)))
+            nB1 = K.local_scalar("int32", init=W - K.int32(H))
+            nB2 = K.local_scalar("int32", init=K.int32(2 * H) - W)
+            is_b1 = cta < nB1
+            is_a = tvm.tirx.all(cta >= nB1, cta < W)
+            is_b2 = tvm.tirx.all(cta >= W, cta < W + nB2)
+            rank = K.local_scalar(
+                "int32",
+                init=K.Select(
+                    is_a, K.int32(0), K.Select(tvm.tirx.any(is_b1, is_b2), K.int32(1), K.int32(2))
+                ),
+            )
+            h = K.local_scalar(
+                "int32",
+                init=K.Select(
+                    is_b1,
+                    cta,
+                    K.Select(is_a, cta - nB1, K.Select(is_b2, nB1 + (cta - W), cta - W - nB2)),
+                ),
+            )
+            item = rank
+            half = K.int32(-1)
+        elif SPEC_PERM == 1:
+            W = K.local_scalar("int32", init=K.min(sms, K.int32(2 * H)))
+            a_cnt = K.local_scalar("int32", init=((cta + 1) * H) // W)
+            a_prev = K.local_scalar("int32", init=(cta * H) // W)
+            j = K.local_scalar("int32", init=cta - W)
+            nB2 = K.local_scalar("int32", init=K.int32(2 * H) - W)
+            is_first = cta < W
+            is_a = tvm.tirx.all(is_first, a_cnt > a_prev)
+            is_b = tvm.tirx.any(
+                tvm.tirx.all(is_first, a_cnt == a_prev), tvm.tirx.all(cta >= W, j < nB2)
+            )
+            rank = K.local_scalar(
+                "int32", init=K.Select(is_a, K.int32(0), K.Select(is_b, K.int32(1), K.int32(2)))
+            )
+            h = K.local_scalar(
+                "int32",
+                init=K.Select(
+                    is_a,
+                    a_prev,
+                    K.Select(is_first, cta - a_cnt, K.Select(is_b, (W - K.int32(H)) + j, j - nB2)),
+                ),
+            )
+            item = rank
+            half = K.int32(-1)
+        else:
+            h = K.local_scalar("int32", init=cta % H)
+            rank = K.local_scalar("int32", init=cta // H)
+            item = rank if SPEC else K.int32(0)
+            half = K.int32(-1)
 
         def shfl_idx_i32(x, src):
             r = K.local_scalar("int32")
@@ -236,7 +362,18 @@ def build_kernel(
             # valid sequence.  Omitting the general ranking prologue keeps its
             # temporaries out of the entry register allocation and spill set.
             K.assign(seq, rank)
-            if fixed_tokens:
+            if SPEC:
+                K.assign(seq, K.int32(0))
+                K.assign(bos, K.Select(rank == K.int32(0), K.int32(0), K.int32(SPEC_A * BT)))
+                K.assign(
+                    Lv,
+                    K.Select(
+                        rank == K.int32(0),
+                        K.int32(SPEC_A * BT),
+                        K.int32(0 if SPEC_DIAG_EXIT else fixed_tokens - SPEC_A * BT),
+                    ),
+                )
+            elif fixed_tokens:
                 K.assign(bos, K.int32(0))
                 K.assign(Lv, K.int32(fixed_tokens))
             else:
@@ -276,6 +413,39 @@ def build_kernel(
                     K.ptx.ld.global_.s64(c1, cu_seqlens.ptr_to([rank + 1]))
                     K.assign(bos, K.Cast("int32", c0))
                     K.assign(Lv, K.Cast("int32", c1 - c0))
+
+        xflag = K.local_scalar("int32", init=K.int32(0))
+        if SPLIT:
+            nt_full = K.local_scalar("int32", init=(Lv + (BT - 1)) // BT)
+            if MULTIPART_SPLIT:
+                do_split = tvm.tirx.all(half >= K.int32(0), nt_full >= K.int32(2 * SPLIT_PARTS))
+                c_lo = K.local_scalar(
+                    "int32", init=(nt_full * half + (SPLIT_PARTS - 1)) // SPLIT_PARTS
+                )
+                c_hi = K.local_scalar(
+                    "int32", init=(nt_full * (half + 1) + (SPLIT_PARTS - 1)) // SPLIT_PARTS
+                )
+                with K.If(do_split), K.Then():
+                    K.assign(bos, bos + c_lo * BT)
+                    K.assign(Lv, K.min(Lv, c_hi * BT) - c_lo * BT)
+                    K.assign(xflag, half + 1)
+                with (
+                    K.If(tvm.tirx.all(half > K.int32(0), nt_full < K.int32(2 * SPLIT_PARTS))),
+                    K.Then(),
+                ):
+                    K.assign(Lv, K.int32(0))
+            else:
+                c_mid = K.local_scalar("int32", init=nt_full // 2)
+                do_split = tvm.tirx.all(half >= K.int32(0), nt_full >= K.int32(4))
+                with K.If(tvm.tirx.all(do_split, half == K.int32(0))), K.Then():
+                    K.assign(Lv, c_mid * BT)
+                    K.assign(xflag, K.int32(1))
+                with K.If(tvm.tirx.all(do_split, half == K.int32(1))), K.Then():
+                    K.assign(bos, bos + c_mid * BT)
+                    K.assign(Lv, Lv - c_mid * BT)
+                    K.assign(xflag, K.int32(2))
+                with K.If(tvm.tirx.all(half == K.int32(1), nt_full < K.int32(4))), K.Then():
+                    K.assign(Lv, K.int32(0))
         L = Lv
         NT = int(fixed_nt) if fixed_nt else K.local_scalar("int32", init=(Lv + (BT - 1)) // BT)
 
@@ -296,16 +466,16 @@ def build_kernel(
             tmark("cta_start", 0)
         smem = K.smem_pool()
         tmem_addr = smem.alloc((1,), K.u32)
+
         # (h, seq, bos, L, NT) published once; every role reloads them into its own registers.
         # Keeping them live across the role bodies spilled them to local memory, and the reloads
         # ran with one active lane per warp (32B sector, 4B used) inside the single-lane MMA loops.
-        ctx_s = None if fixed_tokens else smem.alloc((8,), K.u32)
+        ctx_s = None if CONST_CTX else smem.alloc((8,), K.u32)
         rsq = smem.alloc((2 * 4 * 64,), K.f32, align=16)
         beta_s = smem.alloc((2 * 64 * 8,), K.bf16, align=128)
-        bsig = smem.alloc((2 * 64,), K.f32, align=16)
+        bsig = smem.alloc(((3 if RING3 else 2) * 64,), K.f32, align=16)
         dvec = smem.alloc((3 * 128,), K.f32, align=16)
         tot = smem.alloc((2 * 4 * 128,), K.f32, align=16)
-        adt_s = smem.alloc((128 + 4,), K.f32, align=16)
 
         def mbar(count, depth=1):
             b = K.MBarrier(smem, depth)
@@ -327,6 +497,7 @@ def build_kernel(
         g_free = None if MERGE_GVN else mbar(4)
         u_done = mbar(1, 2)
         Aqk_ready = mbar(4)
+
         # One arrival per SBF quarter-group: the next chunk's S-operand MMAs consume the
         # decayed state incrementally instead of waiting for the whole 128x128 update.
         S_ready = mbar(4, SR_ST)
@@ -351,6 +522,7 @@ def build_kernel(
             return view
 
         pool.move_base_to((pool.offset + 1023) // 1024 * 1024)
+
         # q/k/g stages hold only the raw tiles; kA = A rows of the rounds and B rows of the delta MMA (k * 2^-cs); Bt / qg_s = q and k rows * 2^cs (tokens 0-31 / 32-63)
         q_t = tile_alloc("q", (2, BT, D))
         k_t = tile_alloc("k", (2, BT, D))
@@ -360,26 +532,28 @@ def build_kernel(
         pool.move_base_to((pool.offset + 1023) // 1024 * 1024)
         kA = tile_alloc("kA", (2, BT, D))
         q2t = tile_alloc("q2", (BT, D))
+        q2_abs_off = pool.offset - BT * D * 2
         k2t = tile_alloc("k2", (BT, D))
         Aqk_s = tile_alloc("Aqk", (64, 64))
         LTT = tile_alloc("LTT", (64, 64))
         TpT_t = tile_alloc("TpT", (64, 64))
         o_st_off = pool.offset
-        o_st = tile_alloc(
-            "ost", (2, BT, 64)
-        )  # output staging tile [v-half][token][64 v] for the TMA store
+        o_st = tile_alloc("ost", (2, BT, 64))
         end_off = pool.offset
         pool.move_base_to(o_st_off)
-        h0_s = smem.alloc((64 * 64,), K.f32, align=16)  # aliases o_st: prologue-only staging
+        h0_s = smem.alloc((64 * 64,), K.f32, align=16)
+
+        pool.move_base_to(q2_abs_off)
+        adt_s = smem.alloc((128 + 4,), K.f32, align=16)
         pool.move_base_to(end_off)
         base0 = TOFF["q"]
         for name in TOFF:
             TOFF[name] -= base0
         assert min(TOFF.values()) == 0
 
-        if not fixed_tokens:
+        if not CONST_CTX:
             with K.If(tid == 0), K.Then():
-                for i_, v_ in enumerate((h, seq, bos, L, NT)):
+                for i_, v_ in enumerate((h, seq, bos, L, NT, item, xflag)):
                     K.ptx.st.shared.u32(ctx_s.ptr_to([i_]), K.Cast("uint32", v_))
             K.ptx.fence.proxy.async_.shared__cta()
         K.ptx.fence.mbarrier_init.release.cluster()
@@ -394,7 +568,30 @@ def build_kernel(
 
         def ctx(*names):
             """Role-local copies of the published CTA scalars, in the order (h, seq, bos, L, NT)."""
-            if fixed_tokens:
+            if SPEC_CONST and SPEC_VAR["mode"] is not None:
+                m_ = SPEC_VAR["mode"]
+                consts = {
+                    "seq": 0,
+                    "bos": 0 if m_ == 0 else SPEC_A * BT,
+                    "L": SPEC_A * BT if m_ == 0 else fixed_tokens - SPEC_A * BT,
+                    "NT": SPEC_A if m_ == 0 else SPEC_NT_TOT - SPEC_A,
+                    "xflag": 0,
+                }
+                out = []
+                for n in names:
+                    if n in consts:
+                        out.append(K.local_scalar("int32", init=K.int32(consts[n])))
+                    else:
+                        u = K.local_scalar("uint32")
+                        K.ptx.ld.shared.u32(
+                            u,
+                            ctx_s.ptr_to(
+                                [("h", "seq", "bos", "L", "NT", "item", "xflag").index(n)]
+                            ),
+                        )
+                        out.append(K.local_scalar("int32", init=K.Cast("int32", u)))
+                return out[0] if len(out) == 1 else out
+            if CONST_CTX:
                 out = []
                 for n in names:
                     if n == "h":
@@ -407,6 +604,8 @@ def build_kernel(
                         value = K.int32(fixed_tokens)
                     elif n == "NT":
                         value = (fixed_tokens + BT - 1) // BT
+                    elif n in ("item", "xflag"):
+                        value = K.int32(0)
                     else:
                         raise ValueError(n)
                     out.append(K.local_scalar("int32", init=value))
@@ -414,13 +613,34 @@ def build_kernel(
             out = []
             for n in names:
                 u = K.local_scalar("uint32")
-                K.ptx.ld.shared.u32(u, ctx_s.ptr_to([("h", "seq", "bos", "L", "NT").index(n)]))
+                K.ptx.ld.shared.u32(
+                    u, ctx_s.ptr_to([("h", "seq", "bos", "L", "NT", "item", "xflag").index(n)])
+                )
                 out.append(K.local_scalar("int32", init=K.Cast("int32", u)))
             return out[0] if len(out) == 1 else out
 
         def role_nt():
             """Chunk count, frozen only for an implicit single sequence."""
-            return int(fixed_nt) if fixed_nt else ctx("NT")
+            if fixed_nt:
+                return int(fixed_nt)
+            if SPEC_CONST and SPEC_VAR["mode"] is not None:
+                return SPEC_A if SPEC_VAR["mode"] == 0 else SPEC_NT_TOT - SPEC_A
+            return ctx("NT")
+
+        def run_role(body):
+            """Trace `body` once, or twice under a mode guard with per-mode constants."""
+            if not SPEC_CONST:
+                body()
+                return
+            mode_rt = ctx("item")
+            with K.If(mode_rt == K.int32(0)):
+                with K.Then():
+                    SPEC_VAR["mode"] = 0
+                    body()
+                with K.Else():
+                    SPEC_VAR["mode"] = 1
+                    body()
+            SPEC_VAR["mode"] = None
 
         def tmem(col, lane_off=0):
             if isinstance(col, int):
@@ -449,6 +669,7 @@ def build_kernel(
             if IKET:
                 wait_token = K.alloc_local((1,), "uint32")
                 K.assign(wait_token[0], K.cuda.iket.range_start("mbarrier-wait"))
+
             # One try_wait site per wait, not two.  The peeled first poll cost a
             # second PHASECHK/NANOSLEEP pair at every one of the ~54 wait sites,
             # and this kernel is instruction-fetch bound at high CTA counts.
@@ -568,6 +789,7 @@ def build_kernel(
             lane_i = K.lane_id()
             h, bos = ctx("h", "bos")
             NT = role_nt()
+            mode = ctx("item") if SPEC else None
 
             def issue_loads(cc):
                 sc = cc % 2
@@ -581,6 +803,7 @@ def build_kernel(
                             K.Cast("int32", bos + cc * BT),
                             K.Cast("int32", 2 * h),
                             mb,
+                            CACHE_EVICT_FIRST,
                         )
                     K.ptx[TMA2](
                         beta_s.ptr_to([sc * 512]),
@@ -588,10 +811,26 @@ def build_kernel(
                         K.Cast("int32", (h // 8) * 8),
                         K.Cast("int32", bos + cc * BT),
                         mb,
+                        CACHE_EVICT_FIRST,
                     )
+
+                    def _pref_v():
+                        K.ptx[PREF3](
+                            K.address_of(v_map),
+                            K.int32(0),
+                            K.Cast("int32", bos + cc * BT),
+                            K.Cast("int32", 2 * h),
+                        )
+
+                    if SPEC:
+                        with K.If(mode != K.int32(2)), K.Then():
+                            _pref_v()
+                    else:
+                        _pref_v()
                     K.ptx.mbarrier.arrive.expect_tx.shared.b64(
                         ring_full.ptr_to([sc]), K.uint32(3 * BT * D * 2 + 1024)
                     )
+
                     # No L2 tensor prefetch: the next chunk's TMA is issued one
                     # stage ahead already, so the prefetch only added twelve
                     # UTMAPF issues and ~60 instructions of code to a kernel that
@@ -603,9 +842,11 @@ def build_kernel(
                 issue_loads(K.int32(1))
             with K.serial(NT, unroll=unroll_chunks) as c:
                 padblock(1)
+
                 # stage (c+1)%2 is free once prep has consumed the raw tiles of chunk c-1; v_t once u^T(c-1) is done
                 with K.If(tvm.tirx.all(c >= 1, c + 1 < NT)), K.Then():
                     fwait(stage_free, (c + 1) % 2, ((c - 1) // 2) % 2)
+
                     # stage_free retires prep's generic reads of the raw ring and
                     # beta tiles.  Bridge that into the async proxy before the TMA
                     # refills the same stage: the mbarrier release/acquire pair
@@ -616,14 +857,26 @@ def build_kernel(
                     fwait(u_done, (c + 1) % 2, ((c - 1) // 2) % 2)
                 with K.If(elected()), K.Then():
                     mbv = K.cuda.cvta_generic_to_shared(v_full.ptr_to([0]))
-                    K.ptx[TMA3](
-                        v_t.ptr_to(0, 0),
-                        K.address_of(v_map),
-                        K.int32(0),
-                        K.Cast("int32", bos + c * BT),
-                        K.Cast("int32", 2 * h),
-                        mbv,
-                    )
+
+                    def _ld_v(vmap):
+                        K.ptx[TMA3](
+                            v_t.ptr_to(0, 0),
+                            K.address_of(vmap),
+                            K.int32(0),
+                            K.Cast("int32", bos + c * BT),
+                            K.Cast("int32", 2 * h),
+                            mbv,
+                            CACHE_EVICT_FIRST,
+                        )
+
+                    if SPEC:
+                        with K.If(mode == K.int32(2)):
+                            with K.Then():
+                                _ld_v(vz_map)
+                            with K.Else():
+                                _ld_v(v_map)
+                    else:
+                        _ld_v(v_map)
                     K.ptx.mbarrier.arrive.expect_tx.shared.b64(
                         v_full.ptr_to([0]), K.uint32(BT * D * 2)
                     )
@@ -649,6 +902,7 @@ def build_kernel(
                     tmark("rd_start", c, False)
                     fwait(rfull, b2, (c // 2) % 2)
                     tmark("rd_r0", c, False)
+
                     # With split_rounds, Akk^T is issued first and gets its own
                     # completion: the intra transform's first dependency is the
                     # diagonal block of Akk, so signalling it separately starts the
@@ -767,7 +1021,9 @@ def build_kernel(
                         commit(kA_free.ptr_to([b2]))
                     else:
                         commit(delta_done.ptr_to([0]))
-                        commit(kA_free.ptr_to([b2]))
+
+                        if not RING3:
+                            commit(kA_free.ptr_to([b2]))
                     fwait(Aqk_ready, 0, c % 2, SLEEP_CRIT)
                     tmark("mmc_ox", c, False)
                     for kp in range(4):
@@ -782,6 +1038,7 @@ def build_kernel(
 
         def state_body():
             h, seq, bos, L = ctx("h", "seq", "bos", "L")
+            item, xflag = ctx("item", "xflag")
             NT = role_nt()
             v_idx = tid
             regs = K.alloc_local((64,), "float32")
@@ -793,6 +1050,85 @@ def build_kernel(
                     K.assign(packed[j], bf16x2(regs[base + 2 * j], regs[base + 2 * j + 1]))
                 K.ptx[ST32x16](tmem(col), *[packed[j] for j in range(16)])
 
+            def load_state(src_ptr):
+                """src_ptr(off) -> fp32 [v][k] source; fills SACC / SBF through the swizzled staging tile."""
+                for half_ in range(2):
+                    for blk in range(2):
+                        t4 = K.alloc_local((4,), "float32")
+                        for i in range(8):
+                            rr = i * 8 + tid // 16
+                            cc = (tid % 16) * 4
+                            K.ptx.ld.global_.v4.f32(
+                                t4[0],
+                                t4[1],
+                                t4[2],
+                                t4[3],
+                                src_ptr((64 * blk + rr) * D + 64 * half_ + cc),
+                            )
+                            K.ptx.st.shared.v4.f32(
+                                h0_s.ptr_to([rr * 64 + K.bitwise_xor(tid % 16, rr % 16) * 4]),
+                                t4[0],
+                                t4[1],
+                                t4[2],
+                                t4[3],
+                            )
+                        K.ptx.bar.sync(K.uint32(NB_STATE), K.uint32(128))
+                        with K.If(v_idx // 64 == blk), K.Then():
+                            rl = v_idx % 64
+                            for u in range(16):
+                                K.ptx.ld.shared.v4.f32(
+                                    regs[4 * u],
+                                    regs[4 * u + 1],
+                                    regs[4 * u + 2],
+                                    regs[4 * u + 3],
+                                    h0_s.ptr_to([rl * 64 + K.bitwise_xor(K.int32(u), rl % 16) * 4]),
+                                )
+                        K.ptx.bar.sync(K.uint32(NB_STATE), K.uint32(128))
+                    K.ptx[ST32x64](tmem(C_SACC + 64 * half_), *[regs[j] for j in range(64)])
+                    st_packed(C_SBF + 32 * half_, 0)
+                    st_packed(C_SBF + 32 * half_ + 16, 32)
+
+            def load_state_bf16(src_ptr):
+                """Load a BF16 continuation state through the existing FP32 staging tile."""
+                for half_ in range(2):
+                    for blk in range(2):
+                        b2 = K.alloc_local((2,), "uint32")
+                        t4 = K.alloc_local((4,), "float32")
+                        for i in range(8):
+                            rr = i * 8 + tid // 16
+                            cc = (tid % 16) * 4
+                            K.ptx.ld.global_.v2.b32(
+                                b2[0], b2[1], src_ptr((64 * blk + rr) * D + 64 * half_ + cc)
+                            )
+                            lo0, hi0 = unpack(b2[0])
+                            lo1, hi1 = unpack(b2[1])
+                            K.assign(t4[0], lo0)
+                            K.assign(t4[1], hi0)
+                            K.assign(t4[2], lo1)
+                            K.assign(t4[3], hi1)
+                            K.ptx.st.shared.v4.f32(
+                                h0_s.ptr_to([rr * 64 + K.bitwise_xor(tid % 16, rr % 16) * 4]),
+                                t4[0],
+                                t4[1],
+                                t4[2],
+                                t4[3],
+                            )
+                        K.ptx.bar.sync(K.uint32(NB_STATE), K.uint32(128))
+                        with K.If(v_idx // 64 == blk), K.Then():
+                            rl = v_idx % 64
+                            for u in range(16):
+                                K.ptx.ld.shared.v4.f32(
+                                    regs[4 * u],
+                                    regs[4 * u + 1],
+                                    regs[4 * u + 2],
+                                    regs[4 * u + 3],
+                                    h0_s.ptr_to([rl * 64 + K.bitwise_xor(K.int32(u), rl % 16) * 4]),
+                                )
+                        K.ptx.bar.sync(K.uint32(NB_STATE), K.uint32(128))
+                    K.ptx[ST32x64](tmem(C_SACC + 64 * half_), *[regs[j] for j in range(64)])
+                    st_packed(C_SBF + 32 * half_, 0)
+                    st_packed(C_SBF + 32 * half_ + 16, 32)
+
             # ---- initial state (V-first layout, as FLA's state_v_first): S^T[v][k] = h0[h][v][k].
             # One 512 B row per thread makes the direct read 32 sectors per instruction, and every
             # CTA pays it inside the pipeline fill.  Stage it through shared memory instead: the
@@ -800,41 +1136,53 @@ def build_kernel(
             # 16 B units so neither the fill nor the drain has bank conflicts.  The staging buffer
             # aliases o_st, which the same warps first touch in the epilogue.
             hbase = K.local_scalar("int32", init=(seq * H + h) * D * D)
-            for half in range(2):
-                for blk in range(2):
-                    t4 = K.alloc_local((4,), "float32")
-                    for i in range(8):
-                        rr = i * 8 + tid // 16
-                        cc = (tid % 16) * 4
-                        K.ptx.ld.global_.v4.f32(
-                            t4[0],
-                            t4[1],
-                            t4[2],
-                            t4[3],
-                            h0.ptr_to([hbase + (64 * blk + rr) * D + 64 * half + cc]),
-                        )
-                        K.ptx.st.shared.v4.f32(
-                            h0_s.ptr_to([rr * 64 + K.bitwise_xor(tid % 16, rr % 16) * 4]),
-                            t4[0],
-                            t4[1],
-                            t4[2],
-                            t4[3],
-                        )
-                    K.ptx.bar.sync(K.uint32(NB_STATE), K.uint32(128))
-                    with K.If(v_idx // 64 == blk), K.Then():
-                        rl = v_idx % 64
-                        for u in range(16):
-                            K.ptx.ld.shared.v4.f32(
-                                regs[4 * u],
-                                regs[4 * u + 1],
-                                regs[4 * u + 2],
-                                regs[4 * u + 3],
-                                h0_s.ptr_to([rl * 64 + K.bitwise_xor(K.int32(u), rl % 16) * 4]),
-                            )
-                    K.ptx.bar.sync(K.uint32(NB_STATE), K.uint32(128))
-                K.ptx[ST32x64](tmem(C_SACC + 64 * half), *[regs[j] for j in range(64)])
-                st_packed(C_SBF + 32 * half, 0)
-                st_packed(C_SBF + 32 * half + 16, 32)
+            if SPLIT:
+                if MULTIPART_SPLIT:
+                    in_slot = K.local_scalar("int32", init=(SPLIT_PARTS - 1) * item + xflag - 2)
+                    xbase = K.local_scalar("int32", init=in_slot * D * D)
+                    with K.If(xflag > K.int32(1)):
+                        with K.Then():
+                            with K.If(tid == 0), K.Then():
+                                fl = K.local_scalar("int32", init=K.int32(0))
+                                with K.While(fl == K.int32(0)):
+                                    K.ptx.ld.volatile.global_.s32(fl, flags.ptr_to([in_slot]))
+                                    with K.If(fl == K.int32(0)), K.Then():
+                                        K.cuda.nano_sleep(K.uint64(2000))
+                                K.ptx.fence.acq_rel.gpu()
+                            K.ptx.bar.sync(K.uint32(NB_STATE), K.uint32(128))
+                            K.ptx.fence.acq_rel.gpu()
+                            load_state_bf16(lambda off: state_x.ptr_to([xbase + off]))
+                            with K.If(tid == 0), K.Then():
+                                K.ptx.st.volatile.global_.s32(flags.ptr_to([in_slot]), K.int32(0))
+                        with K.Else():
+                            load_state(lambda off: h0.ptr_to([hbase + off]))
+                else:
+                    xbase = K.local_scalar("int32", init=item * D * D)
+                    with K.If(xflag == K.int32(2)):
+                        with K.Then():
+                            with K.If(tid == 0), K.Then():
+                                fl = K.local_scalar("int32", init=K.int32(0))
+                                with K.While(fl == K.int32(0)):
+                                    K.ptx.ld.volatile.global_.s32(fl, flags.ptr_to([item]))
+                                    with K.If(fl == K.int32(0)), K.Then():
+                                        K.cuda.nano_sleep(K.uint64(2000))
+                                K.ptx.fence.acq_rel.gpu()
+                            K.ptx.bar.sync(K.uint32(NB_STATE), K.uint32(128))
+                            K.ptx.fence.acq_rel.gpu()
+                            load_state(lambda off: state_x.ptr_to([xbase + off]))
+                            with K.If(tid == 0), K.Then():
+                                K.ptx.st.volatile.global_.s32(flags.ptr_to([item]), K.int32(0))
+                        with K.Else():
+                            load_state(lambda off: h0.ptr_to([hbase + off]))
+            elif SPEC:
+                with K.If(item == K.int32(0)):
+                    with K.Then():
+                        load_state(lambda off: h0.ptr_to([hbase + off]))
+                    with K.Else():
+                        ibase = K.local_scalar("int32", init=(item - 1) * (D * D))
+                        load_state(lambda off: init_x.ptr_to([ibase + off]))
+            else:
+                load_state(lambda off: h0.ptr_to([hbase + off]))
             K.ptx.tcgen05.wait__st.sync.aligned()
             K.ptx[FENCE_BEFORE]()
             for _st in range(SR_ST):
@@ -859,6 +1207,7 @@ def build_kernel(
                 nvalid = BT if whole else K.local_scalar("int32", init=L - c1 * BT)
                 c4 = lane % 4
                 r16 = lane // 4
+
                 # Both OACC halves are pulled before any packing so o_free -- which gates the next
                 # chunk's o_inter MMA, and through it prep's phase B -- is released as early as possible.
                 for half in range(2):
@@ -937,13 +1286,29 @@ def build_kernel(
                     K.ptx.bar.sync(K.uint32(NB_STATE), K.uint32(128))
                     with K.If(warp == 0), K.Then():
                         with K.If(lane == 0), K.Then():
-                            K.ptx[TMA_S2G3](
-                                K.address_of(o_map),
-                                K.int32(0),
-                                K.Cast("int32", bos + c1 * BT),
-                                K.Cast("int32", 2 * h),
-                                o_st[0].ptr_to(0, 0),
-                            )
+
+                            def _st_o(omap, hint=CACHE_EVICT_FIRST):
+                                K.ptx[TMA_S2G3](
+                                    K.address_of(omap),
+                                    K.int32(0),
+                                    K.Cast("int32", bos + c1 * BT),
+                                    K.Cast("int32", 2 * h),
+                                    o_st[0].ptr_to(0, 0),
+                                    hint,
+                                )
+
+                            if SPEC:
+                                with K.If(item == K.int32(2)):
+                                    with K.Then():
+                                        _st_o(r_map, CACHE_EVICT_LAST)
+                                    with K.Else():
+                                        with K.If(item == K.int32(1)):
+                                            with K.Then():
+                                                _st_o(o_map, CACHE_EVICT_LAST)
+                                            with K.Else():
+                                                _st_o(o_map)
+                            else:
+                                _st_o(o_map)
                             K.ptx.cp.async_.bulk.commit_group()
                 else:
                     with K.If(nvalid >= BT), K.Then():
@@ -957,6 +1322,7 @@ def build_kernel(
                                     K.Cast("int32", bos + c1 * BT),
                                     K.Cast("int32", 2 * h),
                                     o_st[0].ptr_to(0, 0),
+                                    CACHE_EVICT_FIRST,
                                 )
                                 K.ptx.cp.async_.bulk.commit_group()
                 with K.If(warp == 0), K.Then():
@@ -1008,6 +1374,7 @@ def build_kernel(
                 warrive(aa_free, s)
                 with K.If(warp == 0), K.Then():
                     tmark("st_vn_ready", c)
+
                 # ---- S_{c+1} = (S_c + v_new^T kA) * 2^gc_last: fp32 in SACC, bf16 copy in SBF (A operand of G / o_inter of chunk c+1)
                 if MERGE_DELTA:
                     fwait(kA_free, s, (c // 2) % 2, SLEEP_CRIT)
@@ -1104,6 +1471,58 @@ def build_kernel(
                 # epilogue after the loop only moves the partial-tile path out of the
                 # chunk loop's instruction footprint.
                 epilogue(K.local_scalar("int32", init=NT - 1))
+            if SPEC:
+                with K.If(item == K.int32(0)), K.Then():
+                    K.ptx[FENCE_AFTER]()
+                    xb = K.local_scalar("int32", init=h * (D * D))
+                    for half_ in range(2):
+                        K.ptx[LD32x64](*[regs[j] for j in range(64)], tmem(C_SACC + 64 * half_))
+                        K.ptx.tcgen05.wait__ld.sync.aligned()
+                        for u in range(8):
+                            K.ptx.st.global_.v4.b32(
+                                state_x.ptr_to([xb + v_idx * D + 64 * half_ + 8 * u]),
+                                bf16x2(regs[8 * u], regs[8 * u + 1]),
+                                bf16x2(regs[8 * u + 2], regs[8 * u + 3]),
+                                bf16x2(regs[8 * u + 4], regs[8 * u + 5]),
+                                bf16x2(regs[8 * u + 6], regs[8 * u + 7]),
+                            )
+            if SPLIT:
+                if MULTIPART_SPLIT:
+                    out_slot = K.local_scalar("int32", init=(SPLIT_PARTS - 1) * item + xflag - 1)
+                    out_base = K.local_scalar("int32", init=out_slot * D * D)
+                    publish = tvm.tirx.all(xflag >= K.int32(1), xflag <= K.int32(SPLIT_PARTS - 1))
+                else:
+                    out_slot = item
+                    out_base = xbase
+                    publish = xflag == K.int32(1)
+                with K.If(publish), K.Then():
+                    K.ptx[FENCE_AFTER]()
+                    for half_ in range(2):
+                        K.ptx[LD32x64](*[regs[j] for j in range(64)], tmem(C_SACC + 64 * half_))
+                        K.ptx.tcgen05.wait__ld.sync.aligned()
+                        if MULTIPART_SPLIT:
+                            for u in range(8):
+                                K.ptx.st.global_.v4.b32(
+                                    state_x.ptr_to([out_base + v_idx * D + 64 * half_ + 8 * u]),
+                                    bf16x2(regs[8 * u], regs[8 * u + 1]),
+                                    bf16x2(regs[8 * u + 2], regs[8 * u + 3]),
+                                    bf16x2(regs[8 * u + 4], regs[8 * u + 5]),
+                                    bf16x2(regs[8 * u + 6], regs[8 * u + 7]),
+                                )
+                        else:
+                            for u in range(16):
+                                K.ptx.st.global_.v4.f32(
+                                    state_x.ptr_to([out_base + v_idx * D + 64 * half_ + 4 * u]),
+                                    regs[4 * u],
+                                    regs[4 * u + 1],
+                                    regs[4 * u + 2],
+                                    regs[4 * u + 3],
+                                )
+                    K.ptx.fence.acq_rel.gpu()
+                    K.ptx.bar.sync(K.uint32(NB_STATE), K.uint32(128))
+                    with K.If(tid == 0), K.Then():
+                        K.ptx.fence.acq_rel.gpu()
+                        K.ptx.st.volatile.global_.s32(flags.ptr_to([out_slot]), K.int32(1))
             with K.If(warp == 0), K.Then():
                 with K.If(lane == 0), K.Then():
                     K.ptx.cp.async_.bulk.wait_group(0)
@@ -1214,12 +1633,12 @@ def build_kernel(
                         + K.Select(r16 + 8 == 8 * nh + 2 * c4 + 1, K.float32(1.0), K.float32(0.0)),
                     )
 
-            def beta_rows(s, J):
+            def beta_rows(sb, J):
                 """-beta of rows 16J + r16 and 16J + r16 + 8 (T'^T = T^T beta_j, sign folded so acc = -T^T packs to +T'^T)."""
                 b0 = K.local_scalar("float32")
                 b1 = K.local_scalar("float32")
-                K.ptx.ld.shared.f32(b0, bsig.ptr_to([s * 64 + 16 * J + r16]))
-                K.ptx.ld.shared.f32(b1, bsig.ptr_to([s * 64 + 16 * J + r16 + 8]))
+                K.ptx.ld.shared.f32(b0, bsig.ptr_to([sb * 64 + 16 * J + r16]))
+                K.ptx.ld.shared.f32(b1, bsig.ptr_to([sb * 64 + 16 * J + r16 + 8]))
                 return (K.float32(0.0) - b0, K.float32(0.0) - b1)
 
             def dbg_T(c, J, I, rs):
@@ -1254,6 +1673,7 @@ def build_kernel(
             with K.serial(NT, unroll=unroll_chunks) as c:
                 padblock(2)
                 s = c % 2
+                sb = c % 3 if RING3 else s
 
                 def dbg_sq(off, i, j, val):
                     if DBG:
@@ -1270,11 +1690,12 @@ def build_kernel(
                         K.ptx.ld.shared.v2.f32(
                             bcol[I * 4 + r2 * 2],
                             bcol[I * 4 + r2 * 2 + 1],
-                            bsig.ptr_to([s * 64 + 16 * I + 8 * r2 + 2 * c4]),
+                            bsig.ptr_to([sb * 64 + 16 * I + 8 * r2 + 2 * c4]),
                         )
                 dblk = K.alloc_local((8,), "float32")
                 K.ptx[LD16x2](*[dblk[j] for j in range(8)], tmem(aa_col(s, 16 * q), 16))
                 K.ptx.tcgen05.wait__ld.sync.aligned()
+
                 # beta of the two diagonal-block columns this lane owns; reg 0/2 and 4/6
                 # share them, so load each pair once as one v2 instead of four scalars.
                 bdiag = K.alloc_local((4,), "float32")
@@ -1282,7 +1703,7 @@ def build_kernel(
                     K.ptx.ld.shared.v2.f32(
                         bdiag[2 * rep_],
                         bdiag[2 * rep_ + 1],
-                        bsig.ptr_to([s * 64 + 16 * q + 8 * rep_ + 2 * c4]),
+                        bsig.ptr_to([sb * 64 + 16 * q + 8 * rep_ + 2 * c4]),
                     )
                 for reg in range(0, 8, 2):
                     rep_, rem = divmod(reg, 4)
@@ -1305,6 +1726,7 @@ def build_kernel(
                     K.assign(aM[reg // 2], bf16x2(lv[0], lv[1]))
                 movm(bM, aM)
                 imark("in_L_done", c)
+
                 # ---- S1: T_qq^T = (I+M)^-1 = (I-M)(I+M^2)(I+M^4)(I+M^8), M nilpotent; every operand stays in fragments
                 mma_frag(aM, bM, True)
                 pack_acc(aP)
@@ -1332,23 +1754,24 @@ def build_kernel(
                     K.assign(acc[z], K.float32(0.0) - acc[z])
                 mma_frag(aM, b_frag, False)
                 imark("in_s1c", c)
+
                 # T_qq^T: own A fragment + TT block (B operand of the other warps' chains); T'^T diagonal block -> TpT
                 pack_acc(tA[0], neg=True)
                 with K.If(c >= 1), K.Then():
                     fwait(vnew_done, (c + 1) % 2, ((c - 1) // 2) % 2)
-                    # vnew_done retires the prior async reads of the shared
-                    # TpT tile.  Re-enter the generic proxy before stmatrix
-                    # overwrites that single-buffered tile for this chunk.
+
                     K.ptx.fence.proxy.async_.shared__cta()
                 st_frag(TT, 16 * q, 16 * q, tA[0])
-                rs = beta_rows(s, q)
+                rs = beta_rows(sb, q)
                 pack_acc(a_frag, rs=rs)
                 st_frag(TpT, 16 * q, 16 * q, a_frag)
                 imark("in_diagst", c)
                 dbg_T(c, q, q, rs)
+
                 # ---- S0b: off-diagonal L^T blocks (rows of block q, columns of blocks I > q) and the Aqk capture
                 aqk_pk = K.alloc_local((16,), "uint32")
                 npk = 0
+
                 # Under split_rounds the L = 1 pass (Akk^T -> off-diagonal L blocks)
                 # is already complete, so the full-round wait sits between the two
                 # passes, just before the only one that reads Aqk^T.
@@ -1375,6 +1798,7 @@ def build_kernel(
                         lv = []
                         for cc in range(2):
                             bidx = I * 4 + (rep_ % 2) * 2 + cc
+
                             # The store below is predicated on q < I, and every column of
                             # block I then lies strictly right of every row of block q, so
                             # the strict-lower select this used to carry was always true on
@@ -1398,7 +1822,7 @@ def build_kernel(
                     mma_frag(a_frag, b_frag, True)
                     if I - J < 3:
                         pack_acc(tA[I - J], neg=True)
-                    rs = beta_rows(s, J)
+                    rs = beta_rows(sb, J)
                     pack_acc(a_frag, rs=rs)
                     st_frag(TpT, 16 * J, 16 * I, a_frag)
                     dbg_T(c, J, I, rs)
@@ -1419,9 +1843,11 @@ def build_kernel(
                 K.ptx[FENCE_BEFORE]()
                 warrive(T_ready, s)
                 imark("in_T_ready", c)
+
                 # ---- Aqk^T (unscaled, i >= j) -> AqkT[j][i] (MN-major B operand of o_intra), from the captured pairs
                 with K.If(c >= 1), K.Then():
                     fwait(o_done, 0, (c + 1) % 2)
+
                     # o_done retires mmc's prior async read of Aqk_s.
                     K.ptx.fence.proxy.async_.shared__cta()
                 npk = 0
@@ -1447,6 +1873,7 @@ def build_kernel(
             j4 = lane // 8
             d0 = (half * 8 + cg8) * 8
             tl0 = I * 16 + 4 * j4
+
             # E2/F2 = 2^(+-cs) per [token][pair] (F2 later holds the A rows), csv = inclusive local cumsum, sq = |q|^2 / |k|^2 partials, qraw/kraw = raw bf16 pairs, offp = gate prefix at the block start (producer lane)
             E2 = K.alloc_local((16,), "uint32")
             F2 = K.alloc_local((16,), "uint32")
@@ -1564,19 +1991,24 @@ def build_kernel(
             with K.serial(NT, unroll=unroll_chunks) as c:
                 padblock(3)
                 s = c % 2
+                sb = c % 3 if RING3 else s
                 fwait(ring_full, s, (c // 2) % 2)
-                # The raw TMA ring is free after phase A, but bsig shares this
-                # two-stage lifetime with the intra transform.  Do not lap the
-                # transform and overwrite bsig(c-2) while it is still live.
-                with K.If(c >= 2), K.Then():
-                    if not (probe & 16):
-                        fwait(T_ready, s, (c // 2 + 1) % 2)
+                if not RING3:
+                    # The raw TMA ring is free after phase A, but the two-stage beta
+                    # tile shares its lifetime with the intra transform.  Do not lap
+                    # the transform and overwrite bsig(c-2) while it is still live.
+                    # RING3 gives beta its own third slot, so the wait is unnecessary.
+                    with K.If(c >= 2), K.Then():
+                        if not (probe & 16):
+                            fwait(T_ready, s, (c // 2 + 1) % 2)
+
                 pmark("pr_ring", c)
                 nval = K.local_scalar("int32", init=L - c * BT)
                 qs, ks, gs_ = q_t[s], k_t[s], g_t[s]
 
                 # ---- phase A: raw loads (q/k stay in registers for phase B), gate, local cumsum, sums of squares
                 def phase_a(masked):
+
                     # Issue the independent shared-memory reads as one window so their latency overlaps
                     # the gate dependency chains below.  q/k remain live for phase B; g is consumed here.
                     g16 = K.alloc_local((16,), "uint32")
@@ -1587,6 +2019,7 @@ def build_kernel(
                     for i in range(4):
                         t = tl0 + i
                         g8 = [g16[4 * i + z] for z in range(4)]
+
                         # |q|^2 / |k|^2 partials accumulate as packed bf16 pairs: one FMA slot per
                         # channel pair instead of two unpacks plus two FFMA.
                         sqa = K.local_scalar("uint32", init=K.uint32(0))
@@ -1633,6 +2066,7 @@ def build_kernel(
                         tot.ptr_to([s * 512 + I * 128 + d0 + 4]), xin[4], xin[5], xin[6], xin[7]
                     )
                 excl = [K.local_scalar("float32", init=xin[m] - csv[24 + m]) for m in range(8)]
+
                 # |q|^2, |k|^2 partial sums over the 8 lanes sharing j4 (transpose-reduce: lane keeps index cg8)
                 cur = [sq[m] for m in range(8)]
                 for xr in () if probe & 256 else (4, 2, 1):
@@ -1648,6 +2082,7 @@ def build_kernel(
                     rsq.ptr_to([s * 256 + (cg8 // 4) * 128 + half * 64 + tl0 + cg8 % 4]), cur[0]
                 )
                 K.ptx.bar.sync(K.uint32(NB_PREP), K.uint32(256))
+
                 # beta is only read by the intra transform, which cannot start before
                 # rfull, so computing it here instead of ahead of phase A keeps warp 0 --
                 # the only prep warp with extra work -- off the phase-A barrier that
@@ -1665,11 +2100,12 @@ def build_kernel(
                         )
                         sg = K.idioms.sigmoid_tanh_approx_f32(bv)
                         K.ptx.st.shared.f32(
-                            bsig.ptr_to([s * 64 + lane + 32 * hf]),
+                            bsig.ptr_to([sb * 64 + lane + 32 * hf]),
                             K.Select(lane + 32 * hf < nval, sg, K.float32(0.0)),
                         )
                 warrive(stage_free, s)
                 pmark("pr_A_end", c)
+
                 # ---- per-channel constants: lane l of warp (I, half) produces channel pair cp = 32*half + l; pref[J] = gate prefix at the start of block J, pref[4] = chunk total (dvec)
                 cp = half * 32 + lane
                 tt = K.alloc_local((8,), "float32")
@@ -1686,6 +2122,7 @@ def build_kernel(
                     for J in (2, 1, 0):
                         r = K.Select(I == J, pref[m][J], r)
                     K.assign(offp[m], r)
+
                 # dvec has 3 stages; stage c % 3 is free once the state consumed dvec(c-3)
                 with K.If(c >= 3), K.Then():
                     if not (probe & 8):
@@ -1715,15 +2152,19 @@ def build_kernel(
                         else:
                             K.assign(F2[4 * i + p], bf16x2(rcp(e0), rcp(e1)))
                 pmark("pr_norm", c)
+
                 # ---- phase B
-                with K.If(c >= 2), K.Then():
-                    if not (probe & 1):
-                        fwait(kA_free, s, (c // 2 + 1) % 2)
+                if not RING3:
+                    with K.If(c >= 2), K.Then():
+                        if not (probe & 1):
+                            fwait(kA_free, s, (c // 2 + 1) % 2)
+
                 with K.If(c >= 1), K.Then():
                     if not (probe & 2):
                         fwait(aa_r, (c + 1) % 2, ((c - 1) // 2) % 2)
                     if not (probe & 4):
                         fwait(oi_done, 0, (c + 1) % 2)
+
                     # aa_r/oi_done (and kA_free above) complete asynchronous
                     # tcgen reads.  Bridge that proxy before these generic
                     # shared stores reuse q2/k2/kA.
@@ -1760,6 +2201,7 @@ def build_kernel(
                     il = 4 * j4 + i
                     qgI = K.alloc_local((4,), "uint32")
                     knI = K.alloc_local((4,), "uint32")
+
                     # Tail masking, once per token instead of 48 selects per thread.
                     # A padded row only has to leave kA zero: it is the *rows* of kA
                     # that enter A^T and the state update, beta is already zeroed for
@@ -1791,20 +2233,20 @@ def build_kernel(
 
         with K.If(Lv > 0), K.Then():
             with r_state:
-                state_body()
+                run_role(state_body)
             with wg1:
                 with r_ld:
-                    load_body()
+                    run_role(load_body)
                 with r_mmi:
-                    mmi_body()
+                    run_role(mmi_body)
                 with r_mmc:
-                    mmc_body()
+                    run_role(mmc_body)
                 with r_rnd:
-                    rounds_body()
+                    run_role(rounds_body)
             with r_intra:
-                intra_body()
+                run_role(intra_body)
             with r_prep:
-                prep_body()
+                run_role(prep_body)
 
         K.cuda.cta_sync()
         with K.If(warp == 0), K.Then():
@@ -1828,16 +2270,387 @@ def build_kernel(
         "cu_seqlens": K.gptr[K.i64],
         "num_seqs": K.i32,
         "num_ctas": K.i32,
+        "sms": K.i32,
+        "split_mode": K.i32,
+        "state_x": K.gptr[K.bf16] if (SPEC or MULTIPART_SPLIT) else K.gptr[K.f32],
+        "flags": K.gptr[K.i32],
         "dbg": (K.gptr[K.u64] if trace else K.gptr[K.f32, (DBG_TOTAL if debug else 8,)]),
         "dbg_c": K.i32,
+        "vz_map": K.TensorMap,
+        "r_map": K.TensorMap,
+        "init_x": K.gptr[K.f32],
     }
-    return K.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=1, grid="num_ctas")(kda_fwd)
+    grid = int(check_grid) if check_grid else "num_ctas"
+    return K.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=1, grid=grid)(kda_fwd)
+
+
+ID_FIX = _idesc(128, 128, 16, F32, BF, BF, False, False)
+FIX_WARPS = 4
+FIX_COLS = 128
+
+
+def build_fix_kernel(H: int, check_grid: int = 0, iket_trace: bool = False):
+    """Speculative-split fix-up: O[t, :] += R[t, :] @ S_mid for the rows of the second
+    segment.  One 4-warp CTA per (head, group of `ppc` 128-token pairs): the head's exported
+    fp32 S^T [v][k] is converted once into a bf16 K-major B tile; per pair the 128x128 bf16
+    R tile (A, K-major) is TMA-loaded and one M=128 N=128 K=128 tcgen05 MMA lands in
+    TMEM.  Threads convert the correction to bf16 in shared memory, then a tensor bulk
+    reduction adds it directly into the speculative bf16 output in global memory.  This
+    removes the output read and the scalar epilogue addition."""
+
+    def kda_fix(r_map, o_map, s0_map, s1_map, tok_base, ntok, npairs, ppc, num_fix_ctas):
+        cta = K.cta_id()
+        warp = K.warp_id()
+        lane = K.lane_id()
+        tid = K.thread_id()
+        h = K.local_scalar("int32", init=cta % H)
+        grp = K.local_scalar("int32", init=cta // H)
+        p0 = K.local_scalar("int32", init=grp * ppc)
+        nloc = K.local_scalar("int32", init=K.min(ppc, npairs - p0))
+        smem = K.smem_pool()
+        tmem_addr = smem.alloc((1,), K.u32)
+        bar_r = K.MBarrier(smem, 2)
+        bar_r.init(1)
+        bar_s = K.MBarrier(smem, 1)
+        bar_s.init(1)
+        bar_m = K.MBarrier(smem, 1)
+        bar_m.init(1)
+        pool = smem.pool
+        pool.move_base_to((pool.offset + 1023) // 1024 * 1024)
+        r_t = smem.alloc((2, 128, D), K.bf16, swizzle=K.SW128B)
+        r_off = pool.offset - 2 * 128 * D * 2
+        s_t = smem.alloc((128, D), K.bf16, swizzle=K.SW128B)
+        s_off = pool.offset - 128 * D * 2
+        o_t = smem.alloc((3, 128, D), K.bf16, swizzle=K.SW128B)
+        K.ptx.fence.mbarrier_init.release.cluster()
+        K.cuda.cta_sync()
+        with K.If(warp == 0), K.Then():
+            K.ptx[TMEM_ALLOC](K.address_of(tmem_addr[0]), K.uint32(FIX_COLS))
+            K.cuda.warp_sync()
+        K.cuda.cta_sync()
+        tbase = K.local_scalar("uint32")
+        K.ptx.ld.shared.u32(tbase, tmem_addr.ptr_to([0]))
+
+        def tmem(col):
+            return K.cuda.get_tmem_addr(tbase, 0, col)
+
+        def iket_start(name):
+            token = K.alloc_local((1,), "uint32")
+            K.assign(token[0], K.cuda.iket.sentinel_token(name))
+            with K.If(warp == 0), K.Then():
+                K.assign(token[0], K.cuda.iket.range_start(name))
+            return token
+
+        def iket_end(token):
+            K.cuda.iket.range_end(token[0])
+
+        def bf16x2(lo, hi):
+            r = K.local_scalar("uint32")
+            K.ptx.cvt.rn.bf16x2.f32(r, hi, lo)
+            return r
+
+        def unpack(u):
+            lo = K.reinterpret("float32", K.shift_left(u, K.uint32(16)))
+            hi = K.reinterpret("float32", K.bitwise_and(u, K.uint32(0xFFFF0000)))
+            return lo, hi
+
+        def bwait(b, stage, parity):
+            ready = K.local_scalar("uint32", init=K.uint32(0))
+            with K.While(ready == K.uint32(0)):
+                K.ptx.mbarrier.try_wait.parity.shared.b64(
+                    ready, b.ptr_to([stage]), K.Cast("uint32", parity), K.uint32(WAIT_HINT)
+                )
+
+        def issue_loads(i, rs):
+            """TMA-load one R tile for local pair i (caller guards i < nloc)."""
+            mb = K.cuda.cvta_generic_to_shared(bar_r.ptr_to([rs]))
+            K.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_r.ptr_to([rs]), K.uint32(128 * D * 2))
+            K.ptx[TMA3](
+                r_t[rs].ptr_to(0, 0),
+                K.address_of(r_map),
+                K.int32(0),
+                K.Cast("int32", tok_base + (p0 + i) * 128),
+                K.Cast("int32", 2 * h),
+                mb,
+                CACHE_EVICT_FIRST,
+            )
+
+        def issue_state():
+            """TMA-load the two 64-column halves of this head's state tile."""
+            mb = K.cuda.cvta_generic_to_shared(bar_s.ptr_to([0]))
+            K.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_s.ptr_to([0]), K.uint32(128 * D * 2))
+            for half, tmap in ((0, s0_map), (1, s1_map)):
+                K.ptx[TMA3](
+                    s_t.ptr_to(0, half * 64),
+                    K.address_of(tmap),
+                    K.int32(0),
+                    K.int32(0),
+                    h,
+                    mb,
+                    CACHE_EVICT_FIRST,
+                )
+
+        if iket_trace:
+            prologue_token = iket_start("fix-prologue")
+        with K.If(tid == 0), K.Then():
+            issue_state()
+            issue_loads(K.int32(0), K.int32(0))
+            with K.If(nloc > K.int32(1)), K.Then():
+                issue_loads(K.int32(1), K.int32(1))
+            bwait(bar_s, K.int32(0), K.int32(0))
+            K.ptx[FENCE_AFTER]()
+        if iket_trace:
+            iket_end(prologue_token)
+        regs = K.alloc_local((128,), "float32")
+        with K.serial(nloc, unroll=False) as i:
+            if iket_trace:
+                iter_token = iket_start("fix-iteration")
+            rs = i % 2
+            os_ = i % 3
+            par = (i // 2) % 2
+            if iket_trace:
+                refill_token = iket_start("fix-refill")
+            with K.If(tid == 0), K.Then():
+                with K.If(tvm.tirx.all(i >= 1, i + 1 < nloc)), K.Then():
+                    issue_loads(i + 1, (i + 1) % 2)
+                with K.If(i >= 3), K.Then():
+                    K.ptx.cp.async_.bulk.wait_group.read(2)
+            if iket_trace:
+                iket_end(refill_token)
+                issue_token = iket_start("fix-input-wait-mma-issue")
+            with K.If(tid == 0), K.Then():
+                bwait(bar_r, rs, par)
+                K.ptx[FENCE_AFTER]()
+                d = K.SmemDescriptor()
+                d.init(r_t[rs].ptr_to(0, 0), ldo=128 * 8, sdo=64, swizzle=3)
+                base = d.desc
+                boff = (s_off - (r_off + rs * 128 * D * 2)) >> 4
+                for kp in range(8):
+                    step = (kp % 4) * 2 + (kp // 4) * (128 * 8)
+                    K.ptx[MMA](
+                        K.Cast("uint32", tmem(0)),
+                        base + K.uint64(step),
+                        base + K.uint64(boff + step),
+                        K.uint32(ID_FIX),
+                        *ZERO4_G,
+                        K.ptx.pred(kp != 0),
+                    )
+                K.ptx[COMMIT](bar_m.ptr_to([0]))
+            if iket_trace:
+                iket_end(issue_token)
+                consume_token = iket_start("fix-mma-wait-tmem-load")
+            bwait(bar_m, K.int32(0), i % 2)
+            K.ptx[FENCE_AFTER]()
+            for q in range(4):
+                K.ptx[LD32x32](*[regs[32 * q + j] for j in range(32)], tmem(32 * q))
+            K.ptx.tcgen05.wait__ld.sync.aligned()
+            if iket_trace:
+                iket_end(consume_token)
+                epilogue_token = iket_start("fix-epilogue")
+            # Thread 0 owns the bulk-group wait.  This uniform barrier publishes
+            # completion before any thread reuses the three-stage reduction source.
+            with K.If(i >= 3), K.Then():
+                K.cuda.cta_sync()
+            for batch in range(2):
+                for j in range(8):
+                    jj = batch * 8 + j
+                    n4 = []
+                    for m in range(4):
+                        n4.append(bf16x2(regs[8 * jj + 2 * m], regs[8 * jj + 2 * m + 1]))
+                    K.ptx.st.shared.v4.b32(o_t[os_].ptr_to(tid, 8 * jj), n4[0], n4[1], n4[2], n4[3])
+            if iket_trace:
+                iket_end(epilogue_token)
+                store_token = iket_start("fix-store")
+            K.ptx.fence.proxy.async_.shared__cta()
+            K.ptx[FENCE_BEFORE]()
+            K.cuda.cta_sync()
+            with K.If(tid == 0), K.Then():
+                K.ptx[TMA_REDUCE_S2G3](
+                    K.address_of(o_map),
+                    K.int32(0),
+                    K.Cast("int32", tok_base + (p0 + i) * 128),
+                    K.Cast("int32", 2 * h),
+                    o_t[os_].ptr_to(0, 0),
+                    CACHE_EVICT_FIRST,
+                )
+                K.ptx.cp.async_.bulk.commit_group()
+            if iket_trace:
+                iket_end(store_token)
+                iket_end(iter_token)
+        with K.If(tid == 0), K.Then():
+            K.ptx.cp.async_.bulk.wait_group(0)
+        K.cuda.cta_sync()
+        with K.If(warp == 0), K.Then():
+            K.ptx[TMEM_RELINQ]()
+            K.ptx[TMEM_DEALLOC](tbase, K.uint32(FIX_COLS))
+
+    kda_fix.__annotations__ = {
+        "r_map": K.TensorMap,
+        "o_map": K.TensorMap,
+        "s0_map": K.TensorMap,
+        "s1_map": K.TensorMap,
+        "tok_base": K.i32,
+        "ntok": K.i32,
+        "npairs": K.i32,
+        "ppc": K.i32,
+        "num_fix_ctas": K.i32,
+    }
+    grid = int(check_grid) if check_grid else "num_fix_ctas"
+    return K.kernel(warps=FIX_WARPS, arch="sm_100a", grid=grid)(kda_fix)
+
+
+ZERO4_G = (K.uint32(0),) * 4
+_FIX_KERNELS = {}
+
+
+def _get_fix_kernel(H):
+    if H not in _FIX_KERNELS:
+        kern = build_fix_kernel(H)
+        target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+        with target:
+            _FIX_KERNELS[H] = tvm.compile(kern.mod, target=target, tir_pipeline="tirx")
+    return _FIX_KERNELS[H]
+
+
+_SPEC_ON = bool(int(os.environ.get("KDA_SPEC", "1")))
+_SPEC_CONST = True
+_SPEC_B = {
+    96: int(os.environ.get("KDA_SPEC_B_H96", "24")),
+    64: int(os.environ.get("KDA_SPEC_B_H64", "42")),
+}
+_SPEC_SCRATCH = {}
+
+
+def _spec_a(H, T):
+    """First-segment chunk count for the speculative split of a single T-token sequence
+    (0 disables).  The second segment has an even chunk count so the fix kernel works on
+    whole 128-token pairs; the default sizes balance mode-A latency against the B/C rounds
+    the spare SMs must absorb (3H CTAs on 148 SMs)."""
+    if T % BT:
+        return 0
+    nt = T // BT
+    b = _SPEC_B.get(H, max(2, nt // 5))
+    b -= b % 2
+    if b < 2 or b >= nt:
+        return 0
+    return nt - b
+
+
+def _spec_buffers(dev, T, H):
+    key = (dev, T, H)
+    if key not in _SPEC_SCRATCH:
+        vz = torch.zeros((64, H, 128), dtype=torch.bfloat16, device=dev)
+        r_buf = torch.empty((T, H, 128), dtype=torch.bfloat16, device=dev)
+        init_x = torch.zeros((2, 128, 128), dtype=torch.float32, device=dev)
+        init_x[1] = torch.eye(128, dtype=torch.float32, device=dev)
+        state_x = torch.empty((H, 128, 128), dtype=torch.bfloat16, device=dev)
+        _SPEC_SCRATCH[key] = (vz, r_buf, init_x, state_x)
+    return _SPEC_SCRATCH[key]
+
+
+def _encode_map_rows(tensor, T, H, rows):
+    """Like _encode_map but with a `rows`-token box (the fix kernel loads 128-token R tiles)."""
+    global _TMAP_ENCODE
+    if _TMAP_ENCODE is None:
+        _TMAP_ENCODE = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    m = _TensorMap()
+    _TMAP_ENCODE(
+        m.ptr,
+        "bfloat16",
+        3,
+        ctypes.c_void_p(int(tensor.data_ptr())),
+        64,
+        T,
+        2 * H,
+        H * 256,
+        128,
+        64,
+        rows,
+        2,
+        1,
+        1,
+        1,
+        0,
+        3,
+        2,
+        0,
+    )
+    return m
+
+
+def _encode_state_map(tensor, H, half):
+    """3D map over one 64-column half of contiguous [H, 128, 128] state."""
+    global _TMAP_ENCODE
+    if _TMAP_ENCODE is None:
+        _TMAP_ENCODE = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    m = _TensorMap()
+    _TMAP_ENCODE(
+        m.ptr,
+        "bfloat16",
+        3,
+        ctypes.c_void_p(int(tensor.data_ptr()) + half * 64 * 2),
+        64,
+        128,
+        H,
+        256,
+        128 * 128 * 2,
+        64,
+        128,
+        1,
+        1,
+        1,
+        1,
+        0,
+        3,
+        2,
+        0,
+    )
+    return m
 
 
 _KERNELS = {}
 _DBG_DUMMY = {}
+_SPLIT_SCRATCH = {}
+_UNIFORM_SPLIT_PARTS_H96 = int(os.environ.get("KDA_CAND_SPLIT_PARTS_H96", "5"))
+
+
+def _split_plan(dev, H, num_seqs, cu_seqlens):
+    """Grid and scratch for the split-tail dispatch: enabled for the eight-sequence layout, where
+    num_seqs*H CTAs leave a nearly empty last wave.  Correctness never depends on the layout."""
+    sms = torch.cuda.get_device_properties(dev).multi_processor_count
+    if cu_seqlens is not None and num_seqs == 8:
+        parts = _UNIFORM_SPLIT_PARTS_H96 if H == 96 else 2
+        multipart = parts > 2
+        default = 12 if multipart else (16 if H == 96 else 64)
+        env_name = (
+            "KDA_MULTIPART_JOBS_H96"
+            if multipart
+            else ("KDA_SPLIT_H96" if H == 96 else "KDA_SPLIT_H64")
+        )
+        nsplit = int(os.environ.get(env_name, str(default)))
+        if not 0 <= nsplit <= sms:
+            raise ValueError(f"{env_name} must be in [0, {sms}], got {nsplit}")
+    else:
+        parts = 2
+        multipart = False
+        nsplit = 0
+    scratch_key = (dev, bool(multipart))
+    if scratch_key not in _SPLIT_SCRATCH:
+        _SPLIT_SCRATCH[scratch_key] = (
+            torch.empty(
+                sms * 128 * 128, dtype=torch.bfloat16 if multipart else torch.float32, device=dev
+            ),
+            torch.zeros(sms, dtype=torch.int32, device=dev),
+        )
+    state_x, flags = _SPLIT_SCRATCH[scratch_key]
+    extra = (parts - 1) * nsplit if multipart else nsplit
+    return sms, nsplit, num_seqs * H + extra, state_x, flags
+
+
 _CU_DEFAULT = {}
 _TMAP_ENCODE = None
+
+
 # Retuned after the instruction-fetch work: intra gains the 16 registers the MMA
 # issue warpgroup no longer needs (+2.3% on both uniform shapes, +1.4% on h96 mixed).
 _REG_TUNE = tuple(int(x) for x in os.environ.get("KDA_REG_TUNE", "112,40,104,112").split(","))
@@ -1850,10 +2663,24 @@ _FIXED_REG_TUNE_H64 = tuple(
 _MIXED_REG_TUNE_H64 = tuple(
     int(x) for x in os.environ.get("KDA_MIXED_REG_TUNE_H64", "112,48,96,112").split(",")
 )
+_UNIFORM_REG_TUNE_H64 = tuple(
+    int(x) for x in os.environ.get("KDA_CAND_UNIFORM_REG_H64", "120,32,104,112").split(",")
+)
+_UNIFORM_REG_TUNE_H96 = tuple(
+    int(x) for x in os.environ.get("KDA_CAND_UNIFORM_REG_H96", "120,32,104,112").split(",")
+)
 _FULL_MODE = os.environ.get("KDA_FULL_MODE", "all")
 _UNROLL_CHUNKS = bool(int(os.environ.get("KDA_UNROLL_CHUNKS", "0")))
 _STATE_F32X2 = bool(int(os.environ.get("KDA_STATE_F32X2", "1")))
 _SREADY = int(os.environ.get("KDA_SREADY", "2"))
+_UNIFORM_EVENT_H96 = int(os.environ.get("KDA_CAND_UNIFORM_EVENT_H96", "1"))
+_UNIFORM_EVENT_H64 = int(os.environ.get("KDA_CAND_UNIFORM_EVENT_H64", "0"))
+_UNIFORM_RING_H96 = bool(int(os.environ.get("KDA_CAND_UNIFORM_RING_H96", "1")))
+_UNIFORM_RING_H64 = bool(int(os.environ.get("KDA_CAND_UNIFORM_RING_H64", "1")))
+_UNIFORM_SREADY_H96 = int(os.environ.get("KDA_CAND_UNIFORM_SREADY_H96", "1"))
+_UNIFORM_SREADY_H64 = int(os.environ.get("KDA_CAND_UNIFORM_SREADY_H64", "1"))
+_UNIFORM_SPLIT_RD_H96 = bool(int(os.environ.get("KDA_CAND_UNIFORM_SPLIT_RD_H96", "1")))
+_UNIFORM_SPLIT_RD_H64 = bool(int(os.environ.get("KDA_CAND_UNIFORM_SPLIT_RD_H64", "1")))
 
 
 class _TensorMap:
@@ -1921,9 +2748,25 @@ def _encode_beta_map(tensor, T, H):
     return m
 
 
-def _get_kernel(H, direct=False, num_seqs=1, T=None, *, fixed_shape=False, mixed_shape=False):
+def _get_kernel(
+    H,
+    direct=False,
+    num_seqs=1,
+    T=None,
+    *,
+    fixed_shape=False,
+    mixed_shape=False,
+    split=False,
+    spec_split=0,
+):
     fixed_shape = bool(fixed_shape)
     mixed_shape = bool(mixed_shape)
+    spec_split = int(spec_split)
+    spec_perm = 0
+    spec_diag_exit = False
+    spec_const = _SPEC_CONST
+    split_parts = _UNIFORM_SPLIT_PARTS_H96 if (bool(split) and H == 96 and num_seqs == 8) else 2
+
     # Only the no-cu_seqlens single-sequence case has a layout implied by the
     # call itself.  Packed launches must consume their live cu_seqlens: the
     # verifier deliberately salts sequence lengths and ordering, so treating
@@ -1932,17 +2775,32 @@ def _get_kernel(H, direct=False, num_seqs=1, T=None, *, fixed_shape=False, mixed
     fixed_nt = T // 64 if fixed_shape and T % 64 == 0 else 0
     fixed_tokens = T if fixed_shape else 0
     full = full and T % 64 == 0
-    tune = (
-        (_FIXED_REG_TUNE_H64 if H == 64 else _FIXED_REG_TUNE)
-        if fixed_shape
-        else (_MIXED_REG_TUNE_H64 if mixed_shape and H == 64 else _REG_TUNE)
-    )
+    if spec_split:
+        assert fixed_shape and T % 64 == 0
+        fixed_nt = 0
+        full = True
+    if fixed_shape:
+        tune = _FIXED_REG_TUNE_H64 if H == 64 else _FIXED_REG_TUNE
+    elif H == 64 and num_seqs == 8:
+        tune = _UNIFORM_REG_TUNE_H64
+    elif H == 96 and num_seqs == 8:
+        tune = _UNIFORM_REG_TUNE_H96
+    elif mixed_shape and H == 64:
+        tune = _MIXED_REG_TUNE_H64
+    else:
+        tune = _REG_TUNE
+
     # Equivalent readiness events have shape-dependent scheduling costs.  The
     # full merge is repeatably profitable on both mixed shapes and on H=96
     # fixed; keep H=64 fixed, uniform, and arbitrary shapes on the conservative
     # protocol (re-swept after the instruction-fetch work: 0.998x and 0.999x
     # respectively there, 1.007x on H=64 mixed).
     event_mode = 2 if (mixed_shape or (H == 96 and fixed_shape)) else 0
+    if num_seqs == 8:
+        event_mode = _UNIFORM_EVENT_H96 if H == 96 else _UNIFORM_EVENT_H64
+    if H == 64 and fixed_shape:
+        event_mode = int(os.environ.get("KDA_TEST_EVENT", "0"))
+
     # Publishing the decayed state in halves lets the next chunk's S-operand MMA
     # start inside the state update instead of after it.  The extra tcgen05 store
     # wait pays for itself only where the state warps are not already the ones
@@ -1950,11 +2808,22 @@ def _get_kernel(H, direct=False, num_seqs=1, T=None, *, fixed_shape=False, mixed
     # on every uniform layout, and -2.6% on H=64 mixed once that shape moved to
     # the merged event protocol and the split round commit.
     sready = _SREADY if (H == 64 and fixed_shape) else 1
+    if num_seqs == 8:
+        sready = _UNIFORM_SREADY_H96 if H == 96 else _UNIFORM_SREADY_H64
+
     # Splitting the round commit so the intra transform can start on Akk's
     # diagonal block one round of MMAs earlier is worth 1.0-2.6% everywhere
     # except H=96 mixed, where the rounds warp's extra commit round trip
     # reproducibly costs 2.4%.
     split_rounds = not (H == 96 and mixed_shape)
+    if num_seqs == 8:
+        split_rounds = _UNIFORM_SPLIT_RD_H96 if H == 96 else _UNIFORM_SPLIT_RD_H64
+
+    lite_ring = (H == 96 and fixed_shape) or (H == 64 and num_seqs == 8)
+    if num_seqs == 8:
+        lite_ring = _UNIFORM_RING_H96 if H == 96 else _UNIFORM_RING_H64
+    if H == 64 and fixed_shape:
+        lite_ring = bool(int(os.environ.get("KDA_TEST_RING", "1")))
     key = (
         H,
         bool(direct),
@@ -1969,6 +2838,13 @@ def _get_kernel(H, direct=False, num_seqs=1, T=None, *, fixed_shape=False, mixed
         event_mode,
         sready,
         split_rounds,
+        lite_ring,
+        bool(split),
+        split_parts,
+        spec_split,
+        spec_perm,
+        spec_diag_exit,
+        spec_const,
     )
     if key not in _KERNELS:
         kern = build_kernel(
@@ -1987,6 +2863,13 @@ def _get_kernel(H, direct=False, num_seqs=1, T=None, *, fixed_shape=False, mixed
             event_mode=event_mode,
             sready_stages=sready,
             split_rounds=split_rounds,
+            lite_ring=lite_ring,
+            split=bool(split),
+            split_parts=split_parts,
+            spec_split=spec_split,
+            spec_perm=spec_perm,
+            spec_diag_exit=spec_diag_exit,
+            spec_const=spec_const,
         )
         target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
         with target:
@@ -2022,9 +2905,7 @@ def run(q, k, v, g, beta, A_log, dt_bias, scale, initial_state, cu_seqlens=None)
     o = torch.empty((1, T, H, 128), dtype=torch.bfloat16, device=dev)
     if T == 0:
         return o
-    ex = _get_kernel(
-        H, direct=direct, num_seqs=num_seqs, T=T, fixed_shape=fixed_shape, mixed_shape=mixed_shape
-    )
+    sms, split_mode, num_ctas, state_x, flags = _split_plan(dev, H, num_seqs, cu_seqlens)
     assert H % 8 == 0
     maps = [_encode_map(t, T, H) for t in (q, k, v, g)] + [
         _encode_beta_map(beta, T, H),
@@ -2032,6 +2913,77 @@ def run(q, k, v, g, beta, A_log, dt_bias, scale, initial_state, cu_seqlens=None)
     ]
     if dev not in _DBG_DUMMY:
         _DBG_DUMMY[dev] = torch.empty(8, dtype=torch.float32, device=dev)
+    dbg = _DBG_DUMMY[dev]
+
+    # Speculative split of a single-sequence launch: the main kernel runs the two
+    # segments concurrently, the second one starting from the identity instead of
+    # the (not yet known) mid state, and the fix kernel then folds the real mid
+    # state into the second segment's rows.  It only pays where the spare SMs can
+    # absorb the extra CTAs, so H=96 stays on the ordinary path unless forced.
+    allow_h96_spec = bool(int(os.environ.get("KDA_FORCE_H96_SPEC", "0")))
+    spec_a = _spec_a(H, T) if (fixed_shape and _SPEC_ON and (2 * H <= sms or allow_h96_spec)) else 0
+    if spec_a:
+        vz, r_buf, init_x, state_s = _spec_buffers(dev, T, H)
+        ex = _get_kernel(H, direct=True, num_seqs=1, T=T, fixed_shape=True, spec_split=spec_a)
+        fix = _get_fix_kernel(H)
+        maps += [_encode_map(vz, 64, H), _encode_map(r_buf, T, H)]
+        r_map128 = _encode_map_rows(r_buf, T, H, 128)
+        o_map128 = _encode_map_rows(o, T, H, 128)
+        s0_map128 = _encode_state_map(state_s, H, 0)
+        s1_map128 = _encode_state_map(state_s, H, 1)
+        nt = T // BT
+        npairs = (nt - spec_a) // 2
+        # One CTA per (head, group of `ppc` pairs); widen the group until the fix
+        # launch fits in two waves, then apply the measured override for the shape
+        # whose default grouping leaves an unbalanced tail.
+        ppc = 1
+        while H * ((npairs + ppc - 1) // ppc) > 2 * sms and ppc < npairs:
+            ppc += 1
+        if H == 64 and npairs == 21:
+            ppc = int(os.environ.get("KDA_FIX_PPC", "11"))
+        ngroups = (npairs + ppc - 1) // ppc
+        ex(
+            *[m.ptr for m in maps[:6]],
+            o.view(-1),
+            A_log,
+            dt_bias.view(-1),
+            initial_state.view(-1),
+            float(scale),
+            cu,
+            num_seqs,
+            3 * H,
+            sms,
+            0,
+            state_s.view(-1),
+            flags,
+            dbg,
+            -1,
+            maps[6].ptr,
+            maps[7].ptr,
+            init_x.view(-1),
+        )
+        fix(
+            r_map128.ptr,
+            o_map128.ptr,
+            s0_map128.ptr,
+            s1_map128.ptr,
+            spec_a * BT,
+            T,
+            npairs,
+            ppc,
+            H * ngroups,
+        )
+        return o
+
+    ex = _get_kernel(
+        H,
+        direct=direct,
+        num_seqs=num_seqs,
+        T=T,
+        fixed_shape=fixed_shape,
+        mixed_shape=mixed_shape,
+        split=bool(split_mode),
+    )
     ex(
         *[m.ptr for m in maps],
         o.view(-1),
@@ -2041,9 +2993,16 @@ def run(q, k, v, g, beta, A_log, dt_bias, scale, initial_state, cu_seqlens=None)
         float(scale),
         cu,
         num_seqs,
-        num_seqs * H,
-        _DBG_DUMMY[dev],
+        num_ctas,
+        sms,
+        split_mode,
+        state_x,
+        flags,
+        dbg,
         -1,
+        maps[2].ptr,
+        maps[5].ptr,
+        dbg,
     )
     return o
 
@@ -2107,11 +3066,7 @@ KERNEL_META = {
             "import": "fla",
         },
     ),
-    "provenance": {
-        "generator": "hmz",
-        "run": "kda-forward-handoff-20260906",
-        "selected_version": "f280a7902118d21fb1e8f0f34a349238a4203b81",
-    },
+    "provenance": {"generator": "hmz", "run": "kda-fwd-improve", "selected_version": "6fdef44"},
 }
 
 
@@ -2138,13 +3093,16 @@ def get_kernel(**kwargs: Any):
     cfg = _cfg(**kwargs)
     fixed = not cfg.packed
     mixed = cfg.seq_lens == _MIXED
-    tune = (
-        (112, 40, 104, 112)
-        if fixed
-        else (112, 48, 96, 112)
-        if mixed and cfg.num_heads == 64
-        else (112, 40, 104, 112)
-    )
+    if fixed:
+        tune = (112, 32, 112, 112) if cfg.num_heads == 64 else (112, 40, 104, 112)
+    elif cfg.num_heads == 64 and cfg.seq_lens == _UNIFORM:
+        tune = (128, 40, 96, 104)
+    elif cfg.num_heads == 96 and cfg.seq_lens == _UNIFORM:
+        tune = (120, 40, 96, 112)
+    elif mixed and cfg.num_heads == 64:
+        tune = (112, 48, 96, 112)
+    else:
+        tune = (112, 40, 104, 112)
     kern = build_kernel(
         cfg.num_heads,
         direct=fixed or cfg.seq_lens == _UNIFORM,
@@ -2159,6 +3117,8 @@ def get_kernel(**kwargs: Any):
         event_mode=2 if (mixed or (cfg.num_heads == 96 and fixed)) else 0,
         sready_stages=2 if (cfg.num_heads == 64 and fixed) else 1,
         split_rounds=not mixed,
+        lite_ring=(cfg.num_heads == 96 and fixed)
+        or (cfg.num_heads == 64 and cfg.seq_lens == _UNIFORM),
     )
     return kern.func
 
@@ -2294,7 +3254,25 @@ def prepare_bench(**kwargs: Any):
     """
     from tirx_kernels.runner import prepared_gpu_benchmark
 
-    _get_kernel(**_launch_kernel_args(_cfg(**kwargs)))
+    cfg = _cfg(**kwargs)
+    _get_kernel(**_launch_kernel_args(cfg))
+    if not cfg.packed and _SPEC_ON:
+        # A single-sequence launch may take the speculative split, which looks up a
+        # different `_KERNELS` entry plus the correction kernel.  Whether it does also
+        # depends on the SM count, which this stage deliberately does not query, so
+        # prime the split entry whenever the chunk count allows one: the cost of an
+        # unused entry is CPU compile time, which is what this stage is for.
+        spec_a = _spec_a(cfg.num_heads, cfg.total_tokens)
+        if spec_a:
+            _get_kernel(
+                H=cfg.num_heads,
+                direct=True,
+                num_seqs=1,
+                T=cfg.total_tokens,
+                fixed_shape=True,
+                spec_split=spec_a,
+            )
+            _get_fix_kernel(cfg.num_heads)
     return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs)})
 
 
