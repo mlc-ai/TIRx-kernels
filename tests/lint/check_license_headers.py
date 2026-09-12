@@ -101,6 +101,19 @@ PORT_BUCKETS = {
 # license requires to stay in the file verbatim (BSD-3 clause 1: the copyright
 # notice, the conditions list and the disclaimer travel with the source).
 FILE_OVERRIDES = {
+    # Verbatim copies of SGLang's CuTeDSL paged MQA logits reference (Apache-2.0,
+    # NVIDIA copyright); they sit under the DeepGEMM bucket only because they are the
+    # DeepGEMM paged-MQA-logits benchmark's second reference.
+    "tirx_kernels/deepgemm/_sglang_cutedsl/cutedsl_fp8_paged_mqa_logits.py": {
+        "project": "SGLang",
+        "url": "https://github.com/sgl-project/sglang",
+        "spdx": "Apache-2.0",
+    },
+    "tirx_kernels/deepgemm/_sglang_cutedsl/cutedsl_paged_mqa_logits.py": {
+        "project": "SGLang",
+        "url": "https://github.com/sgl-project/sglang",
+        "spdx": "Apache-2.0",
+    },
     # Port of hao-ai-lab/flash-attention-fp4, a fork of Dao-AILab/flash-attention whose
     # LICENSE and flash_attn/cute/AUTHORS are byte-identical to the upstream texts under
     # licenses/; only the canonical URL and commit history differ from the bucket.

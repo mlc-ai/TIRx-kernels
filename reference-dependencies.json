@@ -71,13 +71,6 @@
       "install_subdirectory": "."
     },
     {
-      "name": "sglang",
-      "import_name": "sglang",
-      "url": "https://github.com/sgl-project/sglang.git",
-      "revision": "c7c03ec53b1e664c2d415db4f02e43f86661f31d",
-      "install_subdirectory": "python"
-    },
-    {
       "name": "flash-kda",
       "import_name": "flash_kda",
       "url": "https://github.com/MoonshotAI/FlashKDA.git",

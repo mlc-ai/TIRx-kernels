@@ -4,16 +4,9 @@
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 import ctypes
-import importlib
-import importlib.machinery
-import importlib.util
-import os
-import sys
-import types
 from dataclasses import asdict, dataclass
 from functools import cache
 from importlib.util import find_spec
-from pathlib import Path
 from typing import Any
 from unittest import SkipTest
 
@@ -1479,120 +1472,28 @@ def _run_deepgemm_paged_mqa(data: dict[str, Any], *, clean_logits: bool = False)
     )
 
 
-_SGLANG_CUTEDSL_MODULE = "sglang.kernels.ops.attention.dsa.cutedsl_paged_mqa_logits"
-# Sibling SGLang modules the CuTeDSL runner imports, loaded from the same
-# checkout so the SGLang frontend (``sglang/__init__.py``) never executes.
-_SGLANG_CUTEDSL_DEPENDENCIES = ("sglang.kernels.ops.attention.cutedsl_fp8_paged_mqa_logits",)
-_SGLANG_SOURCE_DIR_ENV = "TIRX_SGLANG_SOURCE_DIR"
-# ``scripts/install_reference_dependencies.py`` clones the pinned ``sglang``
-# source under ``.reference-deps/sglang`` (install_subdirectory ``python``);
-# the bench suite links the server's reference directory to the same name.
-_SGLANG_REFERENCE_PACKAGE_DIR = (
-    Path(__file__).resolve().parents[2] / ".reference-deps" / "sglang" / "python" / "sglang"
-)
-
-
-def _sglang_module_relative_path(module_name: str) -> Path:
-    return Path(*module_name.split(".")[1:]).with_suffix(".py")
-
-
-def _sglang_source_package_dir() -> Path | None:
-    """Locate the ``sglang`` package directory holding the CuTeDSL paged MQA kernel."""
-    candidates: list[Path] = []
-    override = os.environ.get(_SGLANG_SOURCE_DIR_ENV)
-    if override:
-        base = Path(override)
-        candidates += [base / "python" / "sglang", base / "sglang", base]
-    candidates.append(_SGLANG_REFERENCE_PACKAGE_DIR)
-    try:
-        spec = find_spec("sglang")
-    except (ImportError, ValueError):
-        spec = None
-    if spec is not None and spec.submodule_search_locations:
-        candidates += [Path(root) for root in spec.submodule_search_locations]
-    relative = _sglang_module_relative_path(_SGLANG_CUTEDSL_MODULE)
-    for candidate in candidates:
-        if (candidate / relative).is_file():
-            return candidate
-    return None
-
-
 def _sglang_cutedsl_available() -> bool:
-    return find_spec("cutlass") is not None and _sglang_source_package_dir() is not None
+    """The vendored SGLang CuTeDSL reference needs only CUTLASS DSL and torch."""
+    return find_spec("cutlass") is not None
 
 
-def _register_stub_package(name: str, path: Path) -> None:
-    package = types.ModuleType(name)
-    package.__package__ = name
-    package.__path__ = [str(path)]
-    # A spec-less module in sys.modules makes every later find_spec("sglang")
-    # raise ValueError, failing the availability probe of subsequent configs.
-    package.__spec__ = importlib.machinery.ModuleSpec(name, loader=None, is_package=True)
-    package.__spec__.submodule_search_locations = [str(path)]
-    sys.modules[name] = package
-
-
-def _import_source_module(name: str, path: Path) -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot build an import spec for {name} from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-    except BaseException:
-        sys.modules.pop(name, None)
-        raise
-    return module
-
-
-def _load_sglang_cutedsl_from_source(root: Path) -> types.ModuleType:
-    """Import the CuTeDSL kernel straight from a source checkout.
-
-    Registers stub parent packages whose ``__path__`` points into ``root`` so
-    relative and sibling imports resolve, without ever executing
-    ``sglang/__init__.py`` (which drags in the whole serving frontend).
-    """
-    package_paths = {
-        "sglang": root,
-        "sglang.kernels": root / "kernels",
-        "sglang.kernels.ops": root / "kernels" / "ops",
-        "sglang.kernels.ops.attention": root / "kernels" / "ops" / "attention",
-        "sglang.kernels.ops.attention.dsa": root / "kernels" / "ops" / "attention" / "dsa",
-        "sglang.srt": root / "srt",
-    }
-    for name, path in package_paths.items():
-        _register_stub_package(name, path)
-
-    utils = types.ModuleType("sglang.srt.utils")
-    utils.is_sm100_supported = lambda: torch.cuda.get_device_capability()[0] == 10
-    utils.__spec__ = importlib.machinery.ModuleSpec(utils.__name__, loader=None)
-    sys.modules[utils.__name__] = utils
-
-    for name in (*_SGLANG_CUTEDSL_DEPENDENCIES, _SGLANG_CUTEDSL_MODULE):
-        _import_source_module(name, root / _sglang_module_relative_path(name))
-    return sys.modules[_SGLANG_CUTEDSL_MODULE]
-
-
-@cache
 def _load_sglang_cutedsl_reference() -> tuple[Any, Any]:
-    """Load SGLang's CuTeDSL paged MQA kernel, preferring the installed package."""
+    """Return ``(CuteDSLPagedMQALogitsRunner, pick_dsl_expand)`` from the vendored copy.
+
+    The reference is a verbatim copy of SGLang's CuTeDSL paged MQA logits
+    kernels (``tirx_kernels/deepgemm/_sglang_cutedsl``), so importing the
+    SGLang package (and its serving-stack dependencies) is never required.
+    """
     try:
-        module = importlib.import_module(_SGLANG_CUTEDSL_MODULE)
-    except Exception as exc:
-        import_error = f"{type(exc).__name__}: {exc}"
-        root = _sglang_source_package_dir()
-        if root is None:
-            relative = _sglang_module_relative_path(_SGLANG_CUTEDSL_MODULE)
-            raise ImportError(
-                f"cannot import {_SGLANG_CUTEDSL_MODULE} ({import_error}) and no SGLang "
-                f"source checkout was found; expected the pinned sglang checkout "
-                f"(reference-dependencies.json) at {_SGLANG_REFERENCE_PACKAGE_DIR / relative}"
-                f" -- run scripts/install_reference_dependencies.py or point "
-                f"{_SGLANG_SOURCE_DIR_ENV} at the checkout"
-            ) from exc
-        module = _load_sglang_cutedsl_from_source(root)
-    return module.CuteDSLPagedMQALogitsRunner, module.pick_dsl_expand
+        from tirx_kernels.deepgemm._sglang_cutedsl.cutedsl_paged_mqa_logits import (
+            CuteDSLPagedMQALogitsRunner,
+            pick_dsl_expand,
+        )
+    except ImportError as error:
+        raise ImportError(
+            f"cannot import the vendored SGLang CuTeDSL paged MQA logits reference: {error}"
+        ) from error
+    return CuteDSLPagedMQALogitsRunner, pick_dsl_expand
 
 
 def _make_sglang_cutedsl_runner(data: dict[str, Any]) -> Any:

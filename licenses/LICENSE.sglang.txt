@@ -178,7 +178,7 @@
    APPENDIX: How to apply the Apache License to your work.
 
       To apply the Apache License to your work, attach the following
-      boilerplate notice, with the fields enclosed by brackets "{}"
+      boilerplate notice, with the fields enclosed by brackets "[]"
       replaced with your own identifying information. (Don't include
       the brackets!)  The text should be enclosed in the appropriate
       comment syntax for the file format. We also recommend that a
@@ -186,7 +186,7 @@
       same "printed page" as the copyright notice for easier
       identification within third-party archives.
 
-   Copyright {yyyy} {name of copyright owner}
+   Copyright 2023-2024 SGLang Team
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -199,72 +199,3 @@
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
-
-------------------------------------------------------------------------------------
-This product bundles various third-party components under other open source licenses.
-This section summarizes those components and their licenses. See licenses/ for text
-of these licenses.
-
-
-Apache Software Foundation License 2.0
---------------------------------------
-
-tirx_kernels/cudnn/ (ports of NVIDIA/cudnn-frontend kernels; the upstream
-                     license text and copyright notice are reproduced in
-                     licenses/LICENSE.cudnn-frontend.txt)
-tirx_kernels/flashinfer/ (ports of flashinfer-ai/flashinfer kernels, including
-                          kernels FlashInfer itself derived from NVIDIA
-                          TensorRT-LLM; except the BSD-3 files listed below)
-tirx_kernels/deepgemm/_sglang_cutedsl/ (verbatim copies of sgl-project/sglang's
-                          CuTeDSL paged MQA logits reference kernels, which
-                          SGLang ported from NVIDIA TensorRT-LLM; the upstream
-                          license text is reproduced in licenses/LICENSE.sglang.txt)
-
-
-MIT License
------------
-
-tirx_kernels/fastcu/ (ports of pranjalssh/fast.cu kernels; the upstream
-                      license text and copyright notice are reproduced in
-                      licenses/LICENSE.fast-cu.txt)
-tirx_kernels/deepgemm/ (ports of deepseek-ai/DeepGEMM kernels)
-tirx_kernels/flashmla/ (ports of deepseek-ai/FlashMLA kernels)
-tirx_kernels/msa/ (ports of MiniMax-AI/MSA kernels)
-tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py
-                     (MIT-licensed cuDNN Frontend source derived from the
-                      flash-attention combine kernel)
-
-
-BSD 3-Clause "New" or "Revised" License
----------------------------------------
-
-tirx_kernels/flashattention/ (ports of Dao-AILab/flash-attention kernels; the
-                              AUTHORS file its copyright notice refers to is
-                              licenses/AUTHORS.flash-attention.txt)
-tirx_kernels/flashattention/flash_attention4_fp4.py (port of hao-ai-lab/flash-attention-fp4,
-                              a fork of Dao-AILab/flash-attention; its LICENSE and
-                              flash_attn/cute/AUTHORS are byte-identical to
-                              licenses/LICENSE.flash-attention.txt and
-                              licenses/AUTHORS.flash-attention.txt)
-tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py (full license text is
-                              reproduced in the file header)
-tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py (full license text is reproduced
-                              in the file header)
-tirx_kernels/flashinfer/gemm/grouped_gemm_masked_rubin.py (full license text is
-                              reproduced in the file header)
-tirx_kernels/flashinfer/fused_moe/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin.py
-                             (full license text is reproduced in the file header)
-tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py
-                             (full license text is reproduced in the file header)
-tirx_kernels/cudnn/flex_attention/forward_hd256_sm100.py (full license text is
-                             reproduced in the file header)
-tirx_kernels/cudnn/flex_attention/forward_sm103.py (full license text is
-                             reproduced in the file header)
-tirx_kernels/cudnn/flex_attention/flex_attention_backward_sm100.py (full license
-                             text is reproduced in the file header)
-tirx_kernels/cudnn/flex_attention/_flex_attention_backward_sm100/data.py (full
-                             license text is reproduced in the file header)
-tirx_kernels/cudnn/flex_attention/_flex_attention_backward_sm100/kernel.py (full
-                             license text is reproduced in the file header)
-tirx_kernels/cudnn/flex_attention/_flex_attention_backward_sm100/kernel_2cta.py
-                             (full license text is reproduced in the file header)
