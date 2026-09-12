@@ -177,7 +177,7 @@ Useful options:
 |---|---|
 | `--server URL` | kcoral server (default `$TIRX_BENCH_SERVER` or `http://127.0.0.1:8901`) |
 | `--max-in-flight N` | Concurrent requests (default: the server's worker count; A/B: 1) |
-| `--request-timeout S` | Server execution timeout per workload (default and maximum 3600) |
+| `--request-timeout S` | Server execution timeout per workload (default 900, maximum 3600); a hung kernel is killed server-side at this point |
 | `--prepare {cpu,gpu}` | Compile off the GPU lease (default) or while holding it |
 | `--reference-deps-dir P` | Server-side `.reference-deps` directory for `--with-references` |
 | `--workloads PATH` | Run an explicit workload list |

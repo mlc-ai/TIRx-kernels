@@ -32,7 +32,9 @@ from typing import Any
 SERVER_URL_ENV = "TIRX_BENCH_SERVER"
 REFERENCE_DEPS_DIR_ENV = "TIRX_BENCH_REFERENCE_DEPS"
 DEFAULT_SERVER_URL = "http://127.0.0.1:8901"
-DEFAULT_REQUEST_TIMEOUT_S = 3600.0
+# Well above the longest healthy row (under two minutes) and short enough that a
+# hung kernel cannot hold the server's GPU lease, and every other worker, for an hour.
+DEFAULT_REQUEST_TIMEOUT_S = 900.0
 MAX_REQUEST_TIMEOUT_S = 3600.0
 PROBE_TIMEOUT_S = 600.0
 DEFAULT_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
