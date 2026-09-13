@@ -1,0 +1,7 @@
+kernel: agent_evolved_msa_prefill_multishape
+defaults:
+  num_gpus: 1
+  timer: proton
+configs:
+  - {config: flat_bf16_b1_q4096_kv4096_h64, default: true}
+  - {config: paged_bf16_b3_q4096_kv8192_h8, default: true}
