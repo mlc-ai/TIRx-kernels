@@ -47,6 +47,7 @@ the B200 run using FlashKDA commit `1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b`.
 | [`agent_evolved_msa_prefill_b1_q4096`](msa_prefill_b1_q4096.py) | `b1_q4096_kv4096_h64` | GB200 | Proton | 181.921 | MiniMax MSA | 571.860 | 3.143x | `msa_prefill_b1_q4096_kv4096_hq64_hkv4_d128_topk16_bf16_flat-20260910-221452` `frontier/qmajor-persistent` port rerun |
 | [`agent_evolved_msa_decode_b128_q16`](msa_decode_b128_q16.py) | `b128_q16_kv4096_h64` | GB200 | Proton | 206.197 | MiniMax MSA | 1206.456 | 5.851x | `msa-decode-b128` `frontier/qmajor-union` port rerun |
 | [`agent_evolved_vsa_s80000_h8_topk156`](vsa_s80000_h8_topk156.py) | `s80000_h8_blk128_topk156` | GB200 | Proton | 4681.178 | FlashInfer `bsa_attn_fwd` | 7010.635 | 1.498x | `vsa_s80000_h8_d128_blk128_topk156_bf16-20260910-221104` `frontier/group16-cluster-multicast` port rerun |
+| [`agent_evolved_mla_dsv4_prefill_b2`](mla_dsv4_prefill_b2.py) | `b2_qsum386_h128_swa16384_c16384_k1152` | GB200 | Proton | 77.402 | FlashInfer trtllm-gen DSv4 sparse MLA | 117.251 | 1.515x | `mla-dsv4-prefill-b2` `frontier/dual-issuer` port rerun |
 
 For `kcoral` rows the timer is the evolution harness's benchmark server, which
 reports GPU-only latency for candidate and reference in one run. Geomean rows
