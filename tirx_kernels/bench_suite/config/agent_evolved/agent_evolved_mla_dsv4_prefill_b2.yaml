@@ -1,0 +1,3 @@
+kernel: agent_evolved_mla_dsv4_prefill_b2
+configs:
+  - {config: b2_qsum386_h128_swa16384_c16384_k1152, default: true, timer: proton}
