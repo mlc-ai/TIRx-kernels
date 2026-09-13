@@ -1,0 +1,3 @@
+kernel: agent_evolved_kda_decode_b128_t1
+configs:
+  - {config: b128_t1_h16_hv32_d128, default: true, timer: proton}
