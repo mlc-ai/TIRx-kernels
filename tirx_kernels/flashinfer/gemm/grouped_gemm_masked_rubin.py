@@ -1803,11 +1803,19 @@ def _make_kernel(
                                     )
                                 with K.If(ready_to_publish):
                                     with K.Then():
+                                        # The signal word is a declared
+                                        # synchronization word: the consumer
+                                        # kernel polls it, so the arrival says
+                                        # so rather than leaving the checker to
+                                        # infer a protocol from the spelling.
                                         previous = K.local_scalar("int32")
-                                        K.ptx.atom.release.gpu.global_.add.s32(
+                                        K.cuda.atomic_ref_fetch_add(
                                             previous,
                                             dst_signals.ptr_to([dsm_pending_idx]),
                                             K.int32(1),
+                                            order="release",
+                                            scope="gpu",
+                                            ptx_type="s32",
                                         )
                                         K.assign(dsm_pending_idx, dsm_pending_idx + 1)
                                         K.assign(

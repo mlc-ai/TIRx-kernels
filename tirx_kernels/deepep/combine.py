@@ -248,16 +248,31 @@ def _build_combine_kernel(num_sms: int, num_max_tokens_per_rank: int, num_ranks:
 
         # --- Software grid barrier (dispatch substitution 2) -----------------
         def grid_barrier(site):
+            # The counter is a declared synchronization word. It is addressed
+            # by byte offset into the workspace, so `ptx_type` states its
+            # width rather than respelling a known one.
             counter_ptr = _gptr(ws_u64, WS_PORT_SCRATCH + site * 8)
             with K.If(thread_idx == 0), K.Then():
                 c0 = K.alloc_local([1], "uint64")
-                _ld_acquire_gpu_u64(c0[0], counter_ptr)
+                K.cuda.atomic_ref_load(
+                    c0[0], counter_ptr, order="acquire", scope="gpu", ptx_type="u64"
+                )
                 target = (c0[0] // K.uint64(num_sms) + K.uint64(1)) * K.uint64(num_sms)
-                K.ptx.red.release.gpu.global_.add.u64(counter_ptr, K.uint64(1))
+                K.cuda.atomic_ref_add(
+                    counter_ptr, K.uint64(1), order="release", scope="gpu", ptx_type="u64"
+                )
                 now = K.alloc_local([1], "uint64")
-                _ld_acquire_gpu_u64(now[0], counter_ptr)
-                with K.While(now[0] < target):
-                    _ld_acquire_gpu_u64(now[0], counter_ptr)
+                K.cuda.atomic_ref_load(
+                    now[0], counter_ptr, order="acquire", scope="gpu", ptx_type="u64"
+                )
+                K.cuda.atomic_ref_wait(
+                    now[0],
+                    counter_ptr,
+                    now[0] >= target,
+                    order="acquire",
+                    scope="gpu",
+                    ptx_type="u64",
+                )
             K.ptx.bar.sync(K.uint32(0), K.uint32(NUM_THREADS))
 
         # Real received-token count from the GPU prefix (combine.cuh:45-46);

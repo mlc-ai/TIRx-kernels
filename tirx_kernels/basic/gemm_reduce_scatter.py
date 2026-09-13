@@ -304,14 +304,19 @@ class GEMMMPMCQueue(MPMCQueue):
         with Kern.If(self.head_r[0] < self.num_tot_tasks):
             with Kern.Then():
                 Kern.assign(self.masked_pos[0], self.head_r[0] & self.mask)
-                Kern.ptx.ld.acquire.sys.global_.b32(
-                    fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
+                # The task-type slot is a declared synchronization word: the
+                # producer publishes a non-negative type into it and this
+                # consumer waits for that. One `ld` and then the wait is the
+                # same instruction sequence the loop spelled by hand.
+                Kern.cuda.atomic_ref_wait(
+                    fetched_task_type[0],
+                    self.task_types.ptr_to([self.masked_pos[0]]),
+                    lambda value: value >= Kern.int32(0),
+                    order="acquire",
+                    scope="sys",
+                    ptx_type="b32",
+                    backoff_ns=40,
                 )
-                with Kern.While(fetched_task_type[0] < 0):
-                    Kern.cuda.nano_sleep(40)
-                    Kern.ptx.ld.acquire.sys.global_.b32(
-                        fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
-                    )
                 Kern.ptx.st.global_.s32(
                     self.task_types.ptr_to([self.masked_pos[0]]), Kern.int32(-1)
                 )

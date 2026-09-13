@@ -242,16 +242,28 @@ def _load_i32(buffer, index):
     return out
 
 
+# The semaphore is a declared synchronization word: the arrival and the wait
+# both go through `K.cuda.atomic_ref_*`, which emits the same instructions the
+# raw spellings did and tells the checker that these accesses -- and only
+# these -- belong to the semaphore.
 def _wait_eq_i32(buffer, index, expected, leader):
     with K.If(leader), K.Then():
         value = K.local_scalar("int32", init=K.int32(-1))
-        with K.While(value != expected):
-            K.ptx.ld.acquire.gpu.global_.b32(value, buffer.ptr_to([index]))
+        K.cuda.atomic_ref_wait(
+            value,
+            buffer.ptr_to([index]),
+            value == expected,
+            order="acquire",
+            scope="gpu",
+            ptx_type="b32",
+        )
 
 
 def _release_inc_i32(buffer, index, leader):
     with K.If(leader), K.Then():
-        K.ptx.red.release.gpu.global_.add.s32(buffer.ptr_to([index]), K.int32(1))
+        K.cuda.atomic_ref_add(
+            buffer.ptr_to([index]), K.int32(1), order="release", scope="gpu"
+        )
 
 
 def _publish_pipeline_init():

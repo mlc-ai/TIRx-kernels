@@ -2498,9 +2498,11 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
 
                                     K.ptx[BULK_WAIT](0)
                                     K.ptx["fence.proxy.async.global"]()
-                                    K.ptx["st.release.gpu.global.s64"](
+                                    K.cuda.atomic_ref_store(
                                         flags.ptr_to([fidx_s]),
                                         ep64 + K.Cast("int64", n + K.int32(1)),
+                                        order="release",
+                                        scope="gpu",
                                     )
                                 st_hs.advance()
                         with K.Else():
@@ -2524,9 +2526,11 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                     b_dhb_stored.arrive(0)
                                     K.ptx[BULK_WAIT](0)
                                     K.ptx["fence.proxy.async.global"]()
-                                    K.ptx["st.release.gpu.global.s64"](
+                                    K.cuda.atomic_ref_store(
                                         flags.ptr_to([num_chains + fidx_s]),
                                         ep64 + K.Cast("int64", rn + K.int32(1)),
+                                        order="release",
+                                        scope="gpu",
                                     )
                                 K.assign(bcyc, bcyc + K.int32(1))
                     with K.If(elected()), K.Then():
@@ -2821,13 +2825,15 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                         for gi_ in range(G):
                             fidx = seq * K.int32(HV) + hq * K.int32(G) + K.int32(gi_)
                             flf = K.local_scalar("int64", init=K.int64(0))
-                            with K.While(flf < tgt_f):
-                                K.ptx.ld.acquire.gpu.global_.s64(flf, flags.ptr_to([fidx]))
+                            K.cuda.atomic_ref_wait(
+                                flf, flags.ptr_to([fidx]), flf >= tgt_f,
+                                order="acquire", scope="gpu",
+                            )
                             flb = K.local_scalar("int64", init=K.int64(0))
-                            with K.While(flb < tgt_b):
-                                K.ptx.ld.acquire.gpu.global_.s64(
-                                    flb, flags.ptr_to([num_chains + fidx])
-                                )
+                            K.cuda.atomic_ref_wait(
+                                flb, flags.ptr_to([num_chains + fidx]), flb >= tgt_b,
+                                order="acquire", scope="gpu",
+                            )
 
                         with K.If(rows < K.int32(CHUNK)), K.Then():
                             tgt_1 = K.local_scalar("int64", init=ep64 + K.int64(1))
@@ -2836,13 +2842,15 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                             with K.While((s2 < num_seqs) & (b2 < tok0 + K.int32(CHUNK))):
                                 for gi_ in range(G):
                                     fl2 = K.local_scalar("int64", init=K.int64(0))
-                                    with K.While(fl2 < tgt_1):
-                                        K.ptx.ld.acquire.gpu.global_.s64(
-                                            fl2,
-                                            flags.ptr_to(
-                                                [s2 * K.int32(HV) + hq * K.int32(G) + K.int32(gi_)]
-                                            ),
-                                        )
+                                    K.cuda.atomic_ref_wait(
+                                        fl2,
+                                        flags.ptr_to(
+                                            [s2 * K.int32(HV) + hq * K.int32(G) + K.int32(gi_)]
+                                        ),
+                                        fl2 >= tgt_1,
+                                        order="acquire",
+                                        scope="gpu",
+                                    )
                                 _, l2 = seq_len_of(s2)
                                 K.assign(b2, b2 + l2)
                                 K.assign(s2, s2 + K.int32(1))
@@ -3760,7 +3768,9 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                 with K.If(elected()), K.Then():
                     K.ptx[BULK_WAIT](0)
                     K.ptx["fence.proxy.async.global"]()
-                    K.ptx["st.release.gpu.global.s32"](flags.ptr_to([chain]), epoch)
+                    K.cuda.atomic_ref_store(
+                        flags.ptr_to([chain]), epoch, order="release", scope="gpu"
+                    )
 
         with cg:
             p1_compute()
@@ -4759,9 +4769,11 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
 
                     lphase("lw-flag")
                     with K.If(elected()), K.Then():
+                        # The epoch flag is a declared synchronization word.
                         fl = K.local_scalar("int32", init=K.int32(0))
-                        with K.While(fl != epoch):
-                            K.ptx.ld.acquire.gpu.global_.s32(fl, flags.ptr_to([work]))
+                        K.cuda.atomic_ref_wait(
+                            fl, flags.ptr_to([work]), fl == epoch, order="acquire", scope="gpu"
+                        )
                     K.ptx["bar.warp.sync"](K.uint32(0xFFFFFFFF))
                     K.ptx["fence.proxy.async.global"]()
                     lphase_end()

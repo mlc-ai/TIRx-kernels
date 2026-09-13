@@ -510,7 +510,19 @@ def make_kernel(TOTAL_Q, HQ, HKV, TOPK, NUM_CTAS):
                                                                                     
                     grabbed = K.local_scalar("int32", init=0)
                     with K.If(lane == 0), K.Then():
-                        K.ptx.atom.relaxed.gpu.global_.add.s32(grabbed, sched.ptr_to([0]), K.int32(1))
+                        # `sched[0]` is the work-queue ticket and `sched[1]`
+                        # the completion count: both are declared
+                        # synchronization words, so every access goes through
+                        # `K.cuda.atomic_ref_*` and emits what the raw
+                        # spelling did.
+                        K.cuda.atomic_ref_fetch_add(
+                            grabbed,
+                            sched.ptr_to([0]),
+                            K.int32(1),
+                            order="relaxed",
+                            scope="gpu",
+                            ptx_type="s32",
+                        )
                     task = K.local_scalar("int32", init=K.uniform(grabbed))
                                                                                       
                     union_free.wait(slot, ((it >> 1) + 1) & 1)
@@ -1272,11 +1284,22 @@ def make_kernel(TOTAL_Q, HQ, HKV, TOPK, NUM_CTAS):
         K.cuda.cta_sync()
         with K.If(K.thread_id() == 0), K.Then():
             done = K.local_scalar("int32")
-            K.ptx.atom.acq_rel.gpu.global_.add.s32(done, sched.ptr_to([1]), K.int32(1))
+            K.cuda.atomic_ref_fetch_add(
+                done,
+                sched.ptr_to([1]),
+                K.int32(1),
+                order="acq_rel",
+                scope="gpu",
+                ptx_type="s32",
+            )
             with K.If(done == NUM_CTAS - 1), K.Then():
                                                                                   
-                K.ptx.st.relaxed.gpu.global_.b32(sched.ptr_to([0]), K.int32(0))
-                K.ptx.st.relaxed.gpu.global_.b32(sched.ptr_to([1]), K.int32(0))
+                K.cuda.atomic_ref_store(
+                    sched.ptr_to([0]), K.int32(0), order="relaxed", scope="gpu", ptx_type="b32"
+                )
+                K.cuda.atomic_ref_store(
+                    sched.ptr_to([1]), K.int32(0), order="relaxed", scope="gpu", ptx_type="b32"
+                )
         with K.If(tvm.tirx.all(wg_id == 0, warp_id == 0)), K.Then():
             dealloc = K.local_scalar("uint32")
             K.ptx.ld.shared.u32(dealloc, tmem_addr.ptr_to([0]))

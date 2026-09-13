@@ -222,18 +222,36 @@ def emit_grid_sync(ctr_ptr, cta, num_ctas, tid):
     """Sense-reversing grid barrier over all CTAs (all threads of the CTA participate)."""
     K.ptx.bar.sync(K.uint32(0))
     with K.If(tid == 0), K.Then():
+        # The counter is a declared synchronization word: arrival, the read
+        # that seeds the wait, and the wait itself all go through
+        # `K.cuda.atomic_ref_*`, which emits the instructions the raw spellings
+        # did. The wait states the condition the barrier completes on -- the
+        # sense bit having flipped against the value this CTA's own arrival
+        # returned -- so the checker can tell which arrival released it.
         old = K.local_scalar(K.u32)
         with K.If(cta == 0):
             with K.Then():
-                K.ptx.atom.release.gpu.global_.add.u32(
-                    old, ctr_ptr, K.uint32(0x80000000 - (num_ctas - 1))
+                K.cuda.atomic_ref_fetch_add(
+                    old,
+                    ctr_ptr,
+                    K.uint32(0x80000000 - (num_ctas - 1)),
+                    order="release",
+                    scope="gpu",
                 )
             with K.Else():
-                K.ptx.atom.release.gpu.global_.add.u32(old, ctr_ptr, K.uint32(1))
+                K.cuda.atomic_ref_fetch_add(
+                    old, ctr_ptr, K.uint32(1), order="release", scope="gpu"
+                )
         cur = K.local_scalar(K.u32)
-        K.ptx.ld.acquire.gpu.global_.b32(cur, ctr_ptr)
-        with K.While(K.bitwise_and(K.bitwise_xor(cur, old), K.uint32(0x80000000)) == K.uint32(0)):
-            K.ptx.ld.acquire.gpu.global_.b32(cur, ctr_ptr)
+        K.cuda.atomic_ref_load(cur, ctr_ptr, order="acquire", scope="gpu", ptx_type="b32")
+        K.cuda.atomic_ref_wait(
+            cur,
+            ctr_ptr,
+            K.bitwise_and(K.bitwise_xor(cur, old), K.uint32(0x80000000)) != K.uint32(0),
+            order="acquire",
+            scope="gpu",
+            ptx_type="b32",
+        )
     K.ptx.bar.sync(K.uint32(0))
 
 
@@ -695,9 +713,17 @@ def build_kernel(num_ctas):
             """GEMM2 pair-tiles need all GEMM1 pair-tiles of their m-tile (both CTAs arrive per tile)."""
             with K.If(lane == 0), K.Then():
                 dv = K.local_scalar(K.u32)
-                K.ptx.ld.acquire.gpu.global_.b32(dv, done.ptr_to([e * MAXMT + mt]))
-                with K.While(dv < K.uint32(PAIR * NT1)):
-                    K.ptx.ld.acquire.gpu.global_.b32(dv, done.ptr_to([e * MAXMT + mt]))
+                K.cuda.atomic_ref_load(
+                    dv, done.ptr_to([e * MAXMT + mt]), order="acquire", scope="gpu", ptx_type="b32"
+                )
+                K.cuda.atomic_ref_wait(
+                    dv,
+                    done.ptr_to([e * MAXMT + mt]),
+                    dv >= K.uint32(PAIR * NT1),
+                    order="acquire",
+                    scope="gpu",
+                    ptx_type="b32",
+                )
             K.cuda.warp_sync()
             K.ptx.fence.proxy.async_.global_()
 
@@ -1335,8 +1361,11 @@ def build_kernel(num_ctas):
                     K.ptx.st.global_.u8(a2h.ptr_to([wh * 4 + nt % 2]), sbyte)
                 K.ptx.bar.sync(K.uint32(1), K.uint32((NWARPS - MATH_WARP0) * 32))
                 with K.If(K.And(mw == 0, lane == 0)), K.Then():
-                    K.ptx.red.release.gpu.global_.add.u32(
-                        done.ptr_to([e * MAXMT + mt]), K.uint32(1)
+                    K.cuda.atomic_ref_add(
+                        done.ptr_to([e * MAXMT + mt]),
+                        K.uint32(1),
+                        order="release",
+                        scope="gpu",
                     )
 
             def g2_mainloop(cols, sb_base, arow):
@@ -1416,11 +1445,21 @@ def build_kernel(num_ctas):
                             with K.Else():
                                 tk_d = iket_range("math-wait-done")
                                 dv = K.local_scalar(K.u32)
-                                K.ptx.ld.acquire.gpu.global_.b32(dv, done.ptr_to([e * MAXMT + mt]))
-                                with K.While(dv < K.uint32(PAIR * NT1)):
-                                    K.ptx.ld.acquire.gpu.global_.b32(
-                                        dv, done.ptr_to([e * MAXMT + mt])
-                                    )
+                                K.cuda.atomic_ref_load(
+                                    dv,
+                                    done.ptr_to([e * MAXMT + mt]),
+                                    order="acquire",
+                                    scope="gpu",
+                                    ptx_type="b32",
+                                )
+                                K.cuda.atomic_ref_wait(
+                                    dv,
+                                    done.ptr_to([e * MAXMT + mt]),
+                                    dv >= K.uint32(PAIR * NT1),
+                                    order="acquire",
+                                    scope="gpu",
+                                    ptx_type="b32",
+                                )
                                 iket_end(tk_d)
                                 wtok = f32(K.float32(0.0))
                                 with K.If(arow < row0 + valid), K.Then():

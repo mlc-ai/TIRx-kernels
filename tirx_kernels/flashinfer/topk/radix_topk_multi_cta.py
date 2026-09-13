@@ -83,7 +83,6 @@ from tirx_kernels.flashinfer.utils.topk_radix import (
     atom_shared_add_u32,
     bar_sync,
     emit_selected,
-    ld_acquire_gpu_s32,
     ld_global_bits,
     ld_global_u32,
     ld_shared_pair_u32,
@@ -95,6 +94,7 @@ from tirx_kernels.flashinfer.utils.topk_radix import (
     shfl_down_u32,
     st_global_u16,
     st_global_u32,
+    st_release_declared_s32,
     st_release_gpu_s32,
     st_shared_pair_u32,
     st_shared_quad_u32,
@@ -265,9 +265,20 @@ def advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx):
     with K.If(tx == 0), K.Then():
         red_release_gpu_add_s32(state, arrival_word, K.int32(1))
         target = (phase + K.int32(1)) * K.int32(ctas_per_group)
-        spin = K.local_scalar("int32", init=ld_acquire_gpu_s32(state, arrival_word))
-        with K.While(spin < target):
-            K.assign(spin, ld_acquire_gpu_s32(state, arrival_word))
+        spin = K.local_scalar("int32")
+        # The counter is a declared word, so the wait names the condition the
+        # barrier completes on rather than spinning on a bare load: that is what
+        # lets the checker decide which arrival released this CTA. It loads
+        # before it tests, so the seeding read the hand-written spin needed is
+        # the wait's own first poll -- one fewer unguaranteed read to explain.
+        K.cuda.atomic_ref_wait(
+            spin,
+            state.ptr_to([arrival_word]),
+            spin >= target,
+            order="acquire",
+            scope="gpu",
+            ptx_type="b32",
+        )
     bar_sync()
     K.assign(phase, phase + K.int32(1))
     bar_sync()
@@ -947,7 +958,7 @@ def get_kernel(
                     st_global_u32(state, det_base + dw, K.uint32(0))
             bar_sync()
             with K.If(tx == 0), K.Then():
-                st_release_gpu_s32(state, arrival_word, K.int32(0))
+                st_release_declared_s32(state, arrival_word, K.int32(0))
 
     return radix_topk_multi_cta.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
 

@@ -199,10 +199,20 @@ def warp_inclusive_sum_u32(value, lane):
 # monotonically increasing arrival counter in global memory, with absolute phase
 # targets. These mirror `ld_acquire` / `red_release` / `st_release` /
 # `atom_add_release` (topk.cuh:63-121).
+#
+# The counter is a declared synchronization word: every access it takes goes
+# through `K.cuda.atomic_ref_*`, which emits the same instruction the raw
+# spelling did and additionally tells the checker that these accesses -- and
+# only these -- belong to the barrier. The fence stays at the call site,
+# because it is not an access to the word: the release half here is
+# fence-then-relaxed-atomic, not a release atomic, and those are different
+# instructions.
 def ld_acquire_gpu_s32(buffer, index):
     """``ld.global.acquire.gpu.b32`` -- the acquire half of the group barrier."""
     out = K.local_scalar("int32")
-    K.ptx.ld.acquire.gpu.global_.b32(out, buffer.ptr_to([index]))
+    K.cuda.atomic_ref_load(
+        out, buffer.ptr_to([index]), order="acquire", scope="gpu", ptx_type="b32"
+    )
     return out
 
 
@@ -214,21 +224,39 @@ def fence_acq_rel_gpu():
 def red_release_gpu_add_s32(buffer, index, value):
     """``fence.acq_rel.gpu`` + ``red.relaxed.gpu.global.add.s32`` (no result)."""
     fence_acq_rel_gpu()
-    K.ptx.red.relaxed.gpu.global_.add.s32(buffer.ptr_to([index]), value)
+    K.cuda.atomic_ref_add(
+        buffer.ptr_to([index]), value, order="relaxed", scope="gpu", ptx_type="s32"
+    )
 
 
 def atom_add_release_gpu_s32(buffer, index, value):
     """``fence.acq_rel.gpu`` + ``atom.relaxed.gpu.global.add.s32``; returns the old value."""
     fence_acq_rel_gpu()
     out = K.local_scalar("int32")
-    K.ptx.atom.relaxed.gpu.global_.add.s32(out, buffer.ptr_to([index]), value)
+    K.cuda.atomic_ref_fetch_add(
+        out, buffer.ptr_to([index]), value, order="relaxed", scope="gpu", ptx_type="s32"
+    )
     return out
 
 
 def st_release_gpu_s32(buffer, index, value):
-    """``fence.acq_rel.gpu`` + ``st.release.gpu.global.b32``."""
+    """``fence.acq_rel.gpu`` + ``st.release.gpu.global.b32``.
+
+    Stays raw: this helper also publishes the group's output word, which no
+    protocol owns and which the rest of the kernel reads with plain loads.
+    The arrival counter's own reset goes through the primitive at its call
+    site, because a declaration belongs to one word and not to a spelling.
+    """
     fence_acq_rel_gpu()
     K.ptx.st.release.gpu.global_.b32(buffer.ptr_to([index]), value)
+
+
+def st_release_declared_s32(buffer, index, value):
+    """The same store on a declared synchronization word."""
+    fence_acq_rel_gpu()
+    K.cuda.atomic_ref_store(
+        buffer.ptr_to([index]), value, order="release", scope="gpu", ptx_type="b32"
+    )
 
 
 def atom_global_add_u32(buffer, index, value):

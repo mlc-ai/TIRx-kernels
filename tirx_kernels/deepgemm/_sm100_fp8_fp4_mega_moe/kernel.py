@@ -76,12 +76,25 @@ def load_acq_sys_s32(dst, address):
     return K.ptx.ld.acquire.sys.global_.s32(dst, address)
 
 
+# The grid-sync counter is a declared synchronization word: every access it
+# takes goes through `K.cuda.atomic_ref_*`, which emits the instruction the raw
+# spelling did and additionally tells the checker that these accesses -- and
+# only these -- belong to the barrier.
 def atomic_add_rel_u32(dst, address, value):
-    return K.ptx.atom.release.gpu.global_.add.u32(dst, address, value)
+    return K.cuda.atomic_ref_fetch_add(
+        dst, address, value, order="release", scope="gpu", ptx_type="u32"
+    )
 
 
 def load_acq_u32(dst, address):
     return K.ptx.ld.acquire.gpu.global_.b32(dst, address)
+
+
+def wait_acq_u32(dst, address, predicate):
+    """``ld.acquire.gpu.global.b32`` in a do-while, as the loop spelled it."""
+    return K.cuda.atomic_ref_wait(
+        dst, address, predicate, order="acquire", scope="gpu", ptx_type="b32"
+    )
 
 
 def grid_sync_done_u32(new_value, old_value):
@@ -1592,13 +1605,11 @@ def get_kernel(
                             workspace_grid_sync_count.ptr_to([counter_idx]),
                             K.uint32(1),
                         )
-                load_acq_u32(grid_sync_new_value, workspace_grid_sync_count.ptr_to([counter_idx]))
-                with K.While(
-                    grid_sync_done_u32(grid_sync_new_value, grid_sync_old_value) == K.uint32(0)
-                ):
-                    load_acq_u32(
-                        grid_sync_new_value, workspace_grid_sync_count.ptr_to([counter_idx])
-                    )
+                wait_acq_u32(
+                    grid_sync_new_value,
+                    workspace_grid_sync_count.ptr_to([counter_idx]),
+                    lambda value: grid_sync_done_u32(value, grid_sync_old_value) != K.uint32(0),
+                )
             K.ptx.barrier.sync(K.uint32(sync_barrier_idx), K.uint32(sync_num_threads))
 
         def nvlink_barrier(

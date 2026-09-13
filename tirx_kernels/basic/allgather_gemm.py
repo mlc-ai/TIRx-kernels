@@ -255,12 +255,18 @@ class Semaphore:
         self.state = Kern.alloc_buffer([1], "uint64", scope="local", align=8)
 
     def semaphore_wait(self, *coord):
-        with Kern.While(1):
-            Kern.ptx.ld.acquire.gpu.global_.b64(self.state[0], self.sem.ptr_to(list(coord)))
-            with Kern.If(self.state[0] == self.cnt):
-                with Kern.Then():
-                    Kern.Break()
-            Kern.cuda.nano_sleep(40)
+        # The semaphore is a declared synchronization word. One `ld` and then
+        # the wait is the same instruction sequence the hand-written loop
+        # spelled: load, test, and sleep only before a retry.
+        Kern.cuda.atomic_ref_wait(
+            self.state[0],
+            self.sem.ptr_to(list(coord)),
+            lambda value: value == self.cnt,
+            order="acquire",
+            scope="gpu",
+            ptx_type="b64",
+            backoff_ns=40,
+        )
 
 
 class MPMCQueue:
