@@ -41,7 +41,7 @@ contract and results.
 - **KDA backward:**
   [`agent_evolved_kda_backward_packed`](tirx_kernels/agent_evolved/kda_backward_packed.py) ⟨sm_100a⟩
 - **KDA decode:**
-  [`agent_evolved_kda_decode_b128_t1`](tirx_kernels/agent_evolved/kda_decode_b128_t1.py) ⟨sm_100a⟩
+  [`agent_evolved_kda_decode_multishape`](tirx_kernels/agent_evolved/kda_decode_multishape.py) ⟨sm_100a⟩
 - **MSA prefill:**
   [`agent_evolved_msa_prefill_multishape`](tirx_kernels/agent_evolved/msa_prefill_multishape.py) ⟨sm_100a⟩
 - **MSA decode:**
