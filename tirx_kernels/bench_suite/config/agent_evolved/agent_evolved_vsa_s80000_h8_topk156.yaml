@@ -1,3 +1,0 @@
-kernel: agent_evolved_vsa_s80000_h8_topk156
-configs:
-  - {config: s80000_h8_blk128_topk156, default: true, timer: proton}
