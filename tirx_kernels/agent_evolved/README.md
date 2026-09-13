@@ -45,6 +45,7 @@ the B200 run using FlashKDA commit `1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b`.
 | [`agent_evolved_kda_backward_packed`](kda_backward_packed.py) | `packed_1024x8_h96` | B200 | kcoral | 829.482 | FLA `chunk_kda_bwd` | 7695.851 | 9.278x | `kda-bwd-portfolio-carry-3` `fused-zfold` all-shape sweep |
 | [`agent_evolved_kda_backward_packed`](kda_backward_packed.py) | `all-seventeen-geomean` | B200 | kcoral | 249.000 | FLA `chunk_kda_bwd` | 2132.204 | 8.563x | geometric mean of the seventeen official workloads in that sweep |
 | [`agent_evolved_msa_prefill_b1_q4096`](msa_prefill_b1_q4096.py) | `b1_q4096_kv4096_h64` | GB200 | Proton | 181.921 | MiniMax MSA | 571.860 | 3.143x | `msa_prefill_b1_q4096_kv4096_hq64_hkv4_d128_topk16_bf16_flat-20260910-221452` `frontier/qmajor-persistent` port rerun |
+| [`agent_evolved_msa_decode_b128_q16`](msa_decode_b128_q16.py) | `b128_q16_kv4096_h64` | GB200 | Proton | 206.197 | MiniMax MSA | 1206.456 | 5.851x | `msa-decode-b128` `frontier/qmajor-union` port rerun |
 | [`agent_evolved_vsa_s80000_h8_topk156`](vsa_s80000_h8_topk156.py) | `s80000_h8_blk128_topk156` | GB200 | Proton | 4681.178 | FlashInfer `bsa_attn_fwd` | 7010.635 | 1.498x | `vsa_s80000_h8_d128_blk128_topk156_bf16-20260910-221104` `frontier/group16-cluster-multicast` port rerun |
 
 For `kcoral` rows the timer is the evolution harness's benchmark server, which
