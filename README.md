@@ -43,7 +43,7 @@ contract and results.
 - **KDA decode:**
   [`agent_evolved_kda_decode_b128_t1`](tirx_kernels/agent_evolved/kda_decode_b128_t1.py) ⟨sm_100a⟩
 - **MSA prefill:**
-  [`agent_evolved_msa_prefill_b1_q4096`](tirx_kernels/agent_evolved/msa_prefill_b1_q4096.py) ⟨sm_100a⟩
+  [`agent_evolved_msa_prefill_multishape`](tirx_kernels/agent_evolved/msa_prefill_multishape.py) ⟨sm_100a⟩
 - **MSA decode:**
   [`agent_evolved_msa_decode_b128_q16`](tirx_kernels/agent_evolved/msa_decode_b128_q16.py) ⟨sm_100a⟩
 - **VSA forward:**
