@@ -1,0 +1,29 @@
+kernel: agent_evolved_vsa_multishape
+defaults:
+  num_gpus: 1
+  timer: proton
+selection_rationale: >-
+  The eighteen official rows split into three input families that reach
+  different device code: pooled blk128, head-shared BSR blk64, and FastWan
+  blk64. The defaults take the largest pooled blk128 row, a mid BSR blk64 row,
+  and the FastWan row that carries partial blocks, so both block sizes, both
+  selection generators and the partial-length path stay in the pinned sweep.
+configs:
+  - {config: pooled_blk128_s16384_topk64, default: false}
+  - {config: pooled_blk128_s16384_topk32, default: false}
+  - {config: pooled_blk128_s16384_topk13, default: false}
+  - {config: pooled_blk128_s32768_topk64, default: false}
+  - {config: pooled_blk128_s32768_topk26, default: false}
+  - {config: pooled_blk128_s80000_topk156, default: true, selection_role: large}
+  - {config: pooled_blk128_s80000_topk62, default: false}
+  - {config: bsr_blk64_s1024_topk4, default: false}
+  - {config: bsr_blk64_s1024_topk8, default: false}
+  - {config: bsr_blk64_s1024_topk12, default: false}
+  - {config: bsr_blk64_s2048_topk8, default: false}
+  - {config: bsr_blk64_s2048_topk16, default: false}
+  - {config: bsr_blk64_s2048_topk24, default: false}
+  - {config: bsr_blk64_s4096_topk16, default: false}
+  - {config: bsr_blk64_s4096_topk32, default: true, selection_role: small}
+  - {config: bsr_blk64_s4096_topk48, default: false}
+  - {config: fastwan_blk64_s23296_h12_topk73, default: false}
+  - {config: fastwan_blk64_s26624_h12_topk84_partial, default: true, selection_role: medium}

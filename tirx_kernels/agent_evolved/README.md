@@ -47,8 +47,11 @@ the B200 run using FlashKDA commit `1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b`.
 | [`agent_evolved_kda_decode_b128_t1`](kda_decode_b128_t1.py) | `b128_t1_h16_hv32_d128` | GB200 | Proton | 41.445 | FlashInfer `recurrent_kda` | 54.178 | 1.307x | `kda-decode-b128-t1` `frontier/clc-steal` port rerun |
 | [`agent_evolved_msa_prefill_b1_q4096`](msa_prefill_b1_q4096.py) | `b1_q4096_kv4096_h64` | GB200 | Proton | 181.921 | MiniMax MSA | 571.860 | 3.143x | `msa_prefill_b1_q4096_kv4096_hq64_hkv4_d128_topk16_bf16_flat-20260910-221452` `frontier/qmajor-persistent` port rerun |
 | [`agent_evolved_msa_decode_b128_q16`](msa_decode_b128_q16.py) | `b128_q16_kv4096_h64` | GB200 | Proton | 206.197 | MiniMax MSA | 1206.456 | 5.851x | `msa-decode-b128` `frontier/qmajor-union` port rerun |
-| [`agent_evolved_vsa_s80000_h8_topk156`](vsa_s80000_h8_topk156.py) | `s80000_h8_blk128_topk156` | GB200 | Proton | 4681.178 | FlashInfer `bsa_attn_fwd` | 7010.635 | 1.498x | `vsa_s80000_h8_d128_blk128_topk156_bf16-20260910-221104` `frontier/group16-cluster-multicast` port rerun |
 | [`agent_evolved_mla_dsv4_prefill_b2`](mla_dsv4_prefill_b2.py) | `b2_qsum386_h128_swa16384_c16384_k1152` | GB200 | Proton | 77.402 | FlashInfer trtllm-gen DSv4 sparse MLA | 117.251 | 1.515x | `mla-dsv4-prefill-b2` `frontier/dual-issuer` port rerun |
+| [`agent_evolved_vsa_multishape`](vsa_multishape.py) | `pooled_blk128_s80000_topk156` | GB200 | Proton | 4523.323 | FlashInfer `bsa_attn_fwd` | 7045.071 | 1.558x | GB200 run; Proton, rounds=5, cooldown=1s |
+| [`agent_evolved_vsa_multishape`](vsa_multishape.py) | `bsr_blk64_s4096_topk32` | GB200 | Proton | 34.869 | FlashInfer `bsa_attn_blk64_fwd` | 58.166 | 1.668x | GB200 run; Proton, rounds=5, cooldown=1s |
+| [`agent_evolved_vsa_multishape`](vsa_multishape.py) | `fastwan_blk64_s26624_h12_topk84_partial` | GB200 | Proton | 764.725 | FlashInfer `bsa_attn_blk64_fwd` | 938.857 | 1.228x | GB200 run; Proton, rounds=5, cooldown=1s |
+| [`agent_evolved_vsa_multishape`](vsa_multishape.py) | `all-eighteen-geomean` | GB200 | Proton | 92.210 | FlashInfer BSA | 154.753 | 1.678x | geometric mean of the eighteen official rows in that run |
 
 For `kcoral` rows the timer is the evolution harness's benchmark server, which
 reports GPU-only latency for candidate and reference in one run. Geomean rows

@@ -47,7 +47,7 @@ contract and results.
 - **MSA decode:**
   [`agent_evolved_msa_decode_b128_q16`](tirx_kernels/agent_evolved/msa_decode_b128_q16.py) ⟨sm_100a⟩
 - **VSA forward:**
-  [`agent_evolved_vsa_s80000_h8_topk156`](tirx_kernels/agent_evolved/vsa_s80000_h8_topk156.py) ⟨sm_100a⟩
+  [`agent_evolved_vsa_multishape`](tirx_kernels/agent_evolved/vsa_multishape.py) ⟨sm_100a⟩
 - **DeepSeek-V4 sparse MLA prefill:**
   [`agent_evolved_mla_dsv4_prefill_b2`](tirx_kernels/agent_evolved/mla_dsv4_prefill_b2.py) ⟨sm_100a⟩
 
