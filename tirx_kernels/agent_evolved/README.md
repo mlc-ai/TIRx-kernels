@@ -44,6 +44,7 @@ the B200 run using FlashKDA commit `1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b`.
 | [`agent_evolved_moe_fp8_blockscale_dsv3`](moe_fp8_blockscale_dsv3.py) | `t14107` | B200 | CUPTI | 717.491 | FlashInfer TRT-LLM FP8 MoE | 2239.532 | 3.121x | `moe-20260908-004417` default-max row in full-sweep promotion run |
 | [`agent_evolved_kda_backward_packed`](kda_backward_packed.py) | `packed_1024x8_h96` | B200 | kcoral | 829.482 | FLA `chunk_kda_bwd` | 7695.851 | 9.278x | `kda-bwd-portfolio-carry-3` `fused-zfold` all-shape sweep |
 | [`agent_evolved_kda_backward_packed`](kda_backward_packed.py) | `all-seventeen-geomean` | B200 | kcoral | 249.000 | FLA `chunk_kda_bwd` | 2132.204 | 8.563x | geometric mean of the seventeen official workloads in that sweep |
+| [`agent_evolved_kda_decode_b128_t1`](kda_decode_b128_t1.py) | `b128_t1_h16_hv32_d128` | GB200 | Proton | 41.445 | FlashInfer `recurrent_kda` | 54.178 | 1.307x | `kda-decode-b128-t1` `frontier/clc-steal` port rerun |
 | [`agent_evolved_msa_prefill_b1_q4096`](msa_prefill_b1_q4096.py) | `b1_q4096_kv4096_h64` | GB200 | Proton | 181.921 | MiniMax MSA | 571.860 | 3.143x | `msa_prefill_b1_q4096_kv4096_hq64_hkv4_d128_topk16_bf16_flat-20260910-221452` `frontier/qmajor-persistent` port rerun |
 | [`agent_evolved_vsa_s80000_h8_topk156`](vsa_s80000_h8_topk156.py) | `s80000_h8_blk128_topk156` | GB200 | Proton | 4681.178 | FlashInfer `bsa_attn_fwd` | 7010.635 | 1.498x | `vsa_s80000_h8_d128_blk128_topk156_bf16-20260910-221104` `frontier/group16-cluster-multicast` port rerun |
 

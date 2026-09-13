@@ -40,6 +40,8 @@ contract and results.
   [`agent_evolved_moe_fp8_blockscale_dsv3`](tirx_kernels/agent_evolved/moe_fp8_blockscale_dsv3.py) ⟨sm_100a⟩
 - **KDA backward:**
   [`agent_evolved_kda_backward_packed`](tirx_kernels/agent_evolved/kda_backward_packed.py) ⟨sm_100a⟩
+- **KDA decode:**
+  [`agent_evolved_kda_decode_b128_t1`](tirx_kernels/agent_evolved/kda_decode_b128_t1.py) ⟨sm_100a⟩
 - **MSA prefill:**
   [`agent_evolved_msa_prefill_b1_q4096`](tirx_kernels/agent_evolved/msa_prefill_b1_q4096.py) ⟨sm_100a⟩
 - **VSA forward:**
