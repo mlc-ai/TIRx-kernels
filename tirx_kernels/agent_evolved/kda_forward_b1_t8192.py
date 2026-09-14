@@ -2505,10 +2505,10 @@ _FIX_KERNELS = {}
 
 def _get_fix_kernel(H):
     if H not in _FIX_KERNELS:
-        kern = build_fix_kernel(H)
+        kernel = build_fix_kernel(H)
         target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
         with target:
-            _FIX_KERNELS[H] = tvm.compile(kern.mod, target=target, tir_pipeline="tirx")
+            _FIX_KERNELS[H] = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
     return _FIX_KERNELS[H]
 
 
@@ -2847,7 +2847,7 @@ def _get_kernel(
         spec_const,
     )
     if key not in _KERNELS:
-        kern = build_kernel(
+        kernel = build_kernel(
             H,
             debug=False,
             direct=direct,
@@ -2873,7 +2873,7 @@ def _get_kernel(
         )
         target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
         with target:
-            _KERNELS[key] = tvm.compile(kern.mod, target=target, tir_pipeline="tirx")
+            _KERNELS[key] = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
     return _KERNELS[key]
 
 
@@ -3103,7 +3103,7 @@ def get_kernel(**kwargs: Any):
         tune = (112, 48, 96, 112)
     else:
         tune = (112, 40, 104, 112)
-    kern = build_kernel(
+    kernel = build_kernel(
         cfg.num_heads,
         direct=fixed or cfg.seq_lens == _UNIFORM,
         state_regs=tune[0],
@@ -3120,7 +3120,7 @@ def get_kernel(**kwargs: Any):
         lite_ring=(cfg.num_heads == 96 and fixed)
         or (cfg.num_heads == 64 and cfg.seq_lens == _UNIFORM),
     )
-    return kern.func
+    return kernel.func
 
 
 def _make_case(cfg: KDAForwardConfig, device: torch.device) -> dict[str, Any]:

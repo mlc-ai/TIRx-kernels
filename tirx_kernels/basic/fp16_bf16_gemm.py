@@ -235,8 +235,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
             excluded lanes never execute it; a condition is evaluated by every
             thread that reaches the ``If``, so this placement is convergent.
             Spelling it any other way costs a live register, and this kernel's
-            consumer is allocated at exactly the 255-register ceiling
-            (``fp16_bf16_gemm_kern_NOTES.md``).
+            consumer is allocated at exactly the 255-register ceiling.
             """
             return txl.cuda.elect_sync() != txl.uint32(0)
 

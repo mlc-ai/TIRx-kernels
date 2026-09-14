@@ -1465,8 +1465,8 @@ _KERNELS = {}
 
 
 def _compile(cfg):
-    kern = _KERNELS.get(cfg)
-    if kern is None:
+    compiled_kernel = _KERNELS.get(cfg)
+    if compiled_kernel is None:
         keys = (
             "fp8", "h_total", "h_valid", "groups", "q_tokens", "ktot", "splits", "bpc", "nstage",
             "swa_rows", "comp_rows", "n_items",
@@ -1474,9 +1474,9 @@ def _compile(cfg):
         kernel = make_kernel(**dict(zip(keys, cfg)))
         target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
         with target:
-            kern = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
-        _KERNELS[cfg] = kern
-    return kern
+            compiled_kernel = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
+        _KERNELS[cfg] = compiled_kernel
+    return compiled_kernel
 
 
 def _num_sms():

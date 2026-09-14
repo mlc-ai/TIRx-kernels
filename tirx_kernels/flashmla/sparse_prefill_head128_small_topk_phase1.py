@@ -333,7 +333,7 @@ def make_kernel(
     @txl.kernel(
         warps=16, arch="sm_100a", min_blocks_per_sm=1, grid=2 * s_q, host_prelude=host_prelude
     )
-    def sparse_flashmla_prefill_head128_small_topk_phase1_kern(
+    def sparse_flashmla_prefill_head128_small_topk_phase1_kernel(
         q: txl.gptr[txl.bf16, (s_q, B_H, D_QK)],
         kv: txl.gptr[txl.bf16, (s_kv * stride_kv_s_kv,)],
         indices: txl.gptr[txl.i32, (s_q * stride_indices_s_q,)],
@@ -1446,7 +1446,7 @@ def make_kernel(
 
         txl.cuda.cluster_sync()
 
-    return sparse_flashmla_prefill_head128_small_topk_phase1_kern.func.with_attr(
+    return sparse_flashmla_prefill_head128_small_topk_phase1_kernel.func.with_attr(
         "global_symbol", KERNEL_META["name"]
     ).with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
 
