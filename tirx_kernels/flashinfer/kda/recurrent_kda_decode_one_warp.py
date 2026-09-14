@@ -360,7 +360,7 @@ CONFIGS = [dict(cfg) for cfg in BENCH_CONFIGS] + [
 KERNEL_META = {
     "name": "recurrent_kda_decode_one_warp",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -784,9 +784,10 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for recurrent-KDA one-warp decode")
     capability = torch.cuda.get_device_capability(device)
-    if capability[0] != 10:
+    if capability[0] != 10 and capability != (11, 0):
         raise SkipTest(
-            f"recurrent-KDA one-warp decode targets compute capability 10.x, got {capability}"
+            "recurrent-KDA one-warp decode targets compute capability 10.x or 11.0, "
+            f"got {capability}"
         )
 
     spec = _specialization(kwargs)

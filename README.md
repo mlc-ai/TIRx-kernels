@@ -99,10 +99,10 @@ contract and results.
 Grouped by the FlashInfer Python entry point each port backs.
 
 - **`flashinfer.activation`:**
-  [`act_and_mul`](tirx_kernels/flashinfer/activation/act_and_mul.py),
+  [`act_and_mul`](tirx_kernels/flashinfer/activation/act_and_mul.py) ⟨+sm_110a⟩,
   [`silu_and_mul_nvfp4_experts_quantize`](tirx_kernels/flashinfer/activation/silu_and_mul_nvfp4_experts_quantize.py)
 - **`flashinfer.cascade`:**
-  [`merge_state`](tirx_kernels/flashinfer/cascade/merge_state.py)
+  [`merge_state`](tirx_kernels/flashinfer/cascade/merge_state.py) ⟨+sm_110a⟩
 - **`flashinfer.quantization`:**
   [`nvfp4_quantize`](tirx_kernels/flashinfer/quantization/nvfp4_quantize.py),
   [`nvfp4_quantize_per_token`](tirx_kernels/flashinfer/quantization/nvfp4_quantize_per_token.py),
@@ -127,7 +127,7 @@ Grouped by the FlashInfer Python entry point each port backs.
   [`selective_state_update_mtp_horizontal`](tirx_kernels/flashinfer/mamba/selective_state_update_mtp_horizontal.py) ⟨+sm_110a⟩
 - **`flashinfer.kda`:**
   [`flashkda_bf16_fused_m128`](tirx_kernels/flashinfer/kda/bf16_fused_m128.py),
-  [`recurrent_kda_decode_one_warp`](tirx_kernels/flashinfer/kda/recurrent_kda_decode_one_warp.py),
+  [`recurrent_kda_decode_one_warp`](tirx_kernels/flashinfer/kda/recurrent_kda_decode_one_warp.py) ⟨+sm_110a⟩,
   [`recurrent_kda_decode_grouped`](tirx_kernels/flashinfer/kda/recurrent_kda_decode_grouped.py),
   [`flashkda_decode_t1_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t1_precomputed.py),
   [`flashkda_decode_t2_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t2_precomputed.py),

@@ -15,15 +15,16 @@ token, ``min(d / 8, 1024)`` threads, 16-byte vectorized access, scalar
 remainder loop, and ``griddepcontrol`` PDL intrinsics.
 """
 
+import os
 from typing import Any
 
 import tirx_kernels.kern as K
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
 
 KERNEL_META = {
     "name": "act_and_mul",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -105,6 +106,28 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     n_vec = d // VEC_SIZE
     rem = d % (block_size * VEC_SIZE)
     rem_off = d - rem
+    thor_bf16 = dtype == "bfloat16" and os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a"
+    compact_vector_offset = thor_bf16 and num_tokens * (2 * d) < 2**32
+
+    def vector_offset(token, idx, stride):
+        if compact_vector_offset:
+            # The complete element offset fits in uint32; widen only for the pointer.
+            return K.cast(
+                K.cast(token, "uint32") * K.uint32(stride) + idx * K.uint32(VEC_SIZE), "int64"
+            )
+        return K.cast(token, "int64") * stride + K.cast(idx, "int64") * VEC_SIZE
+
+    def unpack_pair(dst, pair, word):
+        if thor_bf16:
+            # BF16 widening places its bits in the high half of an FP32 word.
+            K.ptx.mov.b32(dst[2 * pair], K.reinterpret("float32", K.shift_left(word, K.uint32(16))))
+            K.ptx.mov.b32(
+                dst[2 * pair + 1],
+                K.reinterpret("float32", K.bitwise_and(word, K.uint32(0xFFFF0000))),
+            )
+        else:
+            K.ptx.mov.b32(dst[2 * pair], _unpack_lo(word, dtype))
+            K.ptx.mov.b32(dst[2 * pair + 1], _unpack_hi(word, dtype))
 
     @K.kernel(warps=(block_size + 31) // 32, arch="sm_100a", grid=num_tokens)
     def act_and_mul(input_global: K.gptr[dtype, 2], out_global: K.gptr[dtype, 2]):
@@ -128,29 +151,19 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                 x_bits[1],
                 x_bits[2],
                 x_bits[3],
-                K.address_of(
-                    input_global[
-                        0, K.cast(token, "int64") * (2 * d) + K.cast(idx, "int64") * VEC_SIZE
-                    ]
-                ),
+                K.address_of(input_global[0, vector_offset(token, idx, 2 * d)]),
             )
             K.ptx.ld.global_.nc.v4.b32(
                 y_bits[0],
                 y_bits[1],
                 y_bits[2],
                 y_bits[3],
-                K.address_of(
-                    input_global[
-                        0, K.cast(token, "int64") * (2 * d) + K.cast(idx, "int64") * VEC_SIZE + d
-                    ]
-                ),
+                K.address_of(input_global[0, vector_offset(token, idx, 2 * d) + d]),
             )
             for p in range(4):
-                K.ptx.mov.b32(x_vec[2 * p], _unpack_lo(x_bits[p], dtype))
-                K.ptx.mov.b32(x_vec[2 * p + 1], _unpack_hi(x_bits[p], dtype))
+                unpack_pair(x_vec, p, x_bits[p])
             for p in range(4):
-                K.ptx.mov.b32(y_vec[2 * p], _unpack_lo(y_bits[p], dtype))
-                K.ptx.mov.b32(y_vec[2 * p + 1], _unpack_hi(y_bits[p], dtype))
+                unpack_pair(y_vec, p, y_bits[p])
             for i in range(8):
                 if act == "silu":
                     K.ptx.ex2.approx.ftz.f32(e_tmp, x_vec[i] * K.float32(-_LOG2E))
@@ -179,9 +192,7 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                 else:
                     K.ptx.cvt.rn.bf16x2.f32(o_bits[p], out_vec[2 * p + 1], out_vec[2 * p])
             K.ptx.st.global_.v4.b32(
-                K.address_of(
-                    out_global[0, K.cast(token, "int64") * d + K.cast(idx, "int64") * VEC_SIZE]
-                ),
+                K.address_of(out_global[0, vector_offset(token, idx, d)]),
                 o_bits[0],
                 o_bits[1],
                 o_bits[2],
