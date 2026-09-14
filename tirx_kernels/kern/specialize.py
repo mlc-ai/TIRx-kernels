@@ -11,8 +11,12 @@ requires but nothing else verifies.
 from __future__ import annotations
 
 import tvm
-from tvm_ffi import structural_map
 from tvm.script import tirx as T
+
+try:
+    from tvm_ffi import structural_map
+except ImportError:
+    structural_map = None
 
 from . import entry as _entry
 
@@ -380,7 +384,10 @@ class Specialize:
                 return stmt
             return new[0] if len(new) == 1 else tvm.tirx.SeqStmt(new, stmt.span)
 
-        body = structural_map(func.body, (tvm.tirx.SeqStmt, postorder))
+        if structural_map is not None:
+            body = structural_map(func.body, (tvm.tirx.SeqStmt, postorder))
+        else:
+            body = tvm.tirx.stmt_functor.ir_transform(func.body, None, postorder, ["tirx.SeqStmt"])
         return func.with_body(body)
 
     def finalize(self):
