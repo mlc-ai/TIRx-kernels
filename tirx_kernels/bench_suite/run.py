@@ -398,7 +398,6 @@ def write_run(
 BASELINE_IMPL_BY_KERNEL = {
     "fp16_bf16_gemm": "torch-cublas",
     "nvfp4_gemm": "flashinfer",
-    "flashkda_bf16_fused_m128": "flashinfer_m128",
     "deepgemm_sm100_fp8_paged_mqa_logits": "deepgemm",
     "sparse_flashmla_prefill_head64_phase1": "flashmla",
     "sparse_flashmla_prefill_head128_phase1": "flashmla",

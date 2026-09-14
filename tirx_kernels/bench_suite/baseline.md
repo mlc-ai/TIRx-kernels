@@ -3,7 +3,7 @@
 - Timestamp: `4`
 - Label:     `remote-baseline`
 - Git:       `{'tir': '7a8c0703', 'tirx-kernels': '52d04aed', 'tirx-bench-ci': None}`
-- Workloads: 271 ok, 0 failed
+- Workloads: 238 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -38,30 +38,6 @@ Grouped workloads show one row per config and one timing column per implementati
 | `t1` | tirx | 49.3324 | flashinfer_trtllm_fp8_block_scale_moe | 64.8516 | 1.315 | — |
 | `t14107` | tirx | 675.0185 | flashinfer_trtllm_fp8_block_scale_moe | 2318.1395 | 3.434 | — |
 | `t901` | tirx | 271.0422 | flashinfer_trtllm_fp8_block_scale_moe | 341.5536 | 1.260 | — |
-
-## cake_vsa_blk128_compact_sm100
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `m16384_n16384_h16_sel16_lse` | tirx | 427.5383 | flashinfer | 432.0306 | 1.011 | — |
-| `m32768_n32768_h24_sel32` | tirx | 2377.7613 | flashinfer | 2405.0680 | 1.011 | — |
-| `m4096_n4096_h8_sel8` | tirx | 36.9984 | flashinfer | 37.2053 | 1.006 | — |
-
-## cake_vsa_longseq_sm100
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `m16384_n32768_h8_sel32` | tirx | 339.5920 | flashinfer | 343.1110 | 1.010 | — |
-| `m4096_n16384_h8_sel1` | tirx | 16.8586 | flashinfer | 16.6366 | 0.987 | — |
-| `m8192_n32768_h8_sel192` | tirx | 996.3080 | flashinfer | 1003.1753 | 1.007 | — |
-
-## cake_vsa_ultrasparse_bsr_sm100
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `m131072_n32768_h8_sel6` | tirx | 500.4929 | flashinfer | 524.3966 | 1.048 | — |
-| `m262144_n131072_h8_sel6` | tirx | 1039.9807 | flashinfer | 1075.2621 | 1.034 | — |
-| `m80000_n8192_h8_sel6` | tirx | 307.1484 | flashinfer | 321.9290 | 1.048 | — |
 
 ## cudnn_sm100_bsa_backward_blk128
 
@@ -426,62 +402,6 @@ Grouped workloads show one row per config and one timing column per implementati
 | `bf16_e4m3_m64_h8192_xc_yc_pdl0_s1` | tirx | 3.3240 | flashinfer_cutedsl | 3.2919 | 0.990 | — |
 | `bf16_e5m2_m3_h1048576_xc_yc_pdl1_s1_cluster16_sync` | tirx | 16.6090 | flashinfer_cutedsl | 16.6953 | 1.005 | — |
 
-## flashkda_bf16_fused_m128
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `h64_mixed` | tirx | 267.2602 | flashinfer_m128 | 246.6408 | 0.923 | flashkda_raw=674.6022 |
-| `h96_fixed8192` | tirx | 501.0936 | flashinfer_m128 | 474.7650 | 0.947 | flashkda_raw=1088.5055 |
-| `h96_uniform` | tirx | 435.1291 | flashinfer_m128 | 393.4816 | 0.904 | flashkda_raw=720.7827 |
-
-## flashkda_decode_t1_precomputed
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `hv16h16_b128_s8` | tirx | 26.5421 | flashinfer_cake | 31.3697 | 1.182 | — |
-| `hv16h16_b1_s16` | tirx | 3.9732 | flashinfer_cake | 4.8230 | 1.214 | — |
-| `hv32h16_b32_s8` | tirx | 15.3485 | flashinfer_cake | 18.9134 | 1.232 | — |
-
-## flashkda_decode_t2_precomputed
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `hv12h12_b8_t2` | tirx | 6.3397 | flashinfer_cake | 8.2341 | 1.299 | — |
-| `hv16h16_b64_t2` | tirx | 25.0377 | flashinfer_cake | 29.5018 | 1.178 | — |
-| `hv32h16_b128_t2` | tirx | 81.4915 | flashinfer_cake | 94.9095 | 1.165 | — |
-
-## flashkda_decode_t3_lower_bound
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `hv16h16_b16_t3` | tirx | 13.3315 | flashinfer_cake | 13.9673 | 1.048 | — |
-| `hv16h16_b1_t3` | tirx | 5.5619 | flashinfer_cake | 5.8770 | 1.057 | — |
-| `hv16h16_b4_t3` | tirx | 6.6880 | flashinfer_cake | 6.8354 | 1.022 | — |
-
-## flashkda_decode_t4_precomputed
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `hv12h12_b8_t4` | tirx | 8.5967 | flashinfer_cake | 10.2990 | 1.198 | — |
-| `hv16h16_b64_t4` | tirx | 39.2970 | flashinfer_cake | 41.8347 | 1.065 | — |
-| `hv32h16_b128_t4` | tirx | 131.5728 | flashinfer_cake | 137.3647 | 1.044 | — |
-
-## flashkda_decode_t5_gram
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `hv32h16_b128_s1` | tirx | 159.1978 | flashinfer_cake | 159.7295 | 1.003 | — |
-| `hv32h16_b1_s8` | tirx | 7.0499 | flashinfer_cake | 9.0548 | 1.284 | — |
-| `hv32h16_b3_s4` | tirx | 8.6346 | flashinfer_cake | 9.8383 | 1.139 | — |
-
-## flashkda_decode_t6_gram
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `hv32h16_b128_s1` | tirx | 177.4392 | flashinfer_cake | 179.3353 | 1.011 | — |
-| `hv32h16_b1_s8` | tirx | 7.1819 | flashinfer_cake | 8.3343 | 1.160 | — |
-| `hv32h16_b3_s4` | tirx | 14.0978 | flashinfer_cake | 15.6588 | 1.111 | — |
-
 ## fp16_bf16_gemm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
@@ -729,11 +649,3 @@ Grouped workloads show one row per config and one timing column per implementati
 | `f32_r4_k128` | tirx | 4.8004 | flashinfer | 4.8560 | 1.012 | — |
 | `f32_r64_k2048` | tirx | 11.4025 | flashinfer | 11.5270 | 1.011 | — |
 | `f32_r64_k256` | tirx | 6.2369 | flashinfer | 6.7179 | 1.077 | — |
-
-## tinygemm2_sm100
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `b16_o2880_k2880` | tirx | 7.8855 | flashinfer_sm100 | 7.9961 | 1.014 | — |
-| `b1_o128_k720` | tirx | 2.9323 | flashinfer_sm100 | 2.9278 | 0.998 | — |
-| `b64_o4096_k3072` | tirx | 21.8806 | flashinfer_sm100 | 22.0385 | 1.007 | — |

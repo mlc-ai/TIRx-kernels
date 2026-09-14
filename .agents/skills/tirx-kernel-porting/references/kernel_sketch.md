@@ -9,8 +9,8 @@ Current canonical upstream sketch/kernel pairs:
 
 | sketch | corresponding TIRx kernel source |
 | --- | --- |
-| `.agents/sketch/flashkda_bf16_m128.md` | `tirx_kernels/flashkda/bf16_fused_m128.py` |
-| `.agents/sketch/gdn_prefill_sm100.md` | `tirx_kernels/attention/gdn_prefill_sm100.py` |
+| `.agents/sketch/flashinfer/kda/recurrent_kda_decode_one_warp.md` | `tirx_kernels/flashinfer/kda/recurrent_kda_decode_one_warp.py` |
+| `.agents/sketch/flashinfer/gdn_prefill/gdn_prefill_sm100.md` | `tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py` |
 
 Only files under the canonical upstream `.agents/sketch/` directory belong in
 this list. Do not treat kernel-local design notes or files named `*_sketch.md`
