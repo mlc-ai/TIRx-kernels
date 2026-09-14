@@ -15,13 +15,13 @@ replace the direct verdict. The same flag exists on
 registered kernel has one file. Files with `default_suite: true` select one to
 three representative single-GPU rows with `default: true`; curated three-row
 files label them `small`, `medium`, and `large`. The current default roster is
-319 rows across 108 device kernels: 265 rows from 90 kernels validated on
-`sm_100a`, `sm_103a`, and `sm_107a`, three rows each from fifteen
-single-architecture kernels (`sm_107a`-only Rubin ports, `sm_100a`-only Cake
-VSA, MSA and FlexAttention backward ports, `sm_103a`-only Cake VSA longseq,
-fast.cu NVFP4 GEMM, FP4 FA4 forward, MSA and FlexAttention forward ports), and
-three rows from the `sm_100a`/`sm_103a` FlexAttention hd256 forward. Thus an
-SM107 run selects 277 rows, an SM103 run 289, and an SM100 run 280.
+274 rows across 93 device kernels: 241 rows from 82 kernels validated on
+`sm_100a`, `sm_103a`, and `sm_107a`, three rows each from eight
+single-architecture kernels (`sm_107a`-only Rubin ports, the `sm_100a`-only
+FlexAttention backward port, `sm_103a`-only fast.cu NVFP4 GEMM, FP4 FA4
+forward, MSA and FlexAttention forward ports), and three rows from the
+`sm_100a`/`sm_103a` FlexAttention hd256 forward. Thus an SM107 run selects 253
+rows, an SM103 run 253, and an SM100 run 247.
 A run retains only rows registered for the server's exact architecture.
 
 With no `--workloads`, the suite writes the selected rows to

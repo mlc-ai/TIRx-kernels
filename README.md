@@ -149,35 +149,6 @@ Grouped by the FlashInfer Python entry point each port backs.
   [`radix_topk_single_cta`](tirx_kernels/flashinfer/topk/radix_topk_single_cta.py),
   [`stable_sort_topk_by_value`](tirx_kernels/flashinfer/topk/stable_sort_topk_by_value.py)
 
-#### Cake-generated kernels
-
-Ports of FlashInfer kernels that were themselves produced by Cake (the
-`backend="cake"` exports; upstream `csrc/cake_*`, the frozen generated
-`csrc/kda/flashkda_*` exports, the `csrc/blackwell_msa/` source exports, and the
-generated `csrc/tinygemm2_sm100.cu`).
-
-- **`flashinfer.kda`:**
-  [`flashkda_bf16_fused_m128`](tirx_kernels/flashinfer/kda/bf16_fused_m128.py),
-  [`flashkda_decode_t1_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t1_precomputed.py),
-  [`flashkda_decode_t2_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t2_precomputed.py),
-  [`flashkda_decode_t3_lower_bound`](tirx_kernels/flashinfer/kda/flashkda_decode_t3_lower_bound.py),
-  [`flashkda_decode_t4_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t4_precomputed.py),
-  [`flashkda_decode_t5_gram`](tirx_kernels/flashinfer/kda/flashkda_decode_t5_gram.py),
-  [`flashkda_decode_t6_gram`](tirx_kernels/flashinfer/kda/flashkda_decode_t6_gram.py)
-- **`flashinfer.cake_vsa`:**
-  [`cake_vsa_blk128_compact_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_blk128_compact_sm100.py) ⟨sm_100a⟩,
-  [`cake_vsa_ultrasparse_bsr_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_ultrasparse_bsr_sm100.py) ⟨sm_100a⟩,
-  [`cake_vsa_longseq_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_longseq_sm100.py) ⟨sm_100a⟩,
-  [`cake_vsa_longseq_sm103`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_longseq_sm103.py) ⟨sm_103a⟩
-- **`flashinfer.msa_ops`:**
-  [`blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103.py) ⟨sm_103a⟩,
-  [`blackwell_msa_decode_uniform_fp8_qkv_paged_sm100`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_decode_uniform_fp8_qkv_paged_sm100.py) ⟨sm_100a⟩,
-  [`blackwell_msa_long_prefill_paged_bf16_gqa16_direct_group_sm100`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_long_prefill_paged_bf16_gqa16_direct_group_sm100.py) ⟨sm_100a⟩,
-  [`blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103.py) ⟨sm_103a⟩,
-  [`blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103.py) ⟨sm_103a⟩
-- **`flashinfer.gemm`:**
-  [`tinygemm2_sm100`](tirx_kernels/flashinfer/gemm/tinygemm2_sm100.py)
-
 ### FlashMLA ports
 
 - **Sparse prefill:**
@@ -264,7 +235,7 @@ remain externally managed runtime/compiler dependencies.
 | `torch`          | all kernels                        | CUDA build matching your GPU.                          |
 | `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels and the MegaMoE timer. |
 | cuDNN Frontend (`cudnn`) | `cudnn_*` correctness and baselines | Source install pinned in the lock (v1.28.0); replaces any released `nvidia-cudnn-frontend` wheel, which lacks the CuTeDSL kernel sources. |
-| `flashinfer`     | all `flashinfer.*` ports, `tinygemm2_sm100`, `nvfp4_gemm` and `rmsnorm` baselines | Correctness reference and optimized baseline. |
+| `flashinfer`     | all `flashinfer.*` ports, `nvfp4_gemm` and `rmsnorm` baselines | Correctness reference and optimized baseline. |
 | `flash-attn` + CUTLASS DSL | `flash_attention_backward_sm100` baseline | Current SM100 forward/backward reference. |
 | SGLang CuTeDSL kernels (vendored, + CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | `sglang_cutedsl` benchmark reference; copied into `tirx_kernels/deepgemm/_sglang_cutedsl/`, no SGLang install needed. |
 | `flash_mla`      | `sparse_flashmla_*` / `flash_mla_sparse_fwd` baselines | Reference impls. |

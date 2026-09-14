@@ -138,13 +138,6 @@ def test_setmaxnreg_requires_pinned_entry_allocation():
     assert check_low_level_ir(build(1)).ok
 
 
-def test_fp8_msa_decode_satisfies_the_default_ir_contract():
-    from tirx_kernels.registry import load_kernel
-
-    kernel = load_kernel("blackwell_msa_decode_uniform_fp8_qkv_paged_sm100").get_kernel()
-    assert check_low_level_ir(kernel).ok
-
-
 @pytest.mark.parametrize("deterministic,num_q_heads", [(False, 1), (True, 1), (False, 2)])
 def test_flex_backward_cooperative_register_roles_are_valid(deterministic, num_q_heads):
     from tirx_kernels.registry import load_kernel
