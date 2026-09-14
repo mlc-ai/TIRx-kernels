@@ -48,8 +48,8 @@ contract and results.
   [`agent_evolved_msa_decode_multishape`](tirx_kernels/agent_evolved/msa_decode_multishape.py) ⟨sm_100a⟩
 - **VSA forward:**
   [`agent_evolved_vsa_multishape`](tirx_kernels/agent_evolved/vsa_multishape.py) ⟨sm_100a⟩
-- **DeepSeek-V4 sparse MLA prefill:**
-  [`agent_evolved_mla_dsv4_prefill_b2`](tirx_kernels/agent_evolved/mla_dsv4_prefill_b2.py) ⟨sm_100a⟩
+- **DeepSeek-V4 sparse MLA:**
+  [`agent_evolved_mla_dsv4_multishape`](tirx_kernels/agent_evolved/mla_dsv4_multishape.py) ⟨sm_100a⟩
 
 ### cuDNN Frontend ports
 
