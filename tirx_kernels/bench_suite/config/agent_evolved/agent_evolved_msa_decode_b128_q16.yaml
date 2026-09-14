@@ -1,3 +1,0 @@
-kernel: agent_evolved_msa_decode_b128_q16
-configs:
-  - {config: b128_q16_kv4096_h64, default: true, timer: proton}
