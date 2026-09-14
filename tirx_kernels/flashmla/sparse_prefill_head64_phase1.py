@@ -388,7 +388,7 @@ def make_kernel(
         return kv_part1, kv_part0, out_part1, out_part0, q_nope, q_rope
 
     @txl.kernel(warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=s_q, host_prelude=host_prelude)
-    def sparse_flashmla_prefill_head64_phase1_kern(
+    def sparse_flashmla_prefill_head64_phase1_kernel(
         q: txl.gptr[txl.bf16, (s_q, h_q, d_qk)],
         kv: txl.gptr[txl.bf16, (s_kv * stride_kv_s_kv,)],
         indices: txl.gptr[txl.i32, (s_q * stride_indices_s_q,)],
@@ -428,7 +428,7 @@ def make_kernel(
         # ---- descriptor prefetch — orig:478-496 --------------------------
         # Six separate `if warp_idx == 0: if elect_sync():` guards, kept as six
         # rather than merged: a collective keeps the original's branch and loop
-        # placement exactly (KERN_PORTING.md §8 G3).
+        # placement exactly.
         def prefetch(tensor_map):
             with txl.If(warp_idx == 0), txl.Then():
                 with txl.If(txl.cuda.elect_sync()), txl.Then():
@@ -661,7 +661,7 @@ def make_kernel(
         # Role bodies. Defined as closures so the five `with role:` blocks
         # below stay *back to back* with nothing at CTA scope between them —
         # adjacency is what lets txl.specialize fold them into one else-if
-        # chain (KERN_PORTING.md §8).
+        # chain.
         # ==================================================================
 
         def softmax_and_epilogue():
@@ -733,8 +733,7 @@ def make_kernel(
                     # An UNANNOTATED assignment in the original (orig:729), which
                     # is a declared one-element local, not a `txl.let` -- the
                     # call-site census caught this as 16 missing `alignas(64)
-                    # int` declarations (KERN_PORTING.md §8, "read the
-                    # assignments, not the annotations").
+                    # int` declarations.
                     exchange_offset = txl.local_scalar(
                         "int32", init=exchange_i * 32 * 4 + lane_idx * 4
                     )
@@ -1448,7 +1447,7 @@ def make_kernel(
         with r_k_rope:
             k_rope_loader()
 
-    return sparse_flashmla_prefill_head64_phase1_kern
+    return sparse_flashmla_prefill_head64_phase1_kernel
 
 
 def _make_kernel_for(**kwargs: Any):

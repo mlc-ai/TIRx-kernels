@@ -371,7 +371,7 @@ def make_kernel(M, N, KDIM):
     TMEM_LD = _TMEM_LD_X2 if EPI_TILE == 16 else _TMEM_LD_X4 if EPI_TILE == 32 else _TMEM_LD_X8
 
     @txl.kernel(warps=NUM_WARPS, arch="sm_100a", grid=SM_COUNT)
-    def nvfp4_gemm_kern(
+    def nvfp4_gemm_kernel(
         A_tensor_map: txl.TensorMap,
         B_tensor_map: txl.TensorMap,
         SFA_tensor_map: txl.TensorMap,
@@ -846,7 +846,7 @@ def make_kernel(M, N, KDIM):
                 tmem_dealloc_addr, txl.uint32(512)
             )
 
-    return nvfp4_gemm_kern
+    return nvfp4_gemm_kernel
 
 
 TIRX_CONFIGS = {

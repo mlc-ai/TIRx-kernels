@@ -437,7 +437,7 @@ def make_kernel(
         )
         return (kv_v_part1, kv_v_part0, kv_k_part1, kv_k_part0, out_part1, out_part0, q_tensormap)
 
-    def sparse_flashmla_prefill_head128_phase1_kern(
+    def sparse_flashmla_prefill_head128_phase1_kernel(
         q, kv, indices, attn_sink, topk_length, out, max_logits, lse, *, host
     ):
         (
@@ -1497,7 +1497,7 @@ def make_kernel(
             with valid:
                 run_wg3_role(False)
 
-    sparse_flashmla_prefill_head128_phase1_kern.__annotations__ = {
+    sparse_flashmla_prefill_head128_phase1_kernel.__annotations__ = {
         "q": txl.gptr[txl.bf16, (s_q, h_q, d_qk)],
         "kv": txl.gptr[txl.bf16, (s_kv * stride_kv_s_kv,)],
         "indices": txl.gptr[txl.i32, (s_q * stride_indices_s_q,)],
@@ -1509,7 +1509,7 @@ def make_kernel(
     }
     return txl.kernel(
         warps=16, arch="sm_100a", min_blocks_per_sm=1, grid=2 * s_q, host_prelude=host_prelude
-    )(sparse_flashmla_prefill_head128_phase1_kern)
+    )(sparse_flashmla_prefill_head128_phase1_kernel)
 
 
 def get_kernel(**kwargs: Any):
