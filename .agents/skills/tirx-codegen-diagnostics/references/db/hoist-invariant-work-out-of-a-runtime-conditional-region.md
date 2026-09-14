@@ -20,7 +20,7 @@ and index that array inside the guarded block.
 ```python
 # before: the swizzled store offsets are iteration-invariant, but the
 # guard stops the compiler from hoisting them.
-with K.If(do_snapshot), K.Then():
+with txl.If(do_snapshot), txl.Then():
     for sub in range(SUBTILES):
         for group in range(GROUPS):
             column = sub * SUB_COLS + group * 8
@@ -29,10 +29,10 @@ with K.If(do_snapshot), K.Then():
                 + row * ROW_ELEMS
                 + _swizzle_xor_128b(row, column % ATOM)
             )
-            K.ptx.st.shared.v4.b32(arena.ptr_to([BASE + element * 2]), *words)
+            txl.ptx.st.shared.v4.b32(arena.ptr_to([BASE + element * 2]), *words)
 
 # after: materialized once per role; the guarded block only indexes.
-snapshot_off = K.alloc_local((SUBTILES * GROUPS,), "int32")
+snapshot_off = txl.alloc_local((SUBTILES * GROUPS,), "int32")
 for sub in range(SUBTILES):
     for group in range(GROUPS):
         column = sub * SUB_COLS + group * 8
@@ -41,12 +41,12 @@ for sub in range(SUBTILES):
             + row * ROW_ELEMS
             + _swizzle_xor_128b(row, column % ATOM)
         )
-        K.assign(snapshot_off[sub * GROUPS + group], BASE + element * 2)
+        txl.assign(snapshot_off[sub * GROUPS + group], BASE + element * 2)
 ...
-with K.If(do_snapshot), K.Then():
+with txl.If(do_snapshot), txl.Then():
     for sub in range(SUBTILES):
         for group in range(GROUPS):
-            K.ptx.st.shared.v4.b32(
+            txl.ptx.st.shared.v4.b32(
                 arena.ptr_to([snapshot_off[sub * GROUPS + group]]), *words
             )
 ```

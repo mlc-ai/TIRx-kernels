@@ -16,20 +16,20 @@ Emit the special-register read where it is consumed instead of carrying it.
 
 ```python
 # before: one asm-volatile read lives across every role's persistent loop.
-num_bids = K.local_scalar("uint32", init=K.cuda.mov_sreg(32, "nctaid.x"))
+num_bids = txl.local_scalar("uint32", init=txl.cuda.mov_sreg(32, "nctaid.x"))
 ...
-K.assign(tile_idx, tile_idx + num_bids)
+txl.assign(tile_idx, tile_idx + num_bids)
 
 # after: the read is re-issued at each increment; nothing stays live.
 def num_bids():
-    return K.cast(K.cuda.mov_sreg(32, "nctaid.x"), "uint32")
+    return txl.cast(txl.cuda.mov_sreg(32, "nctaid.x"), "uint32")
 ...
-K.assign(tile_idx, tile_idx + num_bids())
+txl.assign(tile_idx, tile_idx + num_bids())
 ```
 
 ## Rationale
 
-`K.cuda.mov_sreg` lowers to `asm volatile("mov.u32 %0, %nctaid.x")`. A volatile
+`txl.cuda.mov_sreg` lowers to `asm volatile("mov.u32 %0, %nctaid.x")`. A volatile
 asm result cannot be rematerialized, so under a tight role budget ptxas spills
 it to local memory and refills it at every use; a plain PTX special-register
 read (what nvcc emits for `gridDim.x`) is rematerialized as `S2R` for free. In a

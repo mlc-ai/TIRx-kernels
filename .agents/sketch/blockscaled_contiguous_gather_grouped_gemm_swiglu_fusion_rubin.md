@@ -545,7 +545,7 @@ first-class layouts to any storage object.
 
 ## Executable and validation contract
 
-The device definition imports only `tirx_kernels.kern as K`, uses one rank-one
+The device definition imports only `tirx_kernels.tirx_lite as txl`, uses one rank-one
 dynamic `u8` shared arena with scalar offsets, and contains no inline CUDA
 function-call escape. Correctness compares independent TIRx and frozen-source
 outputs at physical-byte precision where the source is deterministic, checks

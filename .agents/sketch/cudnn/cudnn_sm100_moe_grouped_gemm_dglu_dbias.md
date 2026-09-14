@@ -239,7 +239,7 @@ Each is one PTX instruction, one tile, or one loop of one family:
 # Storage and synchronization objects
 # source 568-611, 1189-1250; PTX 14, 118-243
 # ==========================================================================
-# One flat `u8` arena, `K.alloc_buffer((SMEM_BYTES,), K.u8, scope="shared.dyn",
+# One flat `u8` arena, `txl.alloc_buffer((SMEM_BYTES,), txl.u8, scope="shared.dyn",
 # align=1024)`, carved by explicit scalar byte offsets in upstream declaration
 # order. Anchor byte map, read back from the export's TMA destinations:
 #

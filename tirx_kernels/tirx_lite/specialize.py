@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
-"""Warp-role partition of the CTA exposed as ``K.specialize``.
+"""Warp-role partition of the CTA exposed as ``txl.specialize``.
 
 The primitive owns the one kernel-level structural fact neither PTX nor the
 in-tree ``lang`` helpers carry: which warps run which role. It emits the
@@ -39,7 +39,7 @@ def _validate_register_target(session, kind, name, regs):
     if session.min_blocks_per_sm is None:
         raise ValueError(
             f"{kind} {name!r} asks for regs={regs}, but setmaxnreg requires "
-            "K.kernel(..., min_blocks_per_sm=...) to pin the entry allocation"
+            "txl.kernel(..., min_blocks_per_sm=...) to pin the entry allocation"
         )
 
 
@@ -60,7 +60,7 @@ class RegisterScope:
         T.evaluate(T.ptx[f"setmaxnreg.{direction}.sync.aligned.u32"](self.regs))
 
     def __repr__(self):
-        return f"<K.register_scope {self.name} warps={self.warps} regs={self.regs}>"
+        return f"<txl.register_scope {self.name} warps={self.warps} regs={self.regs}>"
 
 
 class WarpGroup:
@@ -98,7 +98,7 @@ class WarpGroup:
         return False
 
     def __repr__(self):
-        return f"<K.warpgroup {self.name} warps={self.warps} regs={self.regs}>"
+        return f"<txl.warpgroup {self.name} warps={self.warps} regs={self.regs}>"
 
 
 class Role:
@@ -150,7 +150,7 @@ class Role:
         # else-if chain (Specialize.chain_dispatch). Read back off the frame
         # rather than kept from above because `warp_id == lo` hands back an
         # EqualOp proxy, and the node the frame holds is the converted one.
-        # Identity, not structure: a user-written `K.If` spelling the same
+        # Identity, not structure: a user-written `txl.If` spelling the same
         # predicate is a different node and must not be chained.
         self.owner.dispatch.append((self._frames[0].condition, self))
         for frame in self._frames:
@@ -169,7 +169,7 @@ class Role:
         return False
 
     def __repr__(self):
-        return f"<K.role {self.name} warps={self.warps} regs={self.regs}>"
+        return f"<txl.role {self.name} warps={self.warps} regs={self.regs}>"
 
 
 class Specialize:
@@ -265,7 +265,7 @@ class Specialize:
         """Declare a register transition without owning functional dispatch.
 
         The caller emits the scope at the original temporal point and under
-        the original warp-uniform predicate. K emits only ``setmaxnreg`` and
+        the original warp-uniform predicate. txl emits only ``setmaxnreg`` and
         owns its participant metadata and CTA register-budget validation.
         """
         warps = sorted(set(warps)) if not isinstance(warps, int) else [warps]
@@ -313,7 +313,7 @@ class Specialize:
         two adjacent blocks (``with cg0: ...`` twice) means "do both on those
         warps"; chaining that would make the second body unreachable.
 
-        Off entirely under ``K.specialize(chain_dispatch=False)``, which is a
+        Off entirely under ``txl.specialize(chain_dispatch=False)``, which is a
         measured trade rather than a preference — see :func:`specialize`.
         """
         if not self.chaining or len(self.dispatch) < 2:
@@ -324,7 +324,7 @@ class Specialize:
 
             The ``else_case is not None`` arm is **defensive and currently
             unreachable**: a role guard is built by :meth:`Role.__enter__` as
-            ``If`` + ``Then`` only, and ``K.Else`` cannot be attached to it
+            ``If`` + ``Then`` only, and ``txl.Else`` cannot be attached to it
             (the frames close on ``__exit__``, and the role is not exposed
             during the window where an else could be opened). It is written
             anyway because ``chain_run`` below *discards* ``else_case`` when it
@@ -402,7 +402,7 @@ class Specialize:
             raise ValueError(f"roles claim warp(s) {extra} but the kernel is {total} warps wide")
         if missing:
             raise ValueError(
-                f"warp(s) {missing} belong to no role; K.specialize must partition "
+                f"warp(s) {missing} belong to no role; txl.specialize must partition "
                 f"0..{total - 1} exactly"
             )
 
@@ -553,7 +553,7 @@ def specialize(chain_dispatch: bool = True):
     """
     session = _entry.current()
     if session.specialize is not None:
-        raise RuntimeError("K.specialize() was already called for this kernel")
+        raise RuntimeError("txl.specialize() was already called for this kernel")
     session.specialize = Specialize(session, chain_dispatch=chain_dispatch)
     return session.specialize
 
@@ -562,7 +562,7 @@ def _active_role():
     session = _entry.current()
     if session.specialize is None or session.specialize.active is None:
         raise RuntimeError(
-            "K.tid_in_role() / K.warp_id_in_role() are only defined inside a `with role:` block"
+            "txl.tid_in_role() / txl.warp_id_in_role() are only defined inside a `with role:` block"
         )
     return session, session.specialize.active
 

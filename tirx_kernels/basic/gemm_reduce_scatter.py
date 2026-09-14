@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-import tirx_kernels.kern as Kern
+import tirx_kernels.tirx_lite as txl
 import tvm
 from tvm.ir.type import PointerType, PrimType
 
@@ -137,8 +137,8 @@ class GemmRSConfig:
 def _mapa_u64_tx(ptr, rank):
     """`mapa.u64` into a declared register, returned as an ordinary value."""
 
-    mapped = Kern.local_scalar("uint64")
-    Kern.ptx.mapa.u64(mapped, ptr, Kern.uint32(rank))
+    mapped = txl.local_scalar("uint64")
+    txl.ptx.mapa.u64(mapped, ptr, txl.uint32(rank))
     return mapped
 
 
@@ -245,16 +245,16 @@ class SchedulerPipeline:
     """One CTA0 producer publishes each task to both cluster CTAs."""
 
     def __init__(self, smem, cbx):
-        self.p2c = Kern.MBarrier(smem.pool, 1)
+        self.p2c = txl.MBarrier(smem.pool, 1)
         self.p2c.init(1)
-        self.c2p = Kern.MBarrier(smem.pool, 1, leader=(Kern.thread_id() == 0) & (cbx == 0))
+        self.c2p = txl.MBarrier(smem.pool, 1, leader=(txl.thread_id() == 0) & (cbx == 0))
         self.c2p.init(C2P_THREAD_COUNT)
-        self.p2c_state = Kern.PipelineState(1, phase=0)
-        self.c2p_state = Kern.PipelineState(1, phase=1)
+        self.p2c_state = txl.PipelineState(1, phase=0)
+        self.c2p_state = txl.PipelineState(1, phase=1)
 
 
 def int_var(scope="local", dtype="int32", align=4):
-    buf = Kern.alloc_buffer([1], dtype, scope=scope, align=align)
+    buf = txl.alloc_buffer([1], dtype, scope=scope, align=align)
     return buf
 
 
@@ -262,10 +262,10 @@ class MPMCQueue:
     def __init__(
         self,
         capacity: int,
-        task_types: Kern.Buffer,
-        task_idxs: Kern.Buffer,
-        head: Kern.Buffer,
-        tail: Kern.Buffer,
+        task_types: txl.Buffer,
+        task_idxs: txl.Buffer,
+        head: txl.Buffer,
+        tail: txl.Buffer,
         num_tot_tasks: int,
     ):
         if capacity & capacity - 1:
@@ -280,7 +280,7 @@ class MPMCQueue:
         self.num_tot_tasks = num_tot_tasks
 
     def enqueue(self, signal_rank: int, task_type: int, *task_idx: int):
-        Kern.cuda.func_call(
+        txl.cuda.func_call(
             "enqueue_remote",
             self.task_types.ptr_to([0]),
             self.task_idxs.ptr_to([0, 0]),
@@ -296,70 +296,70 @@ class MPMCQueue:
 class GEMMMPMCQueue(MPMCQueue):
     def dequeue(
         self,
-        fetched_task_type: Kern.Buffer,
-        fetched_task_idx0: Kern.Buffer,
-        fetched_task_idx1: Kern.Buffer,
+        fetched_task_type: txl.Buffer,
+        fetched_task_idx0: txl.Buffer,
+        fetched_task_idx1: txl.Buffer,
     ):
-        Kern.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), Kern.int32(1))
-        with Kern.If(self.head_r[0] < self.num_tot_tasks):
-            with Kern.Then():
-                Kern.assign(self.masked_pos[0], self.head_r[0] & self.mask)
-                Kern.ptx.ld.acquire.sys.global_.b32(
+        txl.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), txl.int32(1))
+        with txl.If(self.head_r[0] < self.num_tot_tasks):
+            with txl.Then():
+                txl.assign(self.masked_pos[0], self.head_r[0] & self.mask)
+                txl.ptx.ld.acquire.sys.global_.b32(
                     fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
                 )
-                with Kern.While(fetched_task_type[0] < 0):
-                    Kern.cuda.nano_sleep(40)
-                    Kern.ptx.ld.acquire.sys.global_.b32(
+                with txl.While(fetched_task_type[0] < 0):
+                    txl.cuda.nano_sleep(40)
+                    txl.ptx.ld.acquire.sys.global_.b32(
                         fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
                     )
-                Kern.ptx.st.global_.s32(
-                    self.task_types.ptr_to([self.masked_pos[0]]), Kern.int32(-1)
+                txl.ptx.st.global_.s32(
+                    self.task_types.ptr_to([self.masked_pos[0]]), txl.int32(-1)
                 )
-                Kern.ptx.ld.global_.s32(
+                txl.ptx.ld.global_.s32(
                     fetched_task_idx0[0], self.task_idxs.ptr_to([self.masked_pos[0], 0])
                 )
-                Kern.ptx.ld.global_.s32(
+                txl.ptx.ld.global_.s32(
                     fetched_task_idx1[0], self.task_idxs.ptr_to([self.masked_pos[0], 1])
                 )
-            with Kern.Else():
-                Kern.assign(fetched_task_type[0], -1)
+            with txl.Else():
+                txl.assign(fetched_task_type[0], -1)
 
 
 class RSMPMCQueue(MPMCQueue):
     def dequeue(
         self,
-        fetched_task_type: Kern.Buffer,
-        fetched_task_idx0: Kern.Buffer,
-        fetched_task_idx1: Kern.Buffer,
-        rs_rem: Kern.Buffer,
+        fetched_task_type: txl.Buffer,
+        fetched_task_idx0: txl.Buffer,
+        fetched_task_idx1: txl.Buffer,
+        rs_rem: txl.Buffer,
     ):
-        with Kern.If(rs_rem[0] >= 0):
-            with Kern.Then():
-                Kern.assign(self.head_r[0], rs_rem[0])
-                Kern.assign(rs_rem[0], -1)
-            with Kern.Else():
-                Kern.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), Kern.int32(1))
-        with Kern.If(self.head_r[0] < self.num_tot_tasks):
-            with Kern.Then():
-                Kern.assign(self.masked_pos[0], self.head_r[0] & self.mask)
-                Kern.ptx.ld.global_.acquire.sys.b32(
+        with txl.If(rs_rem[0] >= 0):
+            with txl.Then():
+                txl.assign(self.head_r[0], rs_rem[0])
+                txl.assign(rs_rem[0], -1)
+            with txl.Else():
+                txl.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), txl.int32(1))
+        with txl.If(self.head_r[0] < self.num_tot_tasks):
+            with txl.Then():
+                txl.assign(self.masked_pos[0], self.head_r[0] & self.mask)
+                txl.ptx.ld.global_.acquire.sys.b32(
                     fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
                 )
-                with Kern.If(fetched_task_type[0] < 0):
-                    with Kern.Then():
-                        Kern.assign(rs_rem[0], self.head_r[0])
-                    with Kern.Else():
-                        Kern.ptx.st.global_.s32(
-                            self.task_types.ptr_to([self.masked_pos[0]]), Kern.int32(-1)
+                with txl.If(fetched_task_type[0] < 0):
+                    with txl.Then():
+                        txl.assign(rs_rem[0], self.head_r[0])
+                    with txl.Else():
+                        txl.ptx.st.global_.s32(
+                            self.task_types.ptr_to([self.masked_pos[0]]), txl.int32(-1)
                         )
-                        Kern.ptx.ld.global_.s32(
+                        txl.ptx.ld.global_.s32(
                             fetched_task_idx0[0], self.task_idxs.ptr_to([self.masked_pos[0], 0])
                         )
-                        Kern.ptx.ld.global_.s32(
+                        txl.ptx.ld.global_.s32(
                             fetched_task_idx1[0], self.task_idxs.ptr_to([self.masked_pos[0], 1])
                         )
-            with Kern.Else():
-                Kern.assign(fetched_task_type[0], -1)
+            with txl.Else():
+                txl.assign(fetched_task_type[0], -1)
 
 
 class MixedDynamicTileScheduler:
@@ -367,7 +367,7 @@ class MixedDynamicTileScheduler:
         self,
         gemm_queue: GEMMMPMCQueue,
         rs_queue: RSMPMCQueue,
-        packed_value: Kern.Buffer,
+        packed_value: txl.Buffer,
         sch_pipe: SchedulerPipeline,
     ):
         self.gemm_queue = gemm_queue
@@ -380,10 +380,10 @@ class MixedDynamicTileScheduler:
         self.packed_value = packed_value
 
     def publish(self, cbx, lane_id):
-        with Kern.If(lane_id == 0):
-            with Kern.Then():
-                with Kern.If(cbx == 0):
-                    with Kern.Then():
+        with txl.If(lane_id == 0):
+            with txl.Then():
+                with txl.If(cbx == 0):
+                    with txl.Then():
                         self.sch_pipe.c2p.wait(0, self.sch_pipe.c2p_state.phase)
                         self.rs_queue.dequeue(
                             self.fetched_task_type,
@@ -391,28 +391,28 @@ class MixedDynamicTileScheduler:
                             self.fetched_task_idx1,
                             self.rs_rem,
                         )
-                        with Kern.If(self.fetched_task_type[0] < 0):
-                            with Kern.Then():
+                        with txl.If(self.fetched_task_type[0] < 0):
+                            with txl.Then():
                                 self.gemm_queue.dequeue(
                                     self.fetched_task_type,
                                     self.fetched_task_idx0,
                                     self.fetched_task_idx1,
                                 )
-                        Kern.ptx.st.shared__cluster.v4.b32(
+                        txl.ptx.st.shared__cluster.v4.b32(
                             self.packed_value.ptr_to([0]),
                             self.rs_rem[0],
                             self.fetched_task_type[0],
                             self.fetched_task_idx0[0],
                             self.fetched_task_idx1[0],
                         )
-                        Kern.cuda.thread_fence()
+                        txl.cuda.thread_fence()
                         self.sch_pipe.p2c.arrive(0, remote=0)
                         self.sch_pipe.p2c.arrive(0, remote=1)
                         self.sch_pipe.c2p_state.advance()
 
     def receive(self):
         self.sch_pipe.p2c.wait(0, self.sch_pipe.p2c_state.phase)
-        Kern.ptx.ld.shared__cluster.v4.b32(
+        txl.ptx.ld.shared__cluster.v4.b32(
             self.rs_rem[0],
             self.fetched_task_type[0],
             self.fetched_task_idx0[0],
@@ -423,7 +423,7 @@ class MixedDynamicTileScheduler:
         self.sch_pipe.p2c_state.advance()
 
     def init(self):
-        Kern.assign(self.rs_rem[0], -1)
+        txl.assign(self.rs_rem[0], -1)
 
     def valid(self):
         return tvm.tirx.any(self.fetched_task_type[0] >= 0, self.rs_rem[0] >= 0)
@@ -433,28 +433,28 @@ class Semaphore:
     def __init__(self, cnt, buffer):
         self.cnt = cnt
         self.sem = buffer
-        self.state = Kern.alloc_buffer([1], "uint64", scope="local", align=8)
+        self.state = txl.alloc_buffer([1], "uint64", scope="local", align=8)
 
     def semaphore_notify(self, signal_rank, tid, m_idx, n_idx, rs_queue):
-        with Kern.If(tid % 128 == 0):
-            with Kern.Then():
-                Kern.ptx.fence.sc.sys()
-                Kern.assign(
+        with txl.If(tid % 128 == 0):
+            with txl.Then():
+                txl.ptx.fence.sc.sys()
+                txl.assign(
                     self.state[0],
                     (
-                        Kern.cuda.func_call(
+                        txl.cuda.func_call(
                             "semaphore_notify_remote",
                             signal_rank,
                             self.sem.ptr_to([m_idx, n_idx]),
-                            Kern.uint64(1),
+                            txl.uint64(1),
                             source_code=semaphore_notify_remote,
                             return_type="uint64",
                         )
                         + 1
                     ),
                 )
-                with Kern.If(self.state[0] == self.cnt):
-                    with Kern.Then():
+                with txl.If(self.state[0] == self.cnt):
+                    with txl.Then():
                         rs_queue.enqueue(signal_rank, TaskType.RS.value, m_idx, n_idx)
 
 
@@ -474,10 +474,10 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
     RS_N_CLUSTERS = config.rs_n_clusters
 
     def host_prelude(params):
-        A_tensor_map = Kern.stack_alloca("tensormap", 1)
-        B_tensor_map = Kern.stack_alloca("tensormap", 1)
-        D_tensor_map = Kern.stack_alloca("tensormap", 1)
-        Kern.call_packed(
+        A_tensor_map = txl.stack_alloca("tensormap", 1)
+        B_tensor_map = txl.stack_alloca("tensormap", 1)
+        D_tensor_map = txl.stack_alloca("tensormap", 1)
+        txl.call_packed(
             "runtime.cuTensorMapEncodeTiled",
             A_tensor_map,
             a_type,
@@ -495,7 +495,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
             0,
             0,
         )
-        Kern.call_packed(
+        txl.call_packed(
             "runtime.cuTensorMapEncodeTiled",
             B_tensor_map,
             b_type,
@@ -513,7 +513,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
             0,
             0,
         )
-        Kern.call_packed(
+        txl.call_packed(
             "runtime.cuTensorMapEncodeTiled",
             D_tensor_map,
             d_type,
@@ -533,7 +533,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         )
         return A_tensor_map, B_tensor_map, D_tensor_map
 
-    @Kern.kernel(
+    @txl.kernel(
         warps=NUM_THREADS // 32,
         arch="sm_100a",
         min_blocks_per_sm=1,
@@ -542,20 +542,20 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         allowed_func_calls=_NVSHMEM_RUNTIME_FUNC_CALLS,
     )
     def test_mma_ss_tma_2sm_persistent(
-        A: Kern.gptr[Kern.f16, (M, K_LOCAL)],
-        B: Kern.gptr[Kern.f16, (N, K_LOCAL)],
-        gemm_out: Kern.gptr[Kern.f16, (M, N)],
-        semaphore: Kern.gptr[Kern.u64, (LOCAL_M // TILE_M, N // TILE_N)],
-        out: Kern.gptr[Kern.f16, (LOCAL_M, N)],
-        gemm_task_types: Kern.gptr[Kern.i32, (CAPACITY,)],
-        gemm_task_idxs: Kern.gptr[Kern.i32, (CAPACITY, 2)],
-        gemm_head: Kern.gptr[Kern.i32, (1,)],
-        gemm_tail: Kern.gptr[Kern.i32, (1,)],
-        rs_task_types: Kern.gptr[Kern.i32, (CAPACITY,)],
-        rs_task_idxs: Kern.gptr[Kern.i32, (CAPACITY, 2)],
-        rs_head: Kern.gptr[Kern.i32, (1,)],
-        rs_tail: Kern.gptr[Kern.i32, (1,)],
-        exit_barrier: Kern.gptr[Kern.u32, (2,)],
+        A: txl.gptr[txl.f16, (M, K_LOCAL)],
+        B: txl.gptr[txl.f16, (N, K_LOCAL)],
+        gemm_out: txl.gptr[txl.f16, (M, N)],
+        semaphore: txl.gptr[txl.u64, (LOCAL_M // TILE_M, N // TILE_N)],
+        out: txl.gptr[txl.f16, (LOCAL_M, N)],
+        gemm_task_types: txl.gptr[txl.i32, (CAPACITY,)],
+        gemm_task_idxs: txl.gptr[txl.i32, (CAPACITY, 2)],
+        gemm_head: txl.gptr[txl.i32, (1,)],
+        gemm_tail: txl.gptr[txl.i32, (1,)],
+        rs_task_types: txl.gptr[txl.i32, (CAPACITY,)],
+        rs_task_idxs: txl.gptr[txl.i32, (CAPACITY, 2)],
+        rs_head: txl.gptr[txl.i32, (1,)],
+        rs_tail: txl.gptr[txl.i32, (1,)],
+        exit_barrier: txl.gptr[txl.u32, (2,)],
         *,
         host,
     ):
@@ -573,21 +573,21 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         rs_tail = rs_tail.view(1)
         exit_barrier = exit_barrier.view(2)
 
-        cbx_expr, _ = Kern.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
+        cbx_expr, _ = txl.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
         cbx = cbx_expr
-        bx = Kern.cta_id()
-        warp_id_in_cta = Kern.warp_id()
+        bx = txl.cta_id()
+        warp_id_in_cta = txl.warp_id()
         wg_id = warp_id_in_cta // WARP_NUMBER
         warp_id = warp_id_in_cta % WARP_NUMBER
-        tid = Kern.thread_id()
-        lane_id = Kern.lane_id()
-        rank = Kern.alloc_local((1,), Kern.i32)
-        Kern.assign(rank[0], Kern.nvshmem.my_pe())
+        tid = txl.thread_id()
+        lane_id = txl.lane_id()
+        rank = txl.alloc_local((1,), txl.i32)
+        txl.assign(rank[0], txl.nvshmem.my_pe())
 
-        smem = Kern.smem_pool()
+        smem = txl.smem_pool()
         pool = smem.pool
-        tmem_addr = smem.alloc((1,), Kern.u32, align=4)
-        smem_pipe = Kern.Pipeline(
+        tmem_addr = smem.alloc((1,), txl.u32, align=4)
+        smem_pipe = txl.Pipeline(
             smem,
             PIPELINE_DEPTH,
             full="tma",
@@ -595,7 +595,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
             init_empty=NUM_CONSUMER,
             empty_phase_offset=1,
         )
-        tmem_pipe = Kern.Pipeline(
+        tmem_pipe = txl.Pipeline(
             smem,
             NUM_CONSUMER,
             full="tcgen05",
@@ -603,28 +603,28 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
             init_empty=128 * NUM_CONSUMER,
             empty_phase_offset=1,
         )
-        packed_buf = smem.alloc((4,), Kern.u32, align=16)
+        packed_buf = smem.alloc((4,), txl.u32, align=16)
         sch_pipe = SchedulerPipeline(smem, cbx)
         pool.move_base_to(SMEM_RESERVED_BYTES)
         A_smem = smem.alloc(
-            (PIPELINE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), a_type, swizzle=Kern.SW128B
+            (PIPELINE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), a_type, swizzle=txl.SW128B
         )
-        B_smem = smem.alloc((PIPELINE_DEPTH, BLK_N, BLK_K), b_type, swizzle=Kern.SW128B).buf
-        D_smem = smem.alloc((NUM_CONSUMER, BLK_M, EPI_TILE), d_type, swizzle=Kern.SW128B).buf
+        B_smem = smem.alloc((PIPELINE_DEPTH, BLK_N, BLK_K), b_type, swizzle=txl.SW128B).buf
+        D_smem = smem.alloc((NUM_CONSUMER, BLK_M, EPI_TILE), d_type, swizzle=txl.SW128B).buf
         if smem.bytes > SM100_SMEM_CAPACITY:
             raise ValueError(
                 f"GemmRS shared-memory usage {smem.bytes} exceeds {SM100_SMEM_CAPACITY} bytes"
             )
 
-        reg = Kern.alloc_local((TMEM_LD_SIZE,), Kern.f32)
-        reg_fp16 = Kern.alloc_local((TMEM_LD_SIZE // 2,), Kern.u32, align=16)
-        copy_words = Kern.alloc_local((4,), Kern.u32)
-        descA = Kern.alloc_local((1,), Kern.u64)
-        descB = Kern.alloc_local((1,), Kern.u64)
-        descI = Kern.alloc_local((1,), Kern.u32)
-        stage = Kern.alloc_local((1,), Kern.i32)
-        tmem_addr_local = Kern.alloc_local((1,), Kern.u32)
-        offset = Kern.alloc_local((1,), Kern.i32)
+        reg = txl.alloc_local((TMEM_LD_SIZE,), txl.f32)
+        reg_fp16 = txl.alloc_local((TMEM_LD_SIZE // 2,), txl.u32, align=16)
+        copy_words = txl.alloc_local((4,), txl.u32)
+        descA = txl.alloc_local((1,), txl.u64)
+        descB = txl.alloc_local((1,), txl.u64)
+        descI = txl.alloc_local((1,), txl.u32)
+        stage = txl.alloc_local((1,), txl.i32)
+        tmem_addr_local = txl.alloc_local((1,), txl.u32)
+        offset = txl.alloc_local((1,), txl.i32)
         sem = Semaphore(cnt=2 * WORLD_SIZE, buffer=semaphore)
         gemm_queue = GEMMMPMCQueue(
             CAPACITY,
@@ -638,16 +638,16 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
             CAPACITY, rs_task_types, rs_task_idxs, rs_head, rs_tail, RS_M_CLUSTERS * RS_N_CLUSTERS
         )
 
-        packed_ptr = Kern.reinterpret(
+        packed_ptr = txl.reinterpret(
             PointerType(PrimType("uint32")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)
         )
-        packed_value = Kern.decl_buffer((4,), "uint32", data=packed_ptr, scope="shared")
+        packed_value = txl.decl_buffer((4,), "uint32", data=packed_ptr, scope="shared")
         tile_scheduler = MixedDynamicTileScheduler(gemm_queue, rs_queue, packed_value, sch_pipe)
         smem_full_cta0 = smem_pipe.full.remote_view(0)
-        smem_cycle = Kern.PipelineState(1, phase=0)
-        tmem_cycle = Kern.PipelineState(1, phase=0)
+        smem_cycle = txl.PipelineState(1, phase=0)
+        tmem_cycle = txl.PipelineState(1, phase=0)
 
-        specialization = Kern.specialize(chain_dispatch=chain_dispatch)
+        specialization = txl.specialize(chain_dispatch=chain_dispatch)
         consumer = specialization.role("consumer", range(8), regs=None)
         mma_role = specialization.role("mma", [8, 9], regs=None, when=cbx == 0)
         specialization.role("idle", [10], regs=None)
@@ -660,8 +660,8 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
                 tile_scheduler.publish(cbx, lane_id)
             tile_scheduler.receive()
 
-        Kern.cuda.tcgen05.encode_instr_descriptor(
-            Kern.address_of(descI[0]),
+        txl.cuda.tcgen05.encode_instr_descriptor(
+            txl.address_of(descI[0]),
             d_dtype="float32",
             a_dtype=a_type,
             b_dtype=b_type,
@@ -672,48 +672,48 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
             trans_b=False,
             n_cta_groups=CTA_GROUP,
         )
-        with Kern.If((wg_id == 0) & (warp_id == 0)), Kern.Then():
-            Kern.ptx[f"tcgen05.alloc.cta_group::{CTA_GROUP}.sync.aligned.shared::cta.b32"](
-                Kern.address_of(tmem_addr[0]), Kern.uint32(N_COLS)
+        with txl.If((wg_id == 0) & (warp_id == 0)), txl.Then():
+            txl.ptx[f"tcgen05.alloc.cta_group::{CTA_GROUP}.sync.aligned.shared::cta.b32"](
+                txl.address_of(tmem_addr[0]), txl.uint32(N_COLS)
             )
-            Kern.cuda.warp_sync()
-        Kern.ptx.barrier.cluster.arrive()
-        Kern.ptx.barrier.cluster.wait()
-        Kern.cuda.cta_sync()
-        Kern.ptx.ld.shared.u32(tmem_addr_local[0], tmem_addr.ptr_to([0]))
-        Kern.cuda.trap_when_assert_failed(tmem_addr_local[0] == 0)
-        Kern.ptx.fence.proxy.async_.shared__cta()
-        Kern.ptx.fence.mbarrier_init.release.cluster()
+            txl.cuda.warp_sync()
+        txl.ptx.barrier.cluster.arrive()
+        txl.ptx.barrier.cluster.wait()
+        txl.cuda.cta_sync()
+        txl.ptx.ld.shared.u32(tmem_addr_local[0], tmem_addr.ptr_to([0]))
+        txl.cuda.trap_when_assert_failed(tmem_addr_local[0] == 0)
+        txl.ptx.fence.proxy.async_.shared__cta()
+        txl.ptx.fence.mbarrier_init.release.cluster()
         tile_scheduler.init()
         fetch_next()
 
         def partitioned_loop(main_loop, epilogue1, epilogue2):
-            with Kern.serial(PIPE_CYCLE) as ko:
-                with Kern.unroll(PIPELINE_DEPTH) as ks:
-                    Kern.assign(stage[0], ko * PIPELINE_DEPTH + ks)
+            with txl.serial(PIPE_CYCLE) as ko:
+                with txl.unroll(PIPELINE_DEPTH) as ks:
+                    txl.assign(stage[0], ko * PIPELINE_DEPTH + ks)
                     main_loop(False, ks)
                 smem_cycle.advance()
             if PIPE_REMAIN_NUM > 0:
-                with Kern.unroll(PIPE_REMAIN_NUM) as ks:
-                    Kern.assign(stage[0], PIPE_CYCLE * PIPELINE_DEPTH + ks)
+                with txl.unroll(PIPE_REMAIN_NUM) as ks:
+                    txl.assign(stage[0], PIPE_CYCLE * PIPELINE_DEPTH + ks)
                     main_loop(True, ks)
                 epilogue1()
-                with Kern.unroll(PIPE_REMAIN_NUM, PIPELINE_DEPTH) as ks:
+                with txl.unroll(PIPE_REMAIN_NUM, PIPELINE_DEPTH) as ks:
                     epilogue2(ks)
                 smem_cycle.advance()
             else:
                 epilogue1()
 
-        with Kern.While(tile_scheduler.valid()):
-            with Kern.If(tile_scheduler.fetched_task_type[0] == TaskType.RS.value), Kern.Then():
+        with txl.While(tile_scheduler.valid()):
+            with txl.If(tile_scheduler.fetched_task_type[0] == TaskType.RS.value), txl.Then():
                 m_idx = tile_scheduler.fetched_task_idx0[0]
                 n_idx = tile_scheduler.fetched_task_idx1[0]
-                Kern.assign(offset[0], tid)
-                with Kern.While(offset[0] < TILE_M // 2 * TILE_N // 8):
+                txl.assign(offset[0], tid)
+                with txl.While(offset[0] < TILE_M // 2 * TILE_N // 8):
                     m_start = offset[0] // (TILE_N // 8)
                     n_start = offset[0] % (TILE_N // 8) * 8
                     if WORLD_SIZE == 1:
-                        Kern.ptx.ld.global_.v4.b32(
+                        txl.ptx.ld.global_.v4.b32(
                             copy_words[0],
                             copy_words[1],
                             copy_words[2],
@@ -725,7 +725,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
                                 ]
                             ),
                         )
-                        Kern.ptx.st.global_.v4.b32(
+                        txl.ptx.st.global_.v4.b32(
                             out.ptr_to(
                                 [
                                     TILE_M * m_idx + TILE_M // 2 * cbx + m_start,
@@ -738,7 +738,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
                             copy_words[3],
                         )
                     else:
-                        Kern.cuda.func_call(
+                        txl.cuda.func_call(
                             "ld_reduce_8_fp16",
                             gemm_out.ptr_to(
                                 [
@@ -757,15 +757,15 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
                             ),
                             source_code=ld_reduce_8xfp16,
                         )
-                    Kern.assign(offset[0], offset[0] + NUM_THREADS)
+                    txl.assign(offset[0], offset[0] + NUM_THREADS)
 
-            with Kern.If(tile_scheduler.fetched_task_type[0] == TaskType.GEMM.value), Kern.Then():
+            with txl.If(tile_scheduler.fetched_task_type[0] == TaskType.GEMM.value), txl.Then():
                 m_idx = tile_scheduler.fetched_task_idx0[0]
                 n_idx = tile_scheduler.fetched_task_idx1[0]
 
                 def emit_producer_roles():
                     def tma_body():
-                        with Kern.If(Kern.cuda.elect_sync()), Kern.Then():
+                        with txl.If(txl.cuda.elect_sync()), txl.Then():
 
                             def tma_load(_is_remain, ks):
                                 smem_pipe.empty.wait(ks, smem_cycle.phase)
@@ -773,30 +773,30 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
                                 # cursor the pipeline rewrites per iteration, and
                                 # this value feeds three TMA coordinates. A plain
                                 # name would re-load stage[0] at each of them.
-                                stage_k = Kern.local_scalar("int32", init=stage[0] * BLK_K)
-                                Kern.ptx[_TMA_G2S_CG2](
+                                stage_k = txl.local_scalar("int32", init=stage[0] * BLK_K)
+                                txl.ptx[_TMA_G2S_CG2](
                                     A_smem.ptr_to([ks, 0, 0, 0]),
-                                    Kern.address_of(A_tensor_map),
+                                    txl.address_of(A_tensor_map),
                                     stage_k,
                                     (m_idx * NUM_CONSUMER * CTA_GROUP + cbx) * BLK_M,
                                     smem_full_cta0.ptr_to([ks]),
                                 )
-                                Kern.ptx[_TMA_G2S_CG2](
+                                txl.ptx[_TMA_G2S_CG2](
                                     A_smem.ptr_to([ks, 1, 0, 0]),
-                                    Kern.address_of(A_tensor_map),
+                                    txl.address_of(A_tensor_map),
                                     stage_k,
                                     (m_idx * NUM_CONSUMER * CTA_GROUP + CTA_GROUP + cbx) * BLK_M,
                                     smem_full_cta0.ptr_to([ks]),
                                 )
-                                Kern.ptx[_TMA_G2S_CG2](
+                                txl.ptx[_TMA_G2S_CG2](
                                     B_smem.ptr_to([ks, 0, 0]),
-                                    Kern.address_of(B_tensor_map),
+                                    txl.address_of(B_tensor_map),
                                     stage_k,
                                     (n_idx * CTA_GROUP + cbx) * BLK_N,
                                     smem_full_cta0.ptr_to([ks]),
                                 )
-                                with Kern.If(cbx == 0):
-                                    with Kern.Then():
+                                with txl.If(cbx == 0):
+                                    with txl.Then():
                                         smem_pipe.full.arrive(
                                             ks,
                                             NUM_CONSUMER
@@ -810,8 +810,8 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
 
                             def tma_drain(ks):
                                 smem_pipe.empty.wait(ks, smem_cycle.phase)
-                                with Kern.If(cbx == 0):
-                                    with Kern.Then():
+                                with txl.If(cbx == 0):
+                                    with txl.Then():
                                         smem_pipe.full.arrive(ks, remote=0)
 
                             partitioned_loop(tma_load, tma_done, tma_drain)
@@ -820,51 +820,51 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
                         # Preserve the source's warpgroup-local lowering in the
                         # descriptor/TMEM address path.
                         pw = warp_id
-                        with Kern.If(Kern.cuda.elect_sync()), Kern.Then():
+                        with txl.If(txl.cuda.elect_sync()), txl.Then():
                             tmem_pipe.empty.wait(pw, tmem_cycle.phase)
-                            Kern.ptx.tcgen05.fence__after_thread_sync()
+                            txl.ptx.tcgen05.fence__after_thread_sync()
 
                             def mma(_is_remain, ks):
                                 smem_pipe.full.wait(ks, smem_cycle.phase)
-                                with Kern.unroll(BLK_K // MMA_K) as ki:
-                                    Kern.cuda.tcgen05.encode_matrix_descriptor(
-                                        Kern.address_of(descA[0]),
+                                with txl.unroll(BLK_K // MMA_K) as ki:
+                                    txl.cuda.tcgen05.encode_matrix_descriptor(
+                                        txl.address_of(descA[0]),
                                         A_smem.ptr_to([ks, pw, 0, ki * MMA_K]),
                                         ldo=1,
                                         sdo=8 * BLK_K * F16_BYTES // F128_BYTES,
                                         swizzle=SWIZZLE,
                                     )
-                                    Kern.cuda.tcgen05.encode_matrix_descriptor(
-                                        Kern.address_of(descB[0]),
+                                    txl.cuda.tcgen05.encode_matrix_descriptor(
+                                        txl.address_of(descB[0]),
                                         B_smem.ptr_to([ks, 0, ki * MMA_K]),
                                         ldo=1,
                                         sdo=8 * BLK_K * F16_BYTES // F128_BYTES,
                                         swizzle=SWIZZLE,
                                     )
-                                    with Kern.If(ki == 0):
-                                        with Kern.Then():
-                                            with Kern.If(stage[0] == 0):
-                                                with Kern.Then():
-                                                    Kern.ptx[_MMA_CHAIN](
-                                                        Kern.cast(pw * MMA_N, "uint32"),
+                                    with txl.If(ki == 0):
+                                        with txl.Then():
+                                            with txl.If(stage[0] == 0):
+                                                with txl.Then():
+                                                    txl.ptx[_MMA_CHAIN](
+                                                        txl.cast(pw * MMA_N, "uint32"),
                                                         descA[0],
                                                         descB[0],
                                                         descI[0],
                                                         *_MMA_ZERO_MASKS,
                                                         False,
                                                     )
-                                                with Kern.Else():
-                                                    Kern.ptx[_MMA_CHAIN](
-                                                        Kern.cast(pw * MMA_N, "uint32"),
+                                                with txl.Else():
+                                                    txl.ptx[_MMA_CHAIN](
+                                                        txl.cast(pw * MMA_N, "uint32"),
                                                         descA[0],
                                                         descB[0],
                                                         descI[0],
                                                         *_MMA_ZERO_MASKS,
                                                         True,
                                                     )
-                                        with Kern.Else():
-                                            Kern.ptx[_MMA_CHAIN](
-                                                Kern.cast(pw * MMA_N, "uint32"),
+                                        with txl.Else():
+                                            txl.ptx[_MMA_CHAIN](
+                                                txl.cast(pw * MMA_N, "uint32"),
                                                 descA[0],
                                                 descB[0],
                                                 descI[0],
@@ -890,30 +890,30 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
 
                 # setmaxnreg is warpgroup-collective. Preserve the original
                 # producer scope, with K owning its TMA/scheduler/MMA/idle partition.
-                with Kern.If(wg_id == NUM_CONSUMER), Kern.Then():
+                with txl.If(wg_id == NUM_CONSUMER), txl.Then():
                     producer_regs.emit()
                     emit_producer_roles()
 
                 with consumer:
                     consumer_regs.emit()
-                    consumer_warp = Kern.warp_id_in_role()
+                    consumer_warp = txl.warp_id_in_role()
                     consumer_wg = consumer_warp >> 2
                     consumer_wid = consumer_warp & 3
-                    consumer_lane = Kern.lane_id()
+                    consumer_lane = txl.lane_id()
                     tmem_pipe.full.wait(consumer_wg, tmem_cycle.phase)
                     tmem_cycle.advance()
-                    Kern.ptx.tcgen05.fence__after_thread_sync()
+                    txl.ptx.tcgen05.fence__after_thread_sync()
                     for i in range(MMA_N // TMEM_LD_SIZE):
                         col_st = consumer_wg * MMA_N + i * TMEM_LD_SIZE
-                        Kern.ptx[_TMEM_LD_64](
-                            *[reg[j] for j in range(TMEM_LD_SIZE)], Kern.cast(col_st, "uint32")
+                        txl.ptx[_TMEM_LD_64](
+                            *[reg[j] for j in range(TMEM_LD_SIZE)], txl.cast(col_st, "uint32")
                         )
-                        Kern.ptx.tcgen05.wait__ld.sync.aligned()
+                        txl.ptx.tcgen05.wait__ld.sync.aligned()
                         for j in range(TMEM_LD_SIZE // 2):
-                            Kern.ptx[_CVT_F32X2](reg_fp16[j], reg[j * 2 + 1], reg[j * 2])
+                            txl.ptx[_CVT_F32X2](reg_fp16[j], reg[j * 2 + 1], reg[j * 2])
                         for jv in range(EPI_TILE // 8):
                             r0 = jv * 4
-                            Kern.ptx.st.shared.v4.u32(
+                            txl.ptx.st.shared.v4.u32(
                                 D_smem.ptr_to(
                                     [consumer_wg, consumer_wid * 32 + consumer_lane, jv * 8]
                                 ),
@@ -922,19 +922,19 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
                                 reg_fp16[r0 + 2],
                                 reg_fp16[r0 + 3],
                             )
-                        Kern.cuda.warpgroup_sync(consumer_wg)
-                        Kern.ptx.fence.proxy.async_.shared__cta()
-                        with Kern.If((consumer_lane == 0) & (consumer_wid == 0)), Kern.Then():
-                            Kern.ptx[_TMA_S2G](
-                                Kern.address_of(D_tensor_map),
+                        txl.cuda.warpgroup_sync(consumer_wg)
+                        txl.ptx.fence.proxy.async_.shared__cta()
+                        with txl.If((consumer_lane == 0) & (consumer_wid == 0)), txl.Then():
+                            txl.ptx[_TMA_S2G](
+                                txl.address_of(D_tensor_map),
                                 n_idx * BLK_N * CTA_GROUP + i * EPI_TILE,
                                 (m_idx * NUM_CONSUMER * CTA_GROUP + consumer_wg * CTA_GROUP + cbx)
                                 * BLK_M,
                                 D_smem.ptr_to([consumer_wg, 0, 0]),
                             )
-                            Kern.ptx.cp.async_.bulk.commit_group()
-                            Kern.ptx.cp.async_.bulk.wait_group(0)
-                        Kern.cuda.warpgroup_sync(consumer_wg)
+                            txl.ptx.cp.async_.bulk.commit_group()
+                            txl.ptx.cp.async_.bulk.wait_group(0)
+                        txl.cuda.warpgroup_sync(consumer_wg)
                     tmem_pipe.empty.arrive(consumer_wg, remote=0)
                     comm_m_idx = m_idx * 2 + consumer_wg
                     comm_m_idx_local = comm_m_idx % (LOCAL_M // TILE_M)
@@ -943,27 +943,27 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
 
             fetch_next()
 
-        Kern.ptx.barrier.cluster.arrive()
-        Kern.ptx.barrier.cluster.wait()
+        txl.ptx.barrier.cluster.arrive()
+        txl.ptx.barrier.cluster.wait()
         if WORLD_SIZE > 1:
-            with Kern.If((cbx == 0) & (tid == 0)), Kern.Then():
-                Kern.cuda.func_call(
+            with txl.If((cbx == 0) & (tid == 0)), txl.Then():
+                txl.cuda.func_call(
                     "exit_barrier_arrive_and_wait",
                     exit_barrier.ptr_to([0]),
-                    Kern.int32(NUM_CLUSTERS),
-                    Kern.int32(WORLD_SIZE),
+                    txl.int32(NUM_CLUSTERS),
+                    txl.int32(WORLD_SIZE),
                     source_code=exit_barrier_arrive_and_wait,
                 )
-            Kern.cuda.cta_sync()
-            Kern.ptx.barrier.cluster.arrive()
-            Kern.ptx.barrier.cluster.wait()
+            txl.cuda.cta_sync()
+            txl.ptx.barrier.cluster.arrive()
+            txl.ptx.barrier.cluster.wait()
         # Spell the teardown boundary exactly as the original: shared load to a
         # register, then collective relinquish/dealloc after every local and peer user.
-        with Kern.If((wg_id == 0) & (warp_id == 0)), Kern.Then():
-            Kern.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
-            Kern.ptx.ld.shared.u32(tmem_addr_local[0], tmem_addr.ptr_to([0]))
-            Kern.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](
-                tmem_addr_local[0], Kern.uint32(N_COLS)
+        with txl.If((wg_id == 0) & (warp_id == 0)), txl.Then():
+            txl.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
+            txl.ptx.ld.shared.u32(tmem_addr_local[0], tmem_addr.ptr_to([0]))
+            txl.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](
+                tmem_addr_local[0], txl.uint32(N_COLS)
             )
 
     return test_mma_ss_tma_2sm_persistent

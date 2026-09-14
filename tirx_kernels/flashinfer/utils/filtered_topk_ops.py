@@ -21,18 +21,18 @@ expression: on 16 bits nvcc recognises the shape as a sign-broadcast XOR
 ``abs``/``neg`` (``not.b32`` + ``abs.ftz.f32`` + ``neg.ftz.f32`` + ``setp.lt.s32``
 + ``selp.b32``).
 
-Everything here is a plain Python function emitting into the traced ``@K.kernel``
-body that calls it: runtime control flow is spelled with ``K.If`` / ``K.Then`` /
-``K.Else`` and ``K.serial`` / ``K.unroll``, a Python ``if`` or ``for`` is
-compile-time expansion, and mutable per-thread state is a ``K.local_scalar`` or a
-``K.alloc_local`` array written through ``K.assign``.  The per-element bodies the
+Everything here is a plain Python function emitting into the traced ``@txl.kernel``
+body that calls it: runtime control flow is spelled with ``txl.If`` / ``txl.Then`` /
+``txl.Else`` and ``txl.serial`` / ``txl.unroll``, a Python ``if`` or ``for`` is
+compile-time expansion, and mutable per-thread state is a ``txl.local_scalar`` or a
+``txl.alloc_local`` array written through ``txl.assign``.  The per-element bodies the
 row scan drives are passed as Python closures, which is what the C++ lambdas the
 source hands ``for_each_score`` are.
 """
 
 from typing import NamedTuple
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 from tirx_kernels.flashinfer.utils.topk_radix import (
     atom_shared_add_u32,
     bar_sync,
@@ -53,19 +53,19 @@ def to_ordered_filtered_u32(bits):
 
     ``(bits & 0x80000000) ? ~bits : (bits | 0x80000000)``.
     """
-    return K.Select(
-        K.bitwise_and(bits, K.uint32(0x80000000)) != K.uint32(0),
-        K.bitwise_xor(bits, K.uint32(0xFFFFFFFF)),
-        K.bitwise_or(bits, K.uint32(0x80000000)),
+    return txl.Select(
+        txl.bitwise_and(bits, txl.uint32(0x80000000)) != txl.uint32(0),
+        txl.bitwise_xor(bits, txl.uint32(0xFFFFFFFF)),
+        txl.bitwise_or(bits, txl.uint32(0x80000000)),
     )
 
 
 def to_ordered_filtered_u16(bits):
     """``FilteredTopKTraits<half|nv_bfloat16>::ToOrdered`` (``:2313-2316``, ``:2333-2336``)."""
-    return K.Select(
-        K.bitwise_and(bits, K.uint16(0x8000)) != K.uint16(0),
-        K.bitwise_xor(bits, K.uint16(0xFFFF)),
-        K.bitwise_or(bits, K.uint16(0x8000)),
+    return txl.Select(
+        txl.bitwise_and(bits, txl.uint16(0x8000)) != txl.uint16(0),
+        txl.bitwise_xor(bits, txl.uint16(0xFFFF)),
+        txl.bitwise_or(bits, txl.uint16(0x8000)),
     )
 
 
@@ -76,7 +76,7 @@ def to_coarse_key_u16(bits):
     ``ToOrdered`` performs on 16 bits, so the coarse key is the ordered key's
     high byte.
     """
-    return K.cast(K.shift_right(to_ordered_filtered_u16(bits), K.uint16(8)), "int32")
+    return txl.cast(txl.shift_right(to_ordered_filtered_u16(bits), txl.uint16(8)), "int32")
 
 
 def to_coarse_key_f32(bits):
@@ -87,7 +87,7 @@ def to_coarse_key_f32(bits):
     fine because every phase re-derives it the same way, so the partition stays
     consistent; it is also why the refine rounds exist at all.
     """
-    half_bits = K.reinterpret("uint16", K.cast(K.reinterpret("float32", bits), "float16"))
+    half_bits = txl.reinterpret("uint16", txl.cast(txl.reinterpret("float32", bits), "float16"))
     return to_coarse_key_u16(half_bits)
 
 
@@ -109,8 +109,8 @@ def ordered_key(bits, is32):
 # `utils/topk_radix.py`.
 def ld_global_nc_u32(buffer, index):
     """``ld.global.nc.b32``."""
-    out = K.local_scalar("uint32")
-    K.ptx.ld.global_.nc.b32(out, buffer.ptr_to([index]))
+    out = txl.local_scalar("uint32")
+    txl.ptx.ld.global_.nc.b32(out, buffer.ptr_to([index]))
     return out
 
 
@@ -118,23 +118,23 @@ def ld_global_nc_bits(buf, elem_index, is32):
     """One scalar element's raw bits: ``ld.global.nc.b32`` | ``ld.global.nc.b16``."""
     if is32:
         return ld_global_nc_u32(buf, elem_index)
-    out16 = K.local_scalar("uint16")
-    K.ptx.ld.global_.nc.b16(out16, buf.ptr_to([elem_index]))
+    out16 = txl.local_scalar("uint16")
+    txl.ptx.ld.global_.nc.b16(out16, buf.ptr_to([elem_index]))
     return out16
 
 
 def ld_global_nc_words(buf, elem_index, load_bytes):
     """One vector load of ``load_bytes`` bytes, returned as 32-bit words."""
     if load_bytes == 16:
-        w = K.alloc_local([4], "uint32", align=16)
-        K.ptx["ld.global.nc.v4.b32"](w[0], w[1], w[2], w[3], buf.ptr_to([elem_index]))
+        w = txl.alloc_local([4], "uint32", align=16)
+        txl.ptx["ld.global.nc.v4.b32"](w[0], w[1], w[2], w[3], buf.ptr_to([elem_index]))
         return [w[0], w[1], w[2], w[3]]
     if load_bytes == 8:
-        w = K.alloc_local([2], "uint32", align=8)
-        K.ptx["ld.global.nc.v2.b32"](w[0], w[1], buf.ptr_to([elem_index]))
+        w = txl.alloc_local([2], "uint32", align=8)
+        txl.ptx["ld.global.nc.v2.b32"](w[0], w[1], buf.ptr_to([elem_index]))
         return [w[0], w[1]]
-    w = K.alloc_local([1], "uint32")
-    K.ptx.ld.global_.nc.b32(w[0], buf.ptr_to([elem_index]))
+    w = txl.alloc_local([1], "uint32")
+    txl.ptx.ld.global_.nc.b32(w[0], buf.ptr_to([elem_index]))
     return [w[0]]
 
 
@@ -144,8 +144,8 @@ def ld_global_nc_pair_u16(buffer, index):
     The source's ``vec_t<DType, 2>::cast_load`` keeps the monotone key flip on
     16-bit operands with no extract or repack arithmetic.
     """
-    out = K.alloc_local([2], "uint16")
-    K.ptx["ld.global.nc.v2.b16"](out[0], out[1], buffer.ptr_to([index]))
+    out = txl.alloc_local([2], "uint16")
+    txl.ptx["ld.global.nc.v2.b16"](out[0], out[1], buffer.ptr_to([index]))
     return out[0], out[1]
 
 
@@ -165,8 +165,8 @@ def atom_shared_or_b32(buffer, index, value):
     reduction form -- the export shows ``atom.shared.or.b32`` 20/29 times and
     ``red.shared.or.b32`` zero times, so the return operand is kept here too.
     """
-    out = K.local_scalar("uint32")
-    K.ptx.atom.shared.or_.b32(out, buffer.ptr_to([index]), value)
+    out = txl.local_scalar("uint32")
+    txl.ptx.atom.shared.or_.b32(out, buffer.ptr_to([index]), value)
     return out
 
 
@@ -226,8 +226,8 @@ def _emit_word_fanout(body, words, base, is32):
     else:
         # Each loaded word carries two 16-bit lanes, low lane first.
         for w in range(len(words)):
-            body(K.cast(K.bitwise_and(words[w], K.uint32(0xFFFF)), "uint16"), base + 2 * w)
-            body(K.cast(K.shift_right(words[w], K.uint32(16)), "uint16"), base + 2 * w + 1)
+            body(txl.cast(txl.bitwise_and(words[w], txl.uint32(0xFFFF)), "uint16"), base + 2 * w)
+            body(txl.cast(txl.shift_right(words[w], txl.uint32(16)), "uint16"), base + 2 * w + 1)
 
 
 def for_each_score(inp, row_in, tx, row_len, body, cfg):
@@ -247,27 +247,27 @@ def for_each_score(inp, row_in, tx, row_len, body, cfg):
     # would otherwise carry a shift and a multiply per trip.
     aligned = row_len // cfg.vec * cfg.vec
     if not isinstance(aligned, int):
-        aligned = K.local_scalar("int32", init=aligned)
-    with K.serial(tx * cfg.vec, aligned, step=cfg.block * cfg.vec, unroll=cfg.scan_unroll) as i:
+        aligned = txl.local_scalar("int32", init=aligned)
+    with txl.serial(tx * cfg.vec, aligned, step=cfg.block * cfg.vec, unroll=cfg.scan_unroll) as i:
         if cfg.vec == 1:
-            body(ld_global_nc_bits(inp, row_in + K.cast(i, "int64"), cfg.is32), i)
+            body(ld_global_nc_bits(inp, row_in + txl.cast(i, "int64"), cfg.is32), i)
         elif cfg.load_bytes == 4 and not cfg.is32:
             # VEC_SIZE == 2 on a 16-bit dtype: the source's native
             # ld.global.nc.v2.b16 pair, kept in 16-bit registers rather than
             # routed through one 32-bit word and unpacked.
-            lo, hi = ld_global_nc_pair_u16(inp, row_in + K.cast(i, "int64"))
+            lo, hi = ld_global_nc_pair_u16(inp, row_in + txl.cast(i, "int64"))
             body(lo, i)
             body(hi, i + 1)
         else:
             _emit_word_fanout(
                 body,
-                ld_global_nc_words(inp, row_in + K.cast(i, "int64"), cfg.load_bytes),
+                ld_global_nc_words(inp, row_in + txl.cast(i, "int64"), cfg.load_bytes),
                 i,
                 cfg.is32,
             )
     # Scalar tail (:2477-2480); empty when VEC_SIZE divides the row length.
-    with K.serial(aligned + tx, row_len, step=cfg.block) as j:
-        body(ld_global_nc_bits(inp, row_in + K.cast(j, "int64"), cfg.is32), j)
+    with txl.serial(aligned + tx, row_len, step=cfg.block) as j:
+        body(ld_global_nc_bits(inp, row_in + txl.cast(j, "int64"), cfg.is32), j)
 
 
 def _backfill_nondet_eq(s_scal, s_indices, cfg, value, threshold, idx):
@@ -276,12 +276,12 @@ def _backfill_nondet_eq(s_scal, s_indices, cfg, value, threshold, idx):
     Equal-to-threshold elements count ``s_last_remain`` **down** and write from
     the back of ``s_indices``, so which ties win is genuinely racy.
     """
-    with K.If(value == threshold), K.Then():
-        back = K.reinterpret(
-            "int32", atom_shared_add_u32(s_scal, SC_LAST_REMAIN, K.uint32(0xFFFFFFFF))
+    with txl.If(value == threshold), txl.Then():
+        back = txl.reinterpret(
+            "int32", atom_shared_add_u32(s_scal, SC_LAST_REMAIN, txl.uint32(0xFFFFFFFF))
         )
-        with K.If(back > 0), K.Then():
-            st_shared_u32(s_indices, cfg.top_k - back, K.reinterpret("uint32", idx))
+        with txl.If(back > 0), txl.Then():
+            st_shared_u32(s_indices, cfg.top_k - back, txl.reinterpret("uint32", idx))
 
 
 def collect_gt_and_nondet_eq(s_scal, s_indices, cfg, value, threshold, idx, allow_eq):
@@ -296,29 +296,29 @@ def collect_gt_and_nondet_eq(s_scal, s_indices, cfg, value, threshold, idx, allo
     one, where it arrives as the runtime ``eq_needed > 0`` (``:2891``); a Python
     bool folds the arm away, anything else becomes a real guard.
     """
-    with K.If(value > threshold):
-        with K.Then():
-            pos = K.reinterpret("int32", atom_shared_add_u32(s_scal, SC_COUNTER, K.uint32(1)))
-            st_shared_u32(s_indices, pos, K.reinterpret("uint32", idx))
+    with txl.If(value > threshold):
+        with txl.Then():
+            pos = txl.reinterpret("int32", atom_shared_add_u32(s_scal, SC_COUNTER, txl.uint32(1)))
+            st_shared_u32(s_indices, pos, txl.reinterpret("uint32", idx))
         if not cfg.det and allow_eq is not False:
-            with K.Else():
+            with txl.Else():
                 if allow_eq is True:
                     _backfill_nondet_eq(s_scal, s_indices, cfg, value, threshold, idx)
                 else:
-                    with K.If(allow_eq), K.Then():
+                    with txl.If(allow_eq), txl.Then():
                         _backfill_nondet_eq(s_scal, s_indices, cfg, value, threshold, idx)
 
 
 def body_coarse_hist(s_hist2, cfg, bits, index):
     """``accumulate_coarse_hist`` (``:2482-2485``)."""
-    atom_shared_add_u32(s_hist2, coarse_key(bits, cfg.is32), K.uint32(1))
+    atom_shared_add_u32(s_hist2, coarse_key(bits, cfg.is32), txl.uint32(1))
 
 
 def body_collect_coarse_gt(s_scal, s_indices, threshold_bin, cfg, bits, index):
     """``collect_coarse_gt`` on the coarse fast exit (``:2551-2557``)."""
-    with K.If(coarse_key(bits, cfg.is32) > threshold_bin), K.Then():
-        pos = K.reinterpret("int32", atom_shared_add_u32(s_scal, SC_COUNTER, K.uint32(1)))
-        st_shared_u32(s_indices, pos, K.reinterpret("uint32", index))
+    with txl.If(coarse_key(bits, cfg.is32) > threshold_bin), txl.Then():
+        pos = txl.reinterpret("int32", atom_shared_add_u32(s_scal, SC_COUNTER, txl.uint32(1)))
+        st_shared_u32(s_indices, pos, txl.reinterpret("uint32", index))
 
 
 def body_filter(s_hist2, s_scal, s_indices, s_input, threshold_bin, cfg, bits, index):
@@ -332,32 +332,32 @@ def body_filter(s_hist2, s_scal, s_indices, s_input, threshold_bin, cfg, bits, i
     arm cold.
     """
     # Compared against the threshold twice, once per element of the whole row.
-    bin_id = K.local_scalar("int32", init=coarse_key(bits, cfg.is32))
-    with K.If(bin_id > threshold_bin):
-        with K.Then():
-            pos = K.reinterpret("int32", atom_shared_add_u32(s_scal, SC_COUNTER, K.uint32(1)))
-            st_shared_u32(s_indices, pos, K.reinterpret("uint32", index))
-        with K.Else():
-            with K.If(bin_id == threshold_bin), K.Then():
-                slot = K.reinterpret(
-                    "int32", atom_shared_add_u32(s_scal, SC_NUM_INPUT, K.uint32(1))
+    bin_id = txl.local_scalar("int32", init=coarse_key(bits, cfg.is32))
+    with txl.If(bin_id > threshold_bin):
+        with txl.Then():
+            pos = txl.reinterpret("int32", atom_shared_add_u32(s_scal, SC_COUNTER, txl.uint32(1)))
+            st_shared_u32(s_indices, pos, txl.reinterpret("uint32", index))
+        with txl.Else():
+            with txl.If(bin_id == threshold_bin), txl.Then():
+                slot = txl.reinterpret(
+                    "int32", atom_shared_add_u32(s_scal, SC_NUM_INPUT, txl.uint32(1))
                 )
-                with K.If(slot < cfg.smem_input):
-                    with K.Then():
-                        st_shared_u32(s_input, slot, K.reinterpret("uint32", index))
-                        sub = K.cast(
-                            K.bitwise_and(
-                                K.shift_right(
-                                    K.cast(ordered_key(bits, cfg.is32), "uint32"),
-                                    K.uint32(cfg.first_shift),
+                with txl.If(slot < cfg.smem_input):
+                    with txl.Then():
+                        st_shared_u32(s_input, slot, txl.reinterpret("uint32", index))
+                        sub = txl.cast(
+                            txl.bitwise_and(
+                                txl.shift_right(
+                                    txl.cast(ordered_key(bits, cfg.is32), "uint32"),
+                                    txl.uint32(cfg.first_shift),
                                 ),
-                                K.uint32(0xFF),
+                                txl.uint32(0xFF),
                             ),
                             "int32",
                         )
-                        atom_shared_add_u32(s_hist2, sub, K.uint32(1))
-                    with K.Else():
-                        atom_shared_or_b32(s_scal, SC_REFINE_OVERFLOW, K.uint32(1))
+                        atom_shared_add_u32(s_hist2, sub, txl.uint32(1))
+                    with txl.Else():
+                        atom_shared_or_b32(s_scal, SC_REFINE_OVERFLOW, txl.uint32(1))
 
 
 def run_cumsum(s_hist2, tx, cfg):
@@ -368,19 +368,19 @@ def run_cumsum(s_hist2, tx, cfg):
     zero throughout: it is the exclusive-suffix sentinel every threshold test
     reads at ``tx + 1``, and the scan only ever writes indices below ``RADIX``.
     """
-    with K.unroll(8) as i:
-        with K.If(tx < cfg.radix), K.Then():
-            j = K.shift_left(K.int32(1), i)
-            src = K.bitwise_and(i, K.int32(1)) * cfg.hist_stride
-            dst = K.bitwise_xor(K.bitwise_and(i, K.int32(1)), K.int32(1)) * cfg.hist_stride
-            value = K.local_scalar(
-                "int32", init=K.reinterpret("int32", ld_shared_u32(s_hist2, src + tx))
+    with txl.unroll(8) as i:
+        with txl.If(tx < cfg.radix), txl.Then():
+            j = txl.shift_left(txl.int32(1), i)
+            src = txl.bitwise_and(i, txl.int32(1)) * cfg.hist_stride
+            dst = txl.bitwise_xor(txl.bitwise_and(i, txl.int32(1)), txl.int32(1)) * cfg.hist_stride
+            value = txl.local_scalar(
+                "int32", init=txl.reinterpret("int32", ld_shared_u32(s_hist2, src + tx))
             )
-            with K.If(tx < cfg.radix - j), K.Then():
-                K.assign(
-                    value, value + K.reinterpret("int32", ld_shared_u32(s_hist2, src + tx + j))
+            with txl.If(tx < cfg.radix - j), txl.Then():
+                txl.assign(
+                    value, value + txl.reinterpret("int32", ld_shared_u32(s_hist2, src + tx + j))
                 )
-            st_shared_u32(s_hist2, dst + tx, K.reinterpret("uint32", value))
+            st_shared_u32(s_hist2, dst + tx, txl.reinterpret("uint32", value))
         bar_sync()
 
 
@@ -419,26 +419,26 @@ def block_exclusive_sum_raking(out, total_out, s_scan, tx, value):
     convergent and must not be hoisted out of the guard.
     """
     # Read by both the scatter and the gather of every scan instance.
-    off = K.local_scalar("int32", init=raking_offset(tx))
+    off = txl.local_scalar("int32", init=raking_offset(tx))
     st_shared_u32(s_scan, off, value)
     bar_sync()
-    with K.If(tx < RAKING_THREADS), K.Then():
+    with txl.If(tx < RAKING_THREADS), txl.Then():
         base = tx * RAKING_STRIDE
-        cache = K.alloc_local([RAKING_SEGMENT], "uint32")
-        total = K.local_scalar("uint32", init=K.uint32(0))
-        with K.unroll(RAKING_SEGMENT) as j:
-            K.assign(cache[j], ld_shared_u32(s_scan, base + j))
-            K.assign(total, total + cache[j])
-        incl = K.local_scalar("uint32", init=warp_inclusive_sum_u32(total, tx))
-        run = K.local_scalar("uint32", init=incl - total)
-        with K.unroll(RAKING_SEGMENT) as j2:
+        cache = txl.alloc_local([RAKING_SEGMENT], "uint32")
+        total = txl.local_scalar("uint32", init=txl.uint32(0))
+        with txl.unroll(RAKING_SEGMENT) as j:
+            txl.assign(cache[j], ld_shared_u32(s_scan, base + j))
+            txl.assign(total, total + cache[j])
+        incl = txl.local_scalar("uint32", init=warp_inclusive_sum_u32(total, tx))
+        run = txl.local_scalar("uint32", init=incl - total)
+        with txl.unroll(RAKING_SEGMENT) as j2:
             st_shared_u32(s_scan, base + j2, run)
-            K.assign(run, run + cache[j2])
-        with K.If(tx == RAKING_THREADS - 1), K.Then():
+            txl.assign(run, run + cache[j2])
+        with txl.If(tx == RAKING_THREADS - 1), txl.Then():
             st_shared_u32(s_scan, RAKING_ELEMENTS, incl)
     bar_sync()
-    K.assign(out, ld_shared_u32(s_scan, off))
-    K.assign(total_out, ld_shared_u32(s_scan, RAKING_ELEMENTS))
+    txl.assign(out, ld_shared_u32(s_scan, off))
+    txl.assign(total_out, ld_shared_u32(s_scan, RAKING_ELEMENTS))
 
 
 def det_thread_strided_collect(inp, s_scan, s_indices, tx, row_in, row_len, cfg, pivot, eq_needed):
@@ -449,41 +449,41 @@ def det_thread_strided_collect(inp, s_scan, s_indices, tx, row_in, row_len, cfg,
     ``s_indices[top_k - eq_needed + local_pos]`` (``:2587-2590``); the predicate
     is ``ToOrdered(score[idx]) == pivot``.
     """
-    count = K.local_scalar("uint32", init=K.uint32(0))
-    with K.serial(tx, row_len, step=cfg.block) as i:
-        cur = K.cast(
-            ordered_key(ld_global_nc_bits(inp, row_in + K.cast(i, "int64"), cfg.is32), cfg.is32),
+    count = txl.local_scalar("uint32", init=txl.uint32(0))
+    with txl.serial(tx, row_len, step=cfg.block) as i:
+        cur = txl.cast(
+            ordered_key(ld_global_nc_bits(inp, row_in + txl.cast(i, "int64"), cfg.is32), cfg.is32),
             "uint32",
         )
-        with K.If(cur == pivot), K.Then():
-            K.assign(count, count + K.uint32(1))
-    prefix = K.local_scalar("uint32")
-    total = K.local_scalar("uint32")
+        with txl.If(cur == pivot), txl.Then():
+            txl.assign(count, count + txl.uint32(1))
+    prefix = txl.local_scalar("uint32")
+    total = txl.local_scalar("uint32")
     block_exclusive_sum_raking(prefix, total, s_scan, tx, count)
-    with K.If(count > K.uint32(0)), K.Then():
-        with K.If(prefix < K.cast(eq_needed, "uint32")), K.Then():
-            pos = K.local_scalar("uint32", init=prefix)
+    with txl.If(count > txl.uint32(0)), txl.Then():
+        with txl.If(prefix < txl.cast(eq_needed, "uint32")), txl.Then():
+            pos = txl.local_scalar("uint32", init=prefix)
             # Loop-invariant but read inside the walk below: a plain binding
             # would sink the min back into the loop body.
-            end = K.local_scalar("uint32", init=K.min(prefix + count, K.cast(eq_needed, "uint32")))
-            done = K.local_scalar("int32", init=K.int32(0))
-            with K.serial(tx, row_len, step=cfg.block) as i2:
-                with K.If(done == 0), K.Then():
-                    cur2 = K.cast(
+            end = txl.local_scalar("uint32", init=txl.min(prefix + count, txl.cast(eq_needed, "uint32")))
+            done = txl.local_scalar("int32", init=txl.int32(0))
+            with txl.serial(tx, row_len, step=cfg.block) as i2:
+                with txl.If(done == 0), txl.Then():
+                    cur2 = txl.cast(
                         ordered_key(
-                            ld_global_nc_bits(inp, row_in + K.cast(i2, "int64"), cfg.is32), cfg.is32
+                            ld_global_nc_bits(inp, row_in + txl.cast(i2, "int64"), cfg.is32), cfg.is32
                         ),
                         "uint32",
                     )
-                    with K.If(cur2 == pivot), K.Then():
+                    with txl.If(cur2 == pivot), txl.Then():
                         st_shared_u32(
                             s_indices,
-                            cfg.top_k - eq_needed + K.reinterpret("int32", pos),
-                            K.reinterpret("uint32", i2),
+                            cfg.top_k - eq_needed + txl.reinterpret("int32", pos),
+                            txl.reinterpret("uint32", i2),
                         )
-                        K.assign(pos, pos + K.uint32(1))
-                        with K.If(pos == end), K.Then():
-                            K.assign(done, K.int32(1))
+                        txl.assign(pos, pos + txl.uint32(1))
+                        with txl.If(pos == end), txl.Then():
+                            txl.assign(done, txl.int32(1))
     bar_sync()
 
 
@@ -498,81 +498,81 @@ def det_contiguous_collect(
     ``s_chunk_base`` / ``s_chunk_take`` carry the quota between chunks and the
     walk stops once it is met.
     """
-    with K.If(tx == 0), K.Then():
-        st_shared_u32(s_scal, SC_EMITTED, K.uint32(0))
-        st_shared_u32(s_scal, SC_CHUNK_BASE, K.uint32(0))
-        st_shared_u32(s_scal, SC_CHUNK_TAKE, K.uint32(0))
+    with txl.If(tx == 0), txl.Then():
+        st_shared_u32(s_scal, SC_EMITTED, txl.uint32(0))
+        st_shared_u32(s_scal, SC_CHUNK_BASE, txl.uint32(0))
+        st_shared_u32(s_scal, SC_CHUNK_TAKE, txl.uint32(0))
     bar_sync()
     chunk_items = cfg.block * DET_ITEMS_PER_THREAD
     num_chunks = (row_len + chunk_items - 1) // chunk_items
     if not isinstance(num_chunks, int):
-        num_chunks = K.local_scalar("int32", init=num_chunks)
-    stop = K.local_scalar("int32", init=K.int32(0))
-    with K.serial(0, num_chunks) as chunk:
-        with K.If(stop == 0), K.Then():
-            rows_of = K.alloc_local([DET_ITEMS_PER_THREAD], "int32")
-            sel_of = K.alloc_local([DET_ITEMS_PER_THREAD], "uint32")
-            cnt = K.local_scalar("uint32", init=K.uint32(0))
-            with K.unroll(DET_ITEMS_PER_THREAD) as item:
-                linear = K.local_scalar(
+        num_chunks = txl.local_scalar("int32", init=num_chunks)
+    stop = txl.local_scalar("int32", init=txl.int32(0))
+    with txl.serial(0, num_chunks) as chunk:
+        with txl.If(stop == 0), txl.Then():
+            rows_of = txl.alloc_local([DET_ITEMS_PER_THREAD], "int32")
+            sel_of = txl.alloc_local([DET_ITEMS_PER_THREAD], "uint32")
+            cnt = txl.local_scalar("uint32", init=txl.uint32(0))
+            with txl.unroll(DET_ITEMS_PER_THREAD) as item:
+                linear = txl.local_scalar(
                     "int32", init=chunk * chunk_items + tx * DET_ITEMS_PER_THREAD + item
                 )
-                K.assign(rows_of[item], K.int32(0))
-                K.assign(sel_of[item], K.uint32(0))
-                with K.If(linear < row_len), K.Then():
+                txl.assign(rows_of[item], txl.int32(0))
+                txl.assign(sel_of[item], txl.uint32(0))
+                with txl.If(linear < row_len), txl.Then():
                     if reverse:
-                        K.assign(rows_of[item], row_len - 1 - linear)
+                        txl.assign(rows_of[item], row_len - 1 - linear)
                     else:
-                        K.assign(rows_of[item], linear)
-                    curc = K.cast(
+                        txl.assign(rows_of[item], linear)
+                    curc = txl.cast(
                         ordered_key(
                             ld_global_nc_bits(
-                                inp, row_in + K.cast(rows_of[item], "int64"), cfg.is32
+                                inp, row_in + txl.cast(rows_of[item], "int64"), cfg.is32
                             ),
                             cfg.is32,
                         ),
                         "uint32",
                     )
-                    with K.If(curc == pivot), K.Then():
-                        K.assign(sel_of[item], K.uint32(1))
-                        K.assign(cnt, cnt + K.uint32(1))
-            prefix = K.local_scalar("uint32")
-            blocksel = K.local_scalar("uint32")
+                    with txl.If(curc == pivot), txl.Then():
+                        txl.assign(sel_of[item], txl.uint32(1))
+                        txl.assign(cnt, cnt + txl.uint32(1))
+            prefix = txl.local_scalar("uint32")
+            blocksel = txl.local_scalar("uint32")
             block_exclusive_sum_raking(prefix, blocksel, s_scan, tx, cnt)
-            with K.If(tx == 0), K.Then():
+            with txl.If(tx == 0), txl.Then():
                 emitted = ld_shared_u32(s_scal, SC_EMITTED)
                 st_shared_u32(s_scal, SC_CHUNK_BASE, emitted)
-                remaining = K.local_scalar("uint32", init=K.uint32(0))
-                with K.If(emitted < K.cast(eq_needed, "uint32")), K.Then():
-                    K.assign(remaining, K.cast(eq_needed, "uint32") - emitted)
-                take = K.min(remaining, blocksel)
+                remaining = txl.local_scalar("uint32", init=txl.uint32(0))
+                with txl.If(emitted < txl.cast(eq_needed, "uint32")), txl.Then():
+                    txl.assign(remaining, txl.cast(eq_needed, "uint32") - emitted)
+                take = txl.min(remaining, blocksel)
                 st_shared_u32(s_scal, SC_CHUNK_TAKE, take)
                 st_shared_u32(s_scal, SC_EMITTED, emitted + take)
             bar_sync()
             chunk_take = ld_shared_u32(s_scal, SC_CHUNK_TAKE)
             chunk_base = ld_shared_u32(s_scal, SC_CHUNK_BASE)
-            with K.If(cnt > K.uint32(0)), K.Then():
-                with K.If(prefix < chunk_take), K.Then():
-                    epos = K.local_scalar("uint32", init=prefix)
+            with txl.If(cnt > txl.uint32(0)), txl.Then():
+                with txl.If(prefix < chunk_take), txl.Then():
+                    epos = txl.local_scalar("uint32", init=prefix)
                     # Same: invariant across the item walk that reads it.
-                    eend = K.local_scalar("uint32", init=K.min(prefix + cnt, chunk_take))
-                    fin = K.local_scalar("int32", init=K.int32(0))
-                    with K.unroll(DET_ITEMS_PER_THREAD) as item2:
-                        with K.If(fin == 0), K.Then():
-                            with K.If(sel_of[item2] == K.uint32(1)), K.Then():
+                    eend = txl.local_scalar("uint32", init=txl.min(prefix + cnt, chunk_take))
+                    fin = txl.local_scalar("int32", init=txl.int32(0))
+                    with txl.unroll(DET_ITEMS_PER_THREAD) as item2:
+                        with txl.If(fin == 0), txl.Then():
+                            with txl.If(sel_of[item2] == txl.uint32(1)), txl.Then():
                                 st_shared_u32(
                                     s_indices,
                                     cfg.top_k
                                     - eq_needed
-                                    + K.reinterpret("int32", chunk_base + epos),
-                                    K.reinterpret("uint32", rows_of[item2]),
+                                    + txl.reinterpret("int32", chunk_base + epos),
+                                    txl.reinterpret("uint32", rows_of[item2]),
                                 )
-                                K.assign(epos, epos + K.uint32(1))
-                                with K.If(epos == eend), K.Then():
-                                    K.assign(fin, K.int32(1))
+                                txl.assign(epos, epos + txl.uint32(1))
+                                with txl.If(epos == eend), txl.Then():
+                                    txl.assign(fin, txl.int32(1))
             bar_sync()
-            with K.If(ld_shared_u32(s_scal, SC_EMITTED) >= K.cast(eq_needed, "uint32")), K.Then():
-                K.assign(stop, K.int32(1))
+            with txl.If(ld_shared_u32(s_scal, SC_EMITTED) >= txl.cast(eq_needed, "uint32")), txl.Then():
+                txl.assign(stop, txl.int32(1))
     bar_sync()
 
 
@@ -586,7 +586,7 @@ def collect_det_eq_pivot(
     All three share one BlockScan instance and the same
     ``ToOrdered(score[idx]) == pivot`` predicate.
     """
-    with K.If(eq_needed > 0), K.Then():
+    with txl.If(eq_needed > 0), txl.Then():
         if cfg.tie_break == 1:
             det_contiguous_collect(
                 inp, s_scan, s_indices, s_scal, tx, row_in, row_len, cfg, pivot, eq_needed, False
@@ -610,32 +610,32 @@ def update_refine_threshold(s_hist2, s_scal, tx, cfg, topk, next_idx, reset_next
     one call site, the 16-bit overflow fallback (``:2733``).
     """
     run_cumsum(s_hist2, tx, cfg)
-    with K.If(tx < cfg.radix), K.Then():
-        cur = K.reinterpret("int32", ld_shared_u32(s_hist2, tx))
-        with K.If(cur > topk), K.Then():
-            nxt = K.reinterpret("int32", ld_shared_u32(s_hist2, tx + 1))
-            with K.If(nxt <= topk), K.Then():
-                st_shared_u32(s_scal, SC_THRESH_BIN, K.reinterpret("uint32", tx))
+    with txl.If(tx < cfg.radix), txl.Then():
+        cur = txl.reinterpret("int32", ld_shared_u32(s_hist2, tx))
+        with txl.If(cur > topk), txl.Then():
+            nxt = txl.reinterpret("int32", ld_shared_u32(s_hist2, tx + 1))
+            with txl.If(nxt <= topk), txl.Then():
+                st_shared_u32(s_scal, SC_THRESH_BIN, txl.reinterpret("uint32", tx))
                 if reset_next:
-                    st_shared_u32(s_scal, SC_NUM_INPUT + next_idx, K.uint32(0))
-                st_shared_u32(s_scal, SC_LAST_REMAIN, K.reinterpret("uint32", topk - nxt))
+                    st_shared_u32(s_scal, SC_NUM_INPUT + next_idx, txl.uint32(0))
+                st_shared_u32(s_scal, SC_LAST_REMAIN, txl.reinterpret("uint32", topk - nxt))
     bar_sync()
 
 
 def _refine_bin(inp, row_in, idx, offset, cfg):
     """One candidate's byte at ``offset`` of its ordered key (``:2679``, ``:2637``)."""
-    return K.cast(
-        K.bitwise_and(
-            K.shift_right(
-                K.cast(
+    return txl.cast(
+        txl.bitwise_and(
+            txl.shift_right(
+                txl.cast(
                     ordered_key(
-                        ld_global_nc_bits(inp, row_in + K.cast(idx, "int64"), cfg.is32), cfg.is32
+                        ld_global_nc_bits(inp, row_in + txl.cast(idx, "int64"), cfg.is32), cfg.is32
                     ),
                     "uint32",
                 ),
-                K.uint32(offset),
+                txl.uint32(offset),
             ),
-            K.uint32(0xFF),
+            txl.uint32(0xFF),
         ),
         "int32",
     )
@@ -663,40 +663,40 @@ def run_refine_round(
     indexing them by the round would run off the end from round 2 on.  Sets
     ``resolved`` when the round fully resolves the pivot.
     """
-    raw = K.reinterpret("int32", ld_shared_u32(s_scal, SC_NUM_INPUT + r_idx))
-    num_input = K.local_scalar("int32", init=K.min(raw, cfg.smem_input))
+    raw = txl.reinterpret("int32", ld_shared_u32(s_scal, SC_NUM_INPUT + r_idx))
+    num_input = txl.local_scalar("int32", init=txl.min(raw, cfg.smem_input))
 
     update_refine_threshold(s_hist2, s_scal, tx, cfg, topk, r_idx ^ 1, True)
 
-    threshold = K.reinterpret("int32", ld_shared_u32(s_scal, SC_THRESH_BIN))
+    threshold = txl.reinterpret("int32", ld_shared_u32(s_scal, SC_THRESH_BIN))
     if cfg.det:
-        with K.If(tx == 0), K.Then():
+        with txl.If(tx == 0), txl.Then():
             st_shared_u32(
                 s_scal,
                 SC_REFINE_TH + (cfg.first_shift - offset) // 8,
-                K.reinterpret("uint32", threshold),
+                txl.reinterpret("uint32", threshold),
             )
-    K.assign(topk, topk - K.reinterpret("int32", ld_shared_u32(s_hist2, threshold + 1)))
-    with K.If(topk == 0):
-        with K.Then():
+    txl.assign(topk, topk - txl.reinterpret("int32", ld_shared_u32(s_hist2, threshold + 1)))
+    with txl.If(topk == 0):
+        with txl.Then():
             # Pivot resolved: only bins strictly greater than the threshold remain.
-            with K.serial(tx, num_input, step=cfg.block) as i:
-                idx = K.reinterpret("int32", ld_shared_u32(s_input, r_idx * cfg.smem_input + i))
-                with K.If(_refine_bin(inp, row_in, idx, offset, cfg) > threshold), K.Then():
-                    pos = K.reinterpret(
-                        "int32", atom_shared_add_u32(s_scal, SC_COUNTER, K.uint32(1))
+            with txl.serial(tx, num_input, step=cfg.block) as i:
+                idx = txl.reinterpret("int32", ld_shared_u32(s_input, r_idx * cfg.smem_input + i))
+                with txl.If(_refine_bin(inp, row_in, idx, offset, cfg) > threshold), txl.Then():
+                    pos = txl.reinterpret(
+                        "int32", atom_shared_add_u32(s_scal, SC_COUNTER, txl.uint32(1))
                     )
-                    st_shared_u32(s_indices, pos, K.reinterpret("uint32", idx))
+                    st_shared_u32(s_indices, pos, txl.reinterpret("uint32", idx))
             bar_sync()
-            K.assign(resolved, K.int32(1))
-        with K.Else():
+            txl.assign(resolved, txl.int32(1))
+        with txl.Else():
             if is_last:
                 # collect_with_threshold_last_round (:2635-2645): one barrier.
-                with K.serial(tx, num_input, step=cfg.block) as i2:
-                    idx2 = K.reinterpret(
+                with txl.serial(tx, num_input, step=cfg.block) as i2:
+                    idx2 = txl.reinterpret(
                         "int32", ld_shared_u32(s_input, r_idx * cfg.smem_input + i2)
                     )
-                    bin2 = K.local_scalar("int32", init=_refine_bin(inp, row_in, idx2, offset, cfg))
+                    bin2 = txl.local_scalar("int32", init=_refine_bin(inp, row_in, idx2, offset, cfg))
                     collect_gt_and_nondet_eq(s_scal, s_indices, cfg, bin2, threshold, idx2, True)
                 bar_sync()
             else:
@@ -704,68 +704,68 @@ def run_refine_round(
                 # barriers, ping-ponging the survivors into s_input_idx[r_idx ^ 1]
                 # together with the next byte's histogram.
                 bar_sync()
-                with K.If(tx < cfg.radix + 1), K.Then():
-                    st_shared_u32(s_hist2, tx, K.uint32(0))
+                with txl.If(tx < cfg.radix + 1), txl.Then():
+                    st_shared_u32(s_hist2, tx, txl.uint32(0))
                 bar_sync()
-                with K.serial(tx, num_input, step=cfg.block) as i3:
-                    idx3 = K.reinterpret(
+                with txl.serial(tx, num_input, step=cfg.block) as i3:
+                    idx3 = txl.reinterpret(
                         "int32", ld_shared_u32(s_input, r_idx * cfg.smem_input + i3)
                     )
-                    ord3 = K.cast(
+                    ord3 = txl.cast(
                         ordered_key(
-                            ld_global_nc_bits(inp, row_in + K.cast(idx3, "int64"), cfg.is32),
+                            ld_global_nc_bits(inp, row_in + txl.cast(idx3, "int64"), cfg.is32),
                             cfg.is32,
                         ),
                         "uint32",
                     )
-                    bin3 = K.cast(
-                        K.bitwise_and(K.shift_right(ord3, K.uint32(offset)), K.uint32(0xFF)),
+                    bin3 = txl.cast(
+                        txl.bitwise_and(txl.shift_right(ord3, txl.uint32(offset)), txl.uint32(0xFF)),
                         "int32",
                     )
-                    with K.If(bin3 > threshold):
-                        with K.Then():
-                            pos3 = K.reinterpret(
-                                "int32", atom_shared_add_u32(s_scal, SC_COUNTER, K.uint32(1))
+                    with txl.If(bin3 > threshold):
+                        with txl.Then():
+                            pos3 = txl.reinterpret(
+                                "int32", atom_shared_add_u32(s_scal, SC_COUNTER, txl.uint32(1))
                             )
-                            st_shared_u32(s_indices, pos3, K.reinterpret("uint32", idx3))
-                        with K.Else():
-                            with K.If(bin3 == threshold), K.Then():
-                                slot3 = K.reinterpret(
+                            st_shared_u32(s_indices, pos3, txl.reinterpret("uint32", idx3))
+                        with txl.Else():
+                            with txl.If(bin3 == threshold), txl.Then():
+                                slot3 = txl.reinterpret(
                                     "int32",
                                     atom_shared_add_u32(
-                                        s_scal, SC_NUM_INPUT + (r_idx ^ 1), K.uint32(1)
+                                        s_scal, SC_NUM_INPUT + (r_idx ^ 1), txl.uint32(1)
                                     ),
                                 )
-                                with K.If(slot3 < cfg.smem_input):
-                                    with K.Then():
+                                with txl.If(slot3 < cfg.smem_input):
+                                    with txl.Then():
                                         st_shared_u32(
                                             s_input,
                                             (r_idx ^ 1) * cfg.smem_input + slot3,
-                                            K.reinterpret("uint32", idx3),
+                                            txl.reinterpret("uint32", idx3),
                                         )
-                                        sub3 = K.cast(
-                                            K.bitwise_and(
-                                                K.shift_right(ord3, K.uint32(offset - 8)),
-                                                K.uint32(0xFF),
+                                        sub3 = txl.cast(
+                                            txl.bitwise_and(
+                                                txl.shift_right(ord3, txl.uint32(offset - 8)),
+                                                txl.uint32(0xFF),
                                             ),
                                             "int32",
                                         )
-                                        atom_shared_add_u32(s_hist2, sub3, K.uint32(1))
-                                    with K.Else():
-                                        atom_shared_or_b32(s_scal, SC_REFINE_OVERFLOW, K.uint32(1))
+                                        atom_shared_add_u32(s_hist2, sub3, txl.uint32(1))
+                                    with txl.Else():
+                                        atom_shared_or_b32(s_scal, SC_REFINE_OVERFLOW, txl.uint32(1))
                 bar_sync()
 
 
 def body_rehist_threshold_bin(s_hist2, threshold_bin, cfg, bits, index):
     """16-bit fallback re-histogram (``:2715-2724``): low byte, threshold bin only."""
-    with K.If(coarse_key(bits, cfg.is32) == threshold_bin), K.Then():
+    with txl.If(coarse_key(bits, cfg.is32) == threshold_bin), txl.Then():
         atom_shared_add_u32(
             s_hist2,
-            K.cast(
-                K.bitwise_and(K.cast(ordered_key(bits, cfg.is32), "uint32"), K.uint32(0xFF)),
+            txl.cast(
+                txl.bitwise_and(txl.cast(ordered_key(bits, cfg.is32), "uint32"), txl.uint32(0xFF)),
                 "int32",
             ),
-            K.uint32(1),
+            txl.uint32(1),
         )
 
 
@@ -776,15 +776,15 @@ def body_recollect_threshold_bin(s_scal, s_indices, threshold_bin, cfg, bits, in
     without it the pass would compare out-of-bin elements by their low byte and
     re-collect every strict winner the filter stage already appended.
     """
-    with K.If(coarse_key(bits, cfg.is32) == threshold_bin), K.Then():
-        sub = K.local_scalar(
+    with txl.If(coarse_key(bits, cfg.is32) == threshold_bin), txl.Then():
+        sub = txl.local_scalar(
             "int32",
-            init=K.cast(
-                K.bitwise_and(K.cast(ordered_key(bits, cfg.is32), "uint32"), K.uint32(0xFF)),
+            init=txl.cast(
+                txl.bitwise_and(txl.cast(ordered_key(bits, cfg.is32), "uint32"), txl.uint32(0xFF)),
                 "int32",
             ),
         )
-        threshold = K.reinterpret("int32", ld_shared_u32(s_scal, SC_THRESH_BIN))
+        threshold = txl.reinterpret("int32", ld_shared_u32(s_scal, SC_THRESH_BIN))
         collect_gt_and_nondet_eq(s_scal, s_indices, cfg, sub, threshold, index, True)
 
 
@@ -795,11 +795,11 @@ def _prefix_match(match, ordered, threshold_bytes, rnd):
     source's straight-line chain of byte compares.
     """
     for prev in range(rnd):
-        got = K.cast(
-            K.bitwise_and(K.shift_right(ordered, K.uint32(24 - prev * 8)), K.uint32(0xFF)), "int32"
+        got = txl.cast(
+            txl.bitwise_and(txl.shift_right(ordered, txl.uint32(24 - prev * 8)), txl.uint32(0xFF)), "int32"
         )
-        with K.If(got != K.cast(threshold_bytes[prev], "int32")), K.Then():
-            K.assign(match, K.int32(0))
+        with txl.If(got != txl.cast(threshold_bytes[prev], "int32")), txl.Then():
+            txl.assign(match, txl.int32(0))
 
 
 def body_fallback_rehist(s_hist2, threshold_bytes, threshold_bin, cfg, rnd, bits, index):
@@ -809,20 +809,20 @@ def body_fallback_rehist(s_hist2, threshold_bytes, threshold_bin, cfg, rnd, bits
     by earlier rounds contribute to this round's byte histogram.
     ``threshold_bytes`` is the per-thread register array of ``:2805``.
     """
-    with K.If(coarse_key(bits, cfg.is32) == threshold_bin), K.Then():
+    with txl.If(coarse_key(bits, cfg.is32) == threshold_bin), txl.Then():
         # Read once per already-fixed byte plus once for this round's bump, on
         # every element of the row, on each of the four rebuild rounds.
-        ordered = K.local_scalar("uint32", init=K.cast(ordered_key(bits, cfg.is32), "uint32"))
-        match = K.local_scalar("int32", init=K.int32(1))
+        ordered = txl.local_scalar("uint32", init=txl.cast(ordered_key(bits, cfg.is32), "uint32"))
+        match = txl.local_scalar("int32", init=txl.int32(1))
         _prefix_match(match, ordered, threshold_bytes, rnd)
-        with K.If(match == 1), K.Then():
+        with txl.If(match == 1), txl.Then():
             atom_shared_add_u32(
                 s_hist2,
-                K.cast(
-                    K.bitwise_and(K.shift_right(ordered, K.uint32(24 - rnd * 8)), K.uint32(0xFF)),
+                txl.cast(
+                    txl.bitwise_and(txl.shift_right(ordered, txl.uint32(24 - rnd * 8)), txl.uint32(0xFF)),
                     "int32",
                 ),
-                K.uint32(1),
+                txl.uint32(1),
             )
 
 
@@ -834,14 +834,14 @@ def body_collect_by_pivot(s_scal, s_indices, threshold_bin, cfg, pivot, eq_neede
     full 32-bit ordered key against the rebuilt pivot.
     """
     # Both keys are read twice by the collector they are handed to.
-    bin_id = K.local_scalar("int32", init=coarse_key(bits, cfg.is32))
-    with K.If(bin_id > threshold_bin):
-        with K.Then():
+    bin_id = txl.local_scalar("int32", init=coarse_key(bits, cfg.is32))
+    with txl.If(bin_id > threshold_bin):
+        with txl.Then():
             collect_gt_and_nondet_eq(s_scal, s_indices, cfg, bin_id, threshold_bin, index, False)
-        with K.Else():
-            with K.If(bin_id == threshold_bin), K.Then():
-                ordered = K.local_scalar(
-                    "uint32", init=K.cast(ordered_key(bits, cfg.is32), "uint32")
+        with txl.Else():
+            with txl.If(bin_id == threshold_bin), txl.Then():
+                ordered = txl.local_scalar(
+                    "uint32", init=txl.cast(ordered_key(bits, cfg.is32), "uint32")
                 )
                 collect_gt_and_nondet_eq(
                     s_scal, s_indices, cfg, ordered, pivot, index, eq_needed > 0
@@ -857,7 +857,7 @@ def _fp32_refine_rounds(
     stay compile-time and the four rounds are emitted as four distinct bodies.
     """
     for rnd in range(4):
-        with K.If(stop == 0), K.Then():
+        with txl.If(stop == 0), txl.Then():
             run_refine_round(
                 inp,
                 s_hist2,
@@ -873,18 +873,18 @@ def _fp32_refine_rounds(
                 cfg.first_shift - rnd * 8,
                 rnd == 3,
             )
-            with K.If(resolved == 1):
-                with K.Then():
-                    K.assign(det_stop, K.int32(rnd))
-                    K.assign(stop, K.int32(1))
-                with K.Else():
+            with txl.If(resolved == 1):
+                with txl.Then():
+                    txl.assign(det_stop, txl.int32(rnd))
+                    txl.assign(stop, txl.int32(1))
+                with txl.Else():
                     with (
-                        K.If(
-                            K.reinterpret("int32", ld_shared_u32(s_scal, SC_REFINE_OVERFLOW)) != 0
+                        txl.If(
+                            txl.reinterpret("int32", ld_shared_u32(s_scal, SC_REFINE_OVERFLOW)) != 0
                         ),
-                        K.Then(),
+                        txl.Then(),
                     ):
-                        K.assign(stop, K.int32(1))
+                        txl.assign(stop, txl.int32(1))
 
 
 def _fp32_fallback_rounds(
@@ -903,9 +903,9 @@ def _fp32_fallback_rounds(
 ):
     """The fallback's ``#pragma unroll`` rebuild loop (``:2812-2856``)."""
     for rnd in range(4):
-        with K.If(halt == 0), K.Then():
-            with K.If(tx < cfg.radix + 1), K.Then():
-                st_shared_u32(s_hist2, tx, K.uint32(0))
+        with txl.If(halt == 0), txl.Then():
+            with txl.If(tx < cfg.radix + 1), txl.Then():
+                st_shared_u32(s_hist2, tx, txl.uint32(0))
             bar_sync()
             for_each_score(
                 inp,
@@ -919,34 +919,34 @@ def _fp32_fallback_rounds(
             )
             bar_sync()
             run_cumsum(s_hist2, tx, cfg)
-            with K.If(tx < cfg.radix), K.Then():
-                curf = K.reinterpret("int32", ld_shared_u32(s_hist2, tx))
-                with K.If(curf > remain), K.Then():
-                    nxtf = K.reinterpret("int32", ld_shared_u32(s_hist2, tx + 1))
-                    with K.If(nxtf <= remain), K.Then():
+            with txl.If(tx < cfg.radix), txl.Then():
+                curf = txl.reinterpret("int32", ld_shared_u32(s_hist2, tx))
+                with txl.If(curf > remain), txl.Then():
+                    nxtf = txl.reinterpret("int32", ld_shared_u32(s_hist2, tx + 1))
+                    with txl.If(nxtf <= remain), txl.Then():
                         # Only the bin id here; s_num_input and s_last_remain stay
                         # untouched (:2842-2845).
-                        st_shared_u32(s_scal, SC_THRESH_BIN, K.reinterpret("uint32", tx))
+                        st_shared_u32(s_scal, SC_THRESH_BIN, txl.reinterpret("uint32", tx))
             bar_sync()
-            thrf = K.reinterpret("int32", ld_shared_u32(s_scal, SC_THRESH_BIN))
+            thrf = txl.reinterpret("int32", ld_shared_u32(s_scal, SC_THRESH_BIN))
             # threshold_bytes is a per-thread register array in the source (:2805);
             # every thread reads the same s_threshold_bin_id, so no publication step
             # and no extra barrier is needed.
-            K.assign(bytes_reg[rnd], K.cast(thrf, "uint32"))
-            K.assign(remain, remain - K.reinterpret("int32", ld_shared_u32(s_hist2, thrf + 1)))
+            txl.assign(bytes_reg[rnd], txl.cast(thrf, "uint32"))
+            txl.assign(remain, remain - txl.reinterpret("int32", ld_shared_u32(s_hist2, thrf + 1)))
             bar_sync()
-            with K.If(remain == 0), K.Then():
-                K.assign(stop_round, K.int32(rnd))
-                K.assign(halt, K.int32(1))
+            with txl.If(remain == 0), txl.Then():
+                txl.assign(stop_round, txl.int32(rnd))
+                txl.assign(halt, txl.int32(1))
 
 
 def _fp32_det_pivot_bytes(s_scal, piv, det_stop):
     """``build_det_pivot`` (``:2539-2544``), one byte per refine round."""
     for rnd in range(4):
-        byte0 = K.Select(
-            K.int32(rnd) <= det_stop, ld_shared_u32(s_scal, SC_REFINE_TH + rnd), K.uint32(0xFF)
+        byte0 = txl.Select(
+            txl.int32(rnd) <= det_stop, ld_shared_u32(s_scal, SC_REFINE_TH + rnd), txl.uint32(0xFF)
         )
-        K.assign(piv, K.bitwise_or(piv, K.shift_left(byte0, K.uint32(24 - rnd * 8))))
+        txl.assign(piv, txl.bitwise_or(piv, txl.shift_left(byte0, txl.uint32(24 - rnd * 8))))
 
 
 def _fp32_pivot_bytes(pivf, bytes_reg, remain, stop_round):
@@ -956,11 +956,11 @@ def _fp32_pivot_bytes(pivf, bytes_reg, remain, stop_round):
     ``stop_round``.
     """
     for rnd in range(4):
-        bytef = K.local_scalar("uint32", init=bytes_reg[rnd])
-        with K.If(remain == 0), K.Then():
-            with K.If(K.int32(rnd) > stop_round), K.Then():
-                K.assign(bytef, K.uint32(0xFF))
-        K.assign(pivf, K.bitwise_or(pivf, K.shift_left(bytef, K.uint32(24 - rnd * 8))))
+        bytef = txl.local_scalar("uint32", init=bytes_reg[rnd])
+        with txl.If(remain == 0), txl.Then():
+            with txl.If(txl.int32(rnd) > stop_round), txl.Then():
+                txl.assign(bytef, txl.uint32(0xFF))
+        txl.assign(pivf, txl.bitwise_or(pivf, txl.shift_left(bytef, txl.uint32(24 - rnd * 8))))
 
 
 def emit_fp32_refine(
@@ -980,20 +980,20 @@ def emit_fp32_refine(
     topk_after_coarse,
 ):
     """fp32's four refine rounds and the 32-bit pivot-rebuild fallback (``:2767-2902``)."""
-    det_stop = K.local_scalar("int32", init=K.int32(3))  # NUM_ROUNDS - 1 (:2771)
-    stop = K.local_scalar("int32", init=K.int32(0))
-    remain = K.local_scalar("int32", init=topk_after_coarse)  # (:2804)
-    stop_round = K.local_scalar("int32", init=K.int32(3))
-    halt = K.local_scalar("int32", init=K.int32(0))
+    det_stop = txl.local_scalar("int32", init=txl.int32(3))  # NUM_ROUNDS - 1 (:2771)
+    stop = txl.local_scalar("int32", init=txl.int32(0))
+    remain = txl.local_scalar("int32", init=topk_after_coarse)  # (:2804)
+    stop_round = txl.local_scalar("int32", init=txl.int32(3))
+    halt = txl.local_scalar("int32", init=txl.int32(0))
     # threshold_bytes: a per-thread register array in the source (:2805), not
     # shared state.
-    bytes_reg = K.alloc_local([4], "uint32")
-    with K.unroll(4) as r:
-        K.assign(bytes_reg[r], K.uint32(0xFF))  # (:2805-2810)
+    bytes_reg = txl.alloc_local([4], "uint32")
+    with txl.unroll(4) as r:
+        txl.assign(bytes_reg[r], txl.uint32(0xFF))  # (:2805-2810)
 
     # The whole round loop is guarded on the flag the filter stage may have set
     # (:2772).
-    with K.If(K.reinterpret("int32", ld_shared_u32(s_scal, SC_REFINE_OVERFLOW)) == 0), K.Then():
+    with txl.If(txl.reinterpret("int32", ld_shared_u32(s_scal, SC_REFINE_OVERFLOW)) == 0), txl.Then():
         _fp32_refine_rounds(
             inp,
             s_hist2,
@@ -1013,8 +1013,8 @@ def emit_fp32_refine(
     # itself: run_refine_round can raise s_refine_overflow mid-loop through the
     # atomicOr at :2667, which the source spells out at :2798-2799.
     if cfg.det:
-        with K.If(K.reinterpret("int32", ld_shared_u32(s_scal, SC_REFINE_OVERFLOW)) == 0), K.Then():
-            piv = K.local_scalar("uint32", init=K.uint32(0))
+        with txl.If(txl.reinterpret("int32", ld_shared_u32(s_scal, SC_REFINE_OVERFLOW)) == 0), txl.Then():
+            piv = txl.local_scalar("uint32", init=txl.uint32(0))
             _fp32_det_pivot_bytes(s_scal, piv, det_stop)
             collect_det_eq_pivot(
                 inp, s_scan, s_indices, s_scal, tx, row_in, row_len, cfg, piv, topk
@@ -1023,7 +1023,7 @@ def emit_fp32_refine(
     # 32-bit pivot rebuild after an overflow (:2800-2900).  Overflow can follow
     # partial writes to s_indices / s_counter, so the selection is rebuilt from
     # scratch.
-    with K.If(K.reinterpret("int32", ld_shared_u32(s_scal, SC_REFINE_OVERFLOW)) != 0), K.Then():
+    with txl.If(txl.reinterpret("int32", ld_shared_u32(s_scal, SC_REFINE_OVERFLOW)) != 0), txl.Then():
         _fp32_fallback_rounds(
             inp,
             s_hist2,
@@ -1038,11 +1038,11 @@ def emit_fp32_refine(
             stop_round,
             halt,
         )
-        pivf = K.local_scalar("uint32", init=K.uint32(0))
+        pivf = txl.local_scalar("uint32", init=txl.uint32(0))
         _fp32_pivot_bytes(pivf, bytes_reg, remain, stop_round)
-        with K.If(tx == 0), K.Then():
-            st_shared_u32(s_scal, SC_COUNTER, K.uint32(0))
-            st_shared_u32(s_scal, SC_LAST_REMAIN, K.reinterpret("uint32", remain))
+        with txl.If(tx == 0), txl.Then():
+            st_shared_u32(s_scal, SC_COUNTER, txl.uint32(0))
+            st_shared_u32(s_scal, SC_LAST_REMAIN, txl.reinterpret("uint32", remain))
         bar_sync()
         for_each_score(
             inp,
@@ -1077,10 +1077,10 @@ def _emit_16bit_refine(
     threshold_bin,
 ):
     """The 16-bit dtypes' single refine round and its full-row slow path (``:2710-2765``)."""
-    with K.If(K.reinterpret("int32", ld_shared_u32(s_scal, SC_REFINE_OVERFLOW)) != 0):
-        with K.Then():
-            with K.If(tx < cfg.radix + 1), K.Then():
-                st_shared_u32(s_hist2, tx, K.uint32(0))
+    with txl.If(txl.reinterpret("int32", ld_shared_u32(s_scal, SC_REFINE_OVERFLOW)) != 0):
+        with txl.Then():
+            with txl.If(tx < cfg.radix + 1), txl.Then():
+                st_shared_u32(s_hist2, tx, txl.uint32(0))
             bar_sync()
             for_each_score(
                 inp,
@@ -1093,9 +1093,9 @@ def _emit_16bit_refine(
                 cfg,
             )
             bar_sync()
-            with K.If(tx == 0), K.Then():
-                st_shared_u32(s_scal, SC_THRESH_BIN, K.uint32(0))
-                st_shared_u32(s_scal, SC_LAST_REMAIN, K.uint32(0))
+            with txl.If(tx == 0), txl.Then():
+                st_shared_u32(s_scal, SC_THRESH_BIN, txl.uint32(0))
+                st_shared_u32(s_scal, SC_LAST_REMAIN, txl.uint32(0))
             bar_sync()
             # The only RESET_NEXT_INPUT=false call in the kernel (:2733).
             update_refine_threshold(s_hist2, s_scal, tx, cfg, topk, 0, False)
@@ -1111,8 +1111,8 @@ def _emit_16bit_refine(
             )
             bar_sync()
             if cfg.det:
-                thr_f = K.reinterpret("int32", ld_shared_u32(s_scal, SC_THRESH_BIN))
-                eq_f = K.reinterpret("int32", ld_shared_u32(s_scal, SC_LAST_REMAIN))
+                thr_f = txl.reinterpret("int32", ld_shared_u32(s_scal, SC_THRESH_BIN))
+                eq_f = txl.reinterpret("int32", ld_shared_u32(s_scal, SC_LAST_REMAIN))
                 collect_det_eq_pivot(
                     inp,
                     s_scan,
@@ -1122,13 +1122,13 @@ def _emit_16bit_refine(
                     row_in,
                     row_len,
                     cfg,
-                    K.bitwise_or(
-                        K.shift_left(K.cast(threshold_bin, "uint32"), K.uint32(8)),
-                        K.cast(thr_f, "uint32"),
+                    txl.bitwise_or(
+                        txl.shift_left(txl.cast(threshold_bin, "uint32"), txl.uint32(8)),
+                        txl.cast(thr_f, "uint32"),
                     ),
                     eq_f,
                 )
-        with K.Else():
+        with txl.Else():
             run_refine_round(
                 inp,
                 s_hist2,
@@ -1146,7 +1146,7 @@ def _emit_16bit_refine(
             )
             if cfg.det:
                 # build_det_pivot(0) on 16 bits (:2535-2537).
-                th0 = K.reinterpret("int32", ld_shared_u32(s_scal, SC_REFINE_TH))
+                th0 = txl.reinterpret("int32", ld_shared_u32(s_scal, SC_REFINE_TH))
                 collect_det_eq_pivot(
                     inp,
                     s_scan,
@@ -1156,9 +1156,9 @@ def _emit_16bit_refine(
                     row_in,
                     row_len,
                     cfg,
-                    K.bitwise_or(
-                        K.shift_left(K.cast(threshold_bin, "uint32"), K.uint32(8)),
-                        K.cast(th0, "uint32"),
+                    txl.bitwise_or(
+                        txl.shift_left(txl.cast(threshold_bin, "uint32"), txl.uint32(8)),
+                        txl.cast(th0, "uint32"),
                     ),
                     topk,
                 )
@@ -1185,16 +1185,16 @@ def emit_filtered_topk_main(
     cfg,
 ):
     """``FilteredTopKUnifiedKernel``'s non-trivial path (``:2431-2919``)."""
-    topk = K.local_scalar("int32", init=K.int32(cfg.top_k))
+    topk = txl.local_scalar("int32", init=txl.int32(cfg.top_k))
 
     # --- init (:2450-2458) -------------------------------------------------
-    with K.If(tx == 0), K.Then():
-        st_shared_u32(s_scal, SC_REFINE_OVERFLOW, K.uint32(0))
+    with txl.If(tx == 0), txl.Then():
+        st_shared_u32(s_scal, SC_REFINE_OVERFLOW, txl.uint32(0))
     if cfg.det:
-        with K.If(tx < 4), K.Then():
-            st_shared_u32(s_scal, SC_REFINE_TH + tx, K.uint32(0xFF))
-    with K.If(tx < cfg.radix + 1), K.Then():
-        st_shared_u32(s_hist2, tx, K.uint32(0))
+        with txl.If(tx < 4), txl.Then():
+            st_shared_u32(s_scal, SC_REFINE_TH + tx, txl.uint32(0xFF))
+    with txl.If(tx < cfg.radix + 1), txl.Then():
+        st_shared_u32(s_hist2, tx, txl.uint32(0))
     bar_sync()
 
     # --- Stage 1: coarse histogram over the whole row (:2482-2487) ---------
@@ -1213,23 +1213,23 @@ def emit_filtered_topk_main(
     # `@p bra` and zero `and.pred`.  Exactly one thread satisfies all three, and
     # the counter resets ride on that same predicate rather than on tx == 0.
     run_cumsum(s_hist2, tx, cfg)
-    with K.If(tx < cfg.radix), K.Then():
-        cur0 = K.reinterpret("int32", ld_shared_u32(s_hist2, tx))
-        with K.If(cur0 > topk), K.Then():
-            nxt0 = K.reinterpret("int32", ld_shared_u32(s_hist2, tx + 1))
-            with K.If(nxt0 <= topk), K.Then():
-                st_shared_u32(s_scal, SC_THRESH_BIN, K.reinterpret("uint32", tx))
-                st_shared_u32(s_scal, SC_NUM_INPUT, K.uint32(0))
-                st_shared_u32(s_scal, SC_COUNTER, K.uint32(0))
+    with txl.If(tx < cfg.radix), txl.Then():
+        cur0 = txl.reinterpret("int32", ld_shared_u32(s_hist2, tx))
+        with txl.If(cur0 > topk), txl.Then():
+            nxt0 = txl.reinterpret("int32", ld_shared_u32(s_hist2, tx + 1))
+            with txl.If(nxt0 <= topk), txl.Then():
+                st_shared_u32(s_scal, SC_THRESH_BIN, txl.reinterpret("uint32", tx))
+                st_shared_u32(s_scal, SC_NUM_INPUT, txl.uint32(0))
+                st_shared_u32(s_scal, SC_COUNTER, txl.uint32(0))
     bar_sync()
-    threshold_bin = K.reinterpret("int32", ld_shared_u32(s_scal, SC_THRESH_BIN))
-    K.assign(topk, topk - K.reinterpret("int32", ld_shared_u32(s_hist2, threshold_bin + 1)))
+    threshold_bin = txl.reinterpret("int32", ld_shared_u32(s_scal, SC_THRESH_BIN))
+    txl.assign(topk, topk - txl.reinterpret("int32", ld_shared_u32(s_hist2, threshold_bin + 1)))
     # A SNAPSHOT of `topk` before the refine rounds walk it down (:2804); a plain
     # binding would re-read the counter after those writes.
-    topk_after_coarse = K.local_scalar("int32", init=topk)
+    topk_after_coarse = txl.local_scalar("int32", init=topk)
 
-    with K.If(topk == 0):
-        with K.Then():
+    with txl.If(topk == 0):
+        with txl.Then():
             # The coarse pass already resolved k (:2549-2559).
             for_each_score(
                 inp,
@@ -1242,11 +1242,11 @@ def emit_filtered_topk_main(
                 cfg,
             )
             bar_sync()
-        with K.Else():
+        with txl.Else():
             # --- Stage 2: the filter (:2561-2629) --------------------------
             bar_sync()
-            with K.If(tx < cfg.radix + 1), K.Then():
-                st_shared_u32(s_hist2, tx, K.uint32(0))
+            with txl.If(tx < cfg.radix + 1), txl.Then():
+                st_shared_u32(s_hist2, tx, txl.uint32(0))
             bar_sync()
             for_each_score(
                 inp,
@@ -1261,7 +1261,7 @@ def emit_filtered_topk_main(
             bar_sync()
 
             # --- Stage 3: refine (:2710-2902) ------------------------------
-            resolved = K.local_scalar("int32", init=K.int32(0))
+            resolved = txl.local_scalar("int32", init=txl.int32(0))
             if cfg.num_rounds == 1:
                 _emit_16bit_refine(
                     inp,
@@ -1299,28 +1299,28 @@ def emit_filtered_topk_main(
     # --- Stage 5: output (:2905-2918) --------------------------------------
     # Strict winners plus tie fillers sum to exactly top_k on this path, so
     # nothing is padded here; only the trivial path emits -1.
-    with K.serial(tx, cfg.top_k, step=cfg.block, unroll=2) as base:
-        sel = K.reinterpret("int32", ld_shared_u32(s_indices, base))
+    with txl.serial(tx, cfg.top_k, step=cfg.block, unroll=2) as base:
+        sel = txl.reinterpret("int32", ld_shared_u32(s_indices, base))
         # Materialized: a lazy 64-bit slot address is re-narrowed per store.
-        slot = K.local_scalar("int64", init=row_out + K.cast(base, "int64"))
+        slot = txl.local_scalar("int64", init=row_out + txl.cast(base, "int64"))
         if cfg.basic:
-            st_global_u32(out_idx, slot, K.reinterpret("uint32", sel))
+            st_global_u32(out_idx, slot, txl.reinterpret("uint32", sel))
             st_global_bits(
                 out_val,
                 slot,
-                ld_global_nc_bits(inp, row_in + K.cast(sel, "int64"), cfg.is32),
+                ld_global_nc_bits(inp, row_in + txl.cast(sel, "int64"), cfg.is32),
                 cfg.is32,
             )
         elif cfg.det:
             # Local index; the transform is deferred to the finalize kernel.
-            st_global_u32(out_idx, slot, K.reinterpret("uint32", sel))
+            st_global_u32(out_idx, slot, txl.reinterpret("uint32", sel))
         elif cfg.page_table:
             st_global_u32(
                 out_idx,
                 slot,
                 ld_global_nc_u32(
-                    aux, K.cast(batch_idx, "int64") * aux_stride + K.cast(page_start + sel, "int64")
+                    aux, txl.cast(batch_idx, "int64") * aux_stride + txl.cast(page_start + sel, "int64")
                 ),
             )
         else:
-            st_global_u32(out_idx, slot, K.reinterpret("uint32", sel + offset_val))
+            st_global_u32(out_idx, slot, txl.reinterpret("uint32", sel + offset_val))

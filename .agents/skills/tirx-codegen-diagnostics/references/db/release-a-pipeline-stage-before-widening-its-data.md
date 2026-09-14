@@ -13,10 +13,10 @@ Fence and release as soon as the bytes are in registers; convert afterwards.
 
 ```python
 for word in range(0, words_per_row, 4):
-    K.ptx["ld.shared.v4.b32"](raw[word], raw[word + 1], raw[word + 2], raw[word + 3], ...)
-K.ptx["fence.proxy.async.shared::cta"]()
-with K.If(K.lane_id() == K.int32(0)), K.Then():
-    K.ptx.mbarrier.arrive.shared.b64(pipe.empty.ptr_to([consumer.stage]))
+    txl.ptx["ld.shared.v4.b32"](raw[word], raw[word + 1], raw[word + 2], raw[word + 3], ...)
+txl.ptx["fence.proxy.async.shared::cta"]()
+with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+    txl.ptx.mbarrier.arrive.shared.b64(pipe.empty.ptr_to([consumer.stage]))
 consumer.advance()
 _widen(fragment, raw)   # after the release, not before
 ```

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
-"""Kernel entry frame exposed as ``K.kernel`` and its trace-time session.
+"""Kernel entry frame exposed as ``txl.kernel`` and its trace-time session.
 
 The decorator owns an ``IRBuilder`` and traces the decorated function once,
 at decoration time. Plain Python control flow in the body is macro expansion;
@@ -72,10 +72,10 @@ def cta_register_pool(warps: int, min_blocks_per_sm: int = 1) -> int:
 class gptr:  # pylint: disable=invalid-name
     """A global buffer parameter with symbolic rank or a fixed shape.
 
-    ``K.gptr[dtype]`` and ``K.gptr[dtype, ndim]`` give every dimension a fresh
-    symbolic ``int64`` extent. ``K.gptr[dtype, shape]`` owns the exact fixed
+    ``txl.gptr[dtype]`` and ``txl.gptr[dtype, ndim]`` give every dimension a fresh
+    symbolic ``int64`` extent. ``txl.gptr[dtype, shape]`` owns the exact fixed
     extents when they are part of the specialized kernel contract.
-    ``K.gptr(dtype, shape=lambda p: (...))`` derives dynamic extents from the
+    ``txl.gptr(dtype, shape=lambda p: (...))`` derives dynamic extents from the
     entry's scalar parameters, preserving one shape fact instead of inventing
     unrelated symbols.
     """
@@ -106,34 +106,34 @@ class gptr:  # pylint: disable=invalid-name
         if isinstance(dtype, tuple):
             if len(dtype) != 2:
                 raise TypeError(
-                    "gptr expects K.gptr[dtype], K.gptr[dtype, ndim], or K.gptr[dtype, shape]"
+                    "gptr expects txl.gptr[dtype], txl.gptr[dtype, ndim], or txl.gptr[dtype, shape]"
                 )
             return cls(*dtype)
         return cls(dtype)
 
     def __repr__(self):
         if self.shape_factory is not None:
-            return f"K.gptr({self.dtype!r}, shape=<entry-shape>)"
+            return f"txl.gptr({self.dtype!r}, shape=<entry-shape>)"
         if self.shape is not None:
-            return f"K.gptr[{self.dtype!r}, {self.shape!r}]"
+            return f"txl.gptr[{self.dtype!r}, {self.shape!r}]"
         if self.ndim != 1:
-            return f"K.gptr[{self.dtype!r}, {self.ndim}]"
-        return f"K.gptr[{self.dtype!r}]"
+            return f"txl.gptr[{self.dtype!r}, {self.ndim}]"
+        return f"txl.gptr[{self.dtype!r}]"
 
 
 class TensorMap:  # pylint: disable=invalid-name
-    """``K.TensorMap`` — a ``const __grid_constant__ CUtensorMap`` parameter."""
+    """``txl.TensorMap`` — a ``const __grid_constant__ CUtensorMap`` parameter."""
 
 
 _TLS = threading.local()
 
 
-# Kern traces Python directly instead of going through the TVMScript parser.
+# tirx-lite traces Python directly instead of going through the TVMScript parser.
 # Keep the parser's source-location contract by recording the active user line
-# while the body is being traced.  Frames in Kern itself, TVM, and Python's
+# while the body is being traced.  Frames in tirx-lite itself, TVM, and Python's
 # runtime are implementation details; allowing them to update the active span
 # would make diagnostics point into the DSL rather than to the kernel source.
-_KERN_SOURCE_ROOT = Path(__file__).resolve().parent
+_TXL_SOURCE_ROOT = Path(__file__).resolve().parent
 _TVM_SOURCE_ROOT = Path(tvm.__file__).resolve().parent
 _PYTHON_STDLIB_ROOT = Path(sysconfig.get_paths()["stdlib"]).resolve()
 _PYTHON_SITE_ROOTS = tuple(
@@ -152,7 +152,7 @@ def _is_user_source(filename: str) -> bool:
         path = Path(filename).resolve()
     except OSError:
         return False
-    if path == _KERN_SOURCE_ROOT or _KERN_SOURCE_ROOT in path.parents:
+    if path == _TXL_SOURCE_ROOT or _TXL_SOURCE_ROOT in path.parents:
         return False
     if path == _TVM_SOURCE_ROOT or _TVM_SOURCE_ROOT in path.parents:
         return False
@@ -188,7 +188,7 @@ def _callable_span(func) -> Span | None:
 
 
 class _SourceSpanTracer:
-    """Attach the current Python source line to statements emitted by Kern."""
+    """Attach the current Python source line to statements emitted by tirx-lite."""
 
     def __init__(self, builder):
         self.builder = builder
@@ -259,13 +259,13 @@ def current(required: bool = True) -> Session | None:
     session = getattr(_TLS, "session", None)
     if session is None and required:
         raise RuntimeError(
-            "no kern kernel is being traced; this call is only valid inside a @K.kernel body"
+            "no tirx-lite kernel is being traced; this call is only valid inside a @txl.kernel body"
         )
     return session
 
 
 class Session:
-    """Trace-time state of one ``@K.kernel`` body.
+    """Trace-time state of one ``@txl.kernel`` body.
 
     Owns the ``IRBuilder``, the bound scope ids, and the single smem pool and
     ``specialize`` object the body is allowed to create.
@@ -347,7 +347,7 @@ class Kernel:
         return self.compile(target).mod.imports[0].inspect_source()
 
     def __repr__(self):
-        return f"<K.kernel {self.name} warps={self.warps} arch={self.arch}>"
+        return f"<txl.kernel {self.name} warps={self.warps} arch={self.arch}>"
 
 
 def _scalar_param(name, ann):
@@ -358,8 +358,8 @@ def _scalar_param(name, ann):
             raise TypeError(
                 f"parameter {name!r}: annotation arrived as the string {ann!r} — "
                 "`from __future__ import annotations` (PEP 563) stringifies "
-                "annotations before @K.kernel can read them. Remove that import "
-                "from the kernel's module: kern kernels trace at decoration time "
+                "annotations before @txl.kernel can read them. Remove that import "
+                "from the kernel's module: tirx-lite kernels trace at decoration time "
                 "and need live annotation objects."
             )
         raise TypeError(f"parameter {name!r}: unknown dtype token {ann!r}")
@@ -411,9 +411,9 @@ def _declare_param(name, ann, scalar_params):
     if isinstance(ann, str):
         return I.arg(name, scalar_params[name])
     raise TypeError(
-        f"parameter {name!r} has annotation {ann!r}; expected K.gptr[dtype], "
-        "K.gptr[dtype, ndim], K.gptr[dtype, shape], "
-        "K.TensorMap, or a dtype token such as K.i32"
+        f"parameter {name!r} has annotation {ann!r}; expected txl.gptr[dtype], "
+        "txl.gptr[dtype, ndim], txl.gptr[dtype, shape], "
+        "txl.TensorMap, or a dtype token such as txl.i32"
     )
 
 
@@ -449,7 +449,7 @@ def _resolve_grid(grid, params):
 
 
 def _resolve_grid_dimensions(grid, params):
-    """Resolve and validate the one-to-three CTA extents owned by K."""
+    """Resolve and validate the one-to-three CTA extents owned by txl."""
     dimensions = _resolve_grid(grid, params)
     if not isinstance(dimensions, list):
         dimensions = [dimensions]
@@ -488,7 +488,7 @@ def kernel(
     Parameters
     ----------
     warps : int
-        CTA width in warps. Kern owns one flat ``blockDim.x = warps * 32``
+        CTA width in warps. tirx-lite owns one flat ``blockDim.x = warps * 32``
         thread axis; thread layout is not an entry option.
     arch : str
         CUDA arch for the default compile target.
@@ -524,8 +524,8 @@ def kernel(
         parameters may return either form. Defaults to the parameter named
         ``num_sms`` when the kernel has one, else 1. Pass ``False`` to leave
         the kernel-to-CTA scope to the body, which can then declare the
-        original kernel's dimensions directly with ``K.cta_id(extents)``.
-        This is an ownership opt-out, not a second grid representation in K.
+        original kernel's dimensions directly with ``txl.cta_id(extents)``.
+        This is an ownership opt-out, not a second grid representation in txl.
     host_prelude : callable, optional
         Emit host-only setup in the same traced PrimFunc before its device
         entry.  The callable receives the ABI parameter mapping and returns
@@ -574,13 +574,13 @@ def kernel(
                 # __launch_bounds__ operand iff this attribute is present.
                 if min_blocks_per_sm is not None:
                     _flat_frame(I.attr({"tirx.launch_bounds_min_blocks_per_sm": min_blocks_per_sm}))
-                # K binds the CTA scope only when requested. Otherwise the body
+                # txl binds the CTA scope only when requested. Otherwise the body
                 # declares the original kernel's scope directly; the warp/thread
                 # siblings below remain available to infer deferred ids used by
                 # user closures.
                 if grid is not False:
                     session.cta_id = I.cta_id(_resolve_grid_dimensions(grid, session.params))
-                # Kern owns one flat CTA-local thread axis. A per-entry layout
+                # tirx-lite owns one flat CTA-local thread axis. A per-entry layout
                 # switch would let kernels silently change the launch ABI (or
                 # leave thread scope to a second builder owner), so it is not
                 # part of the kernel DSL contract.
@@ -613,7 +613,7 @@ def kernel(
             # CTA-scope code between them into the previous role's branch.
             func = session.specialize.chain_dispatch(func)
         if check_ir:
-            # Every kern build passes the low-level IR contract by default:
+            # Every tirx-lite build passes the low-level IR contract by default:
             # direct global/shared buffer accesses and unlisted func_calls are
             # trace-time errors, not something a later test run discovers.
             from .low_level_ir import check_low_level_ir
@@ -625,7 +625,7 @@ def kernel(
 
 
 def cta_id(extents=None, preferred=None, dtype="int32"):
-    """CTA id owned by ``@K.kernel``.
+    """CTA id owned by ``@txl.kernel``.
 
     A one-dimensional grid returns its scalar scope id; a multidimensional
     grid returns the corresponding TVM ``Array`` of scope ids. Passing
@@ -636,8 +636,8 @@ def cta_id(extents=None, preferred=None, dtype="int32"):
     value = current().cta_id
     if value is None:
         raise RuntimeError(
-            "K.cta_id() is unavailable because @K.kernel set grid=False. "
-            "Declare it with K.cta_id(extents) inside the kernel body."
+            "txl.cta_id() is unavailable because @txl.kernel set grid=False. "
+            "Declare it with txl.cta_id(extents) inside the kernel body."
         )
     return value
 

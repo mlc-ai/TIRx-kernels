@@ -7,19 +7,19 @@
 A source kernel declares its CTA coordinates in the body and also names a flat
 thread coordinate there. Moving both axes into an entry layout can change the
 generated schedule, but exposing a per-kernel thread-layout switch or calling a
-raw builder bypasses the Kern entry contract.
+raw builder bypasses the tirx-lite entry contract.
 
 ## What to change
 
 Leave only the CTA shape body-owned. Select that contract with `grid=False`,
-declare the CTA coordinates through `K.cta_id(extents)`, and consume the flat
-thread coordinate owned by the entry through `K.thread_id()`.
+declare the CTA coordinates through `txl.cta_id(extents)`, and consume the flat
+thread coordinate owned by the entry through `txl.thread_id()`.
 
 ```python
-@K.kernel(warps=THREADS // 32, arch="sm_100a", grid=False)
+@txl.kernel(warps=THREADS // 32, arch="sm_100a", grid=False)
 def kernel(...):
-    work, batch = K.cta_id([NUM_WORK, NUM_BATCHES])
-    tid = K.thread_id()
+    work, batch = txl.cta_id([NUM_WORK, NUM_BATCHES])
+    tid = txl.thread_id()
 ```
 
 Do not add a `thread_layout` entry option or import the raw IR builder in a
@@ -27,7 +27,7 @@ kernel to recreate the old spelling.
 
 ## Rationale
 
-The Kern entry has one canonical flat CTA-local thread axis, while `grid=False`
+The tirx-lite entry has one canonical flat CTA-local thread axis, while `grid=False`
 keeps the source's body-owned CTA shape without creating a second entry
 representation. An eight-warp PDL combine migrated from raw body calls for both
 axes to this public spelling across three default specializations. The CUDA

@@ -1607,9 +1607,9 @@ branch emits nothing and `total_tokens` is the `ld.global.b32` at source 2241
 
 - registry name `cudnn_sm100_moe_blockscaled_grouped_gemm_dglu_dbias`, category
   `cudnn`, compute capability 10.
-- the device definition imports only `tirx_kernels.kern as K`; every copy,
-  compute, and synchronization operation above is spelled through `K.ptx`,
-  `K.specialize`, `K.smem_pool`, `K.Pipeline`, and `K.RingState`.
+- the device definition imports only `tirx_kernels.tirx_lite as txl`; every copy,
+  compute, and synchronization operation above is spelled through `txl.ptx`,
+  `txl.specialize`, `txl.smem_pool`, `txl.Pipeline`, and `txl.RingState`.
 - exported symbols: `KERNEL_META`, `CONFIGS`, `BENCH_CONFIGS`, `get_kernel`,
   `prepare_data`, `run_test`, `prepare_bench`, `run_gpu`, `run_bench`.
 - `get_kernel` returns `[helper, main]` when the specialization needs the

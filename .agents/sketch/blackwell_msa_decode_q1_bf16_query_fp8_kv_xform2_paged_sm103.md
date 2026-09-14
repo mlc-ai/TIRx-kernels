@@ -52,11 +52,11 @@ immutable.
 
 ## Primitive vocabulary and storage rule
 
-The implementation uses only `import tirx_kernels.kern as K`, scalar K
-control flow, register arrays, `K.TensorMap`, one rank-one dynamic shared byte
-arena, explicit byte offsets, and `K.ptx`. It uses no tile primitive, no
+The implementation uses only `import tirx_kernels.tirx_lite as txl`, scalar txl
+control flow, register arrays, `txl.TensorMap`, one rank-one dynamic shared byte
+arena, explicit byte offsets, and `txl.ptx`. It uses no tile primitive, no
 first-class layout object, no inline CUDA device call, no IR-check exemption,
-and no modification beneath `tirx_kernels/kern/`.
+and no modification beneath `tirx_kernels/tirx_lite/`.
 
 ```python
 linear_smem(name, bytes, alignment)

@@ -14,10 +14,10 @@ once.
 Bind the reused thread-derived indices to local scalars, and only those.
 
 ```python
-row_in_block = K.local_scalar("int32")
-sf_idx_in_row = K.local_scalar("int32")
-K.assign(row_in_block, tid // COLS_PER_ROW)
-K.assign(sf_idx_in_row, (tid % COLS_PER_ROW) // SF_UNIT)
+row_in_block = txl.local_scalar("int32")
+sf_idx_in_row = txl.local_scalar("int32")
+txl.assign(row_in_block, tid // COLS_PER_ROW)
+txl.assign(sf_idx_in_row, (tid % COLS_PER_ROW) // SF_UNIT)
 ```
 
 Materialize values whose reuse is visible in generated address arithmetic, not

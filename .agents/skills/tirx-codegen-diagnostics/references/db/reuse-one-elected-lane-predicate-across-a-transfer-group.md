@@ -16,16 +16,16 @@ for every guarded issue in that group.
 
 ```python
 # before: each helper call emits another warp election.
-with K.If(_elect_one()):
+with txl.If(_elect_one()):
     issue_first_transfer(...)
-with K.If(_elect_one()):
+with txl.If(_elect_one()):
     issue_second_transfer(...)
 
 # after: one election owns the complete transfer group.
 leader = _elect_one()
-with K.If(leader):
+with txl.If(leader):
     issue_first_transfer(...)
-with K.If(leader):
+with txl.If(leader):
     issue_second_transfer(...)
 ```
 

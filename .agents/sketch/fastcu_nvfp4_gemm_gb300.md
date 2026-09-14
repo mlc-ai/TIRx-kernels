@@ -737,7 +737,7 @@ CUDA r9 declares the three read-only arrays in `.const`, producing five static
 `ld.const.b32` sites in the writer PTX: two audit loads, one in each producer
 body, and one epilogue load followed by `redux.sync.min.u32`. The public K API
 has no module-scope constant declaration or `ld.const` operand. The port
-therefore accepts read-only `K.gptr` buffers and uses `ld.global.nc.b32` while
+therefore accepts read-only `txl.gptr` buffers and uses `ld.global.nc.b32` while
 preserving load ownership, location, cadence, uniformization, table contents,
 and the placement atomic. This is the sole device-algorithm adaptation; it is
 accepted only if the reviewer finds it auditable, bitwise correctness passes,
@@ -746,10 +746,10 @@ and every requested `bench_suite` ratio exceeds 0.99.
 ## TIRx module and benchmark contract
 
 - The executable imports the device language only as
-  `import tirx_kernels.kern as K`. It uses rank-one shared allocation, scalar
-  offset functions, `K.TensorMap`, registers, K control flow, and raw `K.ptx`.
+  `import tirx_kernels.tirx_lite as txl`. It uses rank-one shared allocation, scalar
+  offset functions, `txl.TensorMap`, registers, K control flow, and raw `txl.ptx`.
   It uses no tile primitive, layout object, inline CUDA device call, IR checker
-  exemption, or change under `tirx_kernels/kern/`.
+  exemption, or change under `tirx_kernels/tirx_lite/`.
 - Correctness runs source and TIRx on byte-identical packed inputs and requires
   bitwise equality of the complete FP16 output, finite results, complete poison
   overwrite, unchanged input canaries, a zero placement counter, and repeated

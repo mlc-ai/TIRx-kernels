@@ -26,13 +26,13 @@ ops["fused"](inner, work, inner, _spread(1.0))
 
 def _fused(out, left, right, addend):
     """``left * right + addend``; the reference's compiler contracts this."""
-    K.ptx["fma.rn.f32x2"](
+    txl.ptx["fma.rn.f32x2"](
         packed,
-        K.cuda.make_float2(left[0], left[1]),
-        K.cuda.make_float2(right[0], right[1]),
-        K.cuda.make_float2(addend[0], addend[1]),
+        txl.cuda.make_float2(left[0], left[1]),
+        txl.cuda.make_float2(right[0], right[1]),
+        txl.cuda.make_float2(addend[0], addend[1]),
     )
-    K.ptx["mov.b64"](out[0], out[1], packed)
+    txl.ptx["mov.b64"](out[0], out[1], packed)
 ```
 
 Reassociation is the same job by hand: pull the shared subexpression out, and

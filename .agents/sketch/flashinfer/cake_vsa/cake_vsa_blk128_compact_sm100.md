@@ -612,8 +612,8 @@ storage and integer maps", never to a layout.
 
 The public module exports `KERNEL_META`, `CONFIGS`, `BENCH_CONFIGS`,
 `get_kernel`, `prepare_data`, `run_test`, `prepare_bench`, `run_gpu`, and
-`run_bench`. Device code imports only `tirx_kernels.kern as K`; low-level
-instruction families use `K.ptx[...]` / `K.ptx.*`. There is no inline CUDA
+`run_bench`. Device code imports only `tirx_kernels.tirx_lite as txl`; low-level
+instruction families use `txl.ptx[...]` / `txl.ptx.*`. There is no inline CUDA
 function call, tile primitive, first-class layout or multidimensional SMEM
 allocation. The kernel is compiled once, shape-generic, through nvcc 13.2
 (`compile_kernel(..., cuda_compile_mode="nvcc")`) so TIRx and the upstream

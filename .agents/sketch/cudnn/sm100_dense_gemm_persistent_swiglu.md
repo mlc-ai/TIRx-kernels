@@ -51,7 +51,7 @@ integers. Every helper below accepts and returns only scalars, raw pointers, or
 opaque hardware descriptors. “Tile” below means an algorithmic rectangle, not
 a tile primitive or a layout-bearing object.
 
-The executable device body must use only `import tirx_kernels.kern as K` and
+The executable device body must use only `import tirx_kernels.tirx_lite as txl` and
 the `K` language surface. Direct TVM script namespaces, index-map helpers,
 tile primitives, and the tile namespace are forbidden.
 

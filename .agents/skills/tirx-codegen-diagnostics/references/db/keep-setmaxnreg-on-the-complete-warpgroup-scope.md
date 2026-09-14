@@ -19,13 +19,13 @@ MMA, and idle roles beneath it.
 # before: the register instruction rides a narrower, conditional role, so only
 # the MMA warps execute it.
 with mma_role:  # entered only when cbx == 0
-    K.ptx.setmaxnreg.dec.sync.aligned.u32(56)
+    txl.ptx.setmaxnreg.dec.sync.aligned.u32(56)
     ...
 
 # after: one instruction where every warp of the warpgroup reaches it, with the
 # functional roles beneath.
 with producer_warpgroup:
-    K.ptx.setmaxnreg.dec.sync.aligned.u32(56)
+    txl.ptx.setmaxnreg.dec.sync.aligned.u32(56)
     if cbx == 0:
         ...  # MMA role
     ...      # loader, scheduler, idle roles

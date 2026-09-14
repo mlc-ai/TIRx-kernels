@@ -693,7 +693,7 @@ def _cooperative_col_tensormap(tensor, feature_dim, columns, rows, dtype_name):
         box,
         # CuTe's transpose layouts use S<3,4,3> for 64 half elements
         # (128 bytes) and S<2,4,3> for 32 half elements (64 bytes).  The
-        # latter is the D192 Q.T/K.T atom; encoding it as SW128 leaves every
+        # latter is the D192 Q.T/txl.T atom; encoding it as SW128 leaves every
         # other 64-byte shared segment outside the TMA tile.
         {32: 2, 64: 3}[columns],
     )
@@ -770,7 +770,7 @@ def _build_maps(data):
         }
     elif cooperative:
         maps = {
-            # D192 changes only the transposed feature chunk: Q.T/K.T use
+            # D192 changes only the transposed feature chunk: Q.T/txl.T use
             # three 32-feature transfers while the row-major families retain
             # their 64-feature chunks.  These boxes are the source MLIR's
             # exact seven non-exec TMA load atoms.

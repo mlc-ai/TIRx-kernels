@@ -15,7 +15,7 @@ import functools
 import math
 from typing import Any
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 from tirx_kernels.runner import bench
 
 KERNEL_META = {
@@ -140,20 +140,20 @@ def _source_config(H: int) -> dict[str, int | bool]:
 
 
 def _ptx_unary(chain: str, value, dtype: str = "float32"):
-    out = K.alloc_local((1,), dtype)
-    K.ptx[chain](out[0], value)
+    out = txl.alloc_local((1,), dtype)
+    txl.ptx[chain](out[0], value)
     return out[0]
 
 
 def _ptx_binary(chain: str, lhs, rhs, dtype: str = "float32"):
-    out = K.alloc_local((1,), dtype)
-    K.ptx[chain](out[0], lhs, rhs)
+    out = txl.alloc_local((1,), dtype)
+    txl.ptx[chain](out[0], lhs, rhs)
     return out[0]
 
 
 def _ptx_ternary(chain: str, lhs, rhs, acc, dtype: str = "float32"):
-    out = K.alloc_local((1,), dtype)
-    K.ptx[chain](out[0], lhs, rhs, acc)
+    out = txl.alloc_local((1,), dtype)
+    txl.ptx[chain](out[0], lhs, rhs, acc)
     return out[0]
 
 
@@ -174,11 +174,11 @@ def _fma_rn_f32(lhs, rhs, acc):
 
 
 def _fma_half_inputs_to_f32(lhs, rhs, input_dtype: str):
-    out = K.alloc_local((1,), "float32")
+    out = txl.alloc_local((1,), "float32")
     if input_dtype == "float16":
-        K.ptx.fma.rn.f32.f16(out[0], lhs, rhs, K.float32(0.0))
+        txl.ptx.fma.rn.f32.f16(out[0], lhs, rhs, txl.float32(0.0))
     else:
-        K.ptx.fma.rn.f32.bf16(out[0], lhs, rhs, K.float32(0.0))
+        txl.ptx.fma.rn.f32.bf16(out[0], lhs, rhs, txl.float32(0.0))
     return out[0]
 
 
@@ -192,51 +192,51 @@ def _rsqrt_approx_ftz(value):
 
 def _cvt_to_f32(bits, input_dtype: str):
     if input_dtype == "float16":
-        return _ptx_unary("cvt.f32.f16", K.cast(bits, "uint16"))
-    return _ptx_unary("cvt.f32.bf16", K.cast(bits, "uint16"))
+        return _ptx_unary("cvt.f32.f16", txl.cast(bits, "uint16"))
+    return _ptx_unary("cvt.f32.bf16", txl.cast(bits, "uint16"))
 
 
 def _cvt_fp8_pair(low, high, output_dtype: str):
-    pair = K.alloc_local((1,), "uint16")
+    pair = txl.alloc_local((1,), "uint16")
     if output_dtype == "float8_e4m3fn":
-        K.ptx.cvt.rn.satfinite.e4m3x2.f32(pair[0], high, low)
+        txl.ptx.cvt.rn.satfinite.e4m3x2.f32(pair[0], high, low)
     else:
-        K.ptx.cvt.rn.satfinite.e5m2x2.f32(pair[0], high, low)
+        txl.ptx.cvt.rn.satfinite.e5m2x2.f32(pair[0], high, low)
     return pair[0]
 
 
 def _pack_b16_pair(low, high):
-    word = K.alloc_local((1,), "uint32")
-    K.ptx.mov.b32(word[0], low, high)
+    word = txl.alloc_local((1,), "uint32")
+    txl.ptx.mov.b32(word[0], low, high)
     return word[0]
 
 
 def _maximum_f32(value, lower):
-    predicate = K.local_scalar("uint32")
-    out = K.alloc_local((1,), "float32")
-    K.ptx.setp.le.f32(predicate, value, lower)
-    K.ptx.selp.f32(out[0], lower, value, K.ptx.pred(predicate))
+    predicate = txl.local_scalar("uint32")
+    out = txl.alloc_local((1,), "float32")
+    txl.ptx.setp.le.f32(predicate, value, lower)
+    txl.ptx.selp.f32(out[0], lower, value, txl.ptx.pred(predicate))
     return out[0]
 
 
 def _minimum_f32(value, upper):
-    predicate = K.local_scalar("uint32")
-    out = K.alloc_local((1,), "float32")
-    K.ptx.setp.ge.f32(predicate, value, upper)
-    K.ptx.selp.f32(out[0], upper, value, K.ptx.pred(predicate))
+    predicate = txl.local_scalar("uint32")
+    out = txl.alloc_local((1,), "float32")
+    txl.ptx.setp.ge.f32(predicate, value, upper)
+    txl.ptx.selp.f32(out[0], upper, value, txl.ptx.pred(predicate))
     return out[0]
 
 
 def _shfl_bfly_f32(value, lane_xor: int):
-    out = K.alloc_local((1,), "uint32")
-    K.ptx.shfl_sync.bfly.b32(
+    out = txl.alloc_local((1,), "uint32")
+    txl.ptx.shfl_sync.bfly.b32(
         out[0],
-        K.reinterpret("uint32", value),
-        K.uint32(lane_xor),
-        K.uint32(31),
-        K.uint32(0xFFFFFFFF),
+        txl.reinterpret("uint32", value),
+        txl.uint32(lane_xor),
+        txl.uint32(31),
+        txl.uint32(0xFFFFFFFF),
     )
-    return K.reinterpret("float32", out[0])
+    return txl.reinterpret("float32", out[0])
 
 
 def _butterfly_sum_f32(value, lane_xors: tuple[int, ...]):
@@ -246,79 +246,79 @@ def _butterfly_sum_f32(value, lane_xors: tuple[int, ...]):
 
 
 def _mapa_u32(pointer, peer):
-    mapped = K.alloc_local((1,), "uint32")
-    K.ptx.mapa.shared__cluster.u32(
-        mapped[0], K.cuda.cvta_generic_to_shared(pointer), K.cast(peer, "uint32")
+    mapped = txl.alloc_local((1,), "uint32")
+    txl.ptx.mapa.shared__cluster.u32(
+        mapped[0], txl.cuda.cvta_generic_to_shared(pointer), txl.cast(peer, "uint32")
     )
     return mapped[0]
 
 
 def _cluster_mbarrier_wait(pointer):
-    return K.cuda.mbarrier_wait(pointer, K.int32(0))
+    return txl.cuda.mbarrier_wait(pointer, txl.int32(0))
 
 
 @contextlib.contextmanager
 def _runtime_guard(predicate):
-    """Open a Kern runtime branch, or no branch for a statically true case."""
+    """Open a tirx-lite runtime branch, or no branch for a statically true case."""
     if predicate is None:
         yield
     else:
-        with K.If(predicate), K.Then():
+        with txl.If(predicate), txl.Then():
             yield
 
 
-def _load_global_bits(buffer, index, values, value_offset, VEC: K.constexpr):
+def _load_global_bits(buffer, index, values, value_offset, VEC: txl.constexpr):
     if VEC == 1:
-        K.ptx.ld.global_.b16(values[value_offset], buffer.ptr_to([index]))
+        txl.ptx.ld.global_.b16(values[value_offset], buffer.ptr_to([index]))
     elif VEC == 2:
-        K.ptx.ld.global_.v2.b16(
+        txl.ptx.ld.global_.v2.b16(
             values[value_offset], values[value_offset + 1], buffer.ptr_to([index])
         )
     else:
-        words = K.alloc_local((VEC // 2,), "uint32")
+        words = txl.alloc_local((VEC // 2,), "uint32")
         if VEC == 4:
-            K.ptx.ld.global_.v2.b32(words[0], words[1], buffer.ptr_to([index]))
+            txl.ptx.ld.global_.v2.b32(words[0], words[1], buffer.ptr_to([index]))
         else:
-            K.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
+            txl.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
         for pair in range(VEC // 2):
-            K.ptx.mov.b32(
+            txl.ptx.mov.b32(
                 values[value_offset + pair * 2], values[value_offset + pair * 2 + 1], words[pair]
             )
 
 
-def _load_shared_bits(shared_raw, byte_offset, values, value_offset, VEC: K.constexpr):
+def _load_shared_bits(shared_raw, byte_offset, values, value_offset, VEC: txl.constexpr):
     if VEC == 2:
-        K.ptx.ld.shared.v2.b16(
+        txl.ptx.ld.shared.v2.b16(
             values[value_offset], values[value_offset + 1], shared_raw.ptr_to([byte_offset])
         )
     else:
-        words = K.alloc_local((VEC // 2,), "uint32")
+        words = txl.alloc_local((VEC // 2,), "uint32")
         if VEC == 4:
-            halves = K.alloc_local((4,), "uint16")
-            K.ptx.ld.shared.v4.b16(
+            halves = txl.alloc_local((4,), "uint16")
+            txl.ptx.ld.shared.v4.b16(
                 halves[0], halves[1], halves[2], halves[3], shared_raw.ptr_to([byte_offset])
             )
             for value in range(4):
-                K.assign(values[value_offset + value], halves[value])
+                txl.assign(values[value_offset + value], halves[value])
         else:
-            K.ptx.ld.shared.v4.b32(
+            txl.ptx.ld.shared.v4.b32(
                 words[0], words[1], words[2], words[3], shared_raw.ptr_to([byte_offset])
             )
             for pair in range(4):
-                K.ptx.mov.b32(
+                txl.ptx.mov.b32(
                     values[value_offset + pair * 2],
                     values[value_offset + pair * 2 + 1],
                     words[pair],
                 )
 
 
-def _load_global_words(buffer, index, words, word_offset, VEC: K.constexpr):
+def _load_global_words(buffer, index, words, word_offset, VEC: txl.constexpr):
     if VEC == 2:
-        K.ptx.ld.global_.b32(words[word_offset], buffer.ptr_to([index]))
+        txl.ptx.ld.global_.b32(words[word_offset], buffer.ptr_to([index]))
     elif VEC == 4:
-        K.ptx.ld.global_.v2.b32(words[word_offset], words[word_offset + 1], buffer.ptr_to([index]))
+        txl.ptx.ld.global_.v2.b32(words[word_offset], words[word_offset + 1], buffer.ptr_to([index]))
     else:
-        K.ptx.ld.global_.v4.b32(
+        txl.ptx.ld.global_.v4.b32(
             words[word_offset],
             words[word_offset + 1],
             words[word_offset + 2],
@@ -327,15 +327,15 @@ def _load_global_words(buffer, index, words, word_offset, VEC: K.constexpr):
         )
 
 
-def _load_shared_words(shared_raw, byte_offset, words, word_offset, VEC: K.constexpr):
+def _load_shared_words(shared_raw, byte_offset, words, word_offset, VEC: txl.constexpr):
     if VEC == 2:
-        K.ptx.ld.shared.b32(words[word_offset], shared_raw.ptr_to([byte_offset]))
+        txl.ptx.ld.shared.b32(words[word_offset], shared_raw.ptr_to([byte_offset]))
     elif VEC == 4:
-        K.ptx.ld.shared.v2.b32(
+        txl.ptx.ld.shared.v2.b32(
             words[word_offset], words[word_offset + 1], shared_raw.ptr_to([byte_offset])
         )
     else:
-        K.ptx.ld.shared.v4.b32(
+        txl.ptx.ld.shared.v4.b32(
             words[word_offset],
             words[word_offset + 1],
             words[word_offset + 2],
@@ -677,109 +677,109 @@ def get_kernel(
     def entry_registers():
         if max_registers is None:
             return contextlib.nullcontext()
-        return K.attr({"tirx.max_registers": max_registers})
+        return txl.attr({"tirx.max_registers": max_registers})
 
     def kernel_body(x, weight, out, runtime_M, scale_buffer, runtime_eps, x_stride, y_stride):
         # TIRX_TRANSCRIBE_START flashinfer_rmsnorm_quant
         if cluster_n > 1:
-            block_x_raw, block_y_raw = K.cta_id(
-                [K.cast(K.ceildiv(runtime_M, K.int64(rows)), "int32"), cluster_n]
+            block_x_raw, block_y_raw = txl.cta_id(
+                [txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"), cluster_n]
             )
-            _, cta_rank_raw = K.cta_id_in_cluster([1, cluster_n], preferred=[1, cluster_n])
-            block_y = K.local_scalar(K.i32, init=K.cast(block_y_raw, "int32"), name="block_y")
-            cta_rank = K.local_scalar(K.i32, init=K.cast(cta_rank_raw, "int32"), name="cta_rank")
+            _, cta_rank_raw = txl.cta_id_in_cluster([1, cluster_n], preferred=[1, cluster_n])
+            block_y = txl.local_scalar(txl.i32, init=txl.cast(block_y_raw, "int32"), name="block_y")
+            cta_rank = txl.local_scalar(txl.i32, init=txl.cast(cta_rank_raw, "int32"), name="cta_rank")
         else:
-            block_x_raw = K.cta_id([K.cast(K.ceildiv(runtime_M, K.int64(rows)), "int32")])
-            block_y = K.local_scalar(K.i32, init=K.int32(0), name="block_y")
-            cta_rank = K.local_scalar(K.i32, init=K.int32(0), name="cta_rank")
-        tid = K.thread_id()
+            block_x_raw = txl.cta_id([txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32")])
+            block_y = txl.local_scalar(txl.i32, init=txl.int32(0), name="block_y")
+            cta_rank = txl.local_scalar(txl.i32, init=txl.int32(0), name="cta_rank")
+        tid = txl.thread_id()
 
         if enable_pdl:
-            K.ptx.griddepcontrol.wait()
+            txl.ptx.griddepcontrol.wait()
 
-        scale_bits = K.alloc_local((1,), "uint32")
-        K.ptx.ld.global_.b32(scale_bits[0], scale_buffer.ptr_to([0]))
-        scale_value = K.local_scalar(
-            K.f32, init=K.reinterpret("float32", scale_bits[0]), name="scale_value"
+        scale_bits = txl.alloc_local((1,), "uint32")
+        txl.ptx.ld.global_.b32(scale_bits[0], scale_buffer.ptr_to([0]))
+        scale_value = txl.local_scalar(
+            txl.f32, init=txl.reinterpret("float32", scale_bits[0]), name="scale_value"
         )
-        inv_scale = K.local_scalar(K.f32, init=_rcp_approx_ftz(scale_value), name="inv_scale")
+        inv_scale = txl.local_scalar(txl.f32, init=_rcp_approx_ftz(scale_value), name="inv_scale")
 
-        block_x = K.local_scalar(K.i32, init=K.cast(block_x_raw, "int32"), name="block_x")
-        row_in_cta = K.local_scalar(K.i32, init=tid // tpr, name="row_in_cta")
-        thread_in_row = K.local_scalar(K.i32, init=tid % tpr, name="thread_in_row")
-        row_i64 = K.local_scalar(
-            K.i64,
-            init=K.cast(block_x, "int64") * K.int64(rows) + K.cast(row_in_cta, "int64"),
+        block_x = txl.local_scalar(txl.i32, init=txl.cast(block_x_raw, "int32"), name="block_x")
+        row_in_cta = txl.local_scalar(txl.i32, init=tid // tpr, name="row_in_cta")
+        thread_in_row = txl.local_scalar(txl.i32, init=tid % tpr, name="thread_in_row")
+        row_i64 = txl.local_scalar(
+            txl.i64,
+            init=txl.cast(block_x, "int64") * txl.int64(rows) + txl.cast(row_in_cta, "int64"),
             name="row_i64",
         )
-        row_valid = K.local_scalar("bool", init=row_i64 < runtime_M, name="row_valid")
-        warp = K.local_scalar(K.i32, init=tid // 32, name="warp")
-        lane = K.local_scalar(K.i32, init=tid % 32, name="lane")
-        row_warp = K.local_scalar(K.i32, init=warp // warps_per_row, name="row_warp")
-        warp_in_row = K.local_scalar(K.i32, init=warp % warps_per_row, name="warp_in_row")
+        row_valid = txl.local_scalar("bool", init=row_i64 < runtime_M, name="row_valid")
+        warp = txl.local_scalar(txl.i32, init=tid // 32, name="warp")
+        lane = txl.local_scalar(txl.i32, init=tid % 32, name="lane")
+        row_warp = txl.local_scalar(txl.i32, init=warp // warps_per_row, name="row_warp")
+        warp_in_row = txl.local_scalar(txl.i32, init=warp % warps_per_row, name="warp_in_row")
 
-        shared_raw = K.smem_pool().alloc((smem_bytes,), "uint8")
+        shared_raw = txl.smem_pool().alloc((smem_bytes,), "uint8")
 
         if cluster_n > 1:
-            with K.If(tid == 0), K.Then():
-                K.ptx.mbarrier.init.shared.b64(shared_raw.ptr_to([mbar_offset]), K.uint32(1))
-            K.ptx.fence.mbarrier_init.release.cluster()
-            K.ptx.barrier.cluster.arrive.relaxed()
-            K.ptx.barrier.cluster.wait()
+            with txl.If(tid == 0), txl.Then():
+                txl.ptx.mbarrier.init.shared.b64(shared_raw.ptr_to([mbar_offset]), txl.uint32(1))
+            txl.ptx.fence.mbarrier_init.release.cluster()
+            txl.ptx.barrier.cluster.arrive.relaxed()
+            txl.ptx.barrier.cluster.wait()
 
-        x_bits = K.alloc_local((total_values if vec == 1 else 1,), "uint16")
-        w_bits = K.alloc_local((total_values if vec == 1 else 1,), "uint16")
-        x_words = K.alloc_local((packed_pairs if vec > 1 else 1,), "uint32")
-        w_words = K.alloc_local((packed_pairs if vec > 1 else 1,), "uint32")
-        x_f32_pairs = K.alloc_local((packed_pairs,), "uint64")
-        w_f32_pairs = K.alloc_local((packed_pairs,), "uint64")
-        x_f32_scalar = K.alloc_local((1,), "float32")
-        w_f32_scalar = K.alloc_local((1,), "float32")
-        undefined_f32 = K.alloc_local((1,), "float32")
+        x_bits = txl.alloc_local((total_values if vec == 1 else 1,), "uint16")
+        w_bits = txl.alloc_local((total_values if vec == 1 else 1,), "uint16")
+        x_words = txl.alloc_local((packed_pairs if vec > 1 else 1,), "uint32")
+        w_words = txl.alloc_local((packed_pairs if vec > 1 else 1,), "uint32")
+        x_f32_pairs = txl.alloc_local((packed_pairs,), "uint64")
+        w_f32_pairs = txl.alloc_local((packed_pairs,), "uint64")
+        x_f32_scalar = txl.alloc_local((1,), "float32")
+        w_f32_scalar = txl.alloc_local((1,), "float32")
+        undefined_f32 = txl.alloc_local((1,), "float32")
 
         if not use_async:
             if vec == 1:
                 for value in range(total_values):
-                    K.assign(x_bits[value], K.uint16(0))
+                    txl.assign(x_bits[value], txl.uint16(0))
             else:
                 for pair in range(packed_pairs):
-                    K.assign(x_words[pair], K.uint32(0))
+                    txl.assign(x_words[pair], txl.uint32(0))
 
         if use_async and not enable_pdl and H == 8192:
             with _runtime_guard(None if rows == 1 else row_valid):
                 for vb in range(vec_blocks):
-                    local_col = K.local_scalar(
-                        K.i32, init=(thread_in_row + vb * tpr) * vec, name="local_col"
+                    local_col = txl.local_scalar(
+                        txl.i32, init=(thread_in_row + vb * tpr) * vec, name="local_col"
                     )
-                    absolute_col = K.local_scalar(
-                        K.i32, init=block_y * cols + local_col, name="absolute_col"
+                    absolute_col = txl.local_scalar(
+                        txl.i32, init=block_y * cols + local_col, name="absolute_col"
                     )
-                    col_valid = K.local_scalar("bool", init=absolute_col < H, name="col_valid")
+                    col_valid = txl.local_scalar("bool", init=absolute_col < H, name="col_valid")
                     if compact:
-                        x_offset = K.local_scalar(
-                            K.i32,
-                            init=K.cast(
-                                row_i64 * K.int64(H) + K.cast(absolute_col, "int64"), "int32"
+                        x_offset = txl.local_scalar(
+                            txl.i32,
+                            init=txl.cast(
+                                row_i64 * txl.int64(H) + txl.cast(absolute_col, "int64"), "int32"
                             ),
                             name="x_offset",
                         )
                     else:
-                        x_offset = K.local_scalar(
-                            K.i64,
-                            init=row_i64 * x_stride + K.cast(absolute_col, "int64"),
+                        x_offset = txl.local_scalar(
+                            txl.i64,
+                            init=row_i64 * x_stride + txl.cast(absolute_col, "int64"),
                             name="x_offset",
                         )
                     if full_columns:
-                        source_bytes = K.local_scalar(
-                            K.u32, init=K.uint32(copy_bytes), name="source_bytes"
+                        source_bytes = txl.local_scalar(
+                            txl.u32, init=txl.uint32(copy_bytes), name="source_bytes"
                         )
                     else:
-                        source_bytes = K.local_scalar(
-                            K.u32,
-                            init=K.cast(K.if_then_else(col_valid, copy_bytes, 0), "uint32"),
+                        source_bytes = txl.local_scalar(
+                            txl.u32,
+                            init=txl.cast(txl.if_then_else(col_valid, copy_bytes, 0), "uint32"),
                             name="source_bytes",
                         )
-                    K.ptx["cp.async.ca.shared.global"](
+                    txl.ptx["cp.async.ca.shared.global"](
                         shared_raw.ptr_to([(row_in_cta * cols + local_col) * _INPUT_ELEM_BYTES]),
                         x.ptr_to([x_offset]),
                         copy_bytes,
@@ -787,39 +787,39 @@ def get_kernel(
                     )
         else:
             for vb in range(vec_blocks):
-                local_col = K.local_scalar(
-                    K.i32, init=(thread_in_row + vb * tpr) * vec, name="local_col"
+                local_col = txl.local_scalar(
+                    txl.i32, init=(thread_in_row + vb * tpr) * vec, name="local_col"
                 )
-                absolute_col = K.local_scalar(
-                    K.i32, init=block_y * cols + local_col, name="absolute_col"
+                absolute_col = txl.local_scalar(
+                    txl.i32, init=block_y * cols + local_col, name="absolute_col"
                 )
-                col_valid = K.local_scalar("bool", init=absolute_col < H, name="col_valid")
+                col_valid = txl.local_scalar("bool", init=absolute_col < H, name="col_valid")
                 if compact:
-                    x_offset = K.local_scalar(
-                        K.i32,
-                        init=K.cast(row_i64 * K.int64(H) + K.cast(absolute_col, "int64"), "int32"),
+                    x_offset = txl.local_scalar(
+                        txl.i32,
+                        init=txl.cast(row_i64 * txl.int64(H) + txl.cast(absolute_col, "int64"), "int32"),
                         name="x_offset",
                     )
                 else:
-                    x_offset = K.local_scalar(
-                        K.i64,
-                        init=row_i64 * x_stride + K.cast(absolute_col, "int64"),
+                    x_offset = txl.local_scalar(
+                        txl.i64,
+                        init=row_i64 * x_stride + txl.cast(absolute_col, "int64"),
                         name="x_offset",
                     )
 
                 if use_async:
                     with _runtime_guard(None if rows == 1 else row_valid):
                         if full_columns:
-                            source_bytes = K.local_scalar(
-                                K.u32, init=K.uint32(copy_bytes), name="source_bytes"
+                            source_bytes = txl.local_scalar(
+                                txl.u32, init=txl.uint32(copy_bytes), name="source_bytes"
                             )
                         else:
-                            source_bytes = K.local_scalar(
-                                K.u32,
-                                init=K.cast(K.if_then_else(col_valid, copy_bytes, 0), "uint32"),
+                            source_bytes = txl.local_scalar(
+                                txl.u32,
+                                init=txl.cast(txl.if_then_else(col_valid, copy_bytes, 0), "uint32"),
                                 name="source_bytes",
                             )
-                        K.ptx["cp.async.ca.shared.global"](
+                        txl.ptx["cp.async.ca.shared.global"](
                             shared_raw.ptr_to(
                                 [(row_in_cta * cols + local_col) * _INPUT_ELEM_BYTES]
                             ),
@@ -835,7 +835,7 @@ def get_kernel(
                     elif full_columns:
                         load_guard = row_valid
                     else:
-                        load_guard = K.And(row_valid, col_valid)
+                        load_guard = txl.And(row_valid, col_valid)
                     with _runtime_guard(load_guard):
                         if vec == 1:
                             _load_global_bits(x, x_offset, x_bits, vb, VEC=vec)
@@ -843,34 +843,34 @@ def get_kernel(
                             _load_global_words(x, x_offset, x_words, vb * (vec // 2), VEC=vec)
 
         if use_async and not enable_pdl and compact and full_columns and (H == 4096 or H == 8192):
-            K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF))
+            txl.ptx.bar.warp.sync(txl.uint32(0xFFFFFFFF))
 
         if use_async:
-            K.ptx.cp.async_.commit_group()
+            txl.ptx.cp.async_.commit_group()
 
         if use_async and full_columns and compact and H == 4096:
-            weight_base_col = K.local_scalar(
-                K.i32, init=block_y * cols + thread_in_row * vec, name="weight_base_col"
+            weight_base_col = txl.local_scalar(
+                txl.i32, init=block_y * cols + thread_in_row * vec, name="weight_base_col"
             )
             for vb in range(vec_blocks):
-                K.ptx.ld.global_.v4.b32(
+                txl.ptx.ld.global_.v4.b32(
                     w_words[vb * 4],
                     w_words[vb * 4 + 1],
                     w_words[vb * 4 + 2],
                     w_words[vb * 4 + 3],
-                    K.ptx.addr(
+                    txl.ptx.addr(
                         weight.ptr_to([weight_base_col]), vb * tpr * vec * _INPUT_ELEM_BYTES
                     ),
                 )
                 if vb == vec_blocks // 2 - 1:
-                    K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF))
+                    txl.ptx.bar.warp.sync(txl.uint32(0xFFFFFFFF))
         else:
             for vb in range(vec_blocks):
-                local_col = K.local_scalar(
-                    K.i32, init=(thread_in_row + vb * tpr) * vec, name="local_col"
+                local_col = txl.local_scalar(
+                    txl.i32, init=(thread_in_row + vb * tpr) * vec, name="local_col"
                 )
-                absolute_col = K.local_scalar(
-                    K.i32, init=block_y * cols + local_col, name="absolute_col"
+                absolute_col = txl.local_scalar(
+                    txl.i32, init=block_y * cols + local_col, name="absolute_col"
                 )
                 with _runtime_guard(None if full_columns else absolute_col < H):
                     if vec == 1:
@@ -885,31 +885,31 @@ def get_kernel(
                     and H == 8192
                     and vb == vec_blocks // 2 - 1
                 ):
-                    K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF))
+                    txl.ptx.bar.warp.sync(txl.uint32(0xFFFFFFFF))
 
         if use_async:
-            K.ptx.cp.async_.wait_group(0)
+            txl.ptx.cp.async_.wait_group(0)
             if full_columns and compact and H == 4096:
-                shared_load_base = K.local_scalar(
-                    K.i32,
+                shared_load_base = txl.local_scalar(
+                    txl.i32,
                     init=(row_in_cta * cols + thread_in_row * vec) * _INPUT_ELEM_BYTES,
                     name="shared_load_base",
                 )
                 for vb in range(vec_blocks):
-                    K.ptx.ld.shared.v4.b32(
+                    txl.ptx.ld.shared.v4.b32(
                         x_words[vb * 4],
                         x_words[vb * 4 + 1],
                         x_words[vb * 4 + 2],
                         x_words[vb * 4 + 3],
-                        K.ptx.addr(
+                        txl.ptx.addr(
                             shared_raw.ptr_to([shared_load_base]),
                             vb * tpr * vec * _INPUT_ELEM_BYTES,
                         ),
                     )
             else:
                 for vb in range(vec_blocks):
-                    local_col = K.local_scalar(
-                        K.i32, init=(thread_in_row + vb * tpr) * vec, name="local_col"
+                    local_col = txl.local_scalar(
+                        txl.i32, init=(thread_in_row + vb * tpr) * vec, name="local_col"
                     )
                     if vec == 1:
                         _load_shared_bits(
@@ -929,167 +929,167 @@ def get_kernel(
                         )
 
         if total_values == 1:
-            K.assign(x_f32_scalar[0], _cvt_to_f32(x_bits[0], input_dtype))
-            local_sum = K.local_scalar(
-                K.f32,
+            txl.assign(x_f32_scalar[0], _cvt_to_f32(x_bits[0], input_dtype))
+            local_sum = txl.local_scalar(
+                txl.f32,
                 init=_fma_half_inputs_to_f32(x_bits[0], x_bits[0], input_dtype),
                 name="local_sum",
             )
         else:
             if vec == 1:
                 for pair in range(packed_pairs):
-                    low_x = K.local_scalar(
-                        K.f32, init=_cvt_to_f32(x_bits[pair * 2], input_dtype), name="low_x"
+                    low_x = txl.local_scalar(
+                        txl.f32, init=_cvt_to_f32(x_bits[pair * 2], input_dtype), name="low_x"
                     )
-                    high_x = K.local_scalar(K.f32, init=undefined_f32[0], name="high_x")
+                    high_x = txl.local_scalar(txl.f32, init=undefined_f32[0], name="high_x")
                     if pair * 2 + 1 < total_values:
-                        K.assign(high_x, _cvt_to_f32(x_bits[pair * 2 + 1], input_dtype))
-                    K.ptx.mov.b64(x_f32_pairs[pair], low_x, high_x)
+                        txl.assign(high_x, _cvt_to_f32(x_bits[pair * 2 + 1], input_dtype))
+                    txl.ptx.mov.b64(x_f32_pairs[pair], low_x, high_x)
             else:
                 for pair in range(packed_pairs):
-                    low_bits = K.alloc_local((1,), "uint16")
-                    high_bits = K.alloc_local((1,), "uint16")
-                    K.ptx.mov.b32(low_bits[0], high_bits[0], x_words[pair])
-                    low_x = K.local_scalar(
-                        K.f32, init=_cvt_to_f32(low_bits[0], input_dtype), name="low_x"
+                    low_bits = txl.alloc_local((1,), "uint16")
+                    high_bits = txl.alloc_local((1,), "uint16")
+                    txl.ptx.mov.b32(low_bits[0], high_bits[0], x_words[pair])
+                    low_x = txl.local_scalar(
+                        txl.f32, init=_cvt_to_f32(low_bits[0], input_dtype), name="low_x"
                     )
-                    high_x = K.local_scalar(
-                        K.f32, init=_cvt_to_f32(high_bits[0], input_dtype), name="high_x"
+                    high_x = txl.local_scalar(
+                        txl.f32, init=_cvt_to_f32(high_bits[0], input_dtype), name="high_x"
                     )
-                    K.ptx.mov.b64(x_f32_pairs[pair], low_x, high_x)
+                    txl.ptx.mov.b64(x_f32_pairs[pair], low_x, high_x)
 
-            x_sq = K.alloc_local((total_values,), "float32")
+            x_sq = txl.alloc_local((total_values,), "float32")
             for reverse_pair in range(packed_pairs):
                 pair = packed_pairs - reverse_pair - 1
-                product = K.alloc_local((1,), "uint64")
-                K.ptx.mul.f32x2(product[0], x_f32_pairs[pair], x_f32_pairs[pair])
+                product = txl.alloc_local((1,), "uint64")
+                txl.ptx.mul.f32x2(product[0], x_f32_pairs[pair], x_f32_pairs[pair])
                 if pair * 2 + 1 < total_values:
-                    K.ptx.mov.b64(x_sq[pair * 2], x_sq[pair * 2 + 1], product[0])
+                    txl.ptx.mov.b64(x_sq[pair * 2], x_sq[pair * 2 + 1], product[0])
                 else:
-                    discarded = K.alloc_local((1,), "float32")
-                    K.ptx.mov.b64(x_sq[pair * 2], discarded[0], product[0])
+                    discarded = txl.alloc_local((1,), "float32")
+                    txl.ptx.mov.b64(x_sq[pair * 2], discarded[0], product[0])
 
-            local_sum = K.local_scalar(K.f32, init=K.float32(0.0), name="local_sum")
+            local_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0), name="local_sum")
             for value in range(total_values):
-                K.assign(local_sum, _add_f32(local_sum, x_sq[value]))
+                txl.assign(local_sum, _add_f32(local_sum, x_sq[value]))
 
-        K.assign(local_sum, _butterfly_sum_f32(local_sum, row_lane_xors))
-        warp_sum = K.local_scalar(K.f32, init=local_sum, name="warp_sum")
+        txl.assign(local_sum, _butterfly_sum_f32(local_sum, row_lane_xors))
+        warp_sum = txl.local_scalar(txl.f32, init=local_sum, name="warp_sum")
 
         if warps_per_row > 1 and cluster_n == 1:
-            with K.If(lane == 0), K.Then():
-                reduce_index = K.local_scalar(
-                    K.i32, init=row_warp + warp_in_row * rows, name="reduce_index"
+            with txl.If(lane == 0), txl.Then():
+                reduce_index = txl.local_scalar(
+                    txl.i32, init=row_warp + warp_in_row * rows, name="reduce_index"
                 )
-                K.ptx.st.shared.b32(
+                txl.ptx.st.shared.b32(
                     shared_raw.ptr_to([reduce_base + reduce_index * 4]),
-                    K.reinterpret("uint32", warp_sum),
+                    txl.reinterpret("uint32", warp_sum),
                 )
-            K.ptx.bar.sync(K.uint32(0))
-            final_sum = K.local_scalar(K.f32, init=K.float32(0.0), name="final_sum")
-            with K.If(lane < warps_per_row), K.Then():
-                reduce_word = K.alloc_local((1,), "uint32")
-                reduce_index = K.local_scalar(
-                    K.i32, init=row_warp + lane * rows, name="reduce_index"
+            txl.ptx.bar.sync(txl.uint32(0))
+            final_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0), name="final_sum")
+            with txl.If(lane < warps_per_row), txl.Then():
+                reduce_word = txl.alloc_local((1,), "uint32")
+                reduce_index = txl.local_scalar(
+                    txl.i32, init=row_warp + lane * rows, name="reduce_index"
                 )
-                K.ptx.ld.shared.b32(
+                txl.ptx.ld.shared.b32(
                     reduce_word[0], shared_raw.ptr_to([reduce_base + reduce_index * 4])
                 )
-                K.assign(final_sum, K.reinterpret("float32", reduce_word[0]))
-            K.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
-            sum_sq = K.local_scalar(K.f32, init=final_sum, name="sum_sq")
+                txl.assign(final_sum, txl.reinterpret("float32", reduce_word[0]))
+            txl.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
+            sum_sq = txl.local_scalar(txl.f32, init=final_sum, name="sum_sq")
         elif cluster_n > 1:
-            with K.If(warp == 0), K.Then():
-                with K.If(K.cuda.elect_sync()), K.Then():
-                    K.ptx.mbarrier.arrive.expect_tx.shared.b64(
-                        shared_raw.ptr_to([mbar_offset]), K.uint32(expected_bytes)
+            with txl.If(warp == 0), txl.Then():
+                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                        shared_raw.ptr_to([mbar_offset]), txl.uint32(expected_bytes)
                     )
-            with K.If(lane < cluster_n), K.Then():
-                reduce_index = K.local_scalar(
-                    K.i32,
+            with txl.If(lane < cluster_n), txl.Then():
+                reduce_index = txl.local_scalar(
+                    txl.i32,
                     init=row_warp + warp_in_row * rows + cta_rank * rows * warps_per_row,
                     name="reduce_index",
                 )
-                peer_reduce = K.local_scalar(
-                    K.u32,
+                peer_reduce = txl.local_scalar(
+                    txl.u32,
                     init=_mapa_u32(shared_raw.ptr_to([reduce_base + reduce_index * 4]), lane),
                     name="peer_reduce",
                 )
-                peer_mbar = K.local_scalar(
-                    K.u32, init=_mapa_u32(shared_raw.ptr_to([mbar_offset]), lane), name="peer_mbar"
+                peer_mbar = txl.local_scalar(
+                    txl.u32, init=_mapa_u32(shared_raw.ptr_to([mbar_offset]), lane), name="peer_mbar"
                 )
-                K.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.f32(
+                txl.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.f32(
                     peer_reduce, warp_sum, peer_mbar
                 )
 
             _cluster_mbarrier_wait(shared_raw.ptr_to([mbar_offset]))
 
-            final_sum = K.local_scalar(K.f32, init=K.float32(0.0), name="final_sum")
+            final_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0), name="final_sum")
             for iteration in range(_ceil_div(total_partials_per_row, 32)):
-                partial = K.local_scalar(K.i32, init=lane + iteration * 32, name="partial")
-                with K.If(partial < total_partials_per_row), K.Then():
-                    partial_warp = K.local_scalar(
-                        K.i32, init=partial % warps_per_row, name="partial_warp"
+                partial = txl.local_scalar(txl.i32, init=lane + iteration * 32, name="partial")
+                with txl.If(partial < total_partials_per_row), txl.Then():
+                    partial_warp = txl.local_scalar(
+                        txl.i32, init=partial % warps_per_row, name="partial_warp"
                     )
-                    partial_cta = K.local_scalar(
-                        K.i32, init=partial // warps_per_row, name="partial_cta"
+                    partial_cta = txl.local_scalar(
+                        txl.i32, init=partial // warps_per_row, name="partial_cta"
                     )
-                    reduce_index = K.local_scalar(
-                        K.i32,
+                    reduce_index = txl.local_scalar(
+                        txl.i32,
                         init=row_warp + partial_warp * rows + partial_cta * rows * warps_per_row,
                         name="reduce_index",
                     )
-                    reduce_word = K.alloc_local((1,), "uint32")
-                    K.ptx.ld.shared.b32(
+                    reduce_word = txl.alloc_local((1,), "uint32")
+                    txl.ptx.ld.shared.b32(
                         reduce_word[0], shared_raw.ptr_to([reduce_base + reduce_index * 4])
                     )
-                    K.assign(
-                        final_sum, _add_f32(final_sum, K.reinterpret("float32", reduce_word[0]))
+                    txl.assign(
+                        final_sum, _add_f32(final_sum, txl.reinterpret("float32", reduce_word[0]))
                     )
-            K.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
-            sum_sq = K.local_scalar(K.f32, init=final_sum, name="sum_sq")
+            txl.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
+            sum_sq = txl.local_scalar(txl.f32, init=final_sum, name="sum_sq")
         else:
-            sum_sq = K.local_scalar(K.f32, init=warp_sum, name="sum_sq")
+            sum_sq = txl.local_scalar(txl.f32, init=warp_sum, name="sum_sq")
 
         if H == 1:
-            shifted = K.local_scalar(K.f32, init=_add_f32(sum_sq, runtime_eps), name="shifted")
+            shifted = txl.local_scalar(txl.f32, init=_add_f32(sum_sq, runtime_eps), name="shifted")
         elif H & (H - 1) == 0:
-            shifted = K.local_scalar(
-                K.f32, init=_fma_rn_f32(sum_sq, K.float32(1.0 / H), runtime_eps), name="shifted"
+            shifted = txl.local_scalar(
+                txl.f32, init=_fma_rn_f32(sum_sq, txl.float32(1.0 / H), runtime_eps), name="shifted"
             )
         else:
-            mean_sq = K.local_scalar(K.f32, init=_div_rn_f32(sum_sq, K.float32(H)), name="mean_sq")
-            shifted = K.local_scalar(K.f32, init=_add_f32(mean_sq, runtime_eps), name="shifted")
-        rstd = K.local_scalar(K.f32, init=_rsqrt_approx_ftz(shifted), name="rstd")
+            mean_sq = txl.local_scalar(txl.f32, init=_div_rn_f32(sum_sq, txl.float32(H)), name="mean_sq")
+            shifted = txl.local_scalar(txl.f32, init=_add_f32(mean_sq, runtime_eps), name="shifted")
+        rstd = txl.local_scalar(txl.f32, init=_rsqrt_approx_ftz(shifted), name="rstd")
 
         if cluster_n > 1:
-            K.ptx.barrier.cluster.arrive.relaxed()
-            K.ptx.barrier.cluster.wait()
+            txl.ptx.barrier.cluster.arrive.relaxed()
+            txl.ptx.barrier.cluster.wait()
         else:
-            K.ptx.bar.sync(K.uint32(0))
+            txl.ptx.bar.sync(txl.uint32(0))
 
         if use_async:
             if full_columns and compact and H == 4096:
-                shared_reload_base = K.local_scalar(
-                    K.i32,
+                shared_reload_base = txl.local_scalar(
+                    txl.i32,
                     init=(row_in_cta * cols + thread_in_row * vec) * _INPUT_ELEM_BYTES,
                     name="shared_reload_base",
                 )
                 for vb in range(vec_blocks):
-                    K.ptx.ld.shared.v4.b32(
+                    txl.ptx.ld.shared.v4.b32(
                         x_words[vb * 4],
                         x_words[vb * 4 + 1],
                         x_words[vb * 4 + 2],
                         x_words[vb * 4 + 3],
-                        K.ptx.addr(
+                        txl.ptx.addr(
                             shared_raw.ptr_to([shared_reload_base]),
                             vb * tpr * vec * _INPUT_ELEM_BYTES,
                         ),
                     )
             else:
                 for vb in range(vec_blocks):
-                    local_col = K.local_scalar(
-                        K.i32, init=(thread_in_row + vb * tpr) * vec, name="local_col"
+                    local_col = txl.local_scalar(
+                        txl.i32, init=(thread_in_row + vb * tpr) * vec, name="local_col"
                     )
                     if vec == 1:
                         _load_shared_bits(
@@ -1109,187 +1109,187 @@ def get_kernel(
                         )
         if total_values == 1:
             if use_async:
-                K.assign(x_f32_scalar[0], _cvt_to_f32(x_bits[0], input_dtype))
-            K.assign(w_f32_scalar[0], _cvt_to_f32(w_bits[0], input_dtype))
+                txl.assign(x_f32_scalar[0], _cvt_to_f32(x_bits[0], input_dtype))
+            txl.assign(w_f32_scalar[0], _cvt_to_f32(w_bits[0], input_dtype))
         else:
             if use_async:
                 if vec == 1:
                     for pair in range(packed_pairs):
-                        low_x = K.local_scalar(
-                            K.f32, init=_cvt_to_f32(x_bits[pair * 2], input_dtype), name="low_x"
+                        low_x = txl.local_scalar(
+                            txl.f32, init=_cvt_to_f32(x_bits[pair * 2], input_dtype), name="low_x"
                         )
-                        high_x = K.local_scalar(K.f32, init=undefined_f32[0], name="high_x")
+                        high_x = txl.local_scalar(txl.f32, init=undefined_f32[0], name="high_x")
                         if pair * 2 + 1 < total_values:
-                            K.assign(high_x, _cvt_to_f32(x_bits[pair * 2 + 1], input_dtype))
-                        K.ptx.mov.b64(x_f32_pairs[pair], low_x, high_x)
+                            txl.assign(high_x, _cvt_to_f32(x_bits[pair * 2 + 1], input_dtype))
+                        txl.ptx.mov.b64(x_f32_pairs[pair], low_x, high_x)
                 else:
                     for pair in range(packed_pairs):
-                        low_bits = K.alloc_local((1,), "uint16")
-                        high_bits = K.alloc_local((1,), "uint16")
-                        K.ptx.mov.b32(low_bits[0], high_bits[0], x_words[pair])
-                        low_x = K.local_scalar(
-                            K.f32, init=_cvt_to_f32(low_bits[0], input_dtype), name="low_x"
+                        low_bits = txl.alloc_local((1,), "uint16")
+                        high_bits = txl.alloc_local((1,), "uint16")
+                        txl.ptx.mov.b32(low_bits[0], high_bits[0], x_words[pair])
+                        low_x = txl.local_scalar(
+                            txl.f32, init=_cvt_to_f32(low_bits[0], input_dtype), name="low_x"
                         )
-                        high_x = K.local_scalar(
-                            K.f32, init=_cvt_to_f32(high_bits[0], input_dtype), name="high_x"
+                        high_x = txl.local_scalar(
+                            txl.f32, init=_cvt_to_f32(high_bits[0], input_dtype), name="high_x"
                         )
-                        K.ptx.mov.b64(x_f32_pairs[pair], low_x, high_x)
+                        txl.ptx.mov.b64(x_f32_pairs[pair], low_x, high_x)
             if vec == 1:
                 for pair in range(packed_pairs):
-                    low_w = K.local_scalar(
-                        K.f32, init=_cvt_to_f32(w_bits[pair * 2], input_dtype), name="low_w"
+                    low_w = txl.local_scalar(
+                        txl.f32, init=_cvt_to_f32(w_bits[pair * 2], input_dtype), name="low_w"
                     )
-                    high_w = K.local_scalar(K.f32, init=undefined_f32[0], name="high_w")
+                    high_w = txl.local_scalar(txl.f32, init=undefined_f32[0], name="high_w")
                     if pair * 2 + 1 < total_values:
-                        K.assign(high_w, _cvt_to_f32(w_bits[pair * 2 + 1], input_dtype))
-                    K.ptx.mov.b64(w_f32_pairs[pair], low_w, high_w)
+                        txl.assign(high_w, _cvt_to_f32(w_bits[pair * 2 + 1], input_dtype))
+                    txl.ptx.mov.b64(w_f32_pairs[pair], low_w, high_w)
             else:
                 for pair in range(packed_pairs):
-                    low_bits = K.alloc_local((1,), "uint16")
-                    high_bits = K.alloc_local((1,), "uint16")
-                    K.ptx.mov.b32(low_bits[0], high_bits[0], w_words[pair])
-                    low_w = K.local_scalar(
-                        K.f32, init=_cvt_to_f32(low_bits[0], input_dtype), name="low_w"
+                    low_bits = txl.alloc_local((1,), "uint16")
+                    high_bits = txl.alloc_local((1,), "uint16")
+                    txl.ptx.mov.b32(low_bits[0], high_bits[0], w_words[pair])
+                    low_w = txl.local_scalar(
+                        txl.f32, init=_cvt_to_f32(low_bits[0], input_dtype), name="low_w"
                     )
-                    high_w = K.local_scalar(
-                        K.f32, init=_cvt_to_f32(high_bits[0], input_dtype), name="high_w"
+                    high_w = txl.local_scalar(
+                        txl.f32, init=_cvt_to_f32(high_bits[0], input_dtype), name="high_w"
                     )
-                    K.ptx.mov.b64(w_f32_pairs[pair], low_w, high_w)
+                    txl.ptx.mov.b64(w_f32_pairs[pair], low_w, high_w)
 
         if total_values == 1:
-            K.assign(x_f32_scalar[0], _mul_f32(x_f32_scalar[0], rstd))
-            K.assign(w_f32_scalar[0], _add_f32(w_f32_scalar[0], K.float32(0.0)))
-            K.assign(x_f32_scalar[0], _mul_f32(x_f32_scalar[0], w_f32_scalar[0]))
-            K.assign(x_f32_scalar[0], _mul_f32(x_f32_scalar[0], inv_scale))
+            txl.assign(x_f32_scalar[0], _mul_f32(x_f32_scalar[0], rstd))
+            txl.assign(w_f32_scalar[0], _add_f32(w_f32_scalar[0], txl.float32(0.0)))
+            txl.assign(x_f32_scalar[0], _mul_f32(x_f32_scalar[0], w_f32_scalar[0]))
+            txl.assign(x_f32_scalar[0], _mul_f32(x_f32_scalar[0], inv_scale))
         else:
             for pair in range(packed_pairs):
-                high_scale = K.local_scalar(K.f32, init=undefined_f32[0], name="high_scale")
+                high_scale = txl.local_scalar(txl.f32, init=undefined_f32[0], name="high_scale")
                 if pair * 2 + 1 < total_values:
-                    K.assign(high_scale, rstd)
-                packed = K.alloc_local((1,), "uint64")
-                K.ptx.mul.f32x2(packed[0], x_f32_pairs[pair], K.cuda.make_float2(rstd, high_scale))
-                K.assign(x_f32_pairs[pair], packed[0])
+                    txl.assign(high_scale, rstd)
+                packed = txl.alloc_local((1,), "uint64")
+                txl.ptx.mul.f32x2(packed[0], x_f32_pairs[pair], txl.cuda.make_float2(rstd, high_scale))
+                txl.assign(x_f32_pairs[pair], packed[0])
 
             for pair in range(packed_pairs):
-                high_bias = K.local_scalar(K.f32, init=undefined_f32[0], name="high_bias")
+                high_bias = txl.local_scalar(txl.f32, init=undefined_f32[0], name="high_bias")
                 if pair * 2 + 1 < total_values:
-                    K.assign(high_bias, K.float32(0.0))
-                packed = K.alloc_local((1,), "uint64")
-                K.ptx.add.f32x2(
-                    packed[0], w_f32_pairs[pair], K.cuda.make_float2(K.float32(0.0), high_bias)
+                    txl.assign(high_bias, txl.float32(0.0))
+                packed = txl.alloc_local((1,), "uint64")
+                txl.ptx.add.f32x2(
+                    packed[0], w_f32_pairs[pair], txl.cuda.make_float2(txl.float32(0.0), high_bias)
                 )
-                K.assign(w_f32_pairs[pair], packed[0])
+                txl.assign(w_f32_pairs[pair], packed[0])
 
             for pair in range(packed_pairs):
-                packed = K.alloc_local((1,), "uint64")
-                K.ptx.mul.f32x2(packed[0], x_f32_pairs[pair], w_f32_pairs[pair])
-                K.assign(x_f32_pairs[pair], packed[0])
+                packed = txl.alloc_local((1,), "uint64")
+                txl.ptx.mul.f32x2(packed[0], x_f32_pairs[pair], w_f32_pairs[pair])
+                txl.assign(x_f32_pairs[pair], packed[0])
 
             for pair in range(packed_pairs):
-                high_inv_scale = K.local_scalar(K.f32, init=undefined_f32[0], name="high_inv_scale")
+                high_inv_scale = txl.local_scalar(txl.f32, init=undefined_f32[0], name="high_inv_scale")
                 if pair * 2 + 1 < total_values:
-                    K.assign(high_inv_scale, inv_scale)
-                packed = K.alloc_local((1,), "uint64")
-                K.ptx.mul.f32x2(
-                    packed[0], x_f32_pairs[pair], K.cuda.make_float2(inv_scale, high_inv_scale)
+                    txl.assign(high_inv_scale, inv_scale)
+                packed = txl.alloc_local((1,), "uint64")
+                txl.ptx.mul.f32x2(
+                    packed[0], x_f32_pairs[pair], txl.cuda.make_float2(inv_scale, high_inv_scale)
                 )
-                K.assign(x_f32_pairs[pair], packed[0])
+                txl.assign(x_f32_pairs[pair], packed[0])
 
-        y_f32 = K.alloc_local((total_values,), "float32")
+        y_f32 = txl.alloc_local((total_values,), "float32")
         if total_values == 1:
-            K.assign(y_f32[0], x_f32_scalar[0])
+            txl.assign(y_f32[0], x_f32_scalar[0])
         else:
             for pair in range(packed_pairs):
                 if pair * 2 + 1 < total_values:
-                    K.ptx.mov.b64(y_f32[pair * 2], y_f32[pair * 2 + 1], x_f32_pairs[pair])
+                    txl.ptx.mov.b64(y_f32[pair * 2], y_f32[pair * 2 + 1], x_f32_pairs[pair])
                 else:
-                    discarded = K.alloc_local((1,), "float32")
-                    K.ptx.mov.b64(y_f32[pair * 2], discarded[0], x_f32_pairs[pair])
+                    discarded = txl.alloc_local((1,), "float32")
+                    txl.ptx.mov.b64(y_f32[pair * 2], discarded[0], x_f32_pairs[pair])
 
-        col_offset = K.local_scalar(K.i32, init=thread_in_row * vec, name="col_offset")
+        col_offset = txl.local_scalar(txl.i32, init=thread_in_row * vec, name="col_offset")
         for vb in range(vec_blocks):
-            local_col = K.local_scalar(K.i32, init=col_offset + vb * tpr * vec, name="local_col")
-            absolute_col = K.local_scalar(
-                K.i32, init=block_y * cols + local_col, name="absolute_col"
+            local_col = txl.local_scalar(txl.i32, init=col_offset + vb * tpr * vec, name="local_col")
+            absolute_col = txl.local_scalar(
+                txl.i32, init=block_y * cols + local_col, name="absolute_col"
             )
             if compact:
-                y_offset = K.local_scalar(
-                    K.i64,
-                    init=row_i64 * K.int64(H) + K.cast(absolute_col, "int64"),
+                y_offset = txl.local_scalar(
+                    txl.i64,
+                    init=row_i64 * txl.int64(H) + txl.cast(absolute_col, "int64"),
                     name="y_offset",
                 )
             else:
-                y_offset = K.local_scalar(
-                    K.i64, init=row_i64 * y_stride + K.cast(absolute_col, "int64"), name="y_offset"
+                y_offset = txl.local_scalar(
+                    txl.i64, init=row_i64 * y_stride + txl.cast(absolute_col, "int64"), name="y_offset"
                 )
 
             row_store_guard = None if rows == 1 else row_i64 < runtime_M
 
             def store_scalars():
                 for element in range(vec):
-                    scalar_col = K.local_scalar(
-                        K.i32, init=absolute_col + element, name="scalar_col"
+                    scalar_col = txl.local_scalar(
+                        txl.i32, init=absolute_col + element, name="scalar_col"
                     )
                     if compact:
-                        scalar_offset = K.local_scalar(
-                            K.i64,
-                            init=row_i64 * K.int64(H) + K.cast(scalar_col, "int64"),
+                        scalar_offset = txl.local_scalar(
+                            txl.i64,
+                            init=row_i64 * txl.int64(H) + txl.cast(scalar_col, "int64"),
                             name="scalar_offset",
                         )
                     else:
-                        scalar_offset = K.local_scalar(
-                            K.i64,
-                            init=row_i64 * y_stride + K.cast(scalar_col, "int64"),
+                        scalar_offset = txl.local_scalar(
+                            txl.i64,
+                            init=row_i64 * y_stride + txl.cast(scalar_col, "int64"),
                             name="scalar_offset",
                         )
                     col_guard = scalar_col < H
                     scalar_guard = (
-                        col_guard if row_store_guard is None else K.And(col_guard, row_store_guard)
+                        col_guard if row_store_guard is None else txl.And(col_guard, row_store_guard)
                     )
-                    with K.If(scalar_guard), K.Then():
-                        clamped_low = K.local_scalar(
-                            K.f32,
-                            init=_maximum_f32(y_f32[vb * vec + element], K.float32(-fp8_max)),
+                    with txl.If(scalar_guard), txl.Then():
+                        clamped_low = txl.local_scalar(
+                            txl.f32,
+                            init=_maximum_f32(y_f32[vb * vec + element], txl.float32(-fp8_max)),
                             name="clamped_low",
                         )
-                        clamped = K.local_scalar(
-                            K.f32,
-                            init=_minimum_f32(clamped_low, K.float32(fp8_max)),
+                        clamped = txl.local_scalar(
+                            txl.f32,
+                            init=_minimum_f32(clamped_low, txl.float32(fp8_max)),
                             name="clamped",
                         )
-                        pair = K.local_scalar(
-                            K.u16,
-                            init=_cvt_fp8_pair(clamped, K.float32(0.0), output_dtype),
+                        pair = txl.local_scalar(
+                            txl.u16,
+                            init=_cvt_fp8_pair(clamped, txl.float32(0.0), output_dtype),
                             name="pair",
                         )
-                        K.ptx.st.global_.b8(out.ptr_to([scalar_offset]), K.cast(pair, "uint8"))
+                        txl.ptx.st.global_.b8(out.ptr_to([scalar_offset]), txl.cast(pair, "uint8"))
 
             if vec == 8:
 
                 def store_vec8():
-                    p01 = K.local_scalar(
-                        K.u16,
+                    p01 = txl.local_scalar(
+                        txl.u16,
                         init=_cvt_fp8_pair(y_f32[vb * 8], y_f32[vb * 8 + 1], output_dtype),
                         name="p01",
                     )
-                    p23 = K.local_scalar(
-                        K.u16,
+                    p23 = txl.local_scalar(
+                        txl.u16,
                         init=_cvt_fp8_pair(y_f32[vb * 8 + 2], y_f32[vb * 8 + 3], output_dtype),
                         name="p23",
                     )
-                    p45 = K.local_scalar(
-                        K.u16,
+                    p45 = txl.local_scalar(
+                        txl.u16,
                         init=_cvt_fp8_pair(y_f32[vb * 8 + 4], y_f32[vb * 8 + 5], output_dtype),
                         name="p45",
                     )
-                    p67 = K.local_scalar(
-                        K.u16,
+                    p67 = txl.local_scalar(
+                        txl.u16,
                         init=_cvt_fp8_pair(y_f32[vb * 8 + 6], y_f32[vb * 8 + 7], output_dtype),
                         name="p67",
                     )
-                    lo_word = K.local_scalar(K.u32, init=_pack_b16_pair(p01, p23), name="lo_word")
-                    hi_word = K.local_scalar(K.u32, init=_pack_b16_pair(p45, p67), name="hi_word")
-                    K.ptx.st.global_.v2.b32(out.ptr_to([y_offset]), lo_word, hi_word)
+                    lo_word = txl.local_scalar(txl.u32, init=_pack_b16_pair(p01, p23), name="lo_word")
+                    hi_word = txl.local_scalar(txl.u32, init=_pack_b16_pair(p45, p67), name="hi_word")
+                    txl.ptx.st.global_.v2.b32(out.ptr_to([y_offset]), lo_word, hi_word)
 
                 if full_columns:
                     with _runtime_guard(row_store_guard):
@@ -1297,41 +1297,41 @@ def get_kernel(
                 else:
                     vector_guard = absolute_col + 8 <= H
                     if row_store_guard is not None:
-                        vector_guard = K.And(vector_guard, row_store_guard)
-                    with K.If(vector_guard):
-                        with K.Then():
+                        vector_guard = txl.And(vector_guard, row_store_guard)
+                    with txl.If(vector_guard):
+                        with txl.Then():
                             store_vec8()
-                        with K.Else():
+                        with txl.Else():
                             store_scalars()
             elif vec == 4:
                 vector_guard = absolute_col + 4 <= H
                 if row_store_guard is not None:
-                    vector_guard = K.And(vector_guard, row_store_guard)
-                with K.If(vector_guard):
-                    with K.Then():
+                    vector_guard = txl.And(vector_guard, row_store_guard)
+                with txl.If(vector_guard):
+                    with txl.Then():
                         p01 = _cvt_fp8_pair(y_f32[vb * 4], y_f32[vb * 4 + 1], output_dtype)
                         p23 = _cvt_fp8_pair(y_f32[vb * 4 + 2], y_f32[vb * 4 + 3], output_dtype)
-                        packed_word = K.local_scalar(
-                            K.u32, init=_pack_b16_pair(p01, p23), name="packed_word"
+                        packed_word = txl.local_scalar(
+                            txl.u32, init=_pack_b16_pair(p01, p23), name="packed_word"
                         )
-                        K.ptx.st.global_.b32(out.ptr_to([y_offset]), packed_word)
-                    with K.Else():
+                        txl.ptx.st.global_.b32(out.ptr_to([y_offset]), packed_word)
+                    with txl.Else():
                         store_scalars()
             elif vec == 2:
                 vector_guard = absolute_col + 2 <= H
                 if row_store_guard is not None:
-                    vector_guard = K.And(vector_guard, row_store_guard)
-                with K.If(vector_guard):
-                    with K.Then():
+                    vector_guard = txl.And(vector_guard, row_store_guard)
+                with txl.If(vector_guard):
+                    with txl.Then():
                         p01 = _cvt_fp8_pair(y_f32[vb * 2], y_f32[vb * 2 + 1], output_dtype)
-                        K.ptx.st.global_.b16(out.ptr_to([y_offset]), p01)
-                    with K.Else():
+                        txl.ptx.st.global_.b16(out.ptr_to([y_offset]), p01)
+                    with txl.Else():
                         store_scalars()
             else:
                 store_scalars()
 
         if enable_pdl:
-            K.ptx.griddepcontrol.launch_dependents()
+            txl.ptx.griddepcontrol.launch_dependents()
 
     entry_kwargs = {
         "warps": threads // 32,
@@ -1342,33 +1342,33 @@ def get_kernel(
 
     if compact:
 
-        @K.kernel(**entry_kwargs)
+        @txl.kernel(**entry_kwargs)
         def flashinfer_rmsnorm_quant_compact(
-            x: K.gptr[input_dtype],
-            weight: K.gptr[input_dtype, (H,)],
-            out: K.gptr[output_dtype],
-            runtime_M: K.i64,
-            scale_buffer: K.gptr[K.f32, (1,)],
-            runtime_eps: K.f32,
+            x: txl.gptr[input_dtype],
+            weight: txl.gptr[input_dtype, (H,)],
+            out: txl.gptr[output_dtype],
+            runtime_M: txl.i64,
+            scale_buffer: txl.gptr[txl.f32, (1,)],
+            runtime_eps: txl.f32,
         ):
             with entry_registers():
                 kernel_body(
-                    x, weight, out, runtime_M, scale_buffer, runtime_eps, K.int64(H), K.int64(H)
+                    x, weight, out, runtime_M, scale_buffer, runtime_eps, txl.int64(H), txl.int64(H)
                 )
 
         kernel = flashinfer_rmsnorm_quant_compact.func
     else:
 
-        @K.kernel(**entry_kwargs)
+        @txl.kernel(**entry_kwargs)
         def flashinfer_rmsnorm_quant_strided(
-            x: K.gptr[input_dtype],
-            weight: K.gptr[input_dtype, (H,)],
-            out: K.gptr[output_dtype],
-            runtime_M: K.i64,
-            scale_buffer: K.gptr[K.f32, (1,)],
-            runtime_eps: K.f32,
-            runtime_x_row_stride: K.i64,
-            runtime_y_row_stride: K.i64,
+            x: txl.gptr[input_dtype],
+            weight: txl.gptr[input_dtype, (H,)],
+            out: txl.gptr[output_dtype],
+            runtime_M: txl.i64,
+            scale_buffer: txl.gptr[txl.f32, (1,)],
+            runtime_eps: txl.f32,
+            runtime_x_row_stride: txl.i64,
+            runtime_y_row_stride: txl.i64,
         ):
             with entry_registers():
                 kernel_body(

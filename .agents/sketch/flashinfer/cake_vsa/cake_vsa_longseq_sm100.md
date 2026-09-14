@@ -457,10 +457,10 @@ writer export has an occurrence above.
 
 ## TIRx and validation contract
 
-The implementation imports only `tirx_kernels.kern as K`, uses a single
+The implementation imports only `tirx_kernels.tirx_lite as txl`, uses a single
 rank-one shared allocation and scalar offsets, compiles with nvcc for PTX 9.2,
-and contains no tile primitive, first-class layout, `K.cuda.func_call`, verifier
-exception, or edit under `tirx_kernels/kern/`.
+and contains no tile primitive, first-class layout, `txl.cuda.func_call`, verifier
+exception, or edit under `tirx_kernels/tirx_lite/`.
 
 Correctness compares independent outputs from this exact TIRx implementation
 and FlashInfer's direct `longseq/sm_100a` module bit-for-bit for BF16 output and

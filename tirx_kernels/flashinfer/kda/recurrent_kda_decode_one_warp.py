@@ -45,7 +45,7 @@ from unittest import SkipTest
 
 import torch
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 
 # --------------------------------------------------------------------------
 # Fixed dimensions of this specialization (recurrent_kda.py:242-244)
@@ -85,20 +85,20 @@ LOG2_E = 1.4426950408889634
 
 
 def _ptx_un(chain: str, a, dtype: str = "float32"):
-    out = K.local_scalar(dtype)
-    K.ptx[chain](out, a)
+    out = txl.local_scalar(dtype)
+    txl.ptx[chain](out, a)
     return out
 
 
 def _ptx_bin(chain: str, a, b, dtype: str = "float32"):
-    out = K.local_scalar(dtype)
-    K.ptx[chain](out, a, b)
+    out = txl.local_scalar(dtype)
+    txl.ptx[chain](out, a, b)
     return out
 
 
 def _ptx_ter(chain: str, a, b, c, dtype: str = "float32"):
-    out = K.local_scalar(dtype)
-    K.ptx[chain](out, a, b, c)
+    out = txl.local_scalar(dtype)
+    txl.ptx[chain](out, a, b, c)
     return out
 
 
@@ -150,7 +150,7 @@ def _fma_bf16(bf_a, bf_b, acc):
 
 
 def _bf16_to_f32(bits):
-    return _ptx_un("cvt.f32.bf16", K.cast(bits, "uint16"))
+    return _ptx_un("cvt.f32.bf16", txl.cast(bits, "uint16"))
 
 
 def _f32_to_bf16(value):
@@ -168,46 +168,46 @@ def _pack_bf16x2(hi, lo):
 
 def _shfl_bfly_f32(value, lane_xor):
     """``shfl.sync.bfly.b32`` with clamp 31 and the full member mask."""
-    out = K.local_scalar("uint32")
-    K.ptx.shfl_sync.bfly.b32(
-        out, K.reinterpret("uint32", value), K.uint32(lane_xor), K.uint32(31), K.uint32(0xFFFFFFFF)
+    out = txl.local_scalar("uint32")
+    txl.ptx.shfl_sync.bfly.b32(
+        out, txl.reinterpret("uint32", value), txl.uint32(lane_xor), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
-    return K.reinterpret("float32", out)
+    return txl.reinterpret("float32", out)
 
 
 def _shfl_idx_f32(value, source_lane):
     """``shfl.sync.idx.b32`` with clamp 31 and the full member mask."""
-    out = K.local_scalar("uint32")
-    K.ptx.shfl_sync.idx.b32(
+    out = txl.local_scalar("uint32")
+    txl.ptx.shfl_sync.idx.b32(
         out,
-        K.reinterpret("uint32", value),
-        K.cast(source_lane, "uint32"),
-        K.uint32(31),
-        K.uint32(0xFFFFFFFF),
+        txl.reinterpret("uint32", value),
+        txl.cast(source_lane, "uint32"),
+        txl.uint32(31),
+        txl.uint32(0xFFFFFFFF),
     )
-    return K.reinterpret("float32", out)
+    return txl.reinterpret("float32", out)
 
 
 def _load_f32(buffer, index):
-    out = K.local_scalar("uint32")
-    K.ptx.ld.global_.b32(out, buffer.ptr_to([index]))
-    return K.reinterpret("float32", out)
+    out = txl.local_scalar("uint32")
+    txl.ptx.ld.global_.b32(out, buffer.ptr_to([index]))
+    return txl.reinterpret("float32", out)
 
 
 def _load_i32(buffer, index):
-    out = K.local_scalar("uint32")
-    K.ptx.ld.global_.b32(out, buffer.ptr_to([index]))
-    return K.reinterpret("int32", out)
+    out = txl.local_scalar("uint32")
+    txl.ptx.ld.global_.b32(out, buffer.ptr_to([index]))
+    return txl.reinterpret("int32", out)
 
 
 def _load_bf16_bits(buffer, index):
-    out = K.local_scalar("uint16")
-    K.ptx.ld.global_.b16(out, buffer.ptr_to([index]))
+    out = txl.local_scalar("uint16")
+    txl.ptx.ld.global_.b16(out, buffer.ptr_to([index]))
     return out
 
 
 def _store_bf16_bits(buffer, index, bits):
-    K.ptx.st.global_.b16(buffer.ptr_to([index]), bits)
+    txl.ptx.st.global_.b16(buffer.ptr_to([index]), bits)
 
 
 def _store_bf16_bits_pred(buffer, index, bits, pred):
@@ -217,41 +217,41 @@ def _store_bf16_bits_pred(buffer, index, bits, pred):
     j".  Expressing it as `if cond: store` instead makes ptxas emit a real
     branch plus a BSYNC reconvergence per CTA, which the source does not have.
     """
-    K.ptx.st.global_.b16(buffer.ptr_to([index]), bits, pred=pred)
+    txl.ptx.st.global_.b16(buffer.ptr_to([index]), bits, pred=pred)
 
 
 def _load_bf16x4(buffer, index):
     """``ld.global.v4.b16`` -- one 8-byte tile of four bf16."""
-    bits = K.alloc_local((4,), "uint16")
-    K.ptx.ld.global_.v4.b16(bits[0], bits[1], bits[2], bits[3], buffer.ptr_to([index]))
+    bits = txl.alloc_local((4,), "uint16")
+    txl.ptx.ld.global_.v4.b16(bits[0], bits[1], bits[2], bits[3], buffer.ptr_to([index]))
     return bits
 
 
 def _load_bf16x8(buffer, index):
     """``ld.global.v4.b32`` -- one 16-byte tile, unpacked to eight bf16."""
-    words = K.alloc_local((4,), "uint32")
-    K.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
-    bits = K.alloc_local((8,), "uint16")
+    words = txl.alloc_local((4,), "uint32")
+    txl.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
+    bits = txl.alloc_local((8,), "uint16")
     for pair in range(4):
-        K.buffer_store(
-            bits, K.cast(K.bitwise_and(words[pair], K.uint32(0xFFFF)), "uint16"), [2 * pair]
+        txl.buffer_store(
+            bits, txl.cast(txl.bitwise_and(words[pair], txl.uint32(0xFFFF)), "uint16"), [2 * pair]
         )
-        K.buffer_store(
-            bits, K.cast(K.shift_right(words[pair], K.uint32(16)), "uint16"), [2 * pair + 1]
+        txl.buffer_store(
+            bits, txl.cast(txl.shift_right(words[pair], txl.uint32(16)), "uint16"), [2 * pair + 1]
         )
     return bits
 
 
 def _load_u32x4(buffer, index):
     """``ld.global.v4.b32`` -- one 16-byte tile, left packed."""
-    words = K.alloc_local((4,), "uint32")
-    K.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
+    words = txl.alloc_local((4,), "uint32")
+    txl.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
     return words
 
 
 def _store_bf16x8_words(buffer, index, words):
     """``st.global.v4.b32`` -- one 16-byte state row."""
-    K.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
+    txl.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
 
 
 def _dot8(state, base, rhs, schedule: int):
@@ -443,137 +443,137 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
     USE_LOWER_BOUND = spec["USE_LOWER_BOUND"]
     STATE_SLOT_STRIDE = spec["STATE_SLOT_STRIDE"]
 
-    @K.kernel(warps=1, arch="sm_100a", grid=NUM_SEQS * NUM_VALUE_HEADS * NUM_V_TILES)
+    @txl.kernel(warps=1, arch="sm_100a", grid=NUM_SEQS * NUM_VALUE_HEADS * NUM_V_TILES)
     def _recurrent_kda_decode_one_warp(
-        q: K.gptr[K.bf16],
-        k: K.gptr[K.bf16],
-        v: K.gptr[K.bf16],
-        g: K.gptr[K.bf16],
-        beta: K.gptr[K.bf16],
-        state: K.gptr[K.bf16],
-        out: K.gptr[K.bf16],
-        a_log: K.gptr[K.f32],
-        dt_bias: K.gptr[K.f32],
-        cu_seqlens: K.gptr[K.i32],
-        ssm_state_indices: K.gptr[K.i32],
-        scale: K.f32,
-        eps: K.f32,
-        lower_bound: K.f32,
+        q: txl.gptr[txl.bf16],
+        k: txl.gptr[txl.bf16],
+        v: txl.gptr[txl.bf16],
+        g: txl.gptr[txl.bf16],
+        beta: txl.gptr[txl.bf16],
+        state: txl.gptr[txl.bf16],
+        out: txl.gptr[txl.bf16],
+        a_log: txl.gptr[txl.f32],
+        dt_bias: txl.gptr[txl.f32],
+        cu_seqlens: txl.gptr[txl.i32],
+        ssm_state_indices: txl.gptr[txl.i32],
+        scale: txl.f32,
+        eps: txl.f32,
+        lower_bound: txl.f32,
     ):
         # TIRX_TRANSCRIBE_START recurrent_kda_decode_one_warp
         # --- lane and CTA coordinates (recurrent_kda.py:229-246) ----------------
-        bidx = K.cta_id()
-        tidx_axis = K.thread_id()
-        tidx = K.local_scalar("int32")
-        v_tile_idx = K.local_scalar("int32")
-        bh = K.local_scalar("int32")
-        value_head_idx = K.local_scalar("int32")
-        batch_idx = K.local_scalar("int32")
-        query_head_idx = K.local_scalar("int32")
-        v_offset = K.local_scalar("int32")
-        k_lane = K.local_scalar("int32")
-        v_lane = K.local_scalar("int32")
-        K.assign(tidx, K.cast(K.bitwise_and(K.cast(tidx_axis, "uint32"), K.uint32(31)), "int32"))
-        K.assign(v_tile_idx, bidx % NUM_V_TILES)
-        K.assign(bh, bidx // NUM_V_TILES)
-        K.assign(value_head_idx, bh % NUM_VALUE_HEADS)
-        K.assign(batch_idx, bh // NUM_VALUE_HEADS)
-        K.assign(query_head_idx, value_head_idx // GQA_RATIO)
-        K.assign(v_offset, v_tile_idx * TILE_ROWS)
-        K.assign(k_lane, tidx % K_LANES)
-        K.assign(v_lane, tidx // K_LANES)
+        bidx = txl.cta_id()
+        tidx_axis = txl.thread_id()
+        tidx = txl.local_scalar("int32")
+        v_tile_idx = txl.local_scalar("int32")
+        bh = txl.local_scalar("int32")
+        value_head_idx = txl.local_scalar("int32")
+        batch_idx = txl.local_scalar("int32")
+        query_head_idx = txl.local_scalar("int32")
+        v_offset = txl.local_scalar("int32")
+        k_lane = txl.local_scalar("int32")
+        v_lane = txl.local_scalar("int32")
+        txl.assign(tidx, txl.cast(txl.bitwise_and(txl.cast(tidx_axis, "uint32"), txl.uint32(31)), "int32"))
+        txl.assign(v_tile_idx, bidx % NUM_V_TILES)
+        txl.assign(bh, bidx // NUM_V_TILES)
+        txl.assign(value_head_idx, bh % NUM_VALUE_HEADS)
+        txl.assign(batch_idx, bh // NUM_VALUE_HEADS)
+        txl.assign(query_head_idx, value_head_idx // GQA_RATIO)
+        txl.assign(v_offset, v_tile_idx * TILE_ROWS)
+        txl.assign(k_lane, tidx % K_LANES)
+        txl.assign(v_lane, tidx // K_LANES)
 
-        global_offset = K.local_scalar("int32")
+        global_offset = txl.local_scalar("int32")
 
         def gidx(offset):
-            K.assign(global_offset, offset)
-            return K.Cast("int64", global_offset)
+            txl.assign(global_offset, offset)
+            return txl.Cast("int64", global_offset)
 
         # --- sequence metadata (recurrent_kda.py:248-252) -----------------------
-        token_base_offset = K.local_scalar("int32")
-        seq_len = K.local_scalar("int32")
-        K.assign(token_base_offset, _load_i32(cu_seqlens, gidx(batch_idx)))
-        K.assign(seq_len, _load_i32(cu_seqlens, gidx(batch_idx + 1)) - token_base_offset)
+        token_base_offset = txl.local_scalar("int32")
+        seq_len = txl.local_scalar("int32")
+        txl.assign(token_base_offset, _load_i32(cu_seqlens, gidx(batch_idx)))
+        txl.assign(seq_len, _load_i32(cu_seqlens, gidx(batch_idx + 1)) - token_base_offset)
 
         # --- zero-padded output prefill (recurrent_kda.py:253-255) --------------
         # Runs before the state load so inactive rows are defined even when the
         # token loop stores nothing.  Valid only because NUM_TOKENS == 1 makes the
         # token-axis index equal to batch_idx.
-        with K.If(tidx < TILE_ROWS), K.Then():
+        with txl.If(tidx < TILE_ROWS), txl.Then():
             _store_bf16_bits(
                 out,
                 gidx((batch_idx * NUM_VALUE_HEADS + value_head_idx) * HEAD_DIM + v_offset + tidx),
-                K.uint16(0),
+                txl.uint16(0),
             )
-        K.cuda.warp_sync()
+        txl.cuda.warp_sync()
 
         # --- initial-state slot (recurrent_kda.py:257-272) ----------------------
-        init_raw_slot = K.local_scalar("int32")
-        init_seq_idx = K.local_scalar("int32")
-        K.assign(init_raw_slot, _load_i32(ssm_state_indices, gidx(batch_idx * NUM_TOKENS)))
-        K.assign(init_seq_idx, K.max(init_raw_slot, 0))
+        init_raw_slot = txl.local_scalar("int32")
+        init_seq_idx = txl.local_scalar("int32")
+        txl.assign(init_raw_slot, _load_i32(ssm_state_indices, gidx(batch_idx * NUM_TOKENS)))
+        txl.assign(init_seq_idx, txl.max(init_raw_slot, 0))
 
         # --- register storage (recurrent_kda.py:280-293); no SMEM, no mbarrier --
-        h_reg = K.alloc_local((ROWS * 8,), "float32")
-        q_src = K.alloc_local((VALUES_PER_THREAD,), "float32")
-        k_src = K.alloc_local((VALUES_PER_THREAD,), "float32")
-        gate_src = K.alloc_local((VALUES_PER_THREAD,), "float32")
-        q_reg = K.alloc_local((8,), "float32")
-        k_reg = K.alloc_local((8,), "float32")
-        gate_reg = K.alloc_local((8,), "float32")
+        h_reg = txl.alloc_local((ROWS * 8,), "float32")
+        q_src = txl.alloc_local((VALUES_PER_THREAD,), "float32")
+        k_src = txl.alloc_local((VALUES_PER_THREAD,), "float32")
+        gate_src = txl.alloc_local((VALUES_PER_THREAD,), "float32")
+        q_reg = txl.alloc_local((8,), "float32")
+        k_reg = txl.alloc_local((8,), "float32")
+        gate_reg = txl.alloc_local((8,), "float32")
 
         # --- state load (recurrent_kda.py:295-300) ------------------------------
-        state_head_base = K.local_scalar("int32")
-        read_base = K.local_scalar("int64")
-        K.assign(state_head_base, value_head_idx * HEAD_ELEMENTS + 8 * k_lane)
-        K.assign(
+        state_head_base = txl.local_scalar("int32")
+        read_base = txl.local_scalar("int64")
+        txl.assign(state_head_base, value_head_idx * HEAD_ELEMENTS + 8 * k_lane)
+        txl.assign(
             read_base,
-            K.cast(init_seq_idx, "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
-            + K.cast(state_head_base, "int64"),
+            txl.cast(init_seq_idx, "int64") * txl.cast(STATE_SLOT_STRIDE, "int64")
+            + txl.cast(state_head_base, "int64"),
         )
         # Issue every row's load before widening any of them.  bench_suite times a
         # cold L2, so the figure of merit here is how many DRAM misses are in
         # flight; interleaving the widening with the loads lets each cvt chain sit
         # on the critical path of the next load.
-        h_words = K.alloc_local((4 * ROWS,), "uint32")
+        h_words = txl.alloc_local((4 * ROWS,), "uint32")
         for j in range(ROWS):
-            v_idx_l = K.local_scalar("int32", init=v_offset + v_lane + V_LANES * j)
-            words = _load_u32x4(state, read_base + K.cast(v_idx_l * HEAD_DIM, "int64"))
+            v_idx_l = txl.local_scalar("int32", init=v_offset + v_lane + V_LANES * j)
+            words = _load_u32x4(state, read_base + txl.cast(v_idx_l * HEAD_DIM, "int64"))
             for pr in range(4):
-                K.ptx.mov.b32(h_words[j * 4 + pr], words[pr])
+                txl.ptx.mov.b32(h_words[j * 4 + pr], words[pr])
         for j in range(ROWS):
             for pr in range(4):
-                w = K.local_scalar("uint32", init=h_words[j * 4 + pr])
-                K.ptx.mov.b32(
+                w = txl.local_scalar("uint32", init=h_words[j * 4 + pr])
+                txl.ptx.mov.b32(
                     h_reg[j * 8 + 2 * pr],
-                    _bf16_to_f32(K.cast(K.bitwise_and(w, K.uint32(0xFFFF)), "uint16")),
+                    _bf16_to_f32(txl.cast(txl.bitwise_and(w, txl.uint32(0xFFFF)), "uint16")),
                 )
-                K.ptx.mov.b32(
+                txl.ptx.mov.b32(
                     h_reg[j * 8 + 2 * pr + 1],
-                    _bf16_to_f32(K.cast(K.shift_right(w, K.uint32(16)), "uint16")),
+                    _bf16_to_f32(txl.cast(txl.shift_right(w, txl.uint32(16)), "uint16")),
                 )
 
         # --- per-head gate constants (recurrent_kda.py:302-305) -----------------
-        h_K_offset = K.local_scalar("int32")
-        A_log_val = K.local_scalar("float32")
-        K.assign(h_K_offset, query_head_idx * HEAD_DIM)
-        K.assign(A_log_val, _exp2(_mul(_load_f32(a_log, gidx(query_head_idx)), K.float32(LOG2_E))))
+        h_K_offset = txl.local_scalar("int32")
+        A_log_val = txl.local_scalar("float32")
+        txl.assign(h_K_offset, query_head_idx * HEAD_DIM)
+        txl.assign(A_log_val, _exp2(_mul(_load_f32(a_log, gidx(query_head_idx)), txl.float32(LOG2_E))))
 
         # --- loop-invariant lower-bound gate constants (recurrent_kda.py:124-127)
         # Both live inside compute_gate_value's per-i loop in the source and are
         # loop-invariant, so they are hoisted here.  The neg is folded into the
         # negated log2(e) immediate and emits no neg.f32.
-        neg_A_log2e = K.local_scalar("float32")
-        lb_log2e = K.local_scalar("float32")
-        neg_A_log_val = K.local_scalar("float32")
-        K.assign(neg_A_log2e, K.float32(0.0))
-        K.assign(lb_log2e, K.float32(0.0))
-        K.assign(neg_A_log_val, K.float32(0.0))
+        neg_A_log2e = txl.local_scalar("float32")
+        lb_log2e = txl.local_scalar("float32")
+        neg_A_log_val = txl.local_scalar("float32")
+        txl.assign(neg_A_log2e, txl.float32(0.0))
+        txl.assign(lb_log2e, txl.float32(0.0))
+        txl.assign(neg_A_log_val, txl.float32(0.0))
         if USE_LOWER_BOUND:
-            K.assign(neg_A_log2e, _mul(A_log_val, K.float32(-LOG2_E)))
-            K.assign(lb_log2e, _mul(lower_bound, K.float32(LOG2_E)))
+            txl.assign(neg_A_log2e, _mul(A_log_val, txl.float32(-LOG2_E)))
+            txl.assign(lb_log2e, _mul(lower_bound, txl.float32(LOG2_E)))
         else:
-            K.assign(neg_A_log_val, _mul(A_log_val, K.float32(-1.0)))
+            txl.assign(neg_A_log_val, _mul(A_log_val, txl.float32(-1.0)))
 
         # =======================================================================
         # Token loop.  NUM_TOKENS == 1, so this runs exactly once; the source keeps
@@ -586,27 +586,27 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
             # CuTe compiler CSEs them into a single ld.global.b32 + max.s32.  Our PTX
             # helpers are opaque inline asm, so CSE cannot fire across them; reusing
             # the prologue values reproduces the source's *emitted* code exactly.
-            raw_slot = K.local_scalar("int32")
-            has_token = K.local_scalar("int32")
-            is_active = K.local_scalar("int32")
-            token_offset = K.local_scalar("int32")
-            seq_idx = K.local_scalar("int32")
-            K.assign(raw_slot, init_raw_slot)
-            K.assign(has_token, K.cast(token_t < seq_len, "int32"))
-            K.assign(is_active, K.cast(K.cast(raw_slot >= 0, "int32") * has_token, "int32"))
-            K.assign(
+            raw_slot = txl.local_scalar("int32")
+            has_token = txl.local_scalar("int32")
+            is_active = txl.local_scalar("int32")
+            token_offset = txl.local_scalar("int32")
+            seq_idx = txl.local_scalar("int32")
+            txl.assign(raw_slot, init_raw_slot)
+            txl.assign(has_token, txl.cast(token_t < seq_len, "int32"))
+            txl.assign(is_active, txl.cast(txl.cast(raw_slot >= 0, "int32") * has_token, "int32"))
+            txl.assign(
                 token_offset,
-                K.if_then_else(token_t < seq_len, token_base_offset + token_t, K.int32(0)),
+                txl.if_then_else(token_t < seq_len, token_base_offset + token_t, txl.int32(0)),
             )
-            K.assign(seq_idx, init_seq_idx)
+            txl.assign(seq_idx, init_seq_idx)
 
             # --- per-head views and beta (recurrent_kda.py:333-346) ------------
-            q_base = K.local_scalar("int32")
-            v_base = K.local_scalar("int32")
-            beta_val = K.local_scalar("float32")
-            K.assign(q_base, (token_offset * NUM_HEADS + query_head_idx) * HEAD_DIM)
-            K.assign(v_base, (token_offset * NUM_VALUE_HEADS + value_head_idx) * HEAD_DIM)
-            K.assign(
+            q_base = txl.local_scalar("int32")
+            v_base = txl.local_scalar("int32")
+            beta_val = txl.local_scalar("float32")
+            txl.assign(q_base, (token_offset * NUM_HEADS + query_head_idx) * HEAD_DIM)
+            txl.assign(v_base, (token_offset * NUM_VALUE_HEADS + value_head_idx) * HEAD_DIM)
+            txl.assign(
                 beta_val,
                 _bf16_to_f32(
                     _load_bf16_bits(beta, gidx(token_offset * NUM_VALUE_HEADS + value_head_idx))
@@ -619,48 +619,48 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
             gate_bits = _load_bf16x4(g, gidx(v_base + VALUES_PER_THREAD * tidx))
 
             # --- V load, hoisted only at TILE_ROWS == 16 (recurrent_kda.py:359-364)
-            v_loaded = K.local_scalar("float32", init=K.float32(0.0))
+            v_loaded = txl.local_scalar("float32", init=txl.float32(0.0))
             if TILE_ROWS == 16:
-                with K.If(tidx < TILE_ROWS), K.Then():
-                    K.assign(
+                with txl.If(tidx < TILE_ROWS), txl.Then():
+                    txl.assign(
                         v_loaded, _bf16_to_f32(_load_bf16_bits(v, gidx(v_base + v_offset + tidx)))
                     )
 
             # --- gate + q/k conversion (recurrent_kda.py:366-380, :88-148) -----
             for i in range(VALUES_PER_THREAD):
-                k_idx = K.local_scalar("int32")
-                g_val = K.local_scalar("float32")
-                K.assign(k_idx, tidx * VALUES_PER_THREAD + i)
-                K.ptx.mov.b32(q_src[i], _bf16_to_f32(q_bits[i]))
-                K.ptx.mov.b32(k_src[i], _bf16_to_f32(k_bits[i]))
-                K.assign(
+                k_idx = txl.local_scalar("int32")
+                g_val = txl.local_scalar("float32")
+                txl.assign(k_idx, tidx * VALUES_PER_THREAD + i)
+                txl.ptx.mov.b32(q_src[i], _bf16_to_f32(q_bits[i]))
+                txl.ptx.mov.b32(k_src[i], _bf16_to_f32(k_bits[i]))
+                txl.assign(
                     g_val, _add_bf16(gate_bits[i], _load_f32(dt_bias, gidx(h_K_offset + k_idx)))
                 )
                 if USE_LOWER_BOUND:
-                    denom = K.local_scalar("float32")
-                    K.assign(denom, _add(K.float32(1.0), _exp2(_mul(neg_A_log2e, g_val))))
-                    K.ptx.mov.b32(gate_src[i], _exp2(_div_rn(lb_log2e, denom)))
+                    denom = txl.local_scalar("float32")
+                    txl.assign(denom, _add(txl.float32(1.0), _exp2(_mul(neg_A_log2e, g_val))))
+                    txl.ptx.mov.b32(gate_src[i], _exp2(_div_rn(lb_log2e, denom)))
                 else:
-                    exp_g = K.local_scalar("float32")
-                    log2_v = K.local_scalar("float32")
-                    K.assign(exp_g, _exp2(_mul(g_val, K.float32(LOG2_E))))
-                    K.assign(log2_v, _log2(_add(K.float32(1.0), exp_g)))
-                    K.ptx.mov.b32(gate_src[i], _exp2(_mul(neg_A_log_val, log2_v)))
+                    exp_g = txl.local_scalar("float32")
+                    log2_v = txl.local_scalar("float32")
+                    txl.assign(exp_g, _exp2(_mul(g_val, txl.float32(LOG2_E))))
+                    txl.assign(log2_v, _log2(_add(txl.float32(1.0), exp_g)))
+                    txl.ptx.mov.b32(gate_src[i], _exp2(_mul(neg_A_log_val, log2_v)))
 
             # --- q/k sum of squares (recurrent_kda.py:382-404) -----------------
-            q_sum_sq = K.local_scalar("float32")
-            k_sum_sq = K.local_scalar("float32")
-            K.assign(q_sum_sq, K.float32(0.0))
-            K.assign(k_sum_sq, K.float32(0.0))
+            q_sum_sq = txl.local_scalar("float32")
+            k_sum_sq = txl.local_scalar("float32")
+            txl.assign(q_sum_sq, txl.float32(0.0))
+            txl.assign(k_sum_sq, txl.float32(0.0))
             if DOT_REDUCTION_SCHEDULE == DOT_REDUCTION_DUAL_ACCUM:
-                K.assign(
+                txl.assign(
                     q_sum_sq,
                     _add(
                         _fma_bf16(q_bits[2], q_bits[2], _mul(q_src[0], q_src[0])),
                         _fma_bf16(q_bits[3], q_bits[3], _mul(q_src[1], q_src[1])),
                     ),
                 )
-                K.assign(
+                txl.assign(
                     k_sum_sq,
                     _add(
                         _fma_bf16(k_bits[2], k_bits[2], _mul(k_src[0], k_src[0])),
@@ -668,14 +668,14 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
                     ),
                 )
             else:
-                K.assign(
+                txl.assign(
                     q_sum_sq,
                     _add(
                         _fma_bf16(q_bits[0], q_bits[0], _mul(q_src[1], q_src[1])),
                         _fma_bf16(q_bits[2], q_bits[2], _mul(q_src[3], q_src[3])),
                     ),
                 )
-                K.assign(
+                txl.assign(
                     k_sum_sq,
                     _add(
                         _fma_bf16(k_bits[0], k_bits[0], _mul(k_src[1], k_src[1])),
@@ -685,59 +685,59 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
 
             # --- full-warp butterfly (recurrent_kda.py:405-411) ----------------
             for off_i in range(5):
-                shift = K.local_scalar("int32", init=K.shift_right(K.int32(16), off_i))
-                K.assign(q_sum_sq, _add(q_sum_sq, _shfl_bfly_f32(q_sum_sq, shift)))
-                K.assign(k_sum_sq, _add(k_sum_sq, _shfl_bfly_f32(k_sum_sq, shift)))
+                shift = txl.local_scalar("int32", init=txl.shift_right(txl.int32(16), off_i))
+                txl.assign(q_sum_sq, _add(q_sum_sq, _shfl_bfly_f32(q_sum_sq, shift)))
+                txl.assign(k_sum_sq, _add(k_sum_sq, _shfl_bfly_f32(k_sum_sq, shift)))
 
             # --- scale factors (recurrent_kda.py:413-417) ----------------------
-            q_scale_factor = K.local_scalar("float32")
-            k_scale_factor = K.local_scalar("float32")
-            K.assign(q_scale_factor, _mul(_rsqrt(_add(q_sum_sq, eps)), scale))
-            K.assign(k_scale_factor, _rsqrt(_add(k_sum_sq, eps)))
+            q_scale_factor = txl.local_scalar("float32")
+            k_scale_factor = txl.local_scalar("float32")
+            txl.assign(q_scale_factor, _mul(_rsqrt(_add(q_sum_sq, eps)), scale))
+            txl.assign(k_scale_factor, _rsqrt(_add(k_sum_sq, eps)))
 
             # --- broadcast the load view into the k_lane view (:418-436) -------
             for i in range(8):
-                source_lane = K.local_scalar(
+                source_lane = txl.local_scalar(
                     "int32", init=V_LANES * k_lane + i // VALUES_PER_THREAD
                 )
-                K.ptx.mov.b32(
+                txl.ptx.mov.b32(
                     q_reg[i],
                     _mul(_shfl_idx_f32(q_src[i % VALUES_PER_THREAD], source_lane), q_scale_factor),
                 )
-                K.ptx.mov.b32(
+                txl.ptx.mov.b32(
                     k_reg[i],
                     _mul(_shfl_idx_f32(k_src[i % VALUES_PER_THREAD], source_lane), k_scale_factor),
                 )
-                K.ptx.mov.b32(
+                txl.ptx.mov.b32(
                     gate_reg[i], _shfl_idx_f32(gate_src[i % VALUES_PER_THREAD], source_lane)
                 )
 
             # --- late V load for the other schedules (recurrent_kda.py:437-439)
             if TILE_ROWS != 16:
-                with K.If(tidx < TILE_ROWS), K.Then():
-                    K.assign(
+                with txl.If(tidx < TILE_ROWS), txl.Then():
+                    txl.assign(
                         v_loaded, _bf16_to_f32(_load_bf16_bits(v, gidx(v_base + v_offset + tidx)))
                     )
 
             # --- sequential rank-1 recurrence (recurrent_kda.py:440-460) -------
             for j in range(ROWS):
                 for i in range(8):
-                    K.ptx.mov.b32(h_reg[j * 8 + i], _mul(h_reg[j * 8 + i], gate_reg[i]))
+                    txl.ptx.mov.b32(h_reg[j * 8 + i], _mul(h_reg[j * 8 + i], gate_reg[i]))
 
-                pred = K.local_scalar("float32")
-                v_idx = K.local_scalar("int32")
-                v_val = K.local_scalar("float32")
-                delta = K.local_scalar("float32")
-                out_val = K.local_scalar("float32")
-                K.assign(pred, _reduce_k_group(_dot8(h_reg, j * 8, k_reg, DOT_REDUCTION_SCHEDULE)))
-                K.assign(v_idx, v_offset + v_lane + V_LANES * j)
-                K.assign(v_val, _shfl_idx_f32(v_loaded, v_lane + V_LANES * j))
-                K.assign(delta, _mul(_sub(v_val, pred), beta_val))
+                pred = txl.local_scalar("float32")
+                v_idx = txl.local_scalar("int32")
+                v_val = txl.local_scalar("float32")
+                delta = txl.local_scalar("float32")
+                out_val = txl.local_scalar("float32")
+                txl.assign(pred, _reduce_k_group(_dot8(h_reg, j * 8, k_reg, DOT_REDUCTION_SCHEDULE)))
+                txl.assign(v_idx, v_offset + v_lane + V_LANES * j)
+                txl.assign(v_val, _shfl_idx_f32(v_loaded, v_lane + V_LANES * j))
+                txl.assign(delta, _mul(_sub(v_val, pred), beta_val))
 
                 for i in range(8):
-                    K.ptx.mov.b32(h_reg[j * 8 + i], _fma(k_reg[i], delta, h_reg[j * 8 + i]))
+                    txl.ptx.mov.b32(h_reg[j * 8 + i], _fma(k_reg[i], delta, h_reg[j * 8 + i]))
 
-                K.assign(
+                txl.assign(
                     out_val, _reduce_k_group(_dot8(h_reg, j * 8, q_reg, DOT_REDUCTION_SCHEDULE))
                 )
 
@@ -745,29 +745,29 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
                     out,
                     gidx(v_base + v_idx),
                     _f32_to_bf16(out_val),
-                    K.And(is_active != 0, k_lane == j),
+                    txl.And(is_active != 0, k_lane == j),
                 )
 
             # --- state writeback (recurrent_kda.py:462-469) --------------------
             # The source rebinds h_out to seq_idx at :463.  At NUM_TOKENS == 1 that
             # is the same slot the prologue loaded from, and a negative slot cannot
             # reach here because it clears is_active (:327).
-            with K.If(is_active != 0), K.Then():
-                write_base = K.local_scalar(
+            with txl.If(is_active != 0), txl.Then():
+                write_base = txl.local_scalar(
                     "int64",
-                    init=K.cast(seq_idx, "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
-                    + K.cast(state_head_base, "int64"),
+                    init=txl.cast(seq_idx, "int64") * txl.cast(STATE_SLOT_STRIDE, "int64")
+                    + txl.cast(state_head_base, "int64"),
                 )
                 for j in range(ROWS):
-                    v_idx_w = K.local_scalar("int32", init=v_offset + v_lane + V_LANES * j)
-                    words = K.alloc_local((4,), "uint32")
+                    v_idx_w = txl.local_scalar("int32", init=v_offset + v_lane + V_LANES * j)
+                    words = txl.alloc_local((4,), "uint32")
                     for pair in range(4):
-                        K.ptx.mov.b32(
+                        txl.ptx.mov.b32(
                             words[pair],
                             _pack_bf16x2(h_reg[j * 8 + 2 * pair + 1], h_reg[j * 8 + 2 * pair]),
                         )
                     _store_bf16x8_words(
-                        state, write_base + K.cast(v_idx_w * HEAD_DIM, "int64"), words
+                        state, write_base + txl.cast(v_idx_w * HEAD_DIM, "int64"), words
                     )
 
     return _recurrent_kda_decode_one_warp.func

@@ -58,7 +58,7 @@ store it and never read it. Independent `true`/`false` anchor exports are
 byte-identical.
 
 No first-class layout, tile, or fragment object may appear in device code.
-The implementation imports only `tirx_kernels.kern as K`. Shared memory is one
+The implementation imports only `tirx_kernels.tirx_lite as txl`. Shared memory is one
 rank-1 `u8` arena. Stages, swizzles, TensorMap coordinates, UMMA descriptors,
 register fragments, and TMEM rows/columns are scalar integer expressions.
 
@@ -202,7 +202,7 @@ SFB_OFFSET = align_up(SFA_OFFSET + AB_STAGES * SFA_STAGE_BYTES, 1024)
 AMAX_OFFSET = align_up(SFB_OFFSET + AB_STAGES * SFB_STAGE_BYTES, 1024)
 SHARED_BYTES = align_up(AMAX_OFFSET + 16, 1024)
 assert SHARED_BYTES <= 232448
-smem = K.alloc_buffer((SHARED_BYTES,), K.u8, scope="shared.dyn")
+smem = txl.alloc_buffer((SHARED_BYTES,), txl.u8, scope="shared.dyn")
 
 # Anchor byte intervals, directly observed in anchor TMA addresses:
 #   AB_FULL 0..39; AB_EMPTY 40..79; ACC_FULL 80..87; ACC_EMPTY 88..95
@@ -684,6 +684,6 @@ the central benchmark API unchanged.
 
 Structural gates reject `TilePrimitiveCall`, `tirx.tile.*`, `tile_primitive`,
 any first-class layout, non-rank-1 shared buffers, or imports other than the
-normal Python/runtime dependencies plus `tirx_kernels.kern as K` for device
+normal Python/runtime dependencies plus `tirx_kernels.tirx_lite as txl` for device
 construction. Generated PTX must retain the instruction-selection and protocol
 edges cited above.

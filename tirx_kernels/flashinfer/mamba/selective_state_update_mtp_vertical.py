@@ -14,7 +14,7 @@ from typing import Any
 
 import torch
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 
 from . import selective_state_update_mtp_simple as _simple
 from .selective_state_update_mtp_simple import _case, _cvt_rs_f16x2_f32, _shfl_down_f32
@@ -134,65 +134,65 @@ REJECTION_CONFIGS = [
 
 
 def _mbarrier_arrive_wait(barrier):
-    token = K.local_scalar("uint64")
-    done = K.local_scalar("uint32")
-    K.ptx.mbarrier.arrive.shared__cta.b64(token, barrier, K.uint32(1))
-    with K.While(True):
-        K.ptx.mbarrier.try_wait.shared__cta.b64(done, barrier, token)
-        with K.If(done != K.uint32(0)), K.Then():
-            K.Break()
+    token = txl.local_scalar("uint64")
+    done = txl.local_scalar("uint32")
+    txl.ptx.mbarrier.arrive.shared__cta.b64(token, barrier, txl.uint32(1))
+    with txl.While(True):
+        txl.ptx.mbarrier.try_wait.shared__cta.b64(done, barrier, token)
+        with txl.If(done != txl.uint32(0)), txl.Then():
+            txl.Break()
 
 
 def _tma_g2s_4d(dst, tensor_map, c0, c1, c2, c3, barrier):
-    K.ptx[_TMA_G2S_4D](
+    txl.ptx[_TMA_G2S_4D](
         dst,
-        K.address_of(tensor_map),
-        K.cast(c0, "int32"),
-        K.cast(c1, "int32"),
-        K.cast(c2, "int32"),
-        K.cast(c3, "int32"),
+        txl.address_of(tensor_map),
+        txl.cast(c0, "int32"),
+        txl.cast(c1, "int32"),
+        txl.cast(c2, "int32"),
+        txl.cast(c3, "int32"),
         barrier,
     )
 
 
 def _philox4x32(random_words, seed_lo, seed_hi, counter, *, PHILOX_ROUNDS):
-    c0 = K.local_scalar("uint32", init=K.reinterpret("uint32", counter))
-    high_signed = K.local_scalar("int32")
-    K.ptx.shr.s32(high_signed, counter, K.uint32(31))
-    c1 = K.local_scalar("uint32", init=K.reinterpret("uint32", high_signed))
-    c2 = K.local_scalar("uint32", init=0)
-    c3 = K.local_scalar("uint32", init=0)
-    k0 = K.local_scalar("uint32", init=seed_lo)
-    k1 = K.local_scalar("uint32", init=seed_hi)
-    with K.unroll(PHILOX_ROUNDS) as _round:
-        old_c0 = K.local_scalar("uint32", init=c0)
-        old_c2 = K.local_scalar("uint32", init=c2)
-        next_c0 = K.local_scalar("uint32")
-        mul_hi_0 = K.local_scalar("uint32")
-        K.ptx["mul.hi.u32"](mul_hi_0, K.uint32(0xCD9E8D57), old_c2)
-        K.assign(next_c0, K.bitwise_xor(K.bitwise_xor(mul_hi_0, c1), k0))
-        next_c2 = K.local_scalar("uint32")
-        mul_hi_1 = K.local_scalar("uint32")
-        K.ptx["mul.hi.u32"](mul_hi_1, K.uint32(0xD2511F53), old_c0)
-        K.assign(next_c2, K.bitwise_xor(K.bitwise_xor(mul_hi_1, c3), k1))
-        next_c1 = K.local_scalar("int32")
-        K.ptx["mul.lo.s32"](next_c1, K.int32(-845247145), K.reinterpret("int32", old_c2))
-        next_c3 = K.local_scalar("int32")
-        K.ptx["mul.lo.s32"](next_c3, K.int32(-766435501), K.reinterpret("int32", old_c0))
-        next_k0 = K.local_scalar("int32")
-        K.ptx["add.s32"](next_k0, K.reinterpret("int32", k0), K.int32(-1640531527))
-        next_k1 = K.local_scalar("int32")
-        K.ptx["add.s32"](next_k1, K.reinterpret("int32", k1), K.int32(-1150833019))
-        K.assign(c0, next_c0)
-        K.assign(c1, K.reinterpret("uint32", next_c1))
-        K.assign(c2, next_c2)
-        K.assign(c3, K.reinterpret("uint32", next_c3))
-        K.assign(k0, K.reinterpret("uint32", next_k0))
-        K.assign(k1, K.reinterpret("uint32", next_k1))
-    K.ptx.mov.b32(random_words[0], c0)
-    K.ptx.mov.b32(random_words[1], c1)
-    K.ptx.mov.b32(random_words[2], c2)
-    K.ptx.mov.b32(random_words[3], c3)
+    c0 = txl.local_scalar("uint32", init=txl.reinterpret("uint32", counter))
+    high_signed = txl.local_scalar("int32")
+    txl.ptx.shr.s32(high_signed, counter, txl.uint32(31))
+    c1 = txl.local_scalar("uint32", init=txl.reinterpret("uint32", high_signed))
+    c2 = txl.local_scalar("uint32", init=0)
+    c3 = txl.local_scalar("uint32", init=0)
+    k0 = txl.local_scalar("uint32", init=seed_lo)
+    k1 = txl.local_scalar("uint32", init=seed_hi)
+    with txl.unroll(PHILOX_ROUNDS) as _round:
+        old_c0 = txl.local_scalar("uint32", init=c0)
+        old_c2 = txl.local_scalar("uint32", init=c2)
+        next_c0 = txl.local_scalar("uint32")
+        mul_hi_0 = txl.local_scalar("uint32")
+        txl.ptx["mul.hi.u32"](mul_hi_0, txl.uint32(0xCD9E8D57), old_c2)
+        txl.assign(next_c0, txl.bitwise_xor(txl.bitwise_xor(mul_hi_0, c1), k0))
+        next_c2 = txl.local_scalar("uint32")
+        mul_hi_1 = txl.local_scalar("uint32")
+        txl.ptx["mul.hi.u32"](mul_hi_1, txl.uint32(0xD2511F53), old_c0)
+        txl.assign(next_c2, txl.bitwise_xor(txl.bitwise_xor(mul_hi_1, c3), k1))
+        next_c1 = txl.local_scalar("int32")
+        txl.ptx["mul.lo.s32"](next_c1, txl.int32(-845247145), txl.reinterpret("int32", old_c2))
+        next_c3 = txl.local_scalar("int32")
+        txl.ptx["mul.lo.s32"](next_c3, txl.int32(-766435501), txl.reinterpret("int32", old_c0))
+        next_k0 = txl.local_scalar("int32")
+        txl.ptx["add.s32"](next_k0, txl.reinterpret("int32", k0), txl.int32(-1640531527))
+        next_k1 = txl.local_scalar("int32")
+        txl.ptx["add.s32"](next_k1, txl.reinterpret("int32", k1), txl.int32(-1150833019))
+        txl.assign(c0, next_c0)
+        txl.assign(c1, txl.reinterpret("uint32", next_c1))
+        txl.assign(c2, next_c2)
+        txl.assign(c3, txl.reinterpret("uint32", next_c3))
+        txl.assign(k0, txl.reinterpret("uint32", next_k0))
+        txl.assign(k1, txl.reinterpret("uint32", next_k1))
+    txl.ptx.mov.b32(random_words[0], c0)
+    txl.ptx.mov.b32(random_words[1], c1)
+    txl.ptx.mov.b32(random_words[2], c2)
+    txl.ptx.mov.b32(random_words[3], c3)
 
 
 def _store_state_row(
@@ -212,32 +212,32 @@ def _store_state_row(
     PHILOX_ROUNDS,
 ):
     if PHILOX_ROUNDS > 0:
-        pair0 = K.local_scalar("uint32")
-        pair1 = K.local_scalar("uint32")
+        pair0 = txl.local_scalar("uint32")
+        pair1 = txl.local_scalar("uint32")
         _cvt_rs_f16x2_f32(pair0, values[wr, 1], values[wr, 0], random_words[0])
         _cvt_rs_f16x2_f32(pair1, values[wr, 3], values[wr, 2], random_words[1])
         if HAS_INTERMEDIATE_STATES:
-            K.ptx.st.global_.v2.b32(intermediate_states.ptr_to([intermediate_base]), pair0, pair1)
-            with K.If(write_final != 0), K.Then():
-                K.ptx.st.global_.v2.b32(state.ptr_to([final_base]), pair0, pair1)
+            txl.ptx.st.global_.v2.b32(intermediate_states.ptr_to([intermediate_base]), pair0, pair1)
+            with txl.If(write_final != 0), txl.Then():
+                txl.ptx.st.global_.v2.b32(state.ptr_to([final_base]), pair0, pair1)
         else:
-            with K.If(write_final != 0), K.Then():
-                K.ptx.st.global_.v2.b32(state.ptr_to([final_base]), pair0, pair1)
+            with txl.If(write_final != 0), txl.Then():
+                txl.ptx.st.global_.v2.b32(state.ptr_to([final_base]), pair0, pair1)
     elif STATE_DTYPE == "float32":
-        words = K.alloc_local((4,), "uint32")
-        with K.unroll(4) as k:
-            K.ptx.mov.b32(words[k], K.reinterpret("uint32", values[wr, k]))
+        words = txl.alloc_local((4,), "uint32")
+        with txl.unroll(4) as k:
+            txl.ptx.mov.b32(words[k], txl.reinterpret("uint32", values[wr, k]))
         if HAS_INTERMEDIATE_STATES:
-            with K.If(write_final != 0):
-                with K.Then():
-                    lo = K.local_scalar("uint64")
-                    hi = K.local_scalar("uint64")
-                    K.ptx.mov.b64(lo, words[0], words[1])
-                    K.ptx.mov.b64(hi, words[2], words[3])
-                    K.ptx.st.global_.v2.b64(intermediate_states.ptr_to([intermediate_base]), lo, hi)
-                    K.ptx.st.global_.v2.b64(state.ptr_to([final_base]), lo, hi)
-                with K.Else():
-                    K.ptx.st.global_.v4.b32(
+            with txl.If(write_final != 0):
+                with txl.Then():
+                    lo = txl.local_scalar("uint64")
+                    hi = txl.local_scalar("uint64")
+                    txl.ptx.mov.b64(lo, words[0], words[1])
+                    txl.ptx.mov.b64(hi, words[2], words[3])
+                    txl.ptx.st.global_.v2.b64(intermediate_states.ptr_to([intermediate_base]), lo, hi)
+                    txl.ptx.st.global_.v2.b64(state.ptr_to([final_base]), lo, hi)
+                with txl.Else():
+                    txl.ptx.st.global_.v4.b32(
                         intermediate_states.ptr_to([intermediate_base]),
                         words[0],
                         words[1],
@@ -245,54 +245,54 @@ def _store_state_row(
                         words[3],
                     )
         else:
-            with K.If(write_final != 0), K.Then():
-                K.ptx.st.global_.v4.b32(
+            with txl.If(write_final != 0), txl.Then():
+                txl.ptx.st.global_.v4.b32(
                     state.ptr_to([final_base]), words[0], words[1], words[2], words[3]
                 )
     else:
-        bits = K.alloc_local((4,), "uint16")
-        with K.unroll(STATE_VALUES_PER_THREAD) as k:
+        bits = txl.alloc_local((4,), "uint16")
+        with txl.unroll(STATE_VALUES_PER_THREAD) as k:
             if STATE_DTYPE == "bfloat16":
-                K.ptx.cvt.rn.bf16.f32(bits[k], values[wr, k])
+                txl.ptx.cvt.rn.bf16.f32(bits[k], values[wr, k])
             else:
-                K.ptx.cvt.rn.f16.f32(bits[k], values[wr, k])
+                txl.ptx.cvt.rn.f16.f32(bits[k], values[wr, k])
         if DSTATE == 64:
             if HAS_INTERMEDIATE_STATES:
-                with K.If(write_final != 0):
-                    with K.Then():
-                        word = K.local_scalar("uint32")
-                        K.ptx.mov.b32(word, bits[0], bits[1])
-                        K.ptx.st.global_.b32(intermediate_states.ptr_to([intermediate_base]), word)
-                        K.ptx.st.global_.b32(state.ptr_to([final_base]), word)
-                    with K.Else():
-                        K.ptx.st.global_.v2.b16(
+                with txl.If(write_final != 0):
+                    with txl.Then():
+                        word = txl.local_scalar("uint32")
+                        txl.ptx.mov.b32(word, bits[0], bits[1])
+                        txl.ptx.st.global_.b32(intermediate_states.ptr_to([intermediate_base]), word)
+                        txl.ptx.st.global_.b32(state.ptr_to([final_base]), word)
+                    with txl.Else():
+                        txl.ptx.st.global_.v2.b16(
                             intermediate_states.ptr_to([intermediate_base]), bits[0], bits[1]
                         )
             else:
-                with K.If(write_final != 0), K.Then():
-                    K.ptx.st.global_.v2.b16(state.ptr_to([final_base]), bits[0], bits[1])
+                with txl.If(write_final != 0), txl.Then():
+                    txl.ptx.st.global_.v2.b16(state.ptr_to([final_base]), bits[0], bits[1])
         elif DSTATE == 96:
             if HAS_INTERMEDIATE_STATES:
-                with K.unroll(3) as k:
-                    K.ptx.st.global_.b16(
+                with txl.unroll(3) as k:
+                    txl.ptx.st.global_.b16(
                         intermediate_states.ptr_to([intermediate_base + k]), bits[k]
                     )
-            with K.If(write_final != 0), K.Then():
-                with K.unroll(3) as k:
-                    K.ptx.st.global_.b16(state.ptr_to([final_base + k]), bits[k])
+            with txl.If(write_final != 0), txl.Then():
+                with txl.unroll(3) as k:
+                    txl.ptx.st.global_.b16(state.ptr_to([final_base + k]), bits[k])
         elif HAS_INTERMEDIATE_STATES:
-            with K.If(write_final != 0):
-                with K.Then():
-                    word0 = K.local_scalar("uint32")
-                    word1 = K.local_scalar("uint32")
-                    K.ptx.mov.b32(word1, bits[2], bits[3])
-                    K.ptx.mov.b32(word0, bits[0], bits[1])
-                    K.ptx.st.global_.v2.b32(
+            with txl.If(write_final != 0):
+                with txl.Then():
+                    word0 = txl.local_scalar("uint32")
+                    word1 = txl.local_scalar("uint32")
+                    txl.ptx.mov.b32(word1, bits[2], bits[3])
+                    txl.ptx.mov.b32(word0, bits[0], bits[1])
+                    txl.ptx.st.global_.v2.b32(
                         intermediate_states.ptr_to([intermediate_base]), word0, word1
                     )
-                    K.ptx.st.global_.v2.b32(state.ptr_to([final_base]), word0, word1)
-                with K.Else():
-                    K.ptx.st.global_.v4.b16(
+                    txl.ptx.st.global_.v2.b32(state.ptr_to([final_base]), word0, word1)
+                with txl.Else():
+                    txl.ptx.st.global_.v4.b16(
                         intermediate_states.ptr_to([intermediate_base]),
                         bits[0],
                         bits[1],
@@ -300,8 +300,8 @@ def _store_state_row(
                         bits[3],
                     )
         else:
-            with K.If(write_final != 0), K.Then():
-                K.ptx.st.global_.v4.b16(
+            with txl.If(write_final != 0), txl.Then():
+                txl.ptx.st.global_.v4.b16(
                     state.ptr_to([final_base]), bits[0], bits[1], bits[2], bits[3]
                 )
 
@@ -386,92 +386,92 @@ def get_kernel(**kwargs: Any):
     WEIGHT_DTYPE = spec["WEIGHT_DTYPE"]
     INDEX_DTYPE = spec["INDEX_DTYPE"]
 
-    @K.kernel(
+    @txl.kernel(
         warps=16, arch="sm_100a", min_blocks_per_sm=2, grid=(spec["BATCH"], spec["NUM_HEAD_CHUNKS"])
     )
     def selective_state_update_mtp_vertical(
-        tensor_state: K.TensorMap,
-        tensor_b: K.TensorMap,
-        tensor_c: K.TensorMap,
-        tensor_x: K.TensorMap,
-        state: K.gptr[spec["STATE_DTYPE"]],
-        state_scale: K.gptr[K.f32],
-        x: K.gptr[K.bf16],
-        dt: K.gptr[spec["WEIGHT_DTYPE"]],
-        matrix_a: K.gptr[K.f32],
-        matrix_b: K.gptr[K.bf16],
-        matrix_c: K.gptr[K.bf16],
-        d_weight: K.gptr[spec["WEIGHT_DTYPE"]],
-        z: K.gptr[K.bf16],
-        dt_bias: K.gptr[spec["WEIGHT_DTYPE"]],
-        state_indices: K.gptr[spec["INDEX_DTYPE"]],
-        dst_indices: K.gptr[spec["INDEX_DTYPE"]],
-        intermediate_states: K.gptr[spec["STATE_DTYPE"]],
-        intermediate_indices: K.gptr[spec["INDEX_DTYPE"]],
-        intermediate_scales: K.gptr[K.f32],
-        cu_seqlens: K.gptr[str(kwargs["cu_seqlens_dtype"])],
-        num_accepted_tokens: K.gptr[str(kwargs["accepted_dtype"])],
-        rand_seed: K.gptr[K.i64],
-        output: K.gptr[K.bf16],
-        state_stride_batch: K.i64,
-        state_scale_stride_batch: K.i64,
-        x_stride_batch: K.i64,
-        x_stride_mtp: K.i64,
-        dt_stride_batch: K.i64,
-        dt_stride_mtp: K.i64,
-        b_stride_batch: K.i64,
-        b_stride_mtp: K.i64,
-        c_stride_batch: K.i64,
-        c_stride_mtp: K.i64,
-        z_stride_batch: K.i64,
-        z_stride_mtp: K.i64,
-        out_stride_batch: K.i64,
-        out_stride_mtp: K.i64,
-        state_indices_stride_batch: K.i64,
-        state_indices_stride_t: K.i64,
-        dst_indices_stride_batch: K.i64,
-        dst_indices_stride_t: K.i64,
-        cache_steps: K.i32,
-        nheads_runtime: K.i32,
-        ngroups_runtime: K.i32,
-        dt_softplus: K.i32,
-        update_state: K.i32,
-        pad_slot_id: K.i32,
+        tensor_state: txl.TensorMap,
+        tensor_b: txl.TensorMap,
+        tensor_c: txl.TensorMap,
+        tensor_x: txl.TensorMap,
+        state: txl.gptr[spec["STATE_DTYPE"]],
+        state_scale: txl.gptr[txl.f32],
+        x: txl.gptr[txl.bf16],
+        dt: txl.gptr[spec["WEIGHT_DTYPE"]],
+        matrix_a: txl.gptr[txl.f32],
+        matrix_b: txl.gptr[txl.bf16],
+        matrix_c: txl.gptr[txl.bf16],
+        d_weight: txl.gptr[spec["WEIGHT_DTYPE"]],
+        z: txl.gptr[txl.bf16],
+        dt_bias: txl.gptr[spec["WEIGHT_DTYPE"]],
+        state_indices: txl.gptr[spec["INDEX_DTYPE"]],
+        dst_indices: txl.gptr[spec["INDEX_DTYPE"]],
+        intermediate_states: txl.gptr[spec["STATE_DTYPE"]],
+        intermediate_indices: txl.gptr[spec["INDEX_DTYPE"]],
+        intermediate_scales: txl.gptr[txl.f32],
+        cu_seqlens: txl.gptr[str(kwargs["cu_seqlens_dtype"])],
+        num_accepted_tokens: txl.gptr[str(kwargs["accepted_dtype"])],
+        rand_seed: txl.gptr[txl.i64],
+        output: txl.gptr[txl.bf16],
+        state_stride_batch: txl.i64,
+        state_scale_stride_batch: txl.i64,
+        x_stride_batch: txl.i64,
+        x_stride_mtp: txl.i64,
+        dt_stride_batch: txl.i64,
+        dt_stride_mtp: txl.i64,
+        b_stride_batch: txl.i64,
+        b_stride_mtp: txl.i64,
+        c_stride_batch: txl.i64,
+        c_stride_mtp: txl.i64,
+        z_stride_batch: txl.i64,
+        z_stride_mtp: txl.i64,
+        out_stride_batch: txl.i64,
+        out_stride_mtp: txl.i64,
+        state_indices_stride_batch: txl.i64,
+        state_indices_stride_t: txl.i64,
+        dst_indices_stride_batch: txl.i64,
+        dst_indices_stride_t: txl.i64,
+        cache_steps: txl.i32,
+        nheads_runtime: txl.i32,
+        ngroups_runtime: txl.i32,
+        dt_softplus: txl.i32,
+        update_state: txl.i32,
+        pad_slot_id: txl.i32,
     ):
-        batch_i, head_chunk = K.cta_id()
+        batch_i, head_chunk = txl.cta_id()
         head_base = head_chunk * 3
         if spec["HAS_STATE_INDICES"]:
             if spec["INDEX_DTYPE"] == "int32":
-                _t1 = K.local_scalar("int32")
-                K.ptx.ld.global_.nc.b32(_t1, state_indices.ptr_to([batch_i]))
-                state_batch = K.cast(_t1, "int64")
+                _t1 = txl.local_scalar("int32")
+                txl.ptx.ld.global_.nc.b32(_t1, state_indices.ptr_to([batch_i]))
+                state_batch = txl.cast(_t1, "int64")
             else:
-                _t2 = K.local_scalar("int64")
-                K.ptx.ld.global_.nc.b64(_t2, state_indices.ptr_to([batch_i]))
+                _t2 = txl.local_scalar("int64")
+                txl.ptx.ld.global_.nc.b64(_t2, state_indices.ptr_to([batch_i]))
                 state_batch = _t2
         else:
-            state_batch = K.cast(batch_i, "int64")
+            state_batch = txl.cast(batch_i, "int64")
 
-        smem = K.smem_pool()
-        s_b = smem.alloc((3 * spec["NTOKENS"] * spec["DSTATE"],), K.bf16, align=128)
-        s_c = smem.alloc((3 * spec["NTOKENS"] * spec["DSTATE"],), K.bf16, align=128)
-        s_dt = smem.alloc((3 * spec["NTOKENS"],), K.f32, align=128)
+        smem = txl.smem_pool()
+        s_b = smem.alloc((3 * spec["NTOKENS"] * spec["DSTATE"],), txl.bf16, align=128)
+        s_c = smem.alloc((3 * spec["NTOKENS"] * spec["DSTATE"],), txl.bf16, align=128)
+        s_dt = smem.alloc((3 * spec["NTOKENS"],), txl.f32, align=128)
         s_state = smem.alloc((3 * spec["DIM"] * spec["DSTATE"],), spec["STATE_DTYPE"], align=128)
-        s_x = smem.alloc((3 * spec["NTOKENS"] * spec["DIM"],), K.bf16, align=128)
-        s_out = smem.alloc((3 * spec["NTOKENS"] * spec["DIM"],), K.f32, align=128)
-        bar_bc = K.MBarrier(smem, 3)
-        bar_empty = K.MBarrier(smem, 3)
-        bar_full = K.MBarrier(smem, 3)
-        bar_out = K.MBarrier(smem, 3)
-        bar_done = K.MBarrier(smem, 3)
+        s_x = smem.alloc((3 * spec["NTOKENS"] * spec["DIM"],), txl.bf16, align=128)
+        s_out = smem.alloc((3 * spec["NTOKENS"] * spec["DIM"],), txl.f32, align=128)
+        bar_bc = txl.MBarrier(smem, 3)
+        bar_empty = txl.MBarrier(smem, 3)
+        bar_full = txl.MBarrier(smem, 3)
+        bar_out = txl.MBarrier(smem, 3)
+        bar_done = txl.MBarrier(smem, 3)
         bar_bc.init(160)
         bar_empty.init(160)
         bar_full.init(129)
         bar_out.init(160)
         bar_done.init(160)
-        K.cuda.cta_sync()
+        txl.cuda.cta_sync()
 
-        roles = K.specialize()
+        roles = txl.specialize()
         update = roles.role("update", warps=list(range(12)))
         load = roles.role("load", warps=[12, 13, 14])
         epilogue = roles.role("epilogue", warps=[15])
@@ -483,87 +483,87 @@ def get_kernel(**kwargs: Any):
         bar_full_buf = bar_full.buf
         bar_out_buf = bar_out.buf
         bar_done_buf = bar_done.buf
-        intermediate_state_stride_batch = K.int64(NTOKENS * NHEADS * DIM * DSTATE)
+        intermediate_state_stride_batch = txl.int64(NTOKENS * NHEADS * DIM * DSTATE)
 
-        def update_head(group, head, IS_PAD: K.constexpr):
-            lane: K.int32 = K.tid_in_role() & 31
-            compute_warp: K.int32 = K.warp_id_in_role() % 4
-            random_seed = K.local_scalar("int64", init=0)
+        def update_head(group, head, IS_PAD: txl.constexpr):
+            lane: txl.int32 = txl.tid_in_role() & 31
+            compute_warp: txl.int32 = txl.warp_id_in_role() % 4
+            random_seed = txl.local_scalar("int64", init=0)
             if PHILOX_ROUNDS > 0 and not IS_PAD:
-                K.ptx.ld.global_.s64(random_seed, rand_seed.ptr_to([0]))
-            icache_idx = K.local_scalar("int64", init=state_batch)
+                txl.ptx.ld.global_.s64(random_seed, rand_seed.ptr_to([0]))
+            icache_idx = txl.local_scalar("int64", init=state_batch)
             if HAS_INTERMEDIATE_STATES and not IS_PAD:
-                K.assign(
+                txl.assign(
                     icache_idx, _global_load_index_s64(intermediate_indices, batch_i, INDEX_DTYPE)
                 )
 
-            gload_0 = K.local_scalar("uint32")
-            K.ptx.ld.global_.b32(gload_0, matrix_a.ptr_to([head]))
-            a_value: K.float32 = K.reinterpret("float32", gload_0)
-            d_value = K.local_scalar("float32", init=0.0)
+            gload_0 = txl.local_scalar("uint32")
+            txl.ptx.ld.global_.b32(gload_0, matrix_a.ptr_to([head]))
+            a_value: txl.float32 = txl.reinterpret("float32", gload_0)
+            d_value = txl.local_scalar("float32", init=0.0)
             if HAS_D:
-                K.assign(d_value, _load_weight(d_weight, head, WEIGHT_DTYPE))
-            bias_value = K.local_scalar("float32", init=0.0)
+                txl.assign(d_value, _load_weight(d_weight, head, WEIGHT_DTYPE))
+            bias_value = txl.local_scalar("float32", init=0.0)
             if HAS_DT_BIAS:
-                K.assign(bias_value, _load_weight(dt_bias, head, WEIGHT_DTYPE))
+                txl.assign(bias_value, _load_weight(dt_bias, head, WEIGHT_DTYPE))
 
-            K.ptx.mbarrier.arrive.shared__cta.b64(bar_empty_buf.ptr_to([group]), K.uint32(1))
+            txl.ptx.mbarrier.arrive.shared__cta.b64(bar_empty_buf.ptr_to([group]), txl.uint32(1))
             _mbarrier_arrive_wait(bar_bc_buf.ptr_to([group]))
 
-            with K.serial((NTOKENS + 3) // 4) as step_iter:
-                dt_step: K.int32 = compute_warp + step_iter * 4
-                with K.If(K.And(dt_step < NTOKENS, lane == 0)), K.Then():
-                    dt_value = K.local_scalar("float32")
-                    K.assign(
+            with txl.serial((NTOKENS + 3) // 4) as step_iter:
+                dt_step: txl.int32 = compute_warp + step_iter * 4
+                with txl.If(txl.And(dt_step < NTOKENS, lane == 0)), txl.Then():
+                    dt_value = txl.local_scalar("float32")
+                    txl.assign(
                         dt_value,
                         _load_weight(
                             dt,
-                            K.cast(batch_i, "int64") * dt_stride_batch
-                            + K.cast(dt_step, "int64") * dt_stride_mtp
+                            txl.cast(batch_i, "int64") * dt_stride_batch
+                            + txl.cast(dt_step, "int64") * dt_stride_mtp
                             + head,
                             WEIGHT_DTYPE,
                         ),
                     )
                     if HAS_DT_BIAS:
-                        K.ptx["add.ftz.f32"](dt_value, dt_value, bias_value)
-                    with K.If(K.And(dt_softplus != 0, dt_value <= K.float32(20.0))), K.Then():
-                        mul_0 = K.local_scalar("float32")
-                        K.ptx["mul.ftz.f32"](mul_0, dt_value, K.float32(_LOG2_E))
-                        exp_arg: K.float32 = mul_0
-                        exp2_0 = K.local_scalar("float32")
-                        K.ptx["ex2.approx.ftz.f32"](exp2_0, exp_arg)
-                        exp_value: K.float32 = exp2_0
-                        add_0 = K.local_scalar("float32")
-                        K.ptx["add.ftz.f32"](add_0, K.float32(1.0), exp_value)
-                        log2_0 = K.local_scalar("float32")
-                        K.ptx["lg2.approx.ftz.f32"](log2_0, add_0)
-                        log_value: K.float32 = log2_0
-                        K.ptx["mul.ftz.f32"](dt_value, log_value, K.float32(_LN_2))
-                    K.ptx.st.shared.b32(
-                        s_dt.ptr_to([group * NTOKENS + dt_step]), K.reinterpret("uint32", dt_value)
+                        txl.ptx["add.ftz.f32"](dt_value, dt_value, bias_value)
+                    with txl.If(txl.And(dt_softplus != 0, dt_value <= txl.float32(20.0))), txl.Then():
+                        mul_0 = txl.local_scalar("float32")
+                        txl.ptx["mul.ftz.f32"](mul_0, dt_value, txl.float32(_LOG2_E))
+                        exp_arg: txl.float32 = mul_0
+                        exp2_0 = txl.local_scalar("float32")
+                        txl.ptx["ex2.approx.ftz.f32"](exp2_0, exp_arg)
+                        exp_value: txl.float32 = exp2_0
+                        add_0 = txl.local_scalar("float32")
+                        txl.ptx["add.ftz.f32"](add_0, txl.float32(1.0), exp_value)
+                        log2_0 = txl.local_scalar("float32")
+                        txl.ptx["lg2.approx.ftz.f32"](log2_0, add_0)
+                        log_value: txl.float32 = log2_0
+                        txl.ptx["mul.ftz.f32"](dt_value, log_value, txl.float32(_LN_2))
+                    txl.ptx.st.shared.b32(
+                        s_dt.ptr_to([group * NTOKENS + dt_step]), txl.reinterpret("uint32", dt_value)
                     )
 
             _mbarrier_arrive_wait(bar_full_buf.ptr_to([group]))
-            lane_indicator: K.float32 = K.if_then_else(lane == 0, K.float32(1.0), K.float32(0.0))
-            seed_u64: K.uint64 = K.reinterpret("uint64", random_seed)
-            seed_lo: K.uint32 = K.cast(seed_u64, "uint32")
-            seed_hi: K.uint32 = K.cast(K.shift_right(seed_u64, K.uint64(32)), "uint32")
-            state_head_i32: K.int32 = K.cast(
-                state_batch * state_stride_batch + K.cast(head * DIM * DSTATE, "int64"), "int32"
+            lane_indicator: txl.float32 = txl.if_then_else(lane == 0, txl.float32(1.0), txl.float32(0.0))
+            seed_u64: txl.uint64 = txl.reinterpret("uint64", random_seed)
+            seed_lo: txl.uint32 = txl.cast(seed_u64, "uint32")
+            seed_hi: txl.uint32 = txl.cast(txl.shift_right(seed_u64, txl.uint64(32)), "uint32")
+            state_head_i32: txl.int32 = txl.cast(
+                state_batch * state_stride_batch + txl.cast(head * DIM * DSTATE, "int64"), "int32"
             )
 
-            pass_idx = K.local_scalar("int32", init=0)
-            with K.While(pass_idx < NUM_PASSES):
-                row_offset: K.int32 = compute_warp * (DIM // 4) + pass_idx * 4
-                r_state = K.alloc_local((4, STATE_VALUES_PER_THREAD), "float32")
-                with K.unroll(4) as wr:
-                    dd: K.int32 = row_offset + wr
+            pass_idx = txl.local_scalar("int32", init=0)
+            with txl.While(pass_idx < NUM_PASSES):
+                row_offset: txl.int32 = compute_warp * (DIM // 4) + pass_idx * 4
+                r_state = txl.alloc_local((4, STATE_VALUES_PER_THREAD), "float32")
+                with txl.unroll(4) as wr:
+                    dd: txl.int32 = row_offset + wr
                     if IS_PAD:
-                        with K.unroll(STATE_VALUES_PER_THREAD) as ii:
-                            K.ptx.mov.b32(r_state[wr, ii], K.float32(0.0))
+                        with txl.unroll(STATE_VALUES_PER_THREAD) as ii:
+                            txl.ptx.mov.b32(r_state[wr, ii], txl.float32(0.0))
                     elif STATE_DTYPE == "float32":
-                        state_words = K.alloc_local((4,), "uint32")
-                        K.ptx.ld.shared.v4.b32(
+                        state_words = txl.alloc_local((4,), "uint32")
+                        txl.ptx.ld.shared.v4.b32(
                             state_words[0],
                             state_words[1],
                             state_words[2],
@@ -578,52 +578,52 @@ def get_kernel(**kwargs: Any):
                                 ]
                             ),
                         )
-                        with K.unroll(4) as ii:
-                            K.ptx.mov.b32(
-                                r_state[wr, ii], K.reinterpret("float32", state_words[ii])
+                        with txl.unroll(4) as ii:
+                            txl.ptx.mov.b32(
+                                r_state[wr, ii], txl.reinterpret("float32", state_words[ii])
                             )
                     else:
-                        state_bits = K.alloc_local((4,), "uint16")
-                        state_index: K.int32 = (
+                        state_bits = txl.alloc_local((4,), "uint16")
+                        state_index: txl.int32 = (
                             group * DIM * DSTATE + dd * DSTATE + lane * STATE_VALUES_PER_THREAD
                         )
                         if DSTATE == 64:
-                            K.ptx.ld.shared.v2.b16(
+                            txl.ptx.ld.shared.v2.b16(
                                 state_bits[0], state_bits[1], s_state_u16.ptr_to([state_index])
                             )
                         elif DSTATE == 96:
-                            with K.unroll(3) as ii:
-                                sload_0 = K.local_scalar("uint16")
-                                K.ptx.ld.shared.b16(sload_0, s_state_u16.ptr_to([state_index + ii]))
-                                K.ptx.mov.b16(state_bits[ii], sload_0)
+                            with txl.unroll(3) as ii:
+                                sload_0 = txl.local_scalar("uint16")
+                                txl.ptx.ld.shared.b16(sload_0, s_state_u16.ptr_to([state_index + ii]))
+                                txl.ptx.mov.b16(state_bits[ii], sload_0)
                         else:
-                            K.ptx.ld.shared.v4.b16(
+                            txl.ptx.ld.shared.v4.b16(
                                 state_bits[0],
                                 state_bits[1],
                                 state_bits[2],
                                 state_bits[3],
                                 s_state_u16.ptr_to([state_index]),
                             )
-                        with K.unroll(STATE_VALUES_PER_THREAD) as ii:
+                        with txl.unroll(STATE_VALUES_PER_THREAD) as ii:
                             if STATE_DTYPE == "bfloat16":
-                                bf16_f32_0 = K.local_scalar("float32")
-                                K.ptx.cvt.f32.bf16(bf16_f32_0, K.cast(state_bits[ii], "uint16"))
-                                K.ptx.mov.b32(r_state[wr, ii], bf16_f32_0)
+                                bf16_f32_0 = txl.local_scalar("float32")
+                                txl.ptx.cvt.f32.bf16(bf16_f32_0, txl.cast(state_bits[ii], "uint16"))
+                                txl.ptx.mov.b32(r_state[wr, ii], bf16_f32_0)
                             else:
-                                f16_f32_0 = K.local_scalar("float32")
-                                K.ptx.cvt.f32.f16(f16_f32_0, K.cast(state_bits[ii], "uint16"))
-                                K.ptx.mov.b32(r_state[wr, ii], f16_f32_0)
+                                f16_f32_0 = txl.local_scalar("float32")
+                                txl.ptx.cvt.f32.f16(f16_f32_0, txl.cast(state_bits[ii], "uint16"))
+                                txl.ptx.mov.b32(r_state[wr, ii], f16_f32_0)
 
-                row_random = K.alloc_local((4, 4), "uint32")
+                row_random = txl.alloc_local((4, 4), "uint32")
                 if PHILOX_ROUNDS > 0 and not IS_PAD:
-                    with K.unroll(4) as wr:
-                        dd: K.int32 = row_offset + wr
-                        add_s32_0 = K.local_scalar("int32")
-                        K.ptx["add.s32"](
+                    with txl.unroll(4) as wr:
+                        dd: txl.int32 = row_offset + wr
+                        add_s32_0 = txl.local_scalar("int32")
+                        txl.ptx["add.s32"](
                             add_s32_0, state_head_i32, dd * DSTATE + lane * STATE_VALUES_PER_THREAD
                         )
-                        random_counter: K.int32 = add_s32_0
-                        random_words = K.alloc_local((4,), "uint32")
+                        random_counter: txl.int32 = add_s32_0
+                        random_words = txl.alloc_local((4,), "uint32")
                         _philox4x32(
                             random_words,
                             seed_lo,
@@ -631,118 +631,118 @@ def get_kernel(**kwargs: Any):
                             random_counter,
                             PHILOX_ROUNDS=PHILOX_ROUNDS,
                         )
-                        with K.unroll(4) as ri:
-                            K.ptx.mov.b32(row_random[wr, ri], random_words[ri])
+                        with txl.unroll(4) as ri:
+                            txl.ptx.mov.b32(row_random[wr, ri], random_words[ri])
 
-                step = K.local_scalar("int32", init=0)
-                with K.While(step < NTOKENS):
-                    sload_1 = K.local_scalar("uint32")
-                    K.ptx.ld.shared.b32(sload_1, s_dt.ptr_to([group * NTOKENS + step]))
-                    shared_dt: K.float32 = K.reinterpret("float32", sload_1)
-                    mul_1 = K.local_scalar("float32")
-                    K.ptx["mul.ftz.f32"](mul_1, a_value, shared_dt)
-                    mul_2 = K.local_scalar("float32")
-                    K.ptx["mul.ftz.f32"](mul_2, mul_1, K.float32(_LOG2_E))
-                    exp2_1 = K.local_scalar("float32")
-                    K.ptx["ex2.approx.ftz.f32"](exp2_1, mul_2)
-                    da_value: K.float32 = exp2_1
-                    b_values = K.alloc_local((STATE_VALUES_PER_THREAD,), "float32")
-                    c_values = K.alloc_local((STATE_VALUES_PER_THREAD,), "float32")
-                    b_bits = K.alloc_local((4,), "uint16")
-                    c_bits = K.alloc_local((4,), "uint16")
-                    bc_col: K.int32 = lane * STATE_VALUES_PER_THREAD
-                    b_index: K.int32 = group * NTOKENS * DSTATE + step * DSTATE + bc_col
-                    c_index: K.int32 = group * NTOKENS * DSTATE + step * DSTATE + bc_col
+                step = txl.local_scalar("int32", init=0)
+                with txl.While(step < NTOKENS):
+                    sload_1 = txl.local_scalar("uint32")
+                    txl.ptx.ld.shared.b32(sload_1, s_dt.ptr_to([group * NTOKENS + step]))
+                    shared_dt: txl.float32 = txl.reinterpret("float32", sload_1)
+                    mul_1 = txl.local_scalar("float32")
+                    txl.ptx["mul.ftz.f32"](mul_1, a_value, shared_dt)
+                    mul_2 = txl.local_scalar("float32")
+                    txl.ptx["mul.ftz.f32"](mul_2, mul_1, txl.float32(_LOG2_E))
+                    exp2_1 = txl.local_scalar("float32")
+                    txl.ptx["ex2.approx.ftz.f32"](exp2_1, mul_2)
+                    da_value: txl.float32 = exp2_1
+                    b_values = txl.alloc_local((STATE_VALUES_PER_THREAD,), "float32")
+                    c_values = txl.alloc_local((STATE_VALUES_PER_THREAD,), "float32")
+                    b_bits = txl.alloc_local((4,), "uint16")
+                    c_bits = txl.alloc_local((4,), "uint16")
+                    bc_col: txl.int32 = lane * STATE_VALUES_PER_THREAD
+                    b_index: txl.int32 = group * NTOKENS * DSTATE + step * DSTATE + bc_col
+                    c_index: txl.int32 = group * NTOKENS * DSTATE + step * DSTATE + bc_col
                     if DSTATE == 64:
-                        K.ptx.ld.shared.v2.b16(b_bits[0], b_bits[1], s_b.ptr_to([b_index]))
-                        K.ptx.ld.shared.v2.b16(c_bits[0], c_bits[1], s_c.ptr_to([c_index]))
+                        txl.ptx.ld.shared.v2.b16(b_bits[0], b_bits[1], s_b.ptr_to([b_index]))
+                        txl.ptx.ld.shared.v2.b16(c_bits[0], c_bits[1], s_c.ptr_to([c_index]))
                     elif DSTATE == 96:
-                        with K.unroll(3) as ii:
-                            K.ptx.ld.shared.b16(b_bits[ii], s_b.ptr_to([b_index + ii]))
-                            K.ptx.ld.shared.b16(c_bits[ii], s_c.ptr_to([c_index + ii]))
+                        with txl.unroll(3) as ii:
+                            txl.ptx.ld.shared.b16(b_bits[ii], s_b.ptr_to([b_index + ii]))
+                            txl.ptx.ld.shared.b16(c_bits[ii], s_c.ptr_to([c_index + ii]))
                     else:
-                        K.ptx.ld.shared.v4.b16(
+                        txl.ptx.ld.shared.v4.b16(
                             b_bits[0], b_bits[1], b_bits[2], b_bits[3], s_b.ptr_to([b_index])
                         )
-                        K.ptx.ld.shared.v4.b16(
+                        txl.ptx.ld.shared.v4.b16(
                             c_bits[0], c_bits[1], c_bits[2], c_bits[3], s_c.ptr_to([c_index])
                         )
-                    with K.unroll(STATE_VALUES_PER_THREAD) as ii:
-                        K.ptx.cvt.f32.bf16(b_values[ii], K.cast(b_bits[ii], "uint16"))
-                        K.ptx.cvt.f32.bf16(c_values[ii], K.cast(c_bits[ii], "uint16"))
+                    with txl.unroll(STATE_VALUES_PER_THREAD) as ii:
+                        txl.ptx.cvt.f32.bf16(b_values[ii], txl.cast(b_bits[ii], "uint16"))
+                        txl.ptx.cvt.f32.bf16(c_values[ii], txl.cast(c_bits[ii], "uint16"))
 
-                    with K.unroll(4) as wr:
-                        dd: K.int32 = row_offset + wr
-                        sload_2 = K.local_scalar("uint16")
-                        K.ptx.ld.shared.b16(
+                    with txl.unroll(4) as wr:
+                        dd: txl.int32 = row_offset + wr
+                        sload_2 = txl.local_scalar("uint16")
+                        txl.ptx.ld.shared.b16(
                             sload_2, s_x.ptr_to([group * NTOKENS * DIM + step * DIM + dd])
                         )
-                        bf16_f32_1 = K.local_scalar("float32")
-                        K.ptx.cvt.f32.bf16(bf16_f32_1, K.cast(sload_2, "uint16"))
-                        x_value: K.float32 = bf16_f32_1
-                        mul_3 = K.local_scalar("float32")
-                        K.ptx["mul.ftz.f32"](mul_3, d_value, x_value)
-                        d_times_x: K.float32 = mul_3
-                        out_value = K.local_scalar("float32", init=0.0)
-                        with K.unroll(STATE_VALUES_PER_THREAD) as ii:
-                            mul_4 = K.local_scalar("float32")
-                            K.ptx["mul.ftz.f32"](mul_4, b_values[ii], shared_dt)
-                            db_value: K.float32 = mul_4
-                            mul_5 = K.local_scalar("float32")
-                            K.ptx["mul.ftz.f32"](mul_5, db_value, x_value)
-                            db_x: K.float32 = mul_5
-                            fma_0 = K.local_scalar("float32")
-                            K.ptx["fma.rn.ftz.f32"](fma_0, r_state[wr, ii], da_value, db_x)
-                            new_state: K.float32 = fma_0
-                            K.ptx.mov.b32(r_state[wr, ii], new_state)
-                            with K.If(ii == 0):
-                                with K.Then():
-                                    mul_6 = K.local_scalar("float32")
-                                    K.ptx["mul.ftz.f32"](mul_6, new_state, c_values[ii])
-                                    state_c: K.float32 = mul_6
-                                    K.ptx["fma.rn.ftz.f32"](
+                        bf16_f32_1 = txl.local_scalar("float32")
+                        txl.ptx.cvt.f32.bf16(bf16_f32_1, txl.cast(sload_2, "uint16"))
+                        x_value: txl.float32 = bf16_f32_1
+                        mul_3 = txl.local_scalar("float32")
+                        txl.ptx["mul.ftz.f32"](mul_3, d_value, x_value)
+                        d_times_x: txl.float32 = mul_3
+                        out_value = txl.local_scalar("float32", init=0.0)
+                        with txl.unroll(STATE_VALUES_PER_THREAD) as ii:
+                            mul_4 = txl.local_scalar("float32")
+                            txl.ptx["mul.ftz.f32"](mul_4, b_values[ii], shared_dt)
+                            db_value: txl.float32 = mul_4
+                            mul_5 = txl.local_scalar("float32")
+                            txl.ptx["mul.ftz.f32"](mul_5, db_value, x_value)
+                            db_x: txl.float32 = mul_5
+                            fma_0 = txl.local_scalar("float32")
+                            txl.ptx["fma.rn.ftz.f32"](fma_0, r_state[wr, ii], da_value, db_x)
+                            new_state: txl.float32 = fma_0
+                            txl.ptx.mov.b32(r_state[wr, ii], new_state)
+                            with txl.If(ii == 0):
+                                with txl.Then():
+                                    mul_6 = txl.local_scalar("float32")
+                                    txl.ptx["mul.ftz.f32"](mul_6, new_state, c_values[ii])
+                                    state_c: txl.float32 = mul_6
+                                    txl.ptx["fma.rn.ftz.f32"](
                                         out_value, d_times_x, lane_indicator, state_c
                                     )
-                                with K.Else():
-                                    K.ptx["fma.rn.ftz.f32"](
+                                with txl.Else():
+                                    txl.ptx["fma.rn.ftz.f32"](
                                         out_value, new_state, c_values[ii], out_value
                                     )
-                        with K.unroll(5) as delta_i:
-                            delta: K.int32 = K.shift_right(K.int32(16), delta_i)
-                            K.ptx["add.ftz.f32"](
+                        with txl.unroll(5) as delta_i:
+                            delta: txl.int32 = txl.shift_right(txl.int32(16), delta_i)
+                            txl.ptx["add.ftz.f32"](
                                 out_value, out_value, _shfl_down_f32(out_value, delta)
                             )
-                        with K.If(lane == 0), K.Then():
-                            K.ptx.st.shared.b32(
+                        with txl.If(lane == 0), txl.Then():
+                            txl.ptx.st.shared.b32(
                                 s_out.ptr_to([group * NTOKENS * DIM + step * DIM + dd]),
-                                K.reinterpret("uint32", out_value),
+                                txl.reinterpret("uint32", out_value),
                             )
 
                     if not IS_PAD:
-                        write_final: K.int32 = K.if_then_else(
-                            step == NTOKENS - 1, K.if_then_else(update_state != 0, 1, 0), 0
+                        write_final: txl.int32 = txl.if_then_else(
+                            step == NTOKENS - 1, txl.if_then_else(update_state != 0, 1, 0), 0
                         )
                         if HAS_INTERMEDIATE_STATES:
-                            with K.If(write_final != 0):
-                                with K.Then():
-                                    with K.unroll(4) as wr:
-                                        dd: K.int32 = row_offset + wr
-                                        intermediate_base: K.int64 = (
+                            with txl.If(write_final != 0):
+                                with txl.Then():
+                                    with txl.unroll(4) as wr:
+                                        dd: txl.int32 = row_offset + wr
+                                        intermediate_base: txl.int64 = (
                                             icache_idx * intermediate_state_stride_batch
-                                            + K.cast(step * NHEADS * DIM * DSTATE, "int64")
+                                            + txl.cast(step * NHEADS * DIM * DSTATE, "int64")
                                             + head * DIM * DSTATE
                                             + dd * DSTATE
                                             + lane * STATE_VALUES_PER_THREAD
                                         )
-                                        final_base: K.int64 = (
+                                        final_base: txl.int64 = (
                                             state_batch * state_stride_batch
                                             + head * DIM * DSTATE
                                             + dd * DSTATE
                                             + lane * STATE_VALUES_PER_THREAD
                                         )
-                                        random_words = K.alloc_local((4,), "uint32")
-                                        with K.unroll(4) as ri:
-                                            K.ptx.mov.b32(random_words[ri], row_random[wr, ri])
+                                        random_words = txl.alloc_local((4,), "uint32")
+                                        with txl.unroll(4) as ri:
+                                            txl.ptx.mov.b32(random_words[ri], row_random[wr, ri])
                                         _store_state_row(
                                             r_state,
                                             wr,
@@ -751,26 +751,26 @@ def get_kernel(**kwargs: Any):
                                             intermediate_states,
                                             intermediate_base,
                                             final_base,
-                                            K.int32(1),
+                                            txl.int32(1),
                                             DSTATE=DSTATE,
                                             STATE_DTYPE=STATE_DTYPE,
                                             STATE_VALUES_PER_THREAD=STATE_VALUES_PER_THREAD,
                                             HAS_INTERMEDIATE_STATES=True,
                                             PHILOX_ROUNDS=PHILOX_ROUNDS,
                                         )
-                                with K.Else():
-                                    with K.unroll(4) as wr:
-                                        dd: K.int32 = row_offset + wr
-                                        intermediate_base: K.int64 = (
+                                with txl.Else():
+                                    with txl.unroll(4) as wr:
+                                        dd: txl.int32 = row_offset + wr
+                                        intermediate_base: txl.int64 = (
                                             icache_idx * intermediate_state_stride_batch
-                                            + K.cast(step * NHEADS * DIM * DSTATE, "int64")
+                                            + txl.cast(step * NHEADS * DIM * DSTATE, "int64")
                                             + head * DIM * DSTATE
                                             + dd * DSTATE
                                             + lane * STATE_VALUES_PER_THREAD
                                         )
-                                        random_words = K.alloc_local((4,), "uint32")
-                                        with K.unroll(4) as ri:
-                                            K.ptx.mov.b32(random_words[ri], row_random[wr, ri])
+                                        random_words = txl.alloc_local((4,), "uint32")
+                                        with txl.unroll(4) as ri:
+                                            txl.ptx.mov.b32(random_words[ri], row_random[wr, ri])
                                         _store_state_row(
                                             r_state,
                                             wr,
@@ -778,8 +778,8 @@ def get_kernel(**kwargs: Any):
                                             state,
                                             intermediate_states,
                                             intermediate_base,
-                                            K.int64(0),
-                                            K.int32(0),
+                                            txl.int64(0),
+                                            txl.int32(0),
                                             DSTATE=DSTATE,
                                             STATE_DTYPE=STATE_DTYPE,
                                             STATE_VALUES_PER_THREAD=STATE_VALUES_PER_THREAD,
@@ -787,49 +787,49 @@ def get_kernel(**kwargs: Any):
                                             PHILOX_ROUNDS=PHILOX_ROUNDS,
                                         )
                         else:
-                            with K.If(write_final != 0), K.Then():
-                                with K.unroll(4) as wr:
-                                    dd: K.int32 = row_offset + wr
-                                    final_base: K.int64 = (
+                            with txl.If(write_final != 0), txl.Then():
+                                with txl.unroll(4) as wr:
+                                    dd: txl.int32 = row_offset + wr
+                                    final_base: txl.int64 = (
                                         state_batch * state_stride_batch
                                         + head * DIM * DSTATE
                                         + dd * DSTATE
                                         + lane * STATE_VALUES_PER_THREAD
                                     )
-                                    random_words = K.alloc_local((4,), "uint32")
-                                    with K.unroll(4) as ri:
-                                        K.ptx.mov.b32(random_words[ri], row_random[wr, ri])
+                                    random_words = txl.alloc_local((4,), "uint32")
+                                    with txl.unroll(4) as ri:
+                                        txl.ptx.mov.b32(random_words[ri], row_random[wr, ri])
                                     _store_state_row(
                                         r_state,
                                         wr,
                                         random_words,
                                         state,
                                         intermediate_states,
-                                        K.int64(0),
+                                        txl.int64(0),
                                         final_base,
-                                        K.int32(1),
+                                        txl.int32(1),
                                         DSTATE=DSTATE,
                                         STATE_DTYPE=STATE_DTYPE,
                                         STATE_VALUES_PER_THREAD=STATE_VALUES_PER_THREAD,
                                         HAS_INTERMEDIATE_STATES=False,
                                         PHILOX_ROUNDS=PHILOX_ROUNDS,
                                     )
-                    K.assign(step, step + 1)
-                K.assign(pass_idx, pass_idx + 1)
+                    txl.assign(step, step + 1)
+                txl.assign(pass_idx, pass_idx + 1)
 
-            K.ptx.mbarrier.arrive.shared__cta.b64(bar_out_buf.ptr_to([group]), K.uint32(1))
+            txl.ptx.mbarrier.arrive.shared__cta.b64(bar_out_buf.ptr_to([group]), txl.uint32(1))
             _mbarrier_arrive_wait(bar_done_buf.ptr_to([group]))
 
         def run_update(is_pad):
-            group = K.warp_id_in_role() // 4
+            group = txl.warp_id_in_role() // 4
             head = head_base + group
-            with K.If(head < NHEADS), K.Then():
+            with txl.If(head < NHEADS), txl.Then():
                 update_head(group, head, is_pad)
 
-        def load_head(group, head, IS_PAD: K.constexpr):
-            lane: K.int32 = K.tid_in_role() & 31
-            kv_group: K.int32 = head // HEADS_PER_GROUP
-            with K.If(lane == 0), K.Then():
+        def load_head(group, head, IS_PAD: txl.constexpr):
+            lane: txl.int32 = txl.tid_in_role() & 31
+            kv_group: txl.int32 = head // HEADS_PER_GROUP
+            with txl.If(lane == 0), txl.Then():
                 _tma_g2s_4d(
                     s_b.ptr_to([group * NTOKENS * DSTATE]),
                     tensor_b,
@@ -848,15 +848,15 @@ def get_kernel(**kwargs: Any):
                     batch_i,
                     bar_bc_buf.ptr_to([group]),
                 )
-                K.ptx.mbarrier.expect_tx.relaxed.cta.shared__cta.b64(
-                    bar_bc_buf.ptr_to([group]), K.uint32(2 * NTOKENS * DSTATE * 2)
+                txl.ptx.mbarrier.expect_tx.relaxed.cta.shared__cta.b64(
+                    bar_bc_buf.ptr_to([group]), txl.uint32(2 * NTOKENS * DSTATE * 2)
                 )
-                K.ptx.mbarrier.arrive.release.cta.shared__cta.b64(
-                    bar_bc_buf.ptr_to([group]), K.uint32(32)
+                txl.ptx.mbarrier.arrive.release.cta.shared__cta.b64(
+                    bar_bc_buf.ptr_to([group]), txl.uint32(32)
                 )
 
             _mbarrier_arrive_wait(bar_empty_buf.ptr_to([group]))
-            with K.If(lane == 0), K.Then():
+            with txl.If(lane == 0), txl.Then():
                 if not IS_PAD:
                     _tma_g2s_4d(
                         s_state.ptr_to([group * STATE_STAGE_VALUES]),
@@ -877,82 +877,82 @@ def get_kernel(**kwargs: Any):
                     bar_full_buf.ptr_to([group]),
                 )
                 if IS_PAD:
-                    K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
-                        bar_full_buf.ptr_to([group]), K.uint32(NTOKENS * DIM * 2)
+                    txl.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
+                        bar_full_buf.ptr_to([group]), txl.uint32(NTOKENS * DIM * 2)
                     )
                 else:
-                    K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
+                    txl.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
                         bar_full_buf.ptr_to([group]),
-                        K.uint32(DIM * DSTATE * STATE_BYTES + NTOKENS * DIM * 2),
+                        txl.uint32(DIM * DSTATE * STATE_BYTES + NTOKENS * DIM * 2),
                     )
 
         def run_load(is_pad):
-            group = K.warp_id_in_role()
+            group = txl.warp_id_in_role()
             head = head_base + group
-            with K.If(head < NHEADS), K.Then():
+            with txl.If(head < NHEADS), txl.Then():
                 load_head(group, head, is_pad)
 
         def run_epilogue():
-            lane: K.int32 = K.tid_in_role()
-            with K.serial(3) as group:
-                head: K.int32 = head_base + group
-                with K.If(head < NHEADS), K.Then():
+            lane: txl.int32 = txl.tid_in_role()
+            with txl.serial(3) as group:
+                head: txl.int32 = head_base + group
+                with txl.If(head < NHEADS), txl.Then():
                     _mbarrier_arrive_wait(bar_out_buf.ptr_to([group]))
-                    with K.unroll(NTOKENS) as step:
-                        out_base: K.int64 = (
-                            K.cast(batch_i, "int64") * out_stride_batch
-                            + K.cast(step, "int64") * out_stride_mtp
+                    with txl.unroll(NTOKENS) as step:
+                        out_base: txl.int64 = (
+                            txl.cast(batch_i, "int64") * out_stride_batch
+                            + txl.cast(step, "int64") * out_stride_mtp
                             + head * DIM
                         )
-                        z_base: K.int64 = (
-                            K.cast(batch_i, "int64") * z_stride_batch
-                            + K.cast(step, "int64") * z_stride_mtp
+                        z_base: txl.int64 = (
+                            txl.cast(batch_i, "int64") * z_stride_batch
+                            + txl.cast(step, "int64") * z_stride_mtp
                             + head * DIM
                         )
-                        out_words = K.alloc_local((4,), "uint32")
-                        z_bits = K.alloc_local((4,), "uint16")
-                        output_bits = K.alloc_local((4,), "uint16")
+                        out_words = txl.alloc_local((4,), "uint32")
+                        z_bits = txl.alloc_local((4,), "uint16")
+                        output_bits = txl.alloc_local((4,), "uint16")
                         if DIM == 64:
-                            d: K.int32 = lane * 2
-                            K.ptx.ld.shared.v2.b32(
+                            d: txl.int32 = lane * 2
+                            txl.ptx.ld.shared.v2.b32(
                                 out_words[0],
                                 out_words[1],
                                 s_out.ptr_to([group * NTOKENS * DIM + step * DIM + d]),
                             )
                             if HAS_Z:
-                                K.ptx.ld.global_.v2.b16(
+                                txl.ptx.ld.global_.v2.b16(
                                     z_bits[0], z_bits[1], z.ptr_to([(z_base + d)])
                                 )
-                            with K.unroll(2) as k:
-                                out_value = K.local_scalar(
-                                    "float32", init=K.reinterpret("float32", out_words[k])
+                            with txl.unroll(2) as k:
+                                out_value = txl.local_scalar(
+                                    "float32", init=txl.reinterpret("float32", out_words[k])
                                 )
                                 if HAS_Z:
-                                    bf16_f32_2 = K.local_scalar("float32")
-                                    K.ptx.cvt.f32.bf16(bf16_f32_2, K.cast(z_bits[k], "uint16"))
-                                    z_value: K.float32 = bf16_f32_2
-                                    sub_0 = K.local_scalar("float32")
-                                    K.ptx["sub.ftz.f32"](sub_0, K.float32(0.0), z_value)
-                                    mul_7 = K.local_scalar("float32")
-                                    K.ptx["mul.ftz.f32"](mul_7, sub_0, K.float32(_LOG2_E))
-                                    exp2_2 = K.local_scalar("float32")
-                                    K.ptx["ex2.approx.ftz.f32"](exp2_2, mul_7)
-                                    exp_neg_z: K.float32 = exp2_2
-                                    add_1 = K.local_scalar("float32")
-                                    K.ptx["add.ftz.f32"](add_1, K.float32(1.0), exp_neg_z)
-                                    div_0 = K.local_scalar("float32")
-                                    K.ptx["div.approx.ftz.f32"](div_0, K.float32(1.0), add_1)
-                                    sigmoid_z: K.float32 = div_0
-                                    mul_8 = K.local_scalar("float32")
-                                    K.ptx["mul.ftz.f32"](mul_8, z_value, sigmoid_z)
-                                    K.ptx["mul.ftz.f32"](out_value, out_value, mul_8)
-                                K.ptx.cvt.rn.bf16.f32(output_bits[k], out_value)
-                            K.ptx.st.global_.v2.b16(
+                                    bf16_f32_2 = txl.local_scalar("float32")
+                                    txl.ptx.cvt.f32.bf16(bf16_f32_2, txl.cast(z_bits[k], "uint16"))
+                                    z_value: txl.float32 = bf16_f32_2
+                                    sub_0 = txl.local_scalar("float32")
+                                    txl.ptx["sub.ftz.f32"](sub_0, txl.float32(0.0), z_value)
+                                    mul_7 = txl.local_scalar("float32")
+                                    txl.ptx["mul.ftz.f32"](mul_7, sub_0, txl.float32(_LOG2_E))
+                                    exp2_2 = txl.local_scalar("float32")
+                                    txl.ptx["ex2.approx.ftz.f32"](exp2_2, mul_7)
+                                    exp_neg_z: txl.float32 = exp2_2
+                                    add_1 = txl.local_scalar("float32")
+                                    txl.ptx["add.ftz.f32"](add_1, txl.float32(1.0), exp_neg_z)
+                                    div_0 = txl.local_scalar("float32")
+                                    txl.ptx["div.approx.ftz.f32"](div_0, txl.float32(1.0), add_1)
+                                    sigmoid_z: txl.float32 = div_0
+                                    mul_8 = txl.local_scalar("float32")
+                                    txl.ptx["mul.ftz.f32"](mul_8, z_value, sigmoid_z)
+                                    txl.ptx["mul.ftz.f32"](out_value, out_value, mul_8)
+                                txl.ptx.cvt.rn.bf16.f32(output_bits[k], out_value)
+                            txl.ptx.st.global_.v2.b16(
                                 output.ptr_to([out_base + d]), output_bits[0], output_bits[1]
                             )
                         else:
-                            d: K.int32 = lane * 4
-                            K.ptx.ld.shared.v4.b32(
+                            d: txl.int32 = lane * 4
+                            txl.ptx.ld.shared.v4.b32(
                                 out_words[0],
                                 out_words[1],
                                 out_words[2],
@@ -960,57 +960,57 @@ def get_kernel(**kwargs: Any):
                                 s_out.ptr_to([(group * NTOKENS * DIM + step * DIM + d)]),
                             )
                             if HAS_Z:
-                                K.ptx.ld.global_.v4.b16(
+                                txl.ptx.ld.global_.v4.b16(
                                     z_bits[0],
                                     z_bits[1],
                                     z_bits[2],
                                     z_bits[3],
                                     z.ptr_to([(z_base + d)]),
                                 )
-                            with K.unroll(4) as k:
-                                out_value = K.local_scalar(
-                                    "float32", init=K.reinterpret("float32", out_words[k])
+                            with txl.unroll(4) as k:
+                                out_value = txl.local_scalar(
+                                    "float32", init=txl.reinterpret("float32", out_words[k])
                                 )
                                 if HAS_Z:
-                                    bf16_f32_3 = K.local_scalar("float32")
-                                    K.ptx.cvt.f32.bf16(bf16_f32_3, K.cast(z_bits[k], "uint16"))
-                                    z_value: K.float32 = bf16_f32_3
-                                    sub_1 = K.local_scalar("float32")
-                                    K.ptx["sub.ftz.f32"](sub_1, K.float32(0.0), z_value)
-                                    mul_9 = K.local_scalar("float32")
-                                    K.ptx["mul.ftz.f32"](mul_9, sub_1, K.float32(_LOG2_E))
-                                    exp2_3 = K.local_scalar("float32")
-                                    K.ptx["ex2.approx.ftz.f32"](exp2_3, mul_9)
-                                    exp_neg_z: K.float32 = exp2_3
-                                    add_2 = K.local_scalar("float32")
-                                    K.ptx["add.ftz.f32"](add_2, K.float32(1.0), exp_neg_z)
-                                    div_1 = K.local_scalar("float32")
-                                    K.ptx["div.approx.ftz.f32"](div_1, K.float32(1.0), add_2)
-                                    sigmoid_z: K.float32 = div_1
-                                    mul_10 = K.local_scalar("float32")
-                                    K.ptx["mul.ftz.f32"](mul_10, z_value, sigmoid_z)
-                                    K.ptx["mul.ftz.f32"](out_value, out_value, mul_10)
-                                K.ptx.cvt.rn.bf16.f32(output_bits[k], out_value)
-                            K.ptx.st.global_.v4.b16(
+                                    bf16_f32_3 = txl.local_scalar("float32")
+                                    txl.ptx.cvt.f32.bf16(bf16_f32_3, txl.cast(z_bits[k], "uint16"))
+                                    z_value: txl.float32 = bf16_f32_3
+                                    sub_1 = txl.local_scalar("float32")
+                                    txl.ptx["sub.ftz.f32"](sub_1, txl.float32(0.0), z_value)
+                                    mul_9 = txl.local_scalar("float32")
+                                    txl.ptx["mul.ftz.f32"](mul_9, sub_1, txl.float32(_LOG2_E))
+                                    exp2_3 = txl.local_scalar("float32")
+                                    txl.ptx["ex2.approx.ftz.f32"](exp2_3, mul_9)
+                                    exp_neg_z: txl.float32 = exp2_3
+                                    add_2 = txl.local_scalar("float32")
+                                    txl.ptx["add.ftz.f32"](add_2, txl.float32(1.0), exp_neg_z)
+                                    div_1 = txl.local_scalar("float32")
+                                    txl.ptx["div.approx.ftz.f32"](div_1, txl.float32(1.0), add_2)
+                                    sigmoid_z: txl.float32 = div_1
+                                    mul_10 = txl.local_scalar("float32")
+                                    txl.ptx["mul.ftz.f32"](mul_10, z_value, sigmoid_z)
+                                    txl.ptx["mul.ftz.f32"](out_value, out_value, mul_10)
+                                txl.ptx.cvt.rn.bf16.f32(output_bits[k], out_value)
+                            txl.ptx.st.global_.v4.b16(
                                 output.ptr_to([out_base + d]),
                                 output_bits[0],
                                 output_bits[1],
                                 output_bits[2],
                                 output_bits[3],
                             )
-                    K.ptx.mbarrier.arrive.shared__cta.b64(bar_done_buf.ptr_to([group]), K.uint32(1))
+                    txl.ptx.mbarrier.arrive.shared__cta.b64(bar_done_buf.ptr_to([group]), txl.uint32(1))
 
         with update:
-            with K.If(state_batch == K.cast(pad_slot_id, "int64")):
-                with K.Then():
+            with txl.If(state_batch == txl.cast(pad_slot_id, "int64")):
+                with txl.Then():
                     run_update(True)
-                with K.Else():
+                with txl.Else():
                     run_update(False)
         with load:
-            with K.If(state_batch == K.cast(pad_slot_id, "int64")):
-                with K.Then():
+            with txl.If(state_batch == txl.cast(pad_slot_id, "int64")):
+                with txl.Then():
                     run_load(True)
-                with K.Else():
+                with txl.Else():
                     run_load(False)
         with epilogue:
             run_epilogue()

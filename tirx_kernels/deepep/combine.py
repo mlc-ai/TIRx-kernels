@@ -21,7 +21,7 @@ is_scaleup_nvlink=True.
 
 from typing import Any
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 
 from .utils._buffer import get_theoretical_num_sms
 
@@ -131,22 +131,22 @@ _EVICT_NORMAL = 0x1000000000000000
 
 
 def _gptr(base_u64, byte_off):
-    return K.reinterpret("handle", base_u64 + K.cast(byte_off, "uint64"))
+    return txl.reinterpret("handle", base_u64 + txl.cast(byte_off, "uint64"))
 
 
 def _peer_u64(table, dst):
-    value = K.alloc_local([1], "uint64")
-    K.ptx.ld.global_.b64(value[0], table.ptr_to([dst]))
+    value = txl.alloc_local([1], "uint64")
+    txl.ptx.ld.global_.b64(value[0], table.ptr_to([dst]))
     return value[0]
 
 
 def _ld_acquire_gpu_u64(dst, addr):
-    return K.ptx.ld.acquire.gpu.global_.u64(dst, addr)
+    return txl.ptx.ld.acquire.gpu.global_.u64(dst, addr)
 
 
 def _shfl_idx(dst, src, src_lane):
-    return K.ptx.shfl_sync.idx.b32(
-        dst, src, K.cast(src_lane, "uint32"), K.uint32(31), K.uint32(0xFFFFFFFF)
+    return txl.ptx.shfl_sync.idx.b32(
+        dst, src, txl.cast(src_lane, "uint32"), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
 
 
@@ -172,99 +172,99 @@ def _build_combine_kernel(num_sms: int, num_max_tokens_per_rank: int, num_ranks:
     NUM_RANKS_ = num_ranks
     cluster = 2 - num_sms % 2
 
-    @K.kernel(warps=NUM_WARPS, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
+    @txl.kernel(warps=NUM_WARPS, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
     def deepep_combine(
-        x: K.gptr[K.u8],
-        topk_weights: K.gptr[K.f32],
-        src_metadata: K.gptr[K.i32],
-        psum_rank: K.gptr[K.i32, (NUM_RANKS_,)],
-        peer_ws: K.gptr[K.i64, (NUM_RANKS_,)],
-        peer_buf: K.gptr[K.i64, (NUM_RANKS_,)],
-        workspace_addr: K.i64,
-        buffer_addr: K.i64,
-        num_reduced_tokens: K.i32,
-        rank_idx: K.i32,
+        x: txl.gptr[txl.u8],
+        topk_weights: txl.gptr[txl.f32],
+        src_metadata: txl.gptr[txl.i32],
+        psum_rank: txl.gptr[txl.i32, (NUM_RANKS_,)],
+        peer_ws: txl.gptr[txl.i64, (NUM_RANKS_,)],
+        peer_buf: txl.gptr[txl.i64, (NUM_RANKS_,)],
+        workspace_addr: txl.i64,
+        buffer_addr: txl.i64,
+        num_reduced_tokens: txl.i32,
+        rank_idx: txl.i32,
     ):
-        smem = K.smem_pool().alloc([SMEM_TOTAL], "uint8")
+        smem = txl.smem_pool().alloc([SMEM_TOTAL], "uint8")
 
-        sm_idx = K.cta_id()
+        sm_idx = txl.cta_id()
         if cluster > 1:
-            K.cta_id_in_cluster([cluster])
-        thread_idx = K.thread_id()
-        lane = K.lane_id()
+            txl.cta_id_in_cluster([cluster])
+        thread_idx = txl.thread_id()
+        lane = txl.lane_id()
 
-        ws_u64 = K.cast(workspace_addr, "uint64")
-        buf_u64 = K.cast(buffer_addr, "uint64")
+        ws_u64 = txl.cast(workspace_addr, "uint64")
+        buf_u64 = txl.cast(buffer_addr, "uint64")
 
         # Rotated warp index (combine.cuh:39)
-        warp_u32 = K.alloc_local([1], "uint32")
-        K.ptx.shfl_sync.idx.b32(
-            warp_u32[0], thread_idx // 32, K.uint32(0), K.uint32(31), K.uint32(0xFFFFFFFF)
+        warp_u32 = txl.alloc_local([1], "uint32")
+        txl.ptx.shfl_sync.idx.b32(
+            warp_u32[0], thread_idx // 32, txl.uint32(0), txl.uint32(31), txl.uint32(0xFFFFFFFF)
         )
-        warp = (K.cast(warp_u32[0], "int32") + rank_idx) % NUM_WARPS
+        warp = (txl.cast(warp_u32[0], "int32") + rank_idx) % NUM_WARPS
         global_warp_idx = warp * num_sms + sm_idx
 
         # --- NVLink barrier (comm.cuh:88-129), SM 0 only --------------------
         def nvlink_barrier(tag):
-            with K.If(sm_idx == 0), K.Then():
+            with txl.If(sm_idx == 0), txl.Then():
                 counter_ptr = _gptr(ws_u64, WS_BARRIER_COUNTER)
                 # Plain low-word read of the counter (comm.cuh:98; reviewer r2)
-                status32 = K.alloc_local([1], "uint32")
-                K.ptx["ld.global.b32"](status32[0], counter_ptr)
-                status = K.cast(K.bitwise_and(status32[0], K.uint32(3)), "int32")
-                bphase = K.bitwise_and(status, 1)
+                status32 = txl.alloc_local([1], "uint32")
+                txl.ptx["ld.global.b32"](status32[0], counter_ptr)
+                status = txl.cast(txl.bitwise_and(status32[0], txl.uint32(3)), "int32")
+                bphase = txl.bitwise_and(status, 1)
                 bsign = status // 2
-                with K.If(thread_idx < NUM_RANKS_), K.Then():
-                    delta = K.Select(bsign == 0, K.int32(1), K.int32(-1))
-                    K.ptx.red.release.sys.global_.add.s32(
+                with txl.If(thread_idx < NUM_RANKS_), txl.Then():
+                    delta = txl.Select(bsign == 0, txl.int32(1), txl.int32(-1))
+                    txl.ptx.red.release.sys.global_.add.s32(
                         _gptr(_peer_u64(peer_ws, thread_idx), WS_BARRIER_SIGNAL + bphase * 4), delta
                     )
                 # comm.cuh:107 __syncthreads (SM 0's CTA only)
-                K.ptx.bar.sync(K.uint32(0), K.uint32(NUM_THREADS))
-                with K.If(thread_idx == 0), K.Then():
-                    old = K.alloc_local([1], "uint64")
-                    K.ptx.atom.global_.add.u64(old[0], counter_ptr, K.uint64(1))
-                    target = K.Select(bsign == 0, K.int32(NUM_RANKS_), K.int32(0))
-                    sig = K.alloc_local([1], "int32")
+                txl.ptx.bar.sync(txl.uint32(0), txl.uint32(NUM_THREADS))
+                with txl.If(thread_idx == 0), txl.Then():
+                    old = txl.alloc_local([1], "uint64")
+                    txl.ptx.atom.global_.add.u64(old[0], counter_ptr, txl.uint64(1))
+                    target = txl.Select(bsign == 0, txl.int32(NUM_RANKS_), txl.int32(0))
+                    sig = txl.alloc_local([1], "int32")
                     sig_ptr = _gptr(ws_u64, WS_BARRIER_SIGNAL + bphase * 4)
-                    K.ptx["ld.acquire.sys.L1::no_allocate.global.s32"](sig[0], sig_ptr)
-                    start_clock = K.local_scalar(K.u64, init=K.cuda.clock64())
-                    with K.While(sig[0] != target):
+                    txl.ptx["ld.acquire.sys.L1::no_allocate.global.s32"](sig[0], sig_ptr)
+                    start_clock = txl.local_scalar(txl.u64, init=txl.cuda.clock64())
+                    with txl.While(sig[0] != target):
                         with (
-                            K.If(K.cuda.clock64() - start_clock >= K.uint64(TIMEOUT_CYCLES)),
-                            K.Then(),
+                            txl.If(txl.cuda.clock64() - start_clock >= txl.uint64(TIMEOUT_CYCLES)),
+                            txl.Then(),
                         ):
-                            K.cuda.printf(
+                            txl.cuda.printf(
                                 "DeepEP NVLink barrier timeout, tag: %d, nvl: %d, "
                                 "signal: %d, phase: %d, target: %d\n",
-                                K.int32(tag),
+                                txl.int32(tag),
                                 rank_idx,
                                 sig[0],
                                 bphase,
                                 target,
                             )
-                            K.cuda.trap_when_assert_failed(False)
-                        K.ptx["ld.acquire.sys.L1::no_allocate.global.s32"](sig[0], sig_ptr)
+                            txl.cuda.trap_when_assert_failed(False)
+                        txl.ptx["ld.acquire.sys.L1::no_allocate.global.s32"](sig[0], sig_ptr)
 
         # --- Software grid barrier (dispatch substitution 2) -----------------
         def grid_barrier(site):
             counter_ptr = _gptr(ws_u64, WS_PORT_SCRATCH + site * 8)
-            with K.If(thread_idx == 0), K.Then():
-                c0 = K.alloc_local([1], "uint64")
+            with txl.If(thread_idx == 0), txl.Then():
+                c0 = txl.alloc_local([1], "uint64")
                 _ld_acquire_gpu_u64(c0[0], counter_ptr)
-                target = (c0[0] // K.uint64(num_sms) + K.uint64(1)) * K.uint64(num_sms)
-                K.ptx.red.release.gpu.global_.add.u64(counter_ptr, K.uint64(1))
-                now = K.alloc_local([1], "uint64")
+                target = (c0[0] // txl.uint64(num_sms) + txl.uint64(1)) * txl.uint64(num_sms)
+                txl.ptx.red.release.gpu.global_.add.u64(counter_ptr, txl.uint64(1))
+                now = txl.alloc_local([1], "uint64")
                 _ld_acquire_gpu_u64(now[0], counter_ptr)
-                with K.While(now[0] < target):
+                with txl.While(now[0] < target):
                     _ld_acquire_gpu_u64(now[0], counter_ptr)
-            K.ptx.bar.sync(K.uint32(0), K.uint32(NUM_THREADS))
+            txl.ptx.bar.sync(txl.uint32(0), txl.uint32(NUM_THREADS))
 
         # Real received-token count from the GPU prefix (combine.cuh:45-46);
         # kernel 1 has no PDL edge, so `__ldg` is legal here
-        num_red_reg = K.alloc_local([1], "int32")
-        K.ptx["ld.global.nc.s32"](num_red_reg[0], psum_rank.ptr_to([NUM_RANKS_ - 1]))
-        num_reduced = K.Select(
+        num_red_reg = txl.alloc_local([1], "int32")
+        txl.ptx["ld.global.nc.s32"](num_red_reg[0], psum_rank.ptr_to([NUM_RANKS_ - 1]))
+        num_reduced = txl.Select(
             num_reduced_tokens == NUM_RANKS_ * num_max_tokens_per_rank,
             num_red_reg[0],
             num_reduced_tokens,
@@ -273,12 +273,12 @@ def _build_combine_kernel(num_sms: int, num_max_tokens_per_rank: int, num_ranks:
         tok_off = warp * COMBINE_TOKEN_SMEM
         tma_mbar = smem.view("uint64").ptr_to([(tok_off + COMBINE_TOKEN_BYTES) // 8])
 
-        phase = K.alloc_local([1], "uint32")
-        K.assign(phase[0], K.uint32(0))
-        with K.If(K.cuda.elect_sync()), K.Then():
-            K.ptx.mbarrier.init.shared.b64(tma_mbar, K.uint32(1))
-            K.ptx.fence.mbarrier_init.release.cluster()
-        K.cuda.warp_sync()
+        phase = txl.alloc_local([1], "uint32")
+        txl.assign(phase[0], txl.uint32(0))
+        with txl.If(txl.cuda.elect_sync()), txl.Then():
+            txl.ptx.mbarrier.init.shared.b64(tma_mbar, txl.uint32(1))
+            txl.ptx.fence.mbarrier_init.release.cluster()
+        txl.cuda.warp_sync()
 
         # Entry barrier (combine.cuh:77-80): gpu_barrier<tag0, false, false, true>
         nvlink_barrier(4)
@@ -287,62 +287,62 @@ def _build_combine_kernel(num_sms: int, num_max_tokens_per_rank: int, num_ranks:
         # Contiguous token chunks per warp (combine.cuh:83-85: NOT a strided loop)
         num_tokens_per_warp = (num_reduced + num_sms * NUM_WARPS - 1) // (num_sms * NUM_WARPS)
         token_start = num_tokens_per_warp * global_warp_idx
-        token_end = K.min(token_start + num_tokens_per_warp, num_reduced)
-        chunk_trips = K.max(K.int32(0), token_end - token_start)
-        with K.serial(0, chunk_trips) as it:
+        token_end = txl.min(token_start + num_tokens_per_warp, num_reduced)
+        chunk_trips = txl.max(txl.int32(0), token_end - token_start)
+        with txl.serial(0, chunk_trips) as it:
             i = token_start + it
             # Source routing indices (combine.cuh:88-92)
-            meta0 = K.alloc_local([1], "int32")
-            K.ptx["ld.global.nc.s32"](meta0[0], src_metadata.ptr_to([i * 8 + 0]))
+            meta0 = txl.alloc_local([1], "int32")
+            txl.ptx["ld.global.nc.s32"](meta0[0], src_metadata.ptr_to([i * 8 + 0]))
             src_token_idx = meta0[0] % num_max_tokens_per_rank
-            meta1 = K.alloc_local([1], "int32")
-            K.ptx["ld.global.nc.s32"](meta1[0], src_metadata.ptr_to([i * 8 + 1]))
+            meta1 = txl.alloc_local([1], "int32")
+            txl.ptx["ld.global.nc.s32"](meta1[0], src_metadata.ptr_to([i * 8 + 1]))
             src_rank_idx = meta1[0] // NUM_TOPK
             src_topk_idx = meta1[0] % NUM_TOPK
 
             # Master slot on the SOURCE rank's combine recv region (combine.cuh:96-106)
-            master_u64 = _peer_u64(peer_buf, src_rank_idx) + K.cast(
+            master_u64 = _peer_u64(peer_buf, src_rank_idx) + txl.cast(
                 (src_topk_idx * num_max_tokens_per_rank + src_token_idx) * COMBINE_TOKEN_BYTES,
                 "uint64",
             )
 
             # no_local_reduce is always true in this specialization (combine.cuh:125-127)
-            with K.If(K.cuda.elect_sync()), K.Then():
+            with txl.If(txl.cuda.elect_sync()), txl.Then():
                 # Drain the previous token's TMA store before reusing the SMEM slot
-                K.ptx.cp.async_.bulk.wait_group(0)
-                K.ptx[_BULK_G2S_CHAIN](
+                txl.ptx.cp.async_.bulk.wait_group(0)
+                txl.ptx[_BULK_G2S_CHAIN](
                     smem.ptr_to([tok_off]),
                     x.ptr_to([i * HIDDEN_BYTES]),
-                    K.uint32(HIDDEN_BYTES),
+                    txl.uint32(HIDDEN_BYTES),
                     tma_mbar,
-                    K.uint64(_EVICT_FIRST),
+                    txl.uint64(_EVICT_FIRST),
                 )
-                K.ptx.mbarrier.arrive.expect_tx.shared.b64(tma_mbar, K.uint32(HIDDEN_BYTES))
-                K.cuda.mbarrier_wait(tma_mbar, phase[0])
-                K.assign(phase[0], phase[0] ^ K.uint32(1))
-                K.ptx[_BULK_S2G_CHAIN](
-                    K.reinterpret("handle", master_u64),
+                txl.ptx.mbarrier.arrive.expect_tx.shared.b64(tma_mbar, txl.uint32(HIDDEN_BYTES))
+                txl.cuda.mbarrier_wait(tma_mbar, phase[0])
+                txl.assign(phase[0], phase[0] ^ txl.uint32(1))
+                txl.ptx[_BULK_S2G_CHAIN](
+                    txl.reinterpret("handle", master_u64),
                     smem.ptr_to([tok_off]),
-                    K.uint32(HIDDEN_BYTES),
-                    K.uint64(_EVICT_NORMAL),
+                    txl.uint32(HIDDEN_BYTES),
+                    txl.uint64(_EVICT_NORMAL),
                 )
-                K.ptx.cp.async_.bulk.commit_group()
-            K.cuda.warp_sync()
+                txl.ptx.cp.async_.bulk.commit_group()
+            txl.cuda.warp_sync()
 
             # Write this token's top-k weights into the same remote slot
             # (combine.cuh:216-226)
-            with K.If(lane < NUM_TOPK), K.Then():
-                w = K.alloc_local([1], "float32")
-                K.ptx["ld.global.nc.f32"](w[0], topk_weights.ptr_to([i * NUM_TOPK + lane]))
-                K.ptx.st.global_.b32(
-                    _gptr(master_u64, 14360 + lane * 4), K.cuda.float_as_uint(w[0])
+            with txl.If(lane < NUM_TOPK), txl.Then():
+                w = txl.alloc_local([1], "float32")
+                txl.ptx["ld.global.nc.f32"](w[0], topk_weights.ptr_to([i * NUM_TOPK + lane]))
+                txl.ptx.st.global_.b32(
+                    _gptr(master_u64, 14360 + lane * 4), txl.cuda.float_as_uint(w[0])
                 )
-            K.cuda.warp_sync()
+            txl.cuda.warp_sync()
 
         # Exit barrier (combine.cuh:239-242): gpu_barrier<tag1, true, true, false>
-        K.ptx.cp.async_.bulk.commit_group()
-        K.ptx.cp.async_.bulk.wait_group(0)
-        K.cuda.warp_sync()
+        txl.ptx.cp.async_.bulk.commit_group()
+        txl.ptx.cp.async_.bulk.wait_group(0)
+        txl.cuda.warp_sync()
         grid_barrier(1)
         nvlink_barrier(5)
         # No PDL trigger in kernel 1 (combine.cuh has none): kernel 2's
@@ -364,191 +364,191 @@ def _build_reduce_epilogue_kernel(
     NUM_RANKS_ = num_ranks
     EXPERTS_PER_RANK = NUM_EXPERTS // num_ranks
 
-    @K.kernel(warps=NUM_WARPS, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
+    @txl.kernel(warps=NUM_WARPS, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
     def deepep_combine_reduce_epilogue(
-        combined_x: K.gptr[K.u8],
-        combined_topk_weights: K.gptr[K.f32],
-        combined_topk_idx: K.gptr[K.i32],
-        buffer_addr: K.i64,
-        num_combined_tokens: K.i32,
+        combined_x: txl.gptr[txl.u8],
+        combined_topk_weights: txl.gptr[txl.f32],
+        combined_topk_idx: txl.gptr[txl.i32],
+        buffer_addr: txl.i64,
+        num_combined_tokens: txl.i32,
     ):
         # The i64 top-k indices are passed as an int32 view; the source reads
         # only the little-endian low word of each entry (reviewer r2 finding 3)
-        smem = K.smem_pool().alloc([SMEM_TOTAL], "uint8")
+        smem = txl.smem_pool().alloc([SMEM_TOTAL], "uint8")
 
-        sm_idx = K.cta_id()
-        thread_idx = K.thread_id()
-        lane = K.lane_id()
+        sm_idx = txl.cta_id()
+        thread_idx = txl.thread_id()
+        lane = txl.lane_id()
 
-        buf_u64 = K.cast(buffer_addr, "uint64")
+        buf_u64 = txl.cast(buffer_addr, "uint64")
 
-        warp_u32 = K.alloc_local([1], "uint32")
-        K.ptx.shfl_sync.idx.b32(
-            warp_u32[0], thread_idx // 32, K.uint32(0), K.uint32(31), K.uint32(0xFFFFFFFF)
+        warp_u32 = txl.alloc_local([1], "uint32")
+        txl.ptx.shfl_sync.idx.b32(
+            warp_u32[0], thread_idx // 32, txl.uint32(0), txl.uint32(31), txl.uint32(0xFFFFFFFF)
         )
-        warp = K.cast(warp_u32[0], "int32")
+        warp = txl.cast(warp_u32[0], "int32")
         global_warp_idx = warp * num_sms + sm_idx
 
         tok_off = warp * OUTPUT_TOKEN_BYTES
 
         # Block until kernel 1 finished and all peer data are visible (epilogue.cuh:59)
-        K.ptx.griddepcontrol.wait()
+        txl.ptx.griddepcontrol.wait()
 
         epi_stride = NUM_WARPS * num_sms
-        epi_trips = K.max(
-            K.int32(0), (num_combined_tokens - global_warp_idx + epi_stride - 1) // epi_stride
+        epi_trips = txl.max(
+            txl.int32(0), (num_combined_tokens - global_warp_idx + epi_stride - 1) // epi_stride
         )
-        with K.serial(0, epi_trips) as epi_it:
+        with txl.serial(0, epi_trips) as epi_it:
             token_idx = global_warp_idx + epi_it * epi_stride
 
             # Dst expert/rank per top-k lane (epilogue.cuh:66-71; plain ld, NOT
             # __ldg: "PDL is used, please do not use __ldg")
-            dst_expert = K.alloc_local([1], "int32")
-            K.assign(dst_expert[0], -1)
-            with K.If(lane < NUM_TOPK), K.Then():
-                K.ptx["ld.global.b32"](
+            dst_expert = txl.alloc_local([1], "int32")
+            txl.assign(dst_expert[0], -1)
+            with txl.If(lane < NUM_TOPK), txl.Then():
+                txl.ptx["ld.global.b32"](
                     dst_expert[0], combined_topk_idx.ptr_to([token_idx * NUM_TOPK * 2 + lane * 2])
                 )
-            K.cuda.warp_sync()
-            dst_rank = K.Select(dst_expert[0] >= 0, dst_expert[0] // EXPERTS_PER_RANK, -1)
+            txl.cuda.warp_sync()
+            dst_rank = txl.Select(dst_expert[0] >= 0, dst_expert[0] // EXPERTS_PER_RANK, -1)
 
             # Dedup on dst rank (epilogue.cuh:82-84 else-branch, scaleout == 1)
-            match_mask = K.alloc_local([1], "uint32")
-            K.ptx.match.any.sync.b32(match_mask[0], dst_rank, K.uint32(0xFFFFFFFF))
-            master = K.alloc_local([1], "uint32")
-            K.ptx.bfind.u32(master[0], match_mask[0])
-            is_master = K.cast(master[0], "int32") == lane
-            ballot = K.alloc_local([1], "uint32")
-            K.ptx.vote_sync.ballot.b32(
-                ballot[0], K.And(is_master, dst_rank >= 0), K.uint32(0xFFFFFFFF)
+            match_mask = txl.alloc_local([1], "uint32")
+            txl.ptx.match.any.sync.b32(match_mask[0], dst_rank, txl.uint32(0xFFFFFFFF))
+            master = txl.alloc_local([1], "uint32")
+            txl.ptx.bfind.u32(master[0], match_mask[0])
+            is_master = txl.cast(master[0], "int32") == lane
+            ballot = txl.alloc_local([1], "uint32")
+            txl.ptx.vote_sync.ballot.b32(
+                ballot[0], txl.And(is_master, dst_rank >= 0), txl.uint32(0xFFFFFFFF)
             )
 
             # Sort valid top-k slots to front (combine_utils.cuh:43-53; fetch is
             # identity because kUseRankLayout=false)
-            topk_slot = K.alloc_local([NUM_TOKENS_IN_LAYOUT], "int32")
-            mask = K.alloc_local([1], "uint32")
-            K.assign(mask[0], ballot[0])
-            with K.unroll(NUM_TOKENS_IN_LAYOUT) as k:
-                lowest = K.cast(K.cuda.ffs_u32(mask[0]), "int32") - 1
-                K.assign(topk_slot[k], K.Select(lowest >= 0, lowest, -1))
-                K.assign(mask[0], K.bitwise_and(mask[0], mask[0] - K.uint32(1)))
+            topk_slot = txl.alloc_local([NUM_TOKENS_IN_LAYOUT], "int32")
+            mask = txl.alloc_local([1], "uint32")
+            txl.assign(mask[0], ballot[0])
+            with txl.unroll(NUM_TOKENS_IN_LAYOUT) as k:
+                lowest = txl.cast(txl.cuda.ffs_u32(mask[0]), "int32") - 1
+                txl.assign(topk_slot[k], txl.Select(lowest >= 0, lowest, -1))
+                txl.assign(mask[0], txl.bitwise_and(mask[0], mask[0] - txl.uint32(1)))
 
             # combine_reduce<896, 4, 6, 6>: no bias in this specialization, so the
             # path selector is exactly (topk_slot[2] < 0) (utils.cuh:68-70)
-            with K.If(topk_slot[2] < 0):
-                with K.Then():
+            with txl.If(topk_slot[2] < 0):
+                with txl.Then():
                     # --- bf16 hadd path (utils.cuh:73-110) ---
-                    with K.serial(0, 7) as c:
-                        values_0 = K.alloc_local([16], "int32", align=16)
-                        values_1 = K.alloc_local([16], "int32", align=16)
-                        with K.unroll(16) as j:
-                            K.assign(values_0[j], K.uint32(0))
-                            K.assign(values_1[j], K.uint32(0))
-                        with K.If(topk_slot[0] >= 0), K.Then():
-                            base0 = buf_u64 + K.cast(
+                    with txl.serial(0, 7) as c:
+                        values_0 = txl.alloc_local([16], "int32", align=16)
+                        values_1 = txl.alloc_local([16], "int32", align=16)
+                        with txl.unroll(16) as j:
+                            txl.assign(values_0[j], txl.uint32(0))
+                            txl.assign(values_1[j], txl.uint32(0))
+                        with txl.If(topk_slot[0] >= 0), txl.Then():
+                            base0 = buf_u64 + txl.cast(
                                 (topk_slot[0] * num_max_tokens_per_rank + token_idx)
                                 * COMBINE_TOKEN_BYTES,
                                 "uint64",
                             )
-                            with K.unroll(4) as j:
-                                K.ptx[_GEZ_VEC_LOAD](
+                            with txl.unroll(4) as j:
+                                txl.ptx[_GEZ_VEC_LOAD](
                                     values_0[j * 4],
                                     values_0[j * 4 + 1],
                                     values_0[j * 4 + 2],
                                     values_0[j * 4 + 3],
-                                    K.reinterpret(
+                                    txl.reinterpret(
                                         "handle",
-                                        base0 + K.cast((c * 128 + j * 32 + lane) * 16, "uint64"),
+                                        base0 + txl.cast((c * 128 + j * 32 + lane) * 16, "uint64"),
                                     ),
-                                    K.uint64(_EVICT_FIRST),
+                                    txl.uint64(_EVICT_FIRST),
                                 )
-                        with K.If(topk_slot[1] >= 0), K.Then():
-                            base1 = buf_u64 + K.cast(
+                        with txl.If(topk_slot[1] >= 0), txl.Then():
+                            base1 = buf_u64 + txl.cast(
                                 (topk_slot[1] * num_max_tokens_per_rank + token_idx)
                                 * COMBINE_TOKEN_BYTES,
                                 "uint64",
                             )
-                            with K.unroll(4) as j:
-                                K.ptx[_GEZ_VEC_LOAD](
+                            with txl.unroll(4) as j:
+                                txl.ptx[_GEZ_VEC_LOAD](
                                     values_1[j * 4],
                                     values_1[j * 4 + 1],
                                     values_1[j * 4 + 2],
                                     values_1[j * 4 + 3],
-                                    K.reinterpret(
+                                    txl.reinterpret(
                                         "handle",
-                                        base1 + K.cast((c * 128 + j * 32 + lane) * 16, "uint64"),
+                                        base1 + txl.cast((c * 128 + j * 32 + lane) * 16, "uint64"),
                                     ),
-                                    K.uint64(_EVICT_FIRST),
+                                    txl.uint64(_EVICT_FIRST),
                                 )
-                        with K.If(c == 0), K.Then():
+                        with txl.If(c == 0), txl.Then():
                             # Drain the previous token's TMA store before reusing smem
-                            K.ptx.cp.async_.bulk.wait_group(0)
-                            K.cuda.warp_sync()
-                        with K.unroll(4) as j:
-                            sums = K.alloc_local([4], "uint32")
-                            with K.unroll(4) as w:
-                                K.ptx["add.bf16x2"](
+                            txl.ptx.cp.async_.bulk.wait_group(0)
+                            txl.cuda.warp_sync()
+                        with txl.unroll(4) as j:
+                            sums = txl.alloc_local([4], "uint32")
+                            with txl.unroll(4) as w:
+                                txl.ptx["add.bf16x2"](
                                     sums[w],
-                                    K.cast(values_0[j * 4 + w], "uint32"),
-                                    K.cast(values_1[j * 4 + w], "uint32"),
+                                    txl.cast(values_0[j * 4 + w], "uint32"),
+                                    txl.cast(values_1[j * 4 + w], "uint32"),
                                 )
-                            K.ptx.st.shared_.v4.b32(
+                            txl.ptx.st.shared_.v4.b32(
                                 smem.ptr_to([tok_off + (c * 128 + j * 32 + lane) * 16]),
                                 sums[0],
                                 sums[1],
                                 sums[2],
                                 sums[3],
                             )
-                with K.Else():
+                with txl.Else():
                     # --- fp32 accumulate path (utils.cuh:111-168) ---
-                    with K.serial(0, 7) as c:
-                        reduced = K.alloc_local([32], "float32")
-                        with K.unroll(32) as j:
-                            K.assign(reduced[j], K.float32(0.0))
-                        with K.unroll(NUM_TOKENS_IN_LAYOUT) as k:
-                            values = K.alloc_local([16], "int32", align=16)
-                            with K.unroll(16) as j:
-                                K.assign(values[j], K.uint32(0))
-                            with K.If(topk_slot[k] >= 0), K.Then():
-                                base_k = buf_u64 + K.cast(
+                    with txl.serial(0, 7) as c:
+                        reduced = txl.alloc_local([32], "float32")
+                        with txl.unroll(32) as j:
+                            txl.assign(reduced[j], txl.float32(0.0))
+                        with txl.unroll(NUM_TOKENS_IN_LAYOUT) as k:
+                            values = txl.alloc_local([16], "int32", align=16)
+                            with txl.unroll(16) as j:
+                                txl.assign(values[j], txl.uint32(0))
+                            with txl.If(topk_slot[k] >= 0), txl.Then():
+                                base_k = buf_u64 + txl.cast(
                                     (topk_slot[k] * num_max_tokens_per_rank + token_idx)
                                     * COMBINE_TOKEN_BYTES,
                                     "uint64",
                                 )
-                                with K.unroll(4) as j:
-                                    K.ptx[_GEZ_VEC_LOAD](
+                                with txl.unroll(4) as j:
+                                    txl.ptx[_GEZ_VEC_LOAD](
                                         values[j * 4],
                                         values[j * 4 + 1],
                                         values[j * 4 + 2],
                                         values[j * 4 + 3],
-                                        K.reinterpret(
+                                        txl.reinterpret(
                                             "handle",
                                             base_k
-                                            + K.cast((c * 128 + j * 32 + lane) * 16, "uint64"),
+                                            + txl.cast((c * 128 + j * 32 + lane) * 16, "uint64"),
                                         ),
-                                        K.uint64(_EVICT_FIRST),
+                                        txl.uint64(_EVICT_FIRST),
                                     )
-                            with K.unroll(4) as j:
-                                with K.unroll(4) as w:
-                                    word_u32 = K.cast(values[j * 4 + w], "uint32")
-                                    lo = K.cast(K.bitwise_and(word_u32, K.uint32(0xFFFF)), "uint16")
-                                    hi = K.cast(word_u32 >> K.uint32(16), "uint16")
+                            with txl.unroll(4) as j:
+                                with txl.unroll(4) as w:
+                                    word_u32 = txl.cast(values[j * 4 + w], "uint32")
+                                    lo = txl.cast(txl.bitwise_and(word_u32, txl.uint32(0xFFFF)), "uint16")
+                                    hi = txl.cast(word_u32 >> txl.uint32(16), "uint16")
                                     e = j * 8 + w * 2
-                                    K.ptx.add.rn.f32.bf16(reduced[e], lo, reduced[e])
-                                    K.ptx.add.rn.f32.bf16(reduced[e + 1], hi, reduced[e + 1])
-                        with K.If(c == 0), K.Then():
-                            K.ptx.cp.async_.bulk.wait_group(0)
-                            K.cuda.warp_sync()
-                        with K.unroll(4) as j:
-                            casted = K.alloc_local([4], "uint32")
-                            with K.unroll(4) as p:
-                                K.assign(
+                                    txl.ptx.add.rn.f32.bf16(reduced[e], lo, reduced[e])
+                                    txl.ptx.add.rn.f32.bf16(reduced[e + 1], hi, reduced[e + 1])
+                        with txl.If(c == 0), txl.Then():
+                            txl.ptx.cp.async_.bulk.wait_group(0)
+                            txl.cuda.warp_sync()
+                        with txl.unroll(4) as j:
+                            casted = txl.alloc_local([4], "uint32")
+                            with txl.unroll(4) as p:
+                                txl.assign(
                                     casted[p],
-                                    K.cuda.float22bfloat162_rn(
+                                    txl.cuda.float22bfloat162_rn(
                                         reduced[j * 8 + p * 2], reduced[j * 8 + p * 2 + 1]
                                     ),
                                 )
-                            K.ptx.st.shared_.v4.b32(
+                            txl.ptx.st.shared_.v4.b32(
                                 smem.ptr_to([tok_off + (c * 128 + j * 32 + lane) * 16]),
                                 casted[0],
                                 casted[1],
@@ -557,40 +557,40 @@ def _build_reduce_epilogue_kernel(
                             )
 
             # Async-proxy fence so the TMA engine sees the smem reduce output
-            K.ptx["fence.proxy.async.shared::cta"]()
-            K.cuda.warp_sync()
+            txl.ptx["fence.proxy.async.shared::cta"]()
+            txl.cuda.warp_sync()
 
             # TMA-store the reduced token (epilogue.cuh:120-123)
-            with K.If(K.cuda.elect_sync()), K.Then():
-                K.ptx[_BULK_S2G_CHAIN](
+            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                txl.ptx[_BULK_S2G_CHAIN](
                     combined_x.ptr_to([token_idx * OUTPUT_TOKEN_BYTES]),
                     smem.ptr_to([tok_off]),
-                    K.uint32(OUTPUT_TOKEN_BYTES),
-                    K.uint64(_EVICT_NORMAL),
+                    txl.uint32(OUTPUT_TOKEN_BYTES),
+                    txl.uint64(_EVICT_NORMAL),
                 )
-                K.ptx.cp.async_.bulk.commit_group()
-            K.cuda.warp_sync()
+                txl.ptx.cp.async_.bulk.commit_group()
+            txl.cuda.warp_sync()
 
             # Write combined top-k weights from the master lane's rank buffer
             # (epilogue.cuh:128-141)
-            with K.If(lane < NUM_TOPK), K.Then():
-                w32 = K.alloc_local([1], "uint32")
-                K.assign(w32[0], K.uint32(0))
-                with K.If(dst_rank >= 0), K.Then():
-                    K.ptx["ld.global.b32"](
+            with txl.If(lane < NUM_TOPK), txl.Then():
+                w32 = txl.alloc_local([1], "uint32")
+                txl.assign(w32[0], txl.uint32(0))
+                with txl.If(dst_rank >= 0), txl.Then():
+                    txl.ptx["ld.global.b32"](
                         w32[0],
                         _gptr(
                             buf_u64,
-                            (K.cast(master[0], "int32") * num_max_tokens_per_rank + token_idx)
+                            (txl.cast(master[0], "int32") * num_max_tokens_per_rank + token_idx)
                             * COMBINE_TOKEN_BYTES
                             + 14360
                             + lane * 4,
                         ),
                     )
-                K.ptx.st.global_.b32(
+                txl.ptx.st.global_.b32(
                     combined_topk_weights.ptr_to([token_idx * NUM_TOPK + lane]), w32[0]
                 )
-            K.cuda.warp_sync()
+            txl.cuda.warp_sync()
 
     return deepep_combine_reduce_epilogue.func.with_attr(
         "tirx.kernel_launch_params", _launch_tags(1, True)

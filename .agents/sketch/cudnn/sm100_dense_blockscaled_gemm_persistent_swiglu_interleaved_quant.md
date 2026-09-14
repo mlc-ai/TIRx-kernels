@@ -807,7 +807,7 @@ PTX opcode belongs to one cited section.
 - Registry name is
   `cudnn_sm100_dense_blockscaled_gemm_persistent_swiglu_interleaved_quant`,
   category `cudnn`, compute capability 10.
-- Device code imports only `tirx_kernels.kern as K`, declares one rank-1 dynamic
+- Device code imports only `tirx_kernels.tirx_lite as txl`, declares one rank-1 dynamic
   `u8` arena, and uses only integer offsets/strides/swizzle bits/raw descriptors.
 - The fixed pointer ABI is `A/B/SFA/SFB/C/AB12/amax/SFC/norm_const/alpha`.
 - The module exports `KERNEL_META`, deterministic pairwise `CONFIGS`,

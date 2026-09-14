@@ -39,22 +39,22 @@ class.
 
 ```python
 # before: every element waits on its own complete chain.
-for i in K.unroll(FRAGMENT):
+for i in txl.unroll(FRAGMENT):
     exp[i] = _exp2(gate[i])
     denom[i] = 1.0 + exp[i]
     reciprocal[i] = _reciprocal(_round_if_required(denom[i]))
     out[i] = value[i] * gate[i] * reciprocal[i]
 
 # after: expose independent operations within each dependency level.
-for i in K.unroll(FRAGMENT):
+for i in txl.unroll(FRAGMENT):
     reciprocal[i] = _exp2(gate[i])
-for i in K.unroll(FRAGMENT):
+for i in txl.unroll(FRAGMENT):
     reciprocal[i] = 1.0 + reciprocal[i]
-for i in K.unroll(FRAGMENT):
+for i in txl.unroll(FRAGMENT):
     reciprocal[i] = _round_if_required(reciprocal[i])
-for i in K.unroll(FRAGMENT):
+for i in txl.unroll(FRAGMENT):
     reciprocal[i] = _reciprocal(reciprocal[i])
-for i in K.unroll(FRAGMENT):
+for i in txl.unroll(FRAGMENT):
     out[i] = value[i] * gate[i] * reciprocal[i]
 ```
 

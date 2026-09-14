@@ -26,7 +26,7 @@ Upstream sources: deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh,
 scheduler/gemm.cuh.
 """
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 from tvm.backend.cuda.cpp.descriptors import (
     encode_instr_descriptor_block_scaled_uint32,
     encode_smem_descriptor_base_uint64,
@@ -114,28 +114,28 @@ def _uceil(x, d):
     (`IABS` + `ISETP.GE` + sign fixup) where the source -- `uint32_t` throughout --
     gets a single shift.
     """
-    return K.cast((K.cast(x, "uint32") + K.uint32(d - 1)) // K.uint32(d), "int32")
+    return txl.cast((txl.cast(x, "uint32") + txl.uint32(d - 1)) // txl.uint32(d), "int32")
 
 
 def _load_grouped_layout(dst, grouped_layout, index):
-    return K.ptx.ld.global_.s32(dst, grouped_layout.ptr_to([index]))
+    return txl.ptx.ld.global_.s32(dst, grouped_layout.ptr_to([index]))
 
 
 def _udiv(x, d):
     """Exact division of a known non-negative value; see `_uceil`."""
-    return K.cast(K.cast(x, "uint32") // K.cast(d, "uint32"), "int32")
+    return txl.cast(txl.cast(x, "uint32") // txl.cast(d, "uint32"), "int32")
 
 
 def _umod(x, d):
     """Remainder of a known non-negative value; see `_uceil`."""
-    return K.cast(K.cast(x, "uint32") % K.cast(d, "uint32"), "int32")
+    return txl.cast(txl.cast(x, "uint32") % txl.cast(d, "uint32"), "int32")
 
 
 def _wait_barrier(barrier, phase):
-    complete = K.local_scalar("uint32", init=K.uint32(0))
-    with K.While(complete == K.uint32(0)):
-        K.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
-            complete, barrier, K.cast(phase, "uint32"), K.uint32(TRY_WAIT_TICKS)
+    complete = txl.local_scalar("uint32", init=txl.uint32(0))
+    with txl.While(complete == txl.uint32(0)):
+        txl.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
+            complete, barrier, txl.cast(phase, "uint32"), txl.uint32(TRY_WAIT_TICKS)
         )
 
 
@@ -168,171 +168,171 @@ class _PersistentScheduler:
         self.is_batched = spec.gemm_type is GemmType.BATCHED
         self.track_sfk = track_sfk
 
-        self.it = K.local_scalar("int32")
-        self.valid = K.local_scalar("int32")
-        self.grp = K.local_scalar("int32")
-        self.cum = K.local_scalar("int32")
-        self.nmb = K.local_scalar("int32")
-        self.last = K.local_scalar("int32")
-        self.psum = K.local_scalar("int32")
-        self.nb = K.local_scalar("int32")
-        self.nxt = K.local_scalar("int32")
-        self.nxtk = K.local_scalar("int32")
-        self.sfk = K.local_scalar("int32")
-        self.vgrp = K.local_scalar("int32")
-        self.kend = K.local_scalar("int32")
+        self.it = txl.local_scalar("int32")
+        self.valid = txl.local_scalar("int32")
+        self.grp = txl.local_scalar("int32")
+        self.cum = txl.local_scalar("int32")
+        self.nmb = txl.local_scalar("int32")
+        self.last = txl.local_scalar("int32")
+        self.psum = txl.local_scalar("int32")
+        self.nb = txl.local_scalar("int32")
+        self.nxt = txl.local_scalar("int32")
+        self.nxtk = txl.local_scalar("int32")
+        self.sfk = txl.local_scalar("int32")
+        self.vgrp = txl.local_scalar("int32")
+        self.kend = txl.local_scalar("int32")
         self.init()
 
     def init(self):
-        K.assign(self.it, 0)
-        K.assign(self.valid, 1)
-        K.assign(self.grp, 0)
-        K.assign(self.cum, 0)
-        K.assign(self.last, 0)
-        K.assign(self.sfk, 0)
-        K.assign(self.vgrp, 0)
-        K.assign(self.kend, 0)
-        K.assign(self.nxt, 0)
-        K.assign(self.nxtk, 0)
+        txl.assign(self.it, 0)
+        txl.assign(self.valid, 1)
+        txl.assign(self.grp, 0)
+        txl.assign(self.cum, 0)
+        txl.assign(self.last, 0)
+        txl.assign(self.sfk, 0)
+        txl.assign(self.vgrp, 0)
+        txl.assign(self.kend, 0)
+        txl.assign(self.nxt, 0)
+        txl.assign(self.nxtk, 0)
         if self.is_k_grouped:
-            K.assign(self.psum, 0)
-            K.assign(self.nmb, self.num_m_blocks)
+            txl.assign(self.psum, 0)
+            txl.assign(self.nmb, self.num_m_blocks)
             if self.is_k_grouped_psum:
-                with K.While(self.grp < self.num_groups):
+                with txl.While(self.grp < self.num_groups):
                     _load_grouped_layout(self.nxtk, self.grouped_layout, self.grp)
-                    K.assign(self.last, _uceil(self.kend, self.k_alignment) * self.k_alignment)
-                    K.assign(self.psum, self.nxtk - self.last)
-                    K.assign(self.kend, self.nxtk)
-                    with K.If(self.psum > 0):
-                        with K.Then():
-                            K.Break()
-                    K.assign(self.grp, self.grp + 1)
+                    txl.assign(self.last, _uceil(self.kend, self.k_alignment) * self.k_alignment)
+                    txl.assign(self.psum, self.nxtk - self.last)
+                    txl.assign(self.kend, self.nxtk)
+                    with txl.If(self.psum > 0):
+                        with txl.Then():
+                            txl.Break()
+                    txl.assign(self.grp, self.grp + 1)
             else:
-                with K.While(self.grp < self.num_groups):
+                with txl.While(self.grp < self.num_groups):
                     _load_grouped_layout(self.psum, self.grouped_layout, self.grp)
-                    with K.If(self.psum > 0):
-                        with K.Then():
-                            K.Break()
-                    K.assign(self.grp, self.grp + 1)
-                K.assign(self.nxt, self.grp + 1)
-                with K.While(self.nxt < self.num_groups):
+                    with txl.If(self.psum > 0):
+                        with txl.Then():
+                            txl.Break()
+                    txl.assign(self.grp, self.grp + 1)
+                txl.assign(self.nxt, self.grp + 1)
+                with txl.While(self.nxt < self.num_groups):
                     _load_grouped_layout(self.nxtk, self.grouped_layout, self.nxt)
-                    with K.If(self.nxtk > 0):
-                        with K.Then():
-                            K.Break()
-                    K.assign(self.nxt, self.nxt + 1)
+                    with txl.If(self.nxtk > 0):
+                        with txl.Then():
+                            txl.Break()
+                    txl.assign(self.nxt, self.nxt + 1)
         else:
             if self.is_m_grouped_psum:
                 _load_grouped_layout(self.psum, self.grouped_layout, 0)
-                K.assign(self.nmb, _uceil(self.psum, self.block_m))
+                txl.assign(self.nmb, _uceil(self.psum, self.block_m))
             else:
-                K.assign(self.psum, 0)
-                K.assign(self.nmb, self.num_m_blocks)
+                txl.assign(self.psum, 0)
+                txl.assign(self.nmb, self.num_m_blocks)
 
     def next(self):
-        K.assign(self.nb, self.it * self.num_sms + self.sm_idx)
-        done = K.local_scalar("int32", init=0)
+        txl.assign(self.nb, self.it * self.num_sms + self.sm_idx)
+        done = txl.local_scalar("int32", init=0)
         if self.is_m_grouped_masked:
-            with K.While(done == 0):
-                with K.If(self.grp == self.num_groups):
-                    with K.Then():
-                        K.assign(self.valid, 0)
-                        K.assign(done, 1)
-                    with K.Else():
+            with txl.While(done == 0):
+                with txl.If(self.grp == self.num_groups):
+                    with txl.Then():
+                        txl.assign(self.valid, 0)
+                        txl.assign(done, 1)
+                    with txl.Else():
                         _load_grouped_layout(self.nmb, self.grouped_layout, self.grp)
-                        K.assign(self.nmb, _uceil(self.nmb, self.block_m))
-                        with K.If(self.nb < (self.cum + self.nmb) * self.num_n_blocks):
-                            with K.Then():
-                                K.assign(done, 1)
-                            with K.Else():
-                                K.assign(self.cum, self.cum + self.nmb)
-                                K.assign(self.grp, self.grp + 1)
+                        txl.assign(self.nmb, _uceil(self.nmb, self.block_m))
+                        with txl.If(self.nb < (self.cum + self.nmb) * self.num_n_blocks):
+                            with txl.Then():
+                                txl.assign(done, 1)
+                            with txl.Else():
+                                txl.assign(self.cum, self.cum + self.nmb)
+                                txl.assign(self.grp, self.grp + 1)
         else:
             if self.is_m_grouped_psum:
-                with K.While(done == 0):
-                    with K.If(self.nb < (self.cum + self.nmb) * self.num_n_blocks):
-                        with K.Then():
-                            K.assign(done, 1)
-                        with K.Else():
-                            K.assign(self.grp, self.grp + 1)
-                            with K.If(self.grp == self.num_groups):
-                                with K.Then():
-                                    K.assign(self.valid, 0)
-                                    K.assign(done, 1)
-                                with K.Else():
-                                    K.assign(
+                with txl.While(done == 0):
+                    with txl.If(self.nb < (self.cum + self.nmb) * self.num_n_blocks):
+                        with txl.Then():
+                            txl.assign(done, 1)
+                        with txl.Else():
+                            txl.assign(self.grp, self.grp + 1)
+                            with txl.If(self.grp == self.num_groups):
+                                with txl.Then():
+                                    txl.assign(self.valid, 0)
+                                    txl.assign(done, 1)
+                                with txl.Else():
+                                    txl.assign(
                                         self.last, (_uceil(self.psum, self.block_m) * self.block_m)
                                     )
                                     _load_grouped_layout(self.psum, self.grouped_layout, self.grp)
-                                    K.assign(self.cum, self.cum + self.nmb)
-                                    K.assign(self.nmb, _uceil(self.psum - self.last, self.block_m))
+                                    txl.assign(self.cum, self.cum + self.nmb)
+                                    txl.assign(self.nmb, _uceil(self.psum - self.last, self.block_m))
             else:
                 if self.is_k_grouped:
-                    with K.While(done == 0):
-                        with K.If(self.grp == self.num_groups):
-                            with K.Then():
-                                K.assign(self.valid, 0)
-                                K.assign(done, 1)
-                            with K.Else():
-                                with K.If(self.nb < (self.vgrp + 1) * self.num_blocks):
-                                    with K.Then():
-                                        K.assign(done, 1)
-                                    with K.Else():
+                    with txl.While(done == 0):
+                        with txl.If(self.grp == self.num_groups):
+                            with txl.Then():
+                                txl.assign(self.valid, 0)
+                                txl.assign(done, 1)
+                            with txl.Else():
+                                with txl.If(self.nb < (self.vgrp + 1) * self.num_blocks):
+                                    with txl.Then():
+                                        txl.assign(done, 1)
+                                    with txl.Else():
                                         if self.track_sfk:
-                                            K.assign(
+                                            txl.assign(
                                                 self.sfk,
                                                 self.sfk + _uceil(self.psum, self.sf_k_span),
                                             )
-                                        K.assign(self.vgrp, self.vgrp + 1)
+                                        txl.assign(self.vgrp, self.vgrp + 1)
                                         if self.is_k_grouped_psum:
-                                            K.assign(self.grp, self.grp + 1)
-                                            with K.While(self.grp < self.num_groups):
+                                            txl.assign(self.grp, self.grp + 1)
+                                            with txl.While(self.grp < self.num_groups):
                                                 _load_grouped_layout(
                                                     self.nxtk, self.grouped_layout, self.grp
                                                 )
-                                                K.assign(
+                                                txl.assign(
                                                     self.last,
                                                     (
                                                         _uceil(self.kend, self.k_alignment)
                                                         * self.k_alignment
                                                     ),
                                                 )
-                                                K.assign(self.psum, self.nxtk - self.last)
-                                                K.assign(self.kend, self.nxtk)
-                                                with K.If(self.psum > 0):
-                                                    with K.Then():
-                                                        K.Break()
-                                                K.assign(self.grp, self.grp + 1)
+                                                txl.assign(self.psum, self.nxtk - self.last)
+                                                txl.assign(self.kend, self.nxtk)
+                                                with txl.If(self.psum > 0):
+                                                    with txl.Then():
+                                                        txl.Break()
+                                                txl.assign(self.grp, self.grp + 1)
                                         else:
-                                            K.assign(self.last, self.last + self.psum)
-                                            K.assign(self.grp, self.nxt)
-                                            K.assign(self.nxt, self.nxt + 1)
-                                            K.assign(self.psum, self.nxtk)
-                                            with K.While(self.nxt < self.num_groups):
+                                            txl.assign(self.last, self.last + self.psum)
+                                            txl.assign(self.grp, self.nxt)
+                                            txl.assign(self.nxt, self.nxt + 1)
+                                            txl.assign(self.psum, self.nxtk)
+                                            with txl.While(self.nxt < self.num_groups):
                                                 _load_grouped_layout(
                                                     self.nxtk, self.grouped_layout, self.nxt
                                                 )
-                                                with K.If(self.nxtk > 0):
-                                                    with K.Then():
-                                                        K.Break()
-                                                K.assign(self.nxt, self.nxt + 1)
-                    K.assign(self.cum, self.vgrp * self.num_m_blocks)
+                                                with txl.If(self.nxtk > 0):
+                                                    with txl.Then():
+                                                        txl.Break()
+                                                txl.assign(self.nxt, self.nxt + 1)
+                    txl.assign(self.cum, self.vgrp * self.num_m_blocks)
                 else:
                     if self.is_batched:
-                        with K.If(self.nb >= self.num_blocks * self.num_groups):
-                            with K.Then():
-                                K.assign(self.valid, 0)
-                            with K.Else():
-                                K.assign(self.grp, self.nb // self.num_blocks)
-                                K.assign(self.cum, self.grp * self.num_m_blocks)
-                                K.assign(self.nmb, self.num_m_blocks)
+                        with txl.If(self.nb >= self.num_blocks * self.num_groups):
+                            with txl.Then():
+                                txl.assign(self.valid, 0)
+                            with txl.Else():
+                                txl.assign(self.grp, self.nb // self.num_blocks)
+                                txl.assign(self.cum, self.grp * self.num_m_blocks)
+                                txl.assign(self.nmb, self.num_m_blocks)
                     else:
-                        with K.If(self.nb >= self.num_blocks):
-                            with K.Then():
-                                K.assign(self.valid, 0)
+                        with txl.If(self.nb >= self.num_blocks):
+                            with txl.Then():
+                                txl.assign(self.valid, 0)
 
     def advance(self):
-        K.assign(self.it, self.it + 1)
+        txl.assign(self.it, self.it + 1)
 
 
 def build_kernel(spec: GemmSpec):
@@ -344,43 +344,43 @@ def build_kernel(spec: GemmSpec):
     def _u64_const(value):
         """A `uint64` literal whose top bit may be set.
 
-        `K.uint64` routes a Python int through an int64 conversion, so a value
+        `txl.uint64` routes a Python int through an int64 conversion, so a value
         at or above 2**63 does not survive it -- and a descriptor whose swizzle
         puts `layout_type_` at bits [61,64) is exactly that. Assembling it from
         two 32-bit halves does; the compiler folds it straight back.
         """
-        return K.bitwise_or(
-            K.shift_left(K.uint64((value >> 32) & 0xFFFFFFFF), K.uint64(32)),
-            K.uint64(value & 0xFFFFFFFF),
+        return txl.bitwise_or(
+            txl.shift_left(txl.uint64((value >> 32) & 0xFFFFFFFF), txl.uint64(32)),
+            txl.uint64(value & 0xFFFFFFFF),
         )
 
     def _smem_addr_field(addr_u32):
         """Bits [13:0] of a matrix descriptor: the shared address over 16."""
-        return K.cast(
-            K.bitwise_and(K.shift_right(addr_u32, K.uint32(4)), K.uint32(0x3FFF)), "uint64"
+        return txl.cast(
+            txl.bitwise_and(txl.shift_right(addr_u32, txl.uint32(4)), txl.uint32(0x3FFF)), "uint64"
         )
 
     def _with_smem_addr(base, addr_u32):
         """Put an address into a descriptor base whose address field is zero."""
-        return K.bitwise_or(base, _smem_addr_field(addr_u32))
+        return txl.bitwise_or(base, _smem_addr_field(addr_u32))
 
     def _rebase(desc, addr_u32):
         """`replace_smem_desc_addr`: rewrite bits [13:0] with `smem_addr >> 4`."""
-        return K.bitwise_or(
-            K.bitwise_and(desc, K.bitwise_not(K.uint64(0x3FFF))), _smem_addr_field(addr_u32)
+        return txl.bitwise_or(
+            txl.bitwise_and(desc, txl.bitwise_not(txl.uint64(0x3FFF))), _smem_addr_field(addr_u32)
         )
 
     def _with_sf_id(desc, sfa_id, sfb_id):
         """`make_runtime_instr_desc_with_sf_id`: fields [31:29] and [6:4]."""
-        out = K.bitwise_and(desc, K.uint32(0x9FFFFFCF))
-        out = K.bitwise_or(out, K.shift_left(K.cast(sfa_id, "uint32"), K.uint32(29)))
-        return K.bitwise_or(out, K.shift_left(K.cast(sfb_id, "uint32"), K.uint32(4)))
+        out = txl.bitwise_and(desc, txl.uint32(0x9FFFFFCF))
+        out = txl.bitwise_or(out, txl.shift_left(txl.cast(sfa_id, "uint32"), txl.uint32(29)))
+        return txl.bitwise_or(out, txl.shift_left(txl.cast(sfb_id, "uint32"), txl.uint32(4)))
 
     def _advance_lo(desc, base_lo, units):
         """`advance_umma_desc_lo`: replace the low word with `base_lo + units`."""
-        return K.bitwise_or(
-            K.bitwise_and(desc, K.shift_left(K.uint64(0xFFFFFFFF), K.uint64(32))),
-            K.cast(base_lo + K.uint32(units), "uint64"),
+        return txl.bitwise_or(
+            txl.bitwise_and(desc, txl.shift_left(txl.uint64(0xFFFFFFFF), txl.uint64(32))),
+            txl.cast(base_lo + txl.uint32(units), "uint64"),
         )
 
     # ---- compile-time constants (all Python ints; nothing is emitted) --------
@@ -486,8 +486,8 @@ def build_kernel(spec: GemmSpec):
         spec.smem_b_size_per_stage // (1 if spec.b_dtype == "fp8" else 2)
     )
 
-    swizzle_a = K.SwizzleMode(_swizzle_enum(spec.swizzle_a_mode))
-    swizzle_b = K.SwizzleMode(_swizzle_enum(spec.swizzle_b_mode))
+    swizzle_a = txl.SwizzleMode(_swizzle_enum(spec.swizzle_a_mode))
+    swizzle_b = txl.SwizzleMode(_swizzle_enum(spec.swizzle_b_mode))
 
     def _operand_desc_sdo(is_k_major, load_mn, swizzle_mode, elem):
         """Descriptor stride offset for one K-owned operand tile (`mma/sm100.cuh:107`).
@@ -579,12 +579,12 @@ def build_kernel(spec: GemmSpec):
 
     def _next_tma_store_stage(stage):
         """Advance the phase-free TMA store-group ring without extra state."""
-        return K.Select(stage == NUM_TMA_STORE_STAGES - 1, 0, stage + 1)
+        return txl.Select(stage == NUM_TMA_STORE_STAGES - 1, 0, stage + 1)
 
     def _advance_pipeline(state, depth):
         """Advance with the source kernel's branchless stage/phase lowering."""
-        K.assign(state.stage, K.Select(state.stage == depth - 1, 0, state.stage + 1))
-        K.assign(state.phase, K.bitwise_xor(state.phase, K.cast(state.stage == 0, "int32")))
+        txl.assign(state.stage, txl.Select(state.stage == depth - 1, 0, state.stage + 1))
+        txl.assign(state.phase, txl.bitwise_xor(state.phase, txl.cast(state.stage == 0, "int32")))
 
     def _swizzled(block_idx, num_m_blocks, num_n_blocks):
         """`get_swizzled_block_idx`: group blocks along the multicast axis.
@@ -604,7 +604,7 @@ def build_kernel(spec: GemmSpec):
         # here because `per_group` is a runtime value whenever the group sizes are.
         first_block = _udiv(block_idx, per_group) * blocks_per_group
         in_group = _umod(block_idx, per_group)
-        in_group_blocks = K.min(blocks_per_group, primary - first_block)
+        in_group_blocks = txl.min(blocks_per_group, primary - first_block)
         if is_multicast_on_a:
             return _udiv(in_group, in_group_blocks), first_block + _umod(in_group, in_group_blocks)
         return first_block + _umod(in_group, in_group_blocks), _udiv(in_group, in_group_blocks)
@@ -616,37 +616,37 @@ def build_kernel(spec: GemmSpec):
         `cp.async.bulk.tensor` in this kernel, so it is resolved here once
         rather than by duplicating each call site.
         """
-        out = [K.cast(c, "int32") for c in coords]
+        out = [txl.cast(c, "int32") for c in coords]
         if is_batched:
-            out.append(K.cast(batch, "int32"))
+            out.append(txl.cast(batch, "int32"))
         return out
 
     total_warps = (spec.num_non_epilogue_threads + spec.num_epilogue_threads) // 32
 
-    @K.kernel(warps=total_warps, arch="sm_100a", min_blocks_per_sm=1, grid=spec.num_sms)
+    @txl.kernel(warps=total_warps, arch="sm_100a", min_blocks_per_sm=1, grid=spec.num_sms)
     def sm100_fp8_fp4_gemm_1d1d(
-        grouped_layout: K.gptr[K.i32],
-        grouped_len: K.i32,
-        shape_m: K.i32,
-        shape_n: K.i32,
-        shape_k: K.i32,
-        tensor_map_a: K.TensorMap,
-        tensor_map_b: K.TensorMap,
-        tensor_map_sfa: K.TensorMap,
-        tensor_map_sfb: K.TensorMap,
-        tensor_map_cd: K.TensorMap,
+        grouped_layout: txl.gptr[txl.i32],
+        grouped_len: txl.i32,
+        shape_m: txl.i32,
+        shape_n: txl.i32,
+        shape_k: txl.i32,
+        tensor_map_a: txl.TensorMap,
+        tensor_map_b: txl.TensorMap,
+        tensor_map_sfa: txl.TensorMap,
+        tensor_map_sfb: txl.TensorMap,
+        tensor_map_cd: txl.TensorMap,
     ):
         # ---- role ids -------------------------------------------------------
-        sm_idx = K.cta_id()
+        sm_idx = txl.cta_id()
         if cta_group > 1:
-            cta_in_cluster = K.cta_id_in_cluster([cta_group])
+            cta_in_cluster = txl.cta_id_in_cluster([cta_group])
             is_leader_cta = cta_in_cluster == 0
         else:
             is_leader_cta = True
-        thread_idx = K.thread_id()
-        lane_idx = K.lane_id()
+        thread_idx = txl.thread_id()
+        lane_idx = txl.lane_id()
 
-        roles = K.specialize(chain_dispatch=True)
+        roles = txl.specialize(chain_dispatch=True)
         load_role = roles.role("load", warps=[0])
         mma_role = roles.role("mma", warps=[1])
         transpose_role = roles.role("transpose", warps=[2])
@@ -656,7 +656,7 @@ def build_kernel(spec: GemmSpec):
         )
 
         # ---- shared memory --------------------------------------------------
-        smem = K.smem_pool()
+        smem = txl.smem_pool()
         # C/D is a linear view: the swizzle lives in the TensorMap and in the
         # epilogue's explicit bank-group arithmetic.
         smem_cd = smem.alloc(
@@ -674,24 +674,24 @@ def build_kernel(spec: GemmSpec):
             align=1024,
             swizzle=swizzle_b,
         )
-        smem_sfa = smem.alloc((stages, sf_block_m), K.u32, align=16)
-        smem_sfb = smem.alloc((stages, sf_block_n), K.u32, align=16)
-        full_barriers = K.TMABar(smem, stages)
-        empty_barriers = K.TCGen05Bar(smem, stages)
-        with_sf_barriers = K.MBarrier(smem, stages)
-        tmem_full_barriers = K.TCGen05Bar(smem, NUM_EPILOGUE_STAGES)
-        tmem_empty_barriers = K.MBarrier(smem, NUM_EPILOGUE_STAGES)
-        tmem_slot = smem.alloc((1,), K.u32, align=4)
+        smem_sfa = smem.alloc((stages, sf_block_m), txl.u32, align=16)
+        smem_sfb = smem.alloc((stages, sf_block_n), txl.u32, align=16)
+        full_barriers = txl.TMABar(smem, stages)
+        empty_barriers = txl.TCGen05Bar(smem, stages)
+        with_sf_barriers = txl.MBarrier(smem, stages)
+        tmem_full_barriers = txl.TCGen05Bar(smem, NUM_EPILOGUE_STAGES)
+        tmem_empty_barriers = txl.MBarrier(smem, NUM_EPILOGUE_STAGES)
+        tmem_slot = smem.alloc((1,), txl.u32, align=4)
         if smem.bytes != spec.smem_tmem_ptr_offset + 4:
             raise ValueError(
                 f"K SMEM layout ends at {smem.bytes}, expected {spec.smem_tmem_ptr_offset + 4}"
             )
         smem.commit(spec.smem_size)
 
-        smem_cd_word_data = K.reinterpret(
+        smem_cd_word_data = txl.reinterpret(
             PointerType(PrimType("uint32")), smem_cd.ptr_to([0, 0, 0])
         )
-        smem_cd_u32 = K.decl_buffer(
+        smem_cd_u32 = txl.decl_buffer(
             (NUM_TMA_STORE_STAGES * cd_stage_bytes // 4,),
             "uint32",
             data=smem_cd_word_data,
@@ -701,7 +701,7 @@ def build_kernel(spec: GemmSpec):
         )
 
         # ---- tensor memory --------------------------------------------------
-        # TMEM has no ordinary buffer view in Kern.  D's base is the runtime
+        # TMEM has no ordinary buffer view in tirx-lite.  D's base is the runtime
         # allocation mailbox; the scale-factor operands use fixed columns from
         # the specialization.
         tmem_col = tmem_slot[0]
@@ -710,50 +710,50 @@ def build_kernel(spec: GemmSpec):
 
         # ---- cluster rendezvous before the 2-CTA TMEM allocation -------------
         if cta_group > 1:
-            K.ptx.barrier.cluster.arrive.relaxed.aligned()
-            K.ptx.barrier.cluster.wait.acquire.aligned()
+            txl.ptx.barrier.cluster.arrive.relaxed.aligned()
+            txl.ptx.barrier.cluster.wait.acquire.aligned()
 
         with load_role:
-            K.ptx.prefetch.tensormap(K.address_of(tensor_map_a))
-            K.ptx.prefetch.tensormap(K.address_of(tensor_map_b))
-            K.ptx.prefetch.tensormap(K.address_of(tensor_map_sfa))
-            K.ptx.prefetch.tensormap(K.address_of(tensor_map_sfb))
-            K.ptx.prefetch.tensormap(K.address_of(tensor_map_cd))
+            txl.ptx.prefetch.tensormap(txl.address_of(tensor_map_a))
+            txl.ptx.prefetch.tensormap(txl.address_of(tensor_map_b))
+            txl.ptx.prefetch.tensormap(txl.address_of(tensor_map_sfa))
+            txl.ptx.prefetch.tensormap(txl.address_of(tensor_map_sfb))
+            txl.ptx.prefetch.tensormap(txl.address_of(tensor_map_cd))
 
         # ---- barrier init and TMEM allocation -------------------------------
         def init_barriers():
-            init_elected = K.local_scalar("uint32")
-            init_elected_lane = K.local_scalar("uint32")
-            K.ptx.elect_sync(init_elected_lane, init_elected, K.uint32(0xFFFFFFFF))
-            with K.If(init_elected == K.uint32(1)):
-                with K.Then():
-                    with K.unroll(0, stages) as s:
-                        K.ptx.mbarrier.init.shared.b64(full_barriers.ptr_to([s]), K.uint32(1))
-                        K.ptx.mbarrier.init.shared.b64(empty_barriers.ptr_to([s]), K.uint32(1))
-                        K.ptx.mbarrier.init.shared.b64(
-                            with_sf_barriers.ptr_to([s]), K.uint32(cta_group * 32)
+            init_elected = txl.local_scalar("uint32")
+            init_elected_lane = txl.local_scalar("uint32")
+            txl.ptx.elect_sync(init_elected_lane, init_elected, txl.uint32(0xFFFFFFFF))
+            with txl.If(init_elected == txl.uint32(1)):
+                with txl.Then():
+                    with txl.unroll(0, stages) as s:
+                        txl.ptx.mbarrier.init.shared.b64(full_barriers.ptr_to([s]), txl.uint32(1))
+                        txl.ptx.mbarrier.init.shared.b64(empty_barriers.ptr_to([s]), txl.uint32(1))
+                        txl.ptx.mbarrier.init.shared.b64(
+                            with_sf_barriers.ptr_to([s]), txl.uint32(cta_group * 32)
                         )
-                    with K.unroll(0, NUM_EPILOGUE_STAGES) as e:
-                        K.ptx.mbarrier.init.shared.b64(tmem_full_barriers.ptr_to([e]), K.uint32(1))
-                        K.ptx.mbarrier.init.shared.b64(
-                            tmem_empty_barriers.ptr_to([e]), K.uint32(cta_group * num_store_threads)
+                    with txl.unroll(0, NUM_EPILOGUE_STAGES) as e:
+                        txl.ptx.mbarrier.init.shared.b64(tmem_full_barriers.ptr_to([e]), txl.uint32(1))
+                        txl.ptx.mbarrier.init.shared.b64(
+                            tmem_empty_barriers.ptr_to([e]), txl.uint32(cta_group * num_store_threads)
                         )
-                    K.ptx.fence.mbarrier_init.release.cluster()
+                    txl.ptx.fence.mbarrier_init.release.cluster()
 
         with mma_role:
             init_barriers()
         with transpose_role:
-            K.ptx[f"tcgen05.alloc.cta_group::{cta_group}.sync.aligned.shared::cta.b32"](
-                K.address_of(tmem_slot[0]), K.uint32(spec.num_tmem_cols)
+            txl.ptx[f"tcgen05.alloc.cta_group::{cta_group}.sync.aligned.shared::cta.b32"](
+                txl.address_of(tmem_slot[0]), txl.uint32(spec.num_tmem_cols)
             )
 
         if cta_group > 1:
-            K.ptx.barrier.cluster.arrive.relaxed.aligned()
-            K.ptx.barrier.cluster.wait.acquire.aligned()
+            txl.ptx.barrier.cluster.arrive.relaxed.aligned()
+            txl.ptx.barrier.cluster.wait.acquire.aligned()
         else:
-            K.ptx.bar.sync(K.uint32(0))
+            txl.ptx.bar.sync(txl.uint32(0))
 
-        K.ptx.griddepcontrol.wait()
+        txl.ptx.griddepcontrol.wait()
 
         # ===============================================================
         # Persistent scheduler (source `scheduler/gemm.cuh`)
@@ -770,30 +770,30 @@ def build_kernel(spec: GemmSpec):
         eff_n = spec.shape_n if spec.shape_n > 0 else shape_n
         eff_k = spec.shape_k if spec.shape_k > 0 else shape_k
 
-        num_m_blocks = K.local_scalar("int32")
-        num_n_blocks = K.local_scalar("int32")
-        num_blocks = K.local_scalar("int32")
-        num_k_blocks = K.local_scalar("int32")
-        K.assign(num_m_blocks, _uceil(eff_m, block_m))
-        K.assign(num_n_blocks, (eff_n + (block_n - 1)) // block_n)
-        K.assign(num_blocks, num_m_blocks * num_n_blocks)
-        K.assign(num_k_blocks, _uceil(eff_k, block_k))
-        shape_sfa_k = K.local_scalar("int32")
-        shape_sfb_k = K.local_scalar("int32")
-        K.assign(shape_sfa_k, (eff_k + (spec.gran_k_a * 4 - 1)) // (spec.gran_k_a * 4))
-        K.assign(shape_sfb_k, (eff_k + (spec.gran_k_b * 4 - 1)) // (spec.gran_k_b * 4))
+        num_m_blocks = txl.local_scalar("int32")
+        num_n_blocks = txl.local_scalar("int32")
+        num_blocks = txl.local_scalar("int32")
+        num_k_blocks = txl.local_scalar("int32")
+        txl.assign(num_m_blocks, _uceil(eff_m, block_m))
+        txl.assign(num_n_blocks, (eff_n + (block_n - 1)) // block_n)
+        txl.assign(num_blocks, num_m_blocks * num_n_blocks)
+        txl.assign(num_k_blocks, _uceil(eff_k, block_k))
+        shape_sfa_k = txl.local_scalar("int32")
+        shape_sfb_k = txl.local_scalar("int32")
+        txl.assign(shape_sfa_k, (eff_k + (spec.gran_k_a * 4 - 1)) // (spec.gran_k_a * 4))
+        txl.assign(shape_sfb_k, (eff_k + (spec.gran_k_b * 4 - 1)) // (spec.gran_k_b * 4))
 
         # ===============================================================
         # Role 0: TMA load warp, one elected lane (source `:206`)
         # ===============================================================
 
         def load_role_body():
-            ld_elected = K.local_scalar("uint32")
-            ld_elected_lane = K.local_scalar("uint32")
-            K.ptx.elect_sync(ld_elected_lane, ld_elected, K.uint32(0xFFFFFFFF))
-            with K.If(ld_elected == K.uint32(1)):
-                with K.Then():
-                    ld_pipe = K.PipelineState(stages, phase=0)
+            ld_elected = txl.local_scalar("uint32")
+            ld_elected_lane = txl.local_scalar("uint32")
+            txl.ptx.elect_sync(ld_elected_lane, ld_elected, txl.uint32(0xFFFFFFFF))
+            with txl.If(ld_elected == txl.uint32(1)):
+                with txl.Then():
+                    ld_pipe = txl.PipelineState(stages, phase=0)
                     ld_sched = _PersistentScheduler(
                         spec,
                         grouped_layout,
@@ -803,12 +803,12 @@ def build_kernel(spec: GemmSpec):
                         num_blocks,
                         track_sfk=True,
                     )
-                    ld_kblocks = K.local_scalar("int32", init=0)
-                    with K.While(ld_sched.valid == 1):
+                    ld_kblocks = txl.local_scalar("int32", init=0)
+                    with txl.While(ld_sched.valid == 1):
                         ld_sched.next()
-                        with K.If(ld_sched.valid == 1):
-                            with K.Then():
-                                K.assign(
+                        with txl.If(ld_sched.valid == 1):
+                            with txl.Then():
+                                txl.assign(
                                     ld_kblocks,
                                     (
                                         _uceil(ld_sched.psum, block_k)
@@ -824,9 +824,9 @@ def build_kernel(spec: GemmSpec):
                                     ld_sched.nmb,
                                     num_n_blocks,
                                 )
-                                m_idx = K.local_scalar("int32")
-                                n_idx = K.local_scalar("int32")
-                                K.assign(
+                                m_idx = txl.local_scalar("int32")
+                                n_idx = txl.local_scalar("int32")
+                                txl.assign(
                                     m_idx,
                                     (
                                         ld_m_local
@@ -838,63 +838,63 @@ def build_kernel(spec: GemmSpec):
                                     )
                                     * block_m,
                                 )
-                                K.assign(n_idx, ld_n_local * block_n)
-                                sfa_mn = K.local_scalar("int32")
-                                sfb_mn = K.local_scalar("int32")
+                                txl.assign(n_idx, ld_n_local * block_n)
+                                sfa_mn = txl.local_scalar("int32")
+                                sfb_mn = txl.local_scalar("int32")
                                 # The scale factors are indexed by the *whole* block, before
                                 # the cluster split below.
-                                K.assign(sfa_mn, m_idx)
-                                K.assign(sfb_mn, n_idx)
+                                txl.assign(sfa_mn, m_idx)
+                                txl.assign(sfb_mn, n_idx)
                                 # `get_global_idx` carries the expert offset on whichever of
                                 # B's axes the group was folded into: N for a K-major B,
                                 # K for an MN-major one (source `:223`, `:233`, `:271`).
-                                k_b_idx = K.local_scalar("int32")
-                                k_a_offset = K.local_scalar("int32")
-                                K.assign(k_b_idx, 0)
-                                K.assign(k_a_offset, 0)
-                                sfa_k_offset = K.local_scalar("int32", init=0)
+                                k_b_idx = txl.local_scalar("int32")
+                                k_a_offset = txl.local_scalar("int32")
+                                txl.assign(k_b_idx, 0)
+                                txl.assign(k_a_offset, 0)
+                                sfa_k_offset = txl.local_scalar("int32", init=0)
                                 if is_m_grouped_contiguous:
                                     # Non-psum contiguous: the expert is a per-row id.
-                                    expert = K.local_scalar("int32")
+                                    expert = txl.local_scalar("int32")
                                     _load_grouped_layout(expert, grouped_layout, m_idx)
-                                    K.assign(expert, K.max(0, expert))
+                                    txl.assign(expert, txl.max(0, expert))
                                     if major_b_is_k:
-                                        K.assign(n_idx, expert * eff_n + n_idx)
+                                        txl.assign(n_idx, expert * eff_n + n_idx)
                                     else:
-                                        K.assign(k_b_idx, expert * eff_k + k_b_idx)
+                                        txl.assign(k_b_idx, expert * eff_k + k_b_idx)
                                     sfb_k_offset = expert * shape_sfb_k
                                 else:
                                     if is_m_grouped_masked:
                                         # Masked: A, B, SFA and SFB are all `[G, ...]` slabs, so every axis
                                         # carries the group offset (source `:221-234`, `:264-272`).
-                                        K.assign(m_idx, ld_sched.grp * eff_m + m_idx)
+                                        txl.assign(m_idx, ld_sched.grp * eff_m + m_idx)
                                         if major_b_is_k:
-                                            K.assign(n_idx, ld_sched.grp * eff_n + n_idx)
+                                            txl.assign(n_idx, ld_sched.grp * eff_n + n_idx)
                                         else:
-                                            K.assign(k_b_idx, ld_sched.grp * eff_k + k_b_idx)
-                                        K.assign(sfa_k_offset, ld_sched.grp * shape_sfa_k)
+                                            txl.assign(k_b_idx, ld_sched.grp * eff_k + k_b_idx)
+                                        txl.assign(sfa_k_offset, ld_sched.grp * shape_sfa_k)
                                         sfb_k_offset = ld_sched.grp * shape_sfb_k
                                     else:
                                         if is_m_grouped_psum:
                                             # PSUM: A is one flat `[M, K]`; only B and SFB are grouped.
                                             if major_b_is_k:
-                                                K.assign(n_idx, ld_sched.grp * eff_n + n_idx)
+                                                txl.assign(n_idx, ld_sched.grp * eff_n + n_idx)
                                             else:
-                                                K.assign(k_b_idx, (ld_sched.grp * eff_k + k_b_idx))
+                                                txl.assign(k_b_idx, (ld_sched.grp * eff_k + k_b_idx))
                                             sfb_k_offset = ld_sched.grp * shape_sfb_k
                                         else:
                                             if is_k_grouped:
                                                 # Groups are concatenated along K; both operands are MN-major, so the
                                                 # K index carries the running offset and the SF index its own
                                                 # cumulative row count (source `:166-180`).
-                                                K.assign(k_a_offset, ld_sched.last)
-                                                K.assign(k_b_idx, ld_sched.last)
-                                                K.assign(sfa_k_offset, ld_sched.sfk)
+                                                txl.assign(k_a_offset, ld_sched.last)
+                                                txl.assign(k_b_idx, ld_sched.last)
+                                                txl.assign(sfa_k_offset, ld_sched.sfk)
                                                 sfb_k_offset = ld_sched.sfk
                                             else:
                                                 if is_batched:
                                                     # Batched: the batch index rides the SF outer extent (source `:183`).
-                                                    K.assign(
+                                                    txl.assign(
                                                         sfa_k_offset, (ld_sched.grp * shape_sfa_k)
                                                     )
                                                     sfb_k_offset = ld_sched.grp * shape_sfb_k
@@ -905,9 +905,9 @@ def build_kernel(spec: GemmSpec):
                                 # TMA (source `:237-240`).
                                 if use_effective_m:
                                     # `get_aligned_effective_m_in_block` for this block (sketch `:559`).
-                                    ld_eff_m = K.local_scalar("int32", init=block_m)
-                                    with K.If(ld_m_local == ld_sched.nmb - 1), K.Then():
-                                        K.assign(
+                                    ld_eff_m = txl.local_scalar("int32", init=block_m)
+                                    with txl.If(ld_m_local == ld_sched.nmb - 1), txl.Then():
+                                        txl.assign(
                                             ld_eff_m,
                                             (
                                                 _uceil(
@@ -921,7 +921,7 @@ def build_kernel(spec: GemmSpec):
                                         )
                                 if cta_group > 1:
                                     if is_multicast_on_a:
-                                        K.assign(
+                                        txl.assign(
                                             m_idx,
                                             m_idx
                                             + cta_in_cluster
@@ -932,25 +932,25 @@ def build_kernel(spec: GemmSpec):
                                             ),
                                         )
                                     else:
-                                        K.assign(n_idx, n_idx + cta_in_cluster * load_block_n)
-                                ld_k = K.local_scalar("int32", init=0)
-                                with K.While(ld_k < ld_kblocks):
+                                        txl.assign(n_idx, n_idx + cta_in_cluster * load_block_n)
+                                ld_k = txl.local_scalar("int32", init=0)
+                                with txl.While(ld_k < ld_kblocks):
                                     _wait_barrier(
                                         empty_barriers.ptr_to([ld_pipe.stage]),
-                                        K.bitwise_xor(ld_pipe.phase, 1),
+                                        txl.bitwise_xor(ld_pipe.phase, 1),
                                     )
-                                    k_b = K.local_scalar("int32")
-                                    k_a = K.local_scalar("int32")
-                                    K.assign(k_b, k_b_idx + ld_k * block_k)
-                                    K.assign(k_a, k_a_offset + ld_k * block_k)
-                                    with K.unroll(0, num_a_atoms) as i:
-                                        K.ptx[load_chain](
+                                    k_b = txl.local_scalar("int32")
+                                    k_a = txl.local_scalar("int32")
+                                    txl.assign(k_b, k_b_idx + ld_k * block_k)
+                                    txl.assign(k_a, k_a_offset + ld_k * block_k)
+                                    with txl.unroll(0, num_a_atoms) as i:
+                                        txl.ptx[load_chain](
                                             (
                                                 smem_a_tile[ld_pipe.stage].ptr_to(0, i * a_atom)
                                                 if major_a_is_k
                                                 else smem_a_tile[ld_pipe.stage].ptr_to(0, 0)
                                             ),
-                                            K.address_of(tensor_map_a),
+                                            txl.address_of(tensor_map_a),
                                             *_tma_coords(
                                                 (
                                                     (k_a + i * a_atom, m_idx)
@@ -960,16 +960,16 @@ def build_kernel(spec: GemmSpec):
                                                 ld_sched.grp,
                                             ),
                                             full_barriers.ptr_to([ld_pipe.stage]),
-                                            K.uint64(EVICT_NORMAL),
+                                            txl.uint64(EVICT_NORMAL),
                                         )
-                                    with K.unroll(0, num_b_atoms) as i:
-                                        K.ptx[load_chain](
+                                    with txl.unroll(0, num_b_atoms) as i:
+                                        txl.ptx[load_chain](
                                             (
                                                 smem_b_tile[ld_pipe.stage].ptr_to(0, i * b_atom)
                                                 if major_b_is_k
                                                 else smem_b_tile[ld_pipe.stage].ptr_to(0, 0)
                                             ),
-                                            K.address_of(tensor_map_b),
+                                            txl.address_of(tensor_map_b),
                                             *_tma_coords(
                                                 (
                                                     (k_b + i * b_atom, n_idx)
@@ -979,39 +979,39 @@ def build_kernel(spec: GemmSpec):
                                                 ld_sched.grp,
                                             ),
                                             full_barriers.ptr_to([ld_pipe.stage]),
-                                            K.uint64(EVICT_NORMAL),
+                                            txl.uint64(EVICT_NORMAL),
                                         )
-                                    arrival = K.local_scalar("int32", init=arrival_bytes_ab)
-                                    with K.If(ld_k % sfa_stages_per_load == 0):
-                                        with K.Then():
-                                            K.ptx[sf_load_chain](
+                                    arrival = txl.local_scalar("int32", init=arrival_bytes_ab)
+                                    with txl.If(ld_k % sfa_stages_per_load == 0):
+                                        with txl.Then():
+                                            txl.ptx[sf_load_chain](
                                                 smem_sfa.ptr_to([ld_pipe.stage, 0]),
-                                                K.address_of(tensor_map_sfa),
-                                                K.cast(sfa_mn, "int32"),
-                                                K.cast(
+                                                txl.address_of(tensor_map_sfa),
+                                                txl.cast(sfa_mn, "int32"),
+                                                txl.cast(
                                                     sfa_k_offset + ld_k // sfa_stages_per_load,
                                                     "int32",
                                                 ),
                                                 full_barriers.ptr_to([ld_pipe.stage]),
-                                                K.uint64(EVICT_NORMAL),
+                                                txl.uint64(EVICT_NORMAL),
                                             )
-                                            K.assign(arrival, arrival + block_m * 4)
-                                    with K.If(ld_k % sfb_stages_per_load == 0):
-                                        with K.Then():
-                                            K.ptx[sf_load_chain](
+                                            txl.assign(arrival, arrival + block_m * 4)
+                                    with txl.If(ld_k % sfb_stages_per_load == 0):
+                                        with txl.Then():
+                                            txl.ptx[sf_load_chain](
                                                 smem_sfb.ptr_to([ld_pipe.stage, 0]),
-                                                K.address_of(tensor_map_sfb),
-                                                K.cast(sfb_mn, "int32"),
-                                                K.cast(
+                                                txl.address_of(tensor_map_sfb),
+                                                txl.cast(sfb_mn, "int32"),
+                                                txl.cast(
                                                     sfb_k_offset + ld_k // sfb_stages_per_load,
                                                     "int32",
                                                 ),
                                                 full_barriers.ptr_to([ld_pipe.stage]),
-                                                K.uint64(EVICT_NORMAL),
+                                                txl.uint64(EVICT_NORMAL),
                                             )
-                                            K.assign(arrival, arrival + block_n * 4)
-                                    full_barriers.arrive(ld_pipe.stage, K.cast(arrival, "uint32"))
-                                    K.assign(ld_k, ld_k + 1)
+                                            txl.assign(arrival, arrival + block_n * 4)
+                                    full_barriers.arrive(ld_pipe.stage, txl.cast(arrival, "uint32"))
+                                    txl.assign(ld_k, ld_k + 1)
                                     _advance_pipeline(ld_pipe, stages)
                         ld_sched.advance()
 
@@ -1020,55 +1020,55 @@ def build_kernel(spec: GemmSpec):
         # ===============================================================
 
         def mma_role_body():
-            with K.If(is_leader_cta), K.Then():
-                desc_a = K.local_scalar("uint64")
-                desc_b = K.local_scalar("uint64")
-                desc_sf = K.local_scalar("uint64")
-                desc_i = K.local_scalar("uint32")
+            with txl.If(is_leader_cta), txl.Then():
+                desc_a = txl.local_scalar("uint64")
+                desc_b = txl.local_scalar("uint64")
+                desc_sf = txl.local_scalar("uint64")
+                desc_i = txl.local_scalar("uint32")
                 # Every descriptor field but the shared address is a build-time
                 # constant, so the bases are folded in Python and only
                 # `addr >> 4` is computed here.  The `*_DESC_BASE` constants
                 # come from the same bit layout the runtime C encoders fill in.
-                a_smem_u32 = K.local_scalar("uint32")
-                b_smem_u32 = K.local_scalar("uint32")
-                sfa_smem_u32 = K.local_scalar("uint32")
-                sfb_smem_u32 = K.local_scalar("uint32")
-                K.assign(a_smem_u32, K.cuda.cvta_generic_to_shared(smem_a_tile[0].ptr_to(0, 0)))
-                K.assign(b_smem_u32, K.cuda.cvta_generic_to_shared(smem_b_tile[0].ptr_to(0, 0)))
-                K.assign(sfa_smem_u32, K.cuda.cvta_generic_to_shared(smem_sfa.ptr_to([0, 0])))
-                K.assign(sfb_smem_u32, K.cuda.cvta_generic_to_shared(smem_sfb.ptr_to([0, 0])))
-                K.assign(desc_a, _with_smem_addr(_u64_const(A_DESC_BASE), a_smem_u32))
-                K.assign(desc_b, _with_smem_addr(_u64_const(B_DESC_BASE), b_smem_u32))
+                a_smem_u32 = txl.local_scalar("uint32")
+                b_smem_u32 = txl.local_scalar("uint32")
+                sfa_smem_u32 = txl.local_scalar("uint32")
+                sfb_smem_u32 = txl.local_scalar("uint32")
+                txl.assign(a_smem_u32, txl.cuda.cvta_generic_to_shared(smem_a_tile[0].ptr_to(0, 0)))
+                txl.assign(b_smem_u32, txl.cuda.cvta_generic_to_shared(smem_b_tile[0].ptr_to(0, 0)))
+                txl.assign(sfa_smem_u32, txl.cuda.cvta_generic_to_shared(smem_sfa.ptr_to([0, 0])))
+                txl.assign(sfb_smem_u32, txl.cuda.cvta_generic_to_shared(smem_sfb.ptr_to([0, 0])))
+                txl.assign(desc_a, _with_smem_addr(_u64_const(A_DESC_BASE), a_smem_u32))
+                txl.assign(desc_b, _with_smem_addr(_u64_const(B_DESC_BASE), b_smem_u32))
                 # `make_sf_desc`: unswizzled, stride offset 8*16, leading offset 0.
-                K.assign(desc_sf, _with_smem_addr(_u64_const(SF_DESC_BASE), sfa_smem_u32))
+                txl.assign(desc_sf, _with_smem_addr(_u64_const(SF_DESC_BASE), sfa_smem_u32))
                 # Stays a mutable local: the scale-factor ids and, under
                 # `use_effective_m`, the N field are patched per MMA below.
-                K.assign(desc_i, K.uint32(INSTR_DESC))
+                txl.assign(desc_i, txl.uint32(INSTR_DESC))
                 # The per-stage descriptor low words live one stage per lane; a warp
                 # shuffle indexes the table instead of recomputing the descriptor.
-                a_desc_lo = K.local_scalar("uint32")
-                b_desc_lo = K.local_scalar("uint32")
-                K.assign(
+                a_desc_lo = txl.local_scalar("uint32")
+                b_desc_lo = txl.local_scalar("uint32")
+                txl.assign(
                     a_desc_lo,
-                    K.Select(
+                    txl.Select(
                         lane_idx < stages,
-                        K.cast(K.bitwise_and(desc_a, K.uint64(0xFFFFFFFF)), "uint32")
-                        + K.cast(lane_idx * (a_bytes_per_stage // 16), "uint32"),
-                        K.uint32(0),
+                        txl.cast(txl.bitwise_and(desc_a, txl.uint64(0xFFFFFFFF)), "uint32")
+                        + txl.cast(lane_idx * (a_bytes_per_stage // 16), "uint32"),
+                        txl.uint32(0),
                     ),
                 )
-                K.assign(
+                txl.assign(
                     b_desc_lo,
-                    K.Select(
+                    txl.Select(
                         lane_idx < stages,
-                        K.cast(K.bitwise_and(desc_b, K.uint64(0xFFFFFFFF)), "uint32")
-                        + K.cast(lane_idx * (b_bytes_per_stage // 16), "uint32"),
-                        K.uint32(0),
+                        txl.cast(txl.bitwise_and(desc_b, txl.uint64(0xFFFFFFFF)), "uint32")
+                        + txl.cast(lane_idx * (b_bytes_per_stage // 16), "uint32"),
+                        txl.uint32(0),
                     ),
                 )
 
-                mma_pipe = K.PipelineState(stages, phase=0)
-                accum_pipe = K.PipelineState(NUM_EPILOGUE_STAGES, phase=0)
+                mma_pipe = txl.PipelineState(stages, phase=0)
+                accum_pipe = txl.PipelineState(NUM_EPILOGUE_STAGES, phase=0)
                 mma_sched = _PersistentScheduler(
                     spec,
                     grouped_layout,
@@ -1078,24 +1078,24 @@ def build_kernel(spec: GemmSpec):
                     num_blocks,
                     track_sfk=False,
                 )
-                mma_iter = K.local_scalar("int32")
-                mma_kblocks = K.local_scalar("int32")
+                mma_iter = txl.local_scalar("int32")
+                mma_kblocks = txl.local_scalar("int32")
                 # `cute::elect_one_sync()` is loop-invariant for this fully-active warp;
                 # nvcc hoists it into a uniform predicate, so hoist it here too rather
                 # than re-executing `elect.sync` twice per K block.
-                mma_elected = K.local_scalar("uint32")
-                mma_elected_lane = K.local_scalar("uint32")
-                K.ptx.elect_sync(mma_elected_lane, mma_elected, K.uint32(0xFFFFFFFF))
-                K.assign(mma_kblocks, 0)
-                K.assign(mma_iter, 0)
-                with K.While(mma_sched.valid == 1):
+                mma_elected = txl.local_scalar("uint32")
+                mma_elected_lane = txl.local_scalar("uint32")
+                txl.ptx.elect_sync(mma_elected_lane, mma_elected, txl.uint32(0xFFFFFFFF))
+                txl.assign(mma_kblocks, 0)
+                txl.assign(mma_iter, 0)
+                with txl.While(mma_sched.valid == 1):
                     mma_sched.next()
-                    with K.If(mma_sched.valid == 1):
-                        with K.Then():
+                    with txl.If(mma_sched.valid == 1):
+                        with txl.Then():
                             if use_effective_m:
                                 # `get_aligned_effective_m_in_block` for this block (sketch `:559`).
-                                mma_eff_m = K.local_scalar("int32")
-                                mma_m_local = K.local_scalar(
+                                mma_eff_m = txl.local_scalar("int32")
+                                mma_m_local = txl.local_scalar(
                                     "int32",
                                     init=_swizzled(
                                         mma_sched.nb - mma_sched.cum * num_n_blocks,
@@ -1103,9 +1103,9 @@ def build_kernel(spec: GemmSpec):
                                         num_n_blocks,
                                     )[0],
                                 )
-                                K.assign(mma_eff_m, block_m)
-                                with K.If(mma_m_local == mma_sched.nmb - 1), K.Then():
-                                    K.assign(
+                                txl.assign(mma_eff_m, block_m)
+                                with txl.If(mma_m_local == mma_sched.nmb - 1), txl.Then():
+                                    txl.assign(
                                         mma_eff_m,
                                         (
                                             _uceil(
@@ -1117,113 +1117,113 @@ def build_kernel(spec: GemmSpec):
                                             * UMMA_STEP_N
                                         ),
                                     )
-                                K.assign(
+                                txl.assign(
                                     desc_i,
-                                    K.bitwise_or(
-                                        K.bitwise_and(desc_i, K.uint32(UMMA_N_FIELD_MASK)),
-                                        K.shift_left(
-                                            K.cast(mma_eff_m // 8, "uint32"), K.uint32(17)
+                                    txl.bitwise_or(
+                                        txl.bitwise_and(desc_i, txl.uint32(UMMA_N_FIELD_MASK)),
+                                        txl.shift_left(
+                                            txl.cast(mma_eff_m // 8, "uint32"), txl.uint32(17)
                                         ),
                                     ),
                                 )
-                            K.assign(
+                            txl.assign(
                                 mma_kblocks,
                                 (_uceil(mma_sched.psum, block_k) if is_k_grouped else num_k_blocks),
                             )
                             _wait_barrier(
                                 tmem_empty_barriers.ptr_to([accum_pipe.stage]),
-                                K.bitwise_xor(accum_pipe.phase, 1),
+                                txl.bitwise_xor(accum_pipe.phase, 1),
                             )
-                            K.ptx.tcgen05.fence__after_thread_sync()
+                            txl.ptx.tcgen05.fence__after_thread_sync()
 
-                            mma_k = K.local_scalar("int32", init=0)
+                            mma_k = txl.local_scalar("int32", init=0)
                             # `#pragma unroll 4` (source `:339`).  Four bodies per back-edge with
                             # `mma_k == 4 * j + u` makes `mma_k % kNumSF?StagesPerLoad` the constant
                             # `u`, which is what removes the scale-factor id arithmetic and the UTCCP
                             # branch from three of every four K blocks.
-                            mma_k_rounded = K.local_scalar(
+                            mma_k_rounded = txl.local_scalar(
                                 "int32",
                                 init=((mma_kblocks + (MMA_K_UNROLL - 1)) // MMA_K_UNROLL)
                                 * MMA_K_UNROLL,
                             )
-                            with K.While(mma_k < mma_k_rounded):
-                                with K.unroll(0, MMA_K_UNROLL) as u:
-                                    with K.If(mma_k < mma_kblocks), K.Then():
+                            with txl.While(mma_k < mma_k_rounded):
+                                with txl.unroll(0, MMA_K_UNROLL) as u:
+                                    with txl.If(mma_k < mma_kblocks), txl.Then():
                                         _wait_barrier(
                                             with_sf_barriers.ptr_to([mma_pipe.stage]),
                                             mma_pipe.phase,
                                         )
-                                        K.ptx.tcgen05.fence__after_thread_sync()
-                                        a_base_lo = K.local_scalar("uint32")
-                                        b_base_lo = K.local_scalar("uint32")
-                                        K.ptx.shfl_sync.idx.b32(
+                                        txl.ptx.tcgen05.fence__after_thread_sync()
+                                        a_base_lo = txl.local_scalar("uint32")
+                                        b_base_lo = txl.local_scalar("uint32")
+                                        txl.ptx.shfl_sync.idx.b32(
                                             a_base_lo,
                                             a_desc_lo,
-                                            K.cast(mma_pipe.stage, "uint32"),
-                                            K.uint32(0x1F),
-                                            K.uint32(0xFFFFFFFF),
+                                            txl.cast(mma_pipe.stage, "uint32"),
+                                            txl.uint32(0x1F),
+                                            txl.uint32(0xFFFFFFFF),
                                         )
-                                        K.ptx.shfl_sync.idx.b32(
+                                        txl.ptx.shfl_sync.idx.b32(
                                             b_base_lo,
                                             b_desc_lo,
-                                            K.cast(mma_pipe.stage, "uint32"),
-                                            K.uint32(0x1F),
-                                            K.uint32(0xFFFFFFFF),
+                                            txl.cast(mma_pipe.stage, "uint32"),
+                                            txl.uint32(0x1F),
+                                            txl.uint32(0xFFFFFFFF),
                                         )
                                         # One elected lane owns the UTCCP and UMMA issues.  Predicating the
                                         # instructions keeps the warp converged; branching on the elected
                                         # lane instead costs a BSSY/BSYNC pair per K block.
-                                        with K.If(u % sfa_stages_per_load == 0):
-                                            with K.Then():
-                                                with K.unroll(0, num_sfa_chunks) as c:
-                                                    K.assign(
+                                        with txl.If(u % sfa_stages_per_load == 0):
+                                            with txl.Then():
+                                                with txl.unroll(0, num_sfa_chunks) as c:
+                                                    txl.assign(
                                                         desc_sf,
                                                         _rebase(
                                                             desc_sf,
                                                             sfa_smem_u32
-                                                            + K.cast(
+                                                            + txl.cast(
                                                                 mma_pipe.stage * (sf_block_m * 4),
                                                                 "uint32",
                                                             )
-                                                            + K.uint32(
+                                                            + txl.uint32(
                                                                 c * NUM_UTCCP_ALIGNED_ELEMS * 4
                                                             ),
                                                         ),
                                                     )
-                                                    K.ptx[utccp_chain](
-                                                        K.cast(sfa_tmem_col + c * 4, "uint32"),
+                                                    txl.ptx[utccp_chain](
+                                                        txl.cast(sfa_tmem_col + c * 4, "uint32"),
                                                         desc_sf,
                                                         pred=mma_elected,
                                                     )
-                                        with K.If(u % sfb_stages_per_load == 0):
-                                            with K.Then():
-                                                with K.unroll(0, num_sfb_chunks) as c:
-                                                    K.assign(
+                                        with txl.If(u % sfb_stages_per_load == 0):
+                                            with txl.Then():
+                                                with txl.unroll(0, num_sfb_chunks) as c:
+                                                    txl.assign(
                                                         desc_sf,
                                                         _rebase(
                                                             desc_sf,
                                                             sfb_smem_u32
-                                                            + K.cast(
+                                                            + txl.cast(
                                                                 mma_pipe.stage * (sf_block_n * 4),
                                                                 "uint32",
                                                             )
-                                                            + K.uint32(
+                                                            + txl.uint32(
                                                                 c * NUM_UTCCP_ALIGNED_ELEMS * 4
                                                             ),
                                                         ),
                                                     )
-                                                    K.ptx[utccp_chain](
-                                                        K.cast(sfb_tmem_col + c * 4, "uint32"),
+                                                    txl.ptx[utccp_chain](
+                                                        txl.cast(sfb_tmem_col + c * 4, "uint32"),
                                                         desc_sf,
                                                         pred=mma_elected,
                                                     )
-                                        with K.unroll(0, umma_k_steps) as ki:
+                                        with txl.unroll(0, umma_k_steps) as ki:
                                             # `issue_full_k_block` / `issue_tail_k_block`:
                                             # only the leading `ceil_div(remaining_k, UMMA_K)`
                                             # steps of a partial final K block are valid.
                                             with (
-                                                K.If(
-                                                    K.Or(
+                                                txl.If(
+                                                    txl.Or(
                                                         mma_k < mma_kblocks - 1,
                                                         ki * UMMA_K
                                                         < (
@@ -1236,31 +1236,31 @@ def build_kernel(spec: GemmSpec):
                                                     if may_have_tail_k
                                                     else ki < umma_k_steps
                                                 ),
-                                                K.Then(),
+                                                txl.Then(),
                                             ):
-                                                sfa_id = K.local_scalar("uint32")
-                                                sfb_id = K.local_scalar("uint32")
-                                                K.assign(
+                                                sfa_id = txl.local_scalar("uint32")
+                                                sfb_id = txl.local_scalar("uint32")
+                                                txl.assign(
                                                     sfa_id,
                                                     (
-                                                        K.cast(ki, "uint32")
+                                                        txl.cast(ki, "uint32")
                                                         if sfa_stages_per_load == 1
-                                                        else K.cast(
+                                                        else txl.cast(
                                                             u % sfa_stages_per_load, "uint32"
                                                         )
                                                     ),
                                                 )
-                                                K.assign(
+                                                txl.assign(
                                                     sfb_id,
                                                     (
-                                                        K.cast(ki, "uint32")
+                                                        txl.cast(ki, "uint32")
                                                         if sfb_stages_per_load == 1
-                                                        else K.cast(
+                                                        else txl.cast(
                                                             u % sfb_stages_per_load, "uint32"
                                                         )
                                                     ),
                                                 )
-                                                rt_desc = K.local_scalar(
+                                                rt_desc = txl.local_scalar(
                                                     "uint32",
                                                     init=_with_sf_id(
                                                         desc_i,
@@ -1268,37 +1268,37 @@ def build_kernel(spec: GemmSpec):
                                                         (sfa_id if swap_ab else sfb_id),
                                                     ),
                                                 )
-                                                adv_a = K.local_scalar("uint64")
-                                                adv_b = K.local_scalar("uint64")
-                                                K.assign(
+                                                adv_a = txl.local_scalar("uint64")
+                                                adv_b = txl.local_scalar("uint64")
+                                                txl.assign(
                                                     adv_a,
                                                     _advance_lo(
                                                         desc_a, a_base_lo, ki * a_k_step_units
                                                     ),
                                                 )
-                                                K.assign(
+                                                txl.assign(
                                                     adv_b,
                                                     _advance_lo(
                                                         desc_b, b_base_lo, ki * b_k_step_units
                                                     ),
                                                 )
-                                                K.ptx[mma_chain](
-                                                    K.cast(accum_pipe.stage * umma_n, "uint32"),
+                                                txl.ptx[mma_chain](
+                                                    txl.cast(accum_pipe.stage * umma_n, "uint32"),
                                                     (adv_b if swap_ab else adv_a),
                                                     (adv_a if swap_ab else adv_b),
                                                     rt_desc,
-                                                    K.cast(
+                                                    txl.cast(
                                                         sfb_tmem_col if swap_ab else sfa_tmem_col,
                                                         "uint32",
                                                     ),
-                                                    K.cast(
+                                                    txl.cast(
                                                         sfa_tmem_col if swap_ab else sfb_tmem_col,
                                                         "uint32",
                                                     ),
-                                                    K.Or(ki > 0, mma_k > 0),
+                                                    txl.Or(ki > 0, mma_k > 0),
                                                     pred=mma_elected,
                                                 )
-                                        K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF))
+                                        txl.ptx.bar.warp.sync(txl.uint32(0xFFFFFFFF))
                                         # `tcgen05.commit` implies `fence::before_thread_sync`.
                                         # Same here: predicate the commits on the elected lane rather than
                                         # branching, so the warp never diverges inside the K loop.
@@ -1320,8 +1320,8 @@ def build_kernel(spec: GemmSpec):
                                                 accum_pipe.stage,
                                                 cta_group=cta_group,
                                                 cta_mask=(1 << cta_group) - 1,
-                                                pred=K.And(
-                                                    mma_elected == K.uint32(1),
+                                                pred=txl.And(
+                                                    mma_elected == txl.uint32(1),
                                                     mma_k == mma_kblocks - 1,
                                                 ),
                                             )
@@ -1329,28 +1329,28 @@ def build_kernel(spec: GemmSpec):
                                             tmem_full_barriers.arrive(
                                                 accum_pipe.stage,
                                                 cta_group=cta_group,
-                                                pred=K.And(
-                                                    mma_elected == K.uint32(1),
+                                                pred=txl.And(
+                                                    mma_elected == txl.uint32(1),
                                                     mma_k == mma_kblocks - 1,
                                                 ),
                                             )
-                                        K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF))
+                                        txl.ptx.bar.warp.sync(txl.uint32(0xFFFFFFFF))
                                         _advance_pipeline(mma_pipe, stages)
                                     # Advance unconditionally: the guard only masks the rounded-up tail,
                                     # and the loop still has to reach `mma_k_rounded`.
-                                    K.assign(mma_k, mma_k + 1)
+                                    txl.assign(mma_k, mma_k + 1)
                             _advance_pipeline(accum_pipe, NUM_EPILOGUE_STAGES)
-                            K.assign(mma_iter, mma_iter + 1)
+                            txl.assign(mma_iter, mma_iter + 1)
                     mma_sched.advance()
 
                 # A 2-CTA cluster needs one more accumulator wait before the
                 # barriers can be safely destroyed (source `:426`).
                 if cta_group > 1:
-                    with K.If(mma_iter > 0):
-                        with K.Then():
+                    with txl.If(mma_iter > 0):
+                        with txl.Then():
                             _wait_barrier(
                                 tmem_empty_barriers.ptr_to([(mma_iter - 1) % NUM_EPILOGUE_STAGES]),
-                                K.bitwise_and((mma_iter - 1) // NUM_EPILOGUE_STAGES, 1),
+                                txl.bitwise_and((mma_iter - 1) // NUM_EPILOGUE_STAGES, 1),
                             )
 
         # ===============================================================
@@ -1358,7 +1358,7 @@ def build_kernel(spec: GemmSpec):
         # ===============================================================
 
         def transpose_role_body():
-            tr_pipe = K.PipelineState(stages, phase=0)
+            tr_pipe = txl.PipelineState(stages, phase=0)
             tr_sched = _PersistentScheduler(
                 spec,
                 grouped_layout,
@@ -1368,71 +1368,71 @@ def build_kernel(spec: GemmSpec):
                 num_blocks,
                 track_sfk=False,
             )
-            tr_kblocks = K.local_scalar("int32", init=0)
-            sf_vals = K.alloc_local((4,), "uint32")
-            with K.While(tr_sched.valid == 1):
+            tr_kblocks = txl.local_scalar("int32", init=0)
+            sf_vals = txl.alloc_local((4,), "uint32")
+            with txl.While(tr_sched.valid == 1):
                 tr_sched.next()
-                with K.If(tr_sched.valid == 1):
-                    with K.Then():
-                        K.assign(
+                with txl.If(tr_sched.valid == 1):
+                    with txl.Then():
+                        txl.assign(
                             tr_kblocks,
                             (_uceil(tr_sched.psum, block_k) if is_k_grouped else num_k_blocks),
                         )
-                        tr_k = K.local_scalar("int32", init=0)
-                        with K.While(tr_k < tr_kblocks):
+                        tr_k = txl.local_scalar("int32", init=0)
+                        with txl.While(tr_k < tr_kblocks):
                             _wait_barrier(full_barriers.ptr_to([tr_pipe.stage]), tr_pipe.phase)
                             # The prior logical task may still read this stage through tcgen05's
                             # async proxy.  Complete that handoff before generic-proxy transpose
                             # stores reuse the same shared bytes.
-                            K.ptx.fence.proxy.async_.shared__cta()
-                            with K.If(tr_k % sfa_stages_per_load == 0):
-                                with K.Then():
-                                    with K.unroll(0, num_sfa_chunks) as c:
+                            txl.ptx.fence.proxy.async_.shared__cta()
+                            with txl.If(tr_k % sfa_stages_per_load == 0):
+                                with txl.Then():
+                                    with txl.unroll(0, num_sfa_chunks) as c:
                                         base = c * NUM_UTCCP_ALIGNED_ELEMS
-                                        with K.unroll(0, 4) as i:
-                                            K.ptx.ld.shared.u32(
+                                        with txl.unroll(0, 4) as i:
+                                            txl.ptx.ld.shared.u32(
                                                 sf_vals[i],
                                                 smem_sfa.ptr_to(
                                                     [tr_pipe.stage, base + i * 32 + lane_idx]
                                                 ),
                                             )
-                                        K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF))
-                                        K.ptx.st.shared.v4.u32(
+                                        txl.ptx.bar.warp.sync(txl.uint32(0xFFFFFFFF))
+                                        txl.ptx.st.shared.v4.u32(
                                             smem_sfa.ptr_to([tr_pipe.stage, base + lane_idx * 4]),
                                             sf_vals[0],
                                             sf_vals[1],
                                             sf_vals[2],
                                             sf_vals[3],
                                         )
-                                    K.ptx.fence.proxy.async_.shared__cta()
-                            with K.If(tr_k % sfb_stages_per_load == 0):
-                                with K.Then():
-                                    with K.unroll(0, num_sfb_chunks) as c:
+                                    txl.ptx.fence.proxy.async_.shared__cta()
+                            with txl.If(tr_k % sfb_stages_per_load == 0):
+                                with txl.Then():
+                                    with txl.unroll(0, num_sfb_chunks) as c:
                                         base = c * NUM_UTCCP_ALIGNED_ELEMS
-                                        with K.unroll(0, 4) as i:
-                                            K.ptx.ld.shared.u32(
+                                        with txl.unroll(0, 4) as i:
+                                            txl.ptx.ld.shared.u32(
                                                 sf_vals[i],
                                                 smem_sfb.ptr_to(
                                                     [tr_pipe.stage, base + i * 32 + lane_idx]
                                                 ),
                                             )
-                                        K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF))
-                                        K.ptx.st.shared.v4.u32(
+                                        txl.ptx.bar.warp.sync(txl.uint32(0xFFFFFFFF))
+                                        txl.ptx.st.shared.v4.u32(
                                             smem_sfb.ptr_to([tr_pipe.stage, base + lane_idx * 4]),
                                             sf_vals[0],
                                             sf_vals[1],
                                             sf_vals[2],
                                             sf_vals[3],
                                         )
-                                    K.ptx.fence.proxy.async_.shared__cta()
+                                    txl.ptx.fence.proxy.async_.shared__cta()
                             # `arrive(0u)` passes a destination CTA rank, not a count:
                             # every thread arrives on the leader CTA's barrier copy.
-                            rem = K.local_scalar("uint64")
-                            K.ptx.mapa.shared__cluster.u64(
-                                rem, with_sf_barriers.ptr_to([tr_pipe.stage]), K.uint32(0)
+                            rem = txl.local_scalar("uint64")
+                            txl.ptx.mapa.shared__cluster.u64(
+                                rem, with_sf_barriers.ptr_to([tr_pipe.stage]), txl.uint32(0)
                             )
-                            K.ptx.mbarrier.arrive.b64(rem, K.uint32(1), pred=K.bool(True))
-                            K.assign(tr_k, tr_k + 1)
+                            txl.ptx.mbarrier.arrive.b64(rem, txl.uint32(1), pred=txl.bool(True))
+                            txl.assign(tr_k, tr_k + 1)
                             _advance_pipeline(tr_pipe, stages)
                 tr_sched.advance()
 
@@ -1441,8 +1441,8 @@ def build_kernel(spec: GemmSpec):
         # ===============================================================
 
         def epilogue_role_body(ep_warp):
-            accum_pipe_e = K.PipelineState(NUM_EPILOGUE_STAGES, phase=0)
-            tma_stage = K.local_scalar("int32", init=0)
+            accum_pipe_e = txl.PipelineState(NUM_EPILOGUE_STAGES, phase=0)
+            tma_stage = txl.local_scalar("int32", init=0)
             ep_sched = _PersistentScheduler(
                 spec,
                 grouped_layout,
@@ -1452,23 +1452,23 @@ def build_kernel(spec: GemmSpec):
                 num_blocks,
                 track_sfk=False,
             )
-            values = K.alloc_local((8,), "uint32")
-            packed = K.alloc_local((4,), "uint32")
-            with K.While(ep_sched.valid == 1):
+            values = txl.alloc_local((8,), "uint32")
+            packed = txl.alloc_local((4,), "uint32")
+            with txl.While(ep_sched.valid == 1):
                 ep_sched.next()
-                with K.If(ep_sched.valid == 1):
-                    with K.Then():
+                with txl.If(ep_sched.valid == 1):
+                    with txl.Then():
                         _wait_barrier(
                             tmem_full_barriers.ptr_to([accum_pipe_e.stage]), accum_pipe_e.phase
                         )
-                        K.ptx.tcgen05.fence__after_thread_sync()
+                        txl.ptx.tcgen05.fence__after_thread_sync()
                         # One swizzle walk feeds `base_m`, `base_n` and the tail-block test.
                         ep_m_local, ep_n_local = _swizzled(
                             ep_sched.nb - ep_sched.cum * num_n_blocks, ep_sched.nmb, num_n_blocks
                         )
-                        base_m = K.local_scalar("int32")
-                        base_n = K.local_scalar("int32")
-                        K.assign(
+                        base_m = txl.local_scalar("int32")
+                        base_n = txl.local_scalar("int32")
+                        txl.assign(
                             base_m,
                             (
                                 ep_m_local
@@ -1476,18 +1476,18 @@ def build_kernel(spec: GemmSpec):
                             )
                             * block_m,
                         )
-                        K.assign(base_n, ep_n_local * block_n)
+                        txl.assign(base_n, ep_n_local * block_n)
                         if is_m_grouped_masked or is_k_grouped:
-                            K.assign(base_m, ep_sched.grp * eff_m + base_m)
-                        tmem_base = K.local_scalar("int32", init=accum_pipe_e.stage * umma_n)
+                            txl.assign(base_m, ep_sched.grp * eff_m + base_m)
+                        tmem_base = txl.local_scalar("int32", init=accum_pipe_e.stage * umma_n)
 
                         # `num_stores = effective_m / STORE_BLOCK_M` (sketch `:1276`).
-                        ep_stores = K.local_scalar("int32")
+                        ep_stores = txl.local_scalar("int32")
                         if use_effective_m:
                             # `get_aligned_effective_m_in_block` for this block (sketch `:559`).
-                            ep_eff_m = K.local_scalar("int32", init=block_m)
-                            with K.If(ep_m_local == ep_sched.nmb - 1), K.Then():
-                                K.assign(
+                            ep_eff_m = txl.local_scalar("int32", init=block_m)
+                            with txl.If(ep_m_local == ep_sched.nmb - 1), txl.Then():
+                                txl.assign(
                                     ep_eff_m,
                                     (
                                         _uceil(
@@ -1499,26 +1499,26 @@ def build_kernel(spec: GemmSpec):
                                         * UMMA_STEP_N
                                     ),
                                 )
-                            K.assign(ep_stores, _udiv(ep_eff_m, store_block_m))
+                            txl.assign(ep_stores, _udiv(ep_eff_m, store_block_m))
                         else:
-                            K.assign(ep_stores, num_swap_stores)
+                            txl.assign(ep_stores, num_swap_stores)
 
                         if swap_ab:
-                            with K.unroll(0, num_swap_stores) as st:
-                                with K.If(st < ep_stores), K.Then():
-                                    with K.If(ep_warp == 0):
-                                        with K.Then():
-                                            K.ptx.cp.async_.bulk.wait_group(
+                            with txl.unroll(0, num_swap_stores) as st:
+                                with txl.If(st < ep_stores), txl.Then():
+                                    with txl.If(ep_warp == 0):
+                                        with txl.Then():
+                                            txl.ptx.cp.async_.bulk.wait_group(
                                                 NUM_TMA_STORE_STAGES - 1
                                             )
-                                    K.ptx.bar.sync(
-                                        K.uint32(EPILOGUE_NAMED_BARRIER),
-                                        K.uint32(num_store_threads),
+                                    txl.ptx.bar.sync(
+                                        txl.uint32(EPILOGUE_NAMED_BARRIER),
+                                        txl.uint32(num_store_threads),
                                     )
-                                    with K.unroll(0, num_atom_rows) as i:
-                                        taddr_s = K.local_scalar(
+                                    with txl.unroll(0, num_atom_rows) as i:
+                                        taddr_s = txl.local_scalar(
                                             "uint32",
-                                            init=K.cast(
+                                            init=txl.cast(
                                                 tmem_base + st * store_block_m + i * 8, "uint32"
                                             ),
                                         )
@@ -1526,20 +1526,20 @@ def build_kernel(spec: GemmSpec):
                                             ep_warp // warps_per_atom
                                         ) * store_block_m * swizzle_cd + i * 8 * swizzle_cd
                                         if cd_is_fp32:
-                                            K.ptx["tcgen05.ld.sync.aligned.32x32b.x8.b32"](
+                                            txl.ptx["tcgen05.ld.sync.aligned.32x32b.x8.b32"](
                                                 *[values[j] for j in range(8)], taddr_s
                                             )
-                                            K.ptx.tcgen05.wait__ld.sync.aligned()
-                                            col_f = K.local_scalar("int32", init=lane_idx // 4)
-                                            with K.unroll(0, 8) as row:
-                                                K.ptx.st.shared.u32(
+                                            txl.ptx.tcgen05.wait__ld.sync.aligned()
+                                            col_f = txl.local_scalar("int32", init=lane_idx // 4)
+                                            with txl.unroll(0, 8) as row:
+                                                txl.ptx.st.shared.u32(
                                                     smem_cd_u32.ptr_to(
                                                         [
                                                             (
                                                                 tma_stage * cd_stage_bytes
                                                                 + atom_byte
                                                                 + row * (16 * 8)
-                                                                + K.bitwise_xor(col_f, row) * 16
+                                                                + txl.bitwise_xor(col_f, row) * 16
                                                                 + (lane_idx % 4) * 4
                                                             )
                                                             // 4
@@ -1550,40 +1550,40 @@ def build_kernel(spec: GemmSpec):
                                         else:
                                             # Two `16x256b` slices: the second takes the upper
                                             # 16 rows via bit 20 of the TMEM address.
-                                            K.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
+                                            txl.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
                                                 values[0], values[1], values[2], values[3], taddr_s
                                             )
-                                            K.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
+                                            txl.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
                                                 values[4],
                                                 values[5],
                                                 values[6],
                                                 values[7],
-                                                K.bitwise_or(taddr_s, K.uint32(0x00100000)),
+                                                txl.bitwise_or(taddr_s, txl.uint32(0x00100000)),
                                             )
-                                            K.ptx.tcgen05.wait__ld.sync.aligned()
-                                            with K.unroll(0, 4) as j:
+                                            txl.ptx.tcgen05.wait__ld.sync.aligned()
+                                            with txl.unroll(0, 4) as j:
                                                 # `cvt.rn.bf16x2.f32 d, a, b` packs a
                                                 # into the UPPER half and b into the
                                                 # lower, the reverse of the
                                                 # `make_float2(lo, hi)` helper this
                                                 # replaces -- hence the swap.
-                                                K.ptx.cvt.rn.bf16x2.f32(
+                                                txl.ptx.cvt.rn.bf16x2.f32(
                                                     packed[j],
-                                                    K.reinterpret("float32", values[2 * j + 1]),
-                                                    K.reinterpret("float32", values[2 * j]),
+                                                    txl.reinterpret("float32", values[2 * j + 1]),
+                                                    txl.reinterpret("float32", values[2 * j]),
                                                 )
-                                            row_s = K.local_scalar("int32")
-                                            col_s = K.local_scalar("int32")
-                                            K.assign(row_s, lane_idx % 8)
-                                            K.assign(col_s, (ep_warp % 2) * 4 + lane_idx // 8)
-                                            K.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
+                                            row_s = txl.local_scalar("int32")
+                                            col_s = txl.local_scalar("int32")
+                                            txl.assign(row_s, lane_idx % 8)
+                                            txl.assign(col_s, (ep_warp % 2) * 4 + lane_idx // 8)
+                                            txl.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
                                                 smem_cd_u32.ptr_to(
                                                     [
                                                         (
                                                             tma_stage * cd_stage_bytes
                                                             + atom_byte
                                                             + row_s * (16 * 8)
-                                                            + K.bitwise_xor(col_s, row_s) * 16
+                                                            + txl.bitwise_xor(col_s, row_s) * 16
                                                         )
                                                         // 4
                                                     ]
@@ -1594,42 +1594,42 @@ def build_kernel(spec: GemmSpec):
                                                 packed[3],
                                             )
 
-                                    with K.If(st == ep_stores - 1):
-                                        with K.Then():
-                                            K.ptx.tcgen05.fence__before_thread_sync()
-                                            rem_s = K.local_scalar("uint64")
-                                            K.ptx.mapa.shared__cluster.u64(
+                                    with txl.If(st == ep_stores - 1):
+                                        with txl.Then():
+                                            txl.ptx.tcgen05.fence__before_thread_sync()
+                                            rem_s = txl.local_scalar("uint64")
+                                            txl.ptx.mapa.shared__cluster.u64(
                                                 rem_s,
                                                 tmem_empty_barriers.ptr_to([accum_pipe_e.stage]),
-                                                K.uint32(0),
+                                                txl.uint32(0),
                                             )
-                                            K.ptx.mbarrier.arrive.b64(
-                                                rem_s, K.uint32(1), pred=K.bool(True)
+                                            txl.ptx.mbarrier.arrive.b64(
+                                                rem_s, txl.uint32(1), pred=txl.bool(True)
                                             )
 
-                                    K.ptx.fence.proxy.async_.shared__cta()
-                                    K.ptx.bar.sync(
-                                        K.uint32(EPILOGUE_NAMED_BARRIER),
-                                        K.uint32(num_store_threads),
+                                    txl.ptx.fence.proxy.async_.shared__cta()
+                                    txl.ptx.bar.sync(
+                                        txl.uint32(EPILOGUE_NAMED_BARRIER),
+                                        txl.uint32(num_store_threads),
                                     )
-                                    with K.If(ep_warp == 0):
-                                        with K.Then():
+                                    with txl.If(ep_warp == 0):
+                                        with txl.Then():
                                             # The store is issued by one elected lane; predicate rather than
                                             # branch so the epilogue warp stays converged.
-                                            ep_elected = K.local_scalar("uint32")
-                                            ep_elected_lane = K.local_scalar("uint32")
-                                            K.ptx.elect_sync(
-                                                ep_elected_lane, ep_elected, K.uint32(0xFFFFFFFF)
+                                            ep_elected = txl.local_scalar("uint32")
+                                            ep_elected_lane = txl.local_scalar("uint32")
+                                            txl.ptx.elect_sync(
+                                                ep_elected_lane, ep_elected, txl.uint32(0xFFFFFFFF)
                                             )
-                                            with K.unroll(0, num_n_atoms) as i:
-                                                K.ptx[
+                                            with txl.unroll(0, num_n_atoms) as i:
+                                                txl.ptx[
                                                     (
                                                         reduce_chain
                                                         if with_accumulation
                                                         else store_chain
                                                     )
                                                 ](
-                                                    K.address_of(tensor_map_cd),
+                                                    txl.address_of(tensor_map_cd),
                                                     *_tma_coords(
                                                         (
                                                             base_n + i * store_block_n_atom,
@@ -1648,34 +1648,34 @@ def build_kernel(spec: GemmSpec):
                                                     ),
                                                     pred=ep_elected,
                                                 )
-                                            K.ptx.cp.async_.bulk.commit_group()
-                                    K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF))
-                                    K.assign(tma_stage, _next_tma_store_stage(tma_stage))
+                                            txl.ptx.cp.async_.bulk.commit_group()
+                                    txl.ptx.bar.warp.sync(txl.uint32(0xFFFFFFFF))
+                                    txl.assign(tma_stage, _next_tma_store_stage(tma_stage))
                         else:
-                            with K.unroll(0, num_m_waves) as w:
-                                with K.unroll(0, num_stores) as st:
-                                    with K.If(ep_warp == 0):
-                                        with K.Then():
-                                            K.ptx.cp.async_.bulk.wait_group(
+                            with txl.unroll(0, num_m_waves) as w:
+                                with txl.unroll(0, num_stores) as st:
+                                    with txl.If(ep_warp == 0):
+                                        with txl.Then():
+                                            txl.ptx.cp.async_.bulk.wait_group(
                                                 NUM_TMA_STORE_STAGES - 1
                                             )
-                                    K.ptx.bar.sync(
-                                        K.uint32(EPILOGUE_NAMED_BARRIER),
-                                        K.uint32(num_store_threads),
+                                    txl.ptx.bar.sync(
+                                        txl.uint32(EPILOGUE_NAMED_BARRIER),
+                                        txl.uint32(num_store_threads),
                                     )
-                                    with K.unroll(0, elems_per_store) as i:
+                                    with txl.unroll(0, elems_per_store) as i:
                                         bank_group = i + lane_idx * (swizzle_cd // 16)
                                         row = i // 8 + lane_idx if has_shortcut else bank_group // 8
                                         col = i if has_shortcut else bank_group % 8
-                                        col = K.bitwise_xor(col, row % (swizzle_cd // 16))
+                                        col = txl.bitwise_xor(col, row % (swizzle_cd // 16))
                                         # `smem_ptr` in the source: one address per bank
                                         # group, four registers stored at it.
-                                        cd_word = K.local_scalar(
+                                        cd_word = txl.local_scalar(
                                             "int32", init=_cd_word(tma_stage, ep_warp, row, col, 0)
                                         )
-                                        taddr = K.local_scalar(
+                                        taddr = txl.local_scalar(
                                             "uint32",
-                                            init=K.cast(
+                                            init=txl.cast(
                                                 tmem_base
                                                 + w * block_n
                                                 + st * store_block_n
@@ -1684,11 +1684,11 @@ def build_kernel(spec: GemmSpec):
                                             ),
                                         )
                                         if cd_is_fp32:
-                                            K.ptx["tcgen05.ld.sync.aligned.32x32b.x4.b32"](
+                                            txl.ptx["tcgen05.ld.sync.aligned.32x32b.x4.b32"](
                                                 values[0], values[1], values[2], values[3], taddr
                                             )
-                                            K.ptx.tcgen05.wait__ld.sync.aligned()
-                                            K.ptx.st.shared.v4.u32(
+                                            txl.ptx.tcgen05.wait__ld.sync.aligned()
+                                            txl.ptx.st.shared.v4.u32(
                                                 smem_cd_u32.ptr_to([cd_word]),
                                                 values[0],
                                                 values[1],
@@ -1696,22 +1696,22 @@ def build_kernel(spec: GemmSpec):
                                                 values[3],
                                             )
                                         else:
-                                            K.ptx["tcgen05.ld.sync.aligned.32x32b.x8.b32"](
+                                            txl.ptx["tcgen05.ld.sync.aligned.32x32b.x8.b32"](
                                                 *[values[j] for j in range(8)], taddr
                                             )
-                                            K.ptx.tcgen05.wait__ld.sync.aligned()
-                                            with K.unroll(0, 4) as j:
+                                            txl.ptx.tcgen05.wait__ld.sync.aligned()
+                                            with txl.unroll(0, 4) as j:
                                                 # `cvt.rn.bf16x2.f32 d, a, b` packs a
                                                 # into the UPPER half and b into the
                                                 # lower, the reverse of the
                                                 # `make_float2(lo, hi)` helper this
                                                 # replaces -- hence the swap.
-                                                K.ptx.cvt.rn.bf16x2.f32(
+                                                txl.ptx.cvt.rn.bf16x2.f32(
                                                     packed[j],
-                                                    K.reinterpret("float32", values[2 * j + 1]),
-                                                    K.reinterpret("float32", values[2 * j]),
+                                                    txl.reinterpret("float32", values[2 * j + 1]),
+                                                    txl.reinterpret("float32", values[2 * j]),
                                                 )
-                                            K.ptx.st.shared.v4.u32(
+                                            txl.ptx.st.shared.v4.u32(
                                                 smem_cd_u32.ptr_to([cd_word]),
                                                 packed[0],
                                                 packed[1],
@@ -1719,37 +1719,37 @@ def build_kernel(spec: GemmSpec):
                                                 packed[3],
                                             )
 
-                                    with K.If(K.And(w == num_m_waves - 1, st == num_stores - 1)):
-                                        with K.Then():
-                                            K.ptx.tcgen05.fence__before_thread_sync()
-                                            rem_e = K.local_scalar("uint64")
-                                            K.ptx.mapa.shared__cluster.u64(
+                                    with txl.If(txl.And(w == num_m_waves - 1, st == num_stores - 1)):
+                                        with txl.Then():
+                                            txl.ptx.tcgen05.fence__before_thread_sync()
+                                            rem_e = txl.local_scalar("uint64")
+                                            txl.ptx.mapa.shared__cluster.u64(
                                                 rem_e,
                                                 tmem_empty_barriers.ptr_to([accum_pipe_e.stage]),
-                                                K.uint32(0),
+                                                txl.uint32(0),
                                             )
-                                            K.ptx.mbarrier.arrive.b64(
-                                                rem_e, K.uint32(1), pred=K.bool(True)
+                                            txl.ptx.mbarrier.arrive.b64(
+                                                rem_e, txl.uint32(1), pred=txl.bool(True)
                                             )
 
-                                    K.ptx.fence.proxy.async_.shared__cta()
-                                    K.ptx.bar.sync(
-                                        K.uint32(EPILOGUE_NAMED_BARRIER),
-                                        K.uint32(num_store_threads),
+                                    txl.ptx.fence.proxy.async_.shared__cta()
+                                    txl.ptx.bar.sync(
+                                        txl.uint32(EPILOGUE_NAMED_BARRIER),
+                                        txl.uint32(num_store_threads),
                                     )
-                                    with K.If(ep_warp == 0):
-                                        with K.Then():
+                                    with txl.If(ep_warp == 0):
+                                        with txl.Then():
                                             # The store is issued by one elected lane; predicate rather than
                                             # branch so the epilogue warp stays converged.
-                                            ep_elected = K.local_scalar("uint32")
-                                            ep_elected_lane = K.local_scalar("uint32")
-                                            K.ptx.elect_sync(
-                                                ep_elected_lane, ep_elected, K.uint32(0xFFFFFFFF)
+                                            ep_elected = txl.local_scalar("uint32")
+                                            ep_elected_lane = txl.local_scalar("uint32")
+                                            txl.ptx.elect_sync(
+                                                ep_elected_lane, ep_elected, txl.uint32(0xFFFFFFFF)
                                             )
-                                            K.ptx[
+                                            txl.ptx[
                                                 (reduce_chain if with_accumulation else store_chain)
                                             ](
-                                                K.address_of(tensor_map_cd),
+                                                txl.address_of(tensor_map_cd),
                                                 *_tma_coords(
                                                     (
                                                         base_n + st * store_block_n,
@@ -1760,9 +1760,9 @@ def build_kernel(spec: GemmSpec):
                                                 smem_cd.ptr_to([tma_stage, 0, 0]),
                                                 pred=ep_elected,
                                             )
-                                            K.ptx.cp.async_.bulk.commit_group()
-                                    K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF))
-                                    K.assign(tma_stage, _next_tma_store_stage(tma_stage))
+                                            txl.ptx.cp.async_.bulk.commit_group()
+                                    txl.ptx.bar.warp.sync(txl.uint32(0xFFFFFFFF))
+                                    txl.assign(tma_stage, _next_tma_store_stage(tma_stage))
                         _advance_pipeline(accum_pipe_e, NUM_EPILOGUE_STAGES)
                 ep_sched.advance()
 
@@ -1773,22 +1773,22 @@ def build_kernel(spec: GemmSpec):
         with transpose_role:
             transpose_role_body()
         with epilogue_role:
-            epilogue_role_body(K.warp_id_in_role())
+            epilogue_role_body(txl.warp_id_in_role())
 
         # ===============================================================
         # Teardown (source `:524`)
         # ===============================================================
 
         if cta_group > 1:
-            K.ptx.barrier.cluster.arrive.relaxed.aligned()
-            K.ptx.barrier.cluster.wait.acquire.aligned()
+            txl.ptx.barrier.cluster.arrive.relaxed.aligned()
+            txl.ptx.barrier.cluster.wait.acquire.aligned()
         else:
-            K.ptx.bar.sync(K.uint32(0))
+            txl.ptx.bar.sync(txl.uint32(0))
 
         # The allocating warp (2) and the freeing warp (0) deliberately differ.
         with load_role:
-            K.ptx[f"tcgen05.dealloc.cta_group::{cta_group}.sync.aligned.b32"](
-                K.uint32(0), K.uint32(spec.num_tmem_cols)
+            txl.ptx[f"tcgen05.dealloc.cta_group::{cta_group}.sync.aligned.b32"](
+                txl.uint32(0), txl.uint32(spec.num_tmem_cols)
             )
 
     return sm100_fp8_fp4_gemm_1d1d.func

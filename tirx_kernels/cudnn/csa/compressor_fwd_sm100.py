@@ -11,7 +11,7 @@ Upstream source:
 
 from typing import Any
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 
 KERNEL_META = {
     "name": "cudnn_sm100_csa_compressor_fwd",
@@ -82,46 +82,46 @@ def _validate(head_dim: int, coff: int) -> None:
 
 
 def _f32_bits(bits: int):
-    return K.reinterpret("float32", K.uint32(bits))
+    return txl.reinterpret("float32", txl.uint32(bits))
 
 
 def _source_exp(value, magic_bias, magic_scale):
     """Reproduce the source expansion with its literal PTX immediates."""
-    rounded = K.local_scalar("float32")
-    exponent = K.local_scalar("float32")
-    offset = K.local_scalar("float32")
-    negated = K.local_scalar("float32")
-    reduced = K.local_scalar("float32")
-    fraction = K.local_scalar("float32")
-    exponent_bits = K.local_scalar("float32")
-    result = K.local_scalar("float32")
-    K.ptx.fma.rn.f32(rounded, value, _f32_bits(0x3BBB989D), _f32_bits(0x3F000000))
-    K.ptx.cvt.sat.f32.f32(rounded, rounded)
-    K.ptx.fma.rm.f32(exponent, rounded, magic_scale, magic_bias)
-    K.ptx["add.f32"](offset, exponent, _f32_bits(0xCB40007F))
-    K.ptx.neg.f32(negated, offset)
-    K.ptx.fma.rn.f32(reduced, value, _f32_bits(0x3FB8AA3B), negated)
-    K.ptx.fma.rn.f32(reduced, value, _f32_bits(0x32A57060), reduced)
-    K.ptx.shl.b32(exponent_bits, exponent, K.uint32(23))
-    K.ptx.ex2.approx.ftz.f32(fraction, reduced)
-    K.ptx["mul.f32"](result, fraction, exponent_bits)
+    rounded = txl.local_scalar("float32")
+    exponent = txl.local_scalar("float32")
+    offset = txl.local_scalar("float32")
+    negated = txl.local_scalar("float32")
+    reduced = txl.local_scalar("float32")
+    fraction = txl.local_scalar("float32")
+    exponent_bits = txl.local_scalar("float32")
+    result = txl.local_scalar("float32")
+    txl.ptx.fma.rn.f32(rounded, value, _f32_bits(0x3BBB989D), _f32_bits(0x3F000000))
+    txl.ptx.cvt.sat.f32.f32(rounded, rounded)
+    txl.ptx.fma.rm.f32(exponent, rounded, magic_scale, magic_bias)
+    txl.ptx["add.f32"](offset, exponent, _f32_bits(0xCB40007F))
+    txl.ptx.neg.f32(negated, offset)
+    txl.ptx.fma.rn.f32(reduced, value, _f32_bits(0x3FB8AA3B), negated)
+    txl.ptx.fma.rn.f32(reduced, value, _f32_bits(0x32A57060), reduced)
+    txl.ptx.shl.b32(exponent_bits, exponent, txl.uint32(23))
+    txl.ptx.ex2.approx.ftz.f32(fraction, reduced)
+    txl.ptx["mul.f32"](result, fraction, exponent_bits)
     return result
 
 
 def _ordered_max(candidate, current):
     """Select with the source kernel's strict ordered floating-point predicate."""
-    greater = K.local_scalar("uint32")
-    result = K.local_scalar("float32")
-    K.ptx.setp.gt.f32(greater, candidate, current)
-    K.ptx.selp.f32(result, candidate, current, K.ptx.pred(greater))
+    greater = txl.local_scalar("uint32")
+    result = txl.local_scalar("float32")
+    txl.ptx.setp.gt.f32(greater, candidate, current)
+    txl.ptx.selp.f32(result, candidate, current, txl.ptx.pred(greater))
     return result
 
 
 def _load4_bf16x2(score_words, value_words, start, score_pointer, value_pointer, stride_bytes):
     for index in range(4):
-        byte_offset = K.int32(index * stride_bytes)
-        K.ptx.ld.global_.b32(score_words[start + index], K.ptx.addr(score_pointer, byte_offset))
-        K.ptx.ld.global_.b32(value_words[start + index], K.ptx.addr(value_pointer, byte_offset))
+        byte_offset = txl.int32(index * stride_bytes)
+        txl.ptx.ld.global_.b32(score_words[start + index], txl.ptx.addr(score_pointer, byte_offset))
+        txl.ptx.ld.global_.b32(value_words[start + index], txl.ptx.addr(value_pointer, byte_offset))
 
 
 def get_kernel(head_dim: int, coff: int, **kwargs):
@@ -132,112 +132,112 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
     width = coff * head_dim
     win = 8 if coff == 2 else 4
 
-    @K.kernel(warps=2, arch="sm_100a", grid=lambda p: [p["nb_total"], K.ceildiv(ncol, 64), 1])
+    @txl.kernel(warps=2, arch="sm_100a", grid=lambda p: [p["nb_total"], txl.ceildiv(ncol, 64), 1])
     def compressor_fwd(
-        kv: K.gptr[K.bf16],
-        score: K.gptr[K.bf16],
-        ape: K.gptr[K.f32],
-        cu_seqlens: K.gptr[K.i32],
-        cu_seqlens_comp: K.gptr[K.i32],
-        out: K.gptr[K.bf16],
-        nb_total: K.i32,
-        n_seq: K.i32,
+        kv: txl.gptr[txl.bf16],
+        score: txl.gptr[txl.bf16],
+        ape: txl.gptr[txl.f32],
+        cu_seqlens: txl.gptr[txl.i32],
+        cu_seqlens_comp: txl.gptr[txl.i32],
+        out: txl.gptr[txl.bf16],
+        nb_total: txl.i32,
+        n_seq: txl.i32,
     ):
-        bb, block_y, _ = K.cta_id()
-        thread = K.thread_id()
-        col = block_y * K.int32(64) + thread
-        with K.If(col < ncol), K.Then():
-            column = col * K.int32(vec)
+        bb, block_y, _ = txl.cta_id()
+        thread = txl.thread_id()
+        col = block_y * txl.int32(64) + thread
+        with txl.If(col < ncol), txl.Then():
+            column = col * txl.int32(vec)
 
             # The source hoists all APE traffic ahead of row validity checks.
-            ape_values = K.alloc_local([win * vec], "float32")
+            ape_values = txl.alloc_local([win * vec], "float32")
             for k in range(win):
                 column_base = column
                 if coff == 2 and k >= 4:
-                    column_base = K.int32(head_dim) + column
-                ape_offset = K.int32((k % 4) * width) + column_base
+                    column_base = txl.int32(head_dim) + column
+                ape_offset = txl.int32((k % 4) * width) + column_base
                 if vec == 1:
-                    K.ptx.ld.global_.b32(ape_values[k], ape.ptr_to([ape_offset]))
+                    txl.ptx.ld.global_.b32(ape_values[k], ape.ptr_to([ape_offset]))
                 else:
-                    K.ptx.ld.global_.v2.b32(
+                    txl.ptx.ld.global_.v2.b32(
                         ape_values[k * 2], ape_values[k * 2 + 1], ape.ptr_to([ape_offset])
                     )
 
-            nb_valid = K.local_scalar("int32")
-            K.ptx.ld.global_.b32(nb_valid, cu_seqlens_comp.ptr_to([n_seq]))
+            nb_valid = txl.local_scalar("int32")
+            txl.ptx.ld.global_.b32(nb_valid, cu_seqlens_comp.ptr_to([n_seq]))
 
-            with K.If(bb < nb_total), K.Then():
-                seq_idx = K.local_scalar("int32", init=K.int32(0))
-                block_in_sequence = K.local_scalar("int32", init=K.int32(0))
-                with K.If(bb < nb_valid), K.Then():
-                    K.assign(block_in_sequence, bb)
-                    sequence = K.local_scalar("int32", init=K.int32(0))
+            with txl.If(bb < nb_total), txl.Then():
+                seq_idx = txl.local_scalar("int32", init=txl.int32(0))
+                block_in_sequence = txl.local_scalar("int32", init=txl.int32(0))
+                with txl.If(bb < nb_valid), txl.Then():
+                    txl.assign(block_in_sequence, bb)
+                    sequence = txl.local_scalar("int32", init=txl.int32(0))
 
-                    sequence_begin = K.local_scalar("int32")
-                    K.ptx.ld.global_.b32(sequence_begin, cu_seqlens_comp.ptr_to([K.int32(0)]))
+                    sequence_begin = txl.local_scalar("int32")
+                    txl.ptx.ld.global_.b32(sequence_begin, cu_seqlens_comp.ptr_to([txl.int32(0)]))
 
                     def scan_boundary(sequence_number):
-                        sequence_end = K.local_scalar("int32")
-                        K.ptx.ld.global_.b32(
+                        sequence_end = txl.local_scalar("int32")
+                        txl.ptx.ld.global_.b32(
                             sequence_end, cu_seqlens_comp.ptr_to([sequence_number + 1])
                         )
-                        before_begin = K.local_scalar("uint32")
-                        before_end = K.local_scalar("uint32")
-                        candidate_sequence = K.local_scalar("int32")
-                        candidate_block = K.local_scalar("int32")
-                        K.ptx.setp.lt.s32(before_begin, bb, sequence_begin)
-                        K.ptx.setp.lt.s32(before_end, bb, sequence_end)
-                        K.ptx.selp.b32(
-                            candidate_sequence, sequence_number, seq_idx, K.ptx.pred(before_end)
+                        before_begin = txl.local_scalar("uint32")
+                        before_end = txl.local_scalar("uint32")
+                        candidate_sequence = txl.local_scalar("int32")
+                        candidate_block = txl.local_scalar("int32")
+                        txl.ptx.setp.lt.s32(before_begin, bb, sequence_begin)
+                        txl.ptx.setp.lt.s32(before_end, bb, sequence_end)
+                        txl.ptx.selp.b32(
+                            candidate_sequence, sequence_number, seq_idx, txl.ptx.pred(before_end)
                         )
-                        K.ptx.sub.s32(candidate_block, bb, sequence_begin)
-                        K.ptx.selp.b32(
+                        txl.ptx.sub.s32(candidate_block, bb, sequence_begin)
+                        txl.ptx.selp.b32(
                             candidate_block,
                             candidate_block,
                             block_in_sequence,
-                            K.ptx.pred(before_end),
+                            txl.ptx.pred(before_end),
                         )
-                        K.ptx.selp.b32(
-                            seq_idx, seq_idx, candidate_sequence, K.ptx.pred(before_begin)
+                        txl.ptx.selp.b32(
+                            seq_idx, seq_idx, candidate_sequence, txl.ptx.pred(before_begin)
                         )
-                        K.ptx.selp.b32(
+                        txl.ptx.selp.b32(
                             block_in_sequence,
                             block_in_sequence,
                             candidate_block,
-                            K.ptx.pred(before_begin),
+                            txl.ptx.pred(before_begin),
                         )
-                        K.assign(sequence_begin, sequence_end)
+                        txl.assign(sequence_begin, sequence_end)
 
                     # Preserve the source compiler's nounroll 8/4/2/1 boundary
                     # grouping rather than a scalar two-load loop.
-                    with K.While(sequence + 8 <= n_seq):
+                    with txl.While(sequence + 8 <= n_seq):
                         for offset in range(8):
-                            scan_boundary(sequence + K.int32(offset))
-                        K.assign(sequence, sequence + 8)
-                    with K.If(sequence + 4 <= n_seq), K.Then():
-                        K.ptx.ld.global_.b32(sequence_begin, cu_seqlens_comp.ptr_to([sequence]))
+                            scan_boundary(sequence + txl.int32(offset))
+                        txl.assign(sequence, sequence + 8)
+                    with txl.If(sequence + 4 <= n_seq), txl.Then():
+                        txl.ptx.ld.global_.b32(sequence_begin, cu_seqlens_comp.ptr_to([sequence]))
                         for offset in range(4):
-                            scan_boundary(sequence + K.int32(offset))
-                        K.assign(sequence, sequence + 4)
-                    with K.If(sequence + 2 <= n_seq), K.Then():
-                        K.ptx.ld.global_.b32(sequence_begin, cu_seqlens_comp.ptr_to([sequence]))
+                            scan_boundary(sequence + txl.int32(offset))
+                        txl.assign(sequence, sequence + 4)
+                    with txl.If(sequence + 2 <= n_seq), txl.Then():
+                        txl.ptx.ld.global_.b32(sequence_begin, cu_seqlens_comp.ptr_to([sequence]))
                         for offset in range(2):
-                            scan_boundary(sequence + K.int32(offset))
-                        K.assign(sequence, sequence + 2)
-                    with K.If(sequence < n_seq), K.Then():
-                        K.ptx.ld.global_.b32(sequence_begin, cu_seqlens_comp.ptr_to([sequence]))
+                            scan_boundary(sequence + txl.int32(offset))
+                        txl.assign(sequence, sequence + 2)
+                    with txl.If(sequence < n_seq), txl.Then():
+                        txl.ptx.ld.global_.b32(sequence_begin, cu_seqlens_comp.ptr_to([sequence]))
                         scan_boundary(sequence)
 
-                token_base = K.local_scalar("int32")
-                K.ptx.ld.global_.b32(token_base, cu_seqlens.ptr_to([seq_idx]))
-                token = token_base + block_in_sequence * K.int32(4)
+                token_base = txl.local_scalar("int32")
+                txl.ptx.ld.global_.b32(token_base, cu_seqlens.ptr_to([seq_idx]))
+                token = token_base + block_in_sequence * txl.int32(4)
 
-                scores = K.alloc_local([win * vec], "float32")
-                values = K.alloc_local([win * vec], "float32")
+                scores = txl.alloc_local([win * vec], "float32")
+                values = txl.alloc_local([win * vec], "float32")
                 if coff == 2 and vec == 2:
-                    score_words = K.alloc_local([win], "uint32")
-                    value_words = K.alloc_local([win], "uint32")
-                    own_offset = token * K.int32(width) + K.int32(head_dim) + column
+                    score_words = txl.alloc_local([win], "uint32")
+                    value_words = txl.alloc_local([win], "uint32")
+                    own_offset = token * txl.int32(width) + txl.int32(head_dim) + column
                     _load4_bf16x2(
                         score_words,
                         value_words,
@@ -247,14 +247,14 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
                         width * 2,
                     )
                 for k in range(win):
-                    score_bits = K.alloc_local([vec], "uint16")
-                    value_bits = K.alloc_local([vec], "uint16")
+                    score_bits = txl.alloc_local([vec], "uint16")
+                    value_bits = txl.alloc_local([vec], "uint16")
                     if coff == 2 and k < 4:
-                        with K.If(block_in_sequence > 0), K.Then():
-                            offset = (token - K.int32(4) + K.int32(k)) * K.int32(width) + column
+                        with txl.If(block_in_sequence > 0), txl.Then():
+                            offset = (token - txl.int32(4) + txl.int32(k)) * txl.int32(width) + column
                             if vec == 1:
-                                K.ptx.ld.global_.b16(score_bits[0], score.ptr_to([offset]))
-                                K.ptx.ld.global_.b16(value_bits[0], kv.ptr_to([offset]))
+                                txl.ptx.ld.global_.b16(score_bits[0], score.ptr_to([offset]))
+                                txl.ptx.ld.global_.b16(value_bits[0], kv.ptr_to([offset]))
                             else:
                                 if k == 0:
                                     _load4_bf16x2(
@@ -265,89 +265,89 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
                                         kv.ptr_to([offset]),
                                         width * 2,
                                     )
-                                K.ptx.mov.b32(score_bits[0], score_bits[1], score_words[k])
-                                K.ptx.mov.b32(value_bits[0], value_bits[1], value_words[k])
+                                txl.ptx.mov.b32(score_bits[0], score_bits[1], score_words[k])
+                                txl.ptx.mov.b32(value_bits[0], value_bits[1], value_words[k])
                         for lane in range(vec):
-                            K.ptx.mov.b32(scores[k * vec + lane], K.float32(float("-inf")))
-                            K.ptx.mov.b32(values[k * vec + lane], K.float32(0.0))
-                            with K.If(block_in_sequence > 0), K.Then():
-                                K.ptx.add.rn.f32.bf16(
+                            txl.ptx.mov.b32(scores[k * vec + lane], txl.float32(float("-inf")))
+                            txl.ptx.mov.b32(values[k * vec + lane], txl.float32(0.0))
+                            with txl.If(block_in_sequence > 0), txl.Then():
+                                txl.ptx.add.rn.f32.bf16(
                                     scores[k * vec + lane],
                                     score_bits[lane],
                                     ape_values[k * vec + lane],
                                 )
-                                K.ptx.cvt.f32.bf16(values[k * vec + lane], value_bits[lane])
+                                txl.ptx.cvt.f32.bf16(values[k * vec + lane], value_bits[lane])
                     else:
                         if coff == 2:
                             offset = (
-                                (token + K.int32(k - 4)) * K.int32(width)
-                                + K.int32(head_dim)
+                                (token + txl.int32(k - 4)) * txl.int32(width)
+                                + txl.int32(head_dim)
                                 + column
                             )
                         else:
-                            offset = (token + K.int32(k)) * K.int32(width) + column
+                            offset = (token + txl.int32(k)) * txl.int32(width) + column
                         if vec == 1:
-                            K.ptx.ld.global_.b16(score_bits[0], score.ptr_to([offset]))
-                            K.ptx.ld.global_.b16(value_bits[0], kv.ptr_to([offset]))
+                            txl.ptx.ld.global_.b16(score_bits[0], score.ptr_to([offset]))
+                            txl.ptx.ld.global_.b16(value_bits[0], kv.ptr_to([offset]))
                         else:
                             if coff == 2:
-                                K.ptx.mov.b32(score_bits[0], score_bits[1], score_words[k])
-                                K.ptx.mov.b32(value_bits[0], value_bits[1], value_words[k])
+                                txl.ptx.mov.b32(score_bits[0], score_bits[1], score_words[k])
+                                txl.ptx.mov.b32(value_bits[0], value_bits[1], value_words[k])
                             else:
-                                K.ptx.ld.global_.v2.b16(
+                                txl.ptx.ld.global_.v2.b16(
                                     score_bits[0], score_bits[1], score.ptr_to([offset])
                                 )
-                                K.ptx.ld.global_.v2.b16(
+                                txl.ptx.ld.global_.v2.b16(
                                     value_bits[0], value_bits[1], kv.ptr_to([offset])
                                 )
                         for lane in range(vec):
-                            K.ptx.add.rn.f32.bf16(
+                            txl.ptx.add.rn.f32.bf16(
                                 scores[k * vec + lane], score_bits[lane], ape_values[k * vec + lane]
                             )
-                            K.ptx.cvt.f32.bf16(values[k * vec + lane], value_bits[lane])
+                            txl.ptx.cvt.f32.bf16(values[k * vec + lane], value_bits[lane])
 
                 # CuTe materializes these two constants once and shares them across
                 # every scalar exponential expansion in the thread.
-                magic_bias = K.local_scalar("float32")
-                magic_scale = K.local_scalar("float32")
-                K.ptx.mov.b32(magic_bias, K.uint32(0x4B400001))
-                K.ptx.mov.b32(magic_scale, K.uint32(0x437C0000))
+                magic_bias = txl.local_scalar("float32")
+                magic_scale = txl.local_scalar("float32")
+                txl.ptx.mov.b32(magic_bias, txl.uint32(0x4B400001))
+                txl.ptx.mov.b32(magic_scale, txl.uint32(0x437C0000))
 
-                outputs = K.alloc_local([vec], "float32")
+                outputs = txl.alloc_local([vec], "float32")
                 for lane in range(vec):
-                    maximum = K.local_scalar("float32")
-                    K.ptx.mov.b32(maximum, scores[lane])
+                    maximum = txl.local_scalar("float32")
+                    txl.ptx.mov.b32(maximum, scores[lane])
                     for k in range(1, win):
-                        K.assign(maximum, _ordered_max(scores[k * vec + lane], maximum))
+                        txl.assign(maximum, _ordered_max(scores[k * vec + lane], maximum))
 
-                    denominator = K.local_scalar("float32")
-                    K.ptx.mov.b32(denominator, K.float32(0.0))
-                    exponentials = K.alloc_local([win], "float32")
+                    denominator = txl.local_scalar("float32")
+                    txl.ptx.mov.b32(denominator, txl.float32(0.0))
+                    exponentials = txl.alloc_local([win], "float32")
                     for k in range(win):
-                        difference = K.local_scalar("float32")
-                        K.ptx["sub.f32"](difference, scores[k * vec + lane], maximum)
-                        K.assign(exponentials[k], _source_exp(difference, magic_bias, magic_scale))
-                        K.ptx["add.f32"](denominator, denominator, exponentials[k])
+                        difference = txl.local_scalar("float32")
+                        txl.ptx["sub.f32"](difference, scores[k * vec + lane], maximum)
+                        txl.assign(exponentials[k], _source_exp(difference, magic_bias, magic_scale))
+                        txl.ptx["add.f32"](denominator, denominator, exponentials[k])
 
-                    accumulator = K.local_scalar("float32")
-                    K.ptx.mov.b32(accumulator, K.float32(0.0))
+                    accumulator = txl.local_scalar("float32")
+                    txl.ptx.mov.b32(accumulator, txl.float32(0.0))
                     for k in range(win):
-                        probability = K.local_scalar("float32")
-                        K.ptx.div.rn.f32(probability, exponentials[k], denominator)
-                        product = K.local_scalar("float32")
-                        K.ptx.mul.rn.f32(product, values[k * vec + lane], probability)
-                        K.ptx["add.f32"](accumulator, accumulator, product)
-                    K.ptx.mov.b32(outputs[lane], accumulator)
+                        probability = txl.local_scalar("float32")
+                        txl.ptx.div.rn.f32(probability, exponentials[k], denominator)
+                        product = txl.local_scalar("float32")
+                        txl.ptx.mul.rn.f32(product, values[k * vec + lane], probability)
+                        txl.ptx["add.f32"](accumulator, accumulator, product)
+                    txl.ptx.mov.b32(outputs[lane], accumulator)
 
-                output_offset = bb * K.int32(head_dim) + column
+                output_offset = bb * txl.int32(head_dim) + column
                 if vec == 1:
-                    output_bits = K.local_scalar("uint16")
-                    K.ptx.cvt.rn.bf16.f32(output_bits, outputs[0])
-                    K.ptx.st.global_.b16(out.ptr_to([output_offset]), output_bits)
+                    output_bits = txl.local_scalar("uint16")
+                    txl.ptx.cvt.rn.bf16.f32(output_bits, outputs[0])
+                    txl.ptx.st.global_.b16(out.ptr_to([output_offset]), output_bits)
                 else:
-                    output_word = K.local_scalar("uint32")
-                    K.ptx.cvt.rn.bf16x2.f32(output_word, outputs[1], outputs[0])
-                    K.ptx.st.global_.b32(out.ptr_to([output_offset]), output_word)
+                    output_word = txl.local_scalar("uint32")
+                    txl.ptx.cvt.rn.bf16x2.f32(output_word, outputs[1], outputs[0])
+                    txl.ptx.st.global_.b32(out.ptr_to([output_offset]), output_word)
 
     return compressor_fwd.func
 

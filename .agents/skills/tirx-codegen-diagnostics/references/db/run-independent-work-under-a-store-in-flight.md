@@ -14,11 +14,11 @@ the store is in flight -- and put it after the *barrier* that precedes the
 store, not merely after the shared writes.
 
 ```python
-K.ptx["fence.proxy.async.shared::cta"]()
-K.ptx.bar.sync(K.uint32(2), K.uint32(128))
-with K.If(warp == K.int32(0)), K.Then():
-    K.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group..."](...)
-    K.ptx["cp.async.bulk.commit_group"]()
+txl.ptx["fence.proxy.async.shared::cta"]()
+txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
+with txl.If(warp == txl.int32(0)), txl.Then():
+    txl.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group..."](...)
+    txl.ptx["cp.async.bulk.commit_group"]()
 # Here: reductions that read the activation fragments and touch their own
 # shared region. Placed before the barrier above, ptxas schedules them back
 # on top of the stores and nothing is gained.

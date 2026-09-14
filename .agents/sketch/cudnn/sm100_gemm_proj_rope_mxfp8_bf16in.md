@@ -40,9 +40,9 @@ oracle. The only compile-time branch is the physical weight orientation:
 
 ## No first-class layout invariant
 
-The executable device body uses only `import tirx_kernels.kern as K`. It may
+The executable device body uses only `import tirx_kernels.tirx_lite as txl`. It may
 not construct, pass, return, or store a first-class layout value, use a tile
-primitive, call `K.cuda.func_call`, embed CUDA source, or rely on a low-level-IR
+primitive, call `txl.cuda.func_call`, embed CUDA source, or rely on a low-level-IR
 exemption. All shared storage is one rank-1 dynamic `u8` arena. TensorMap
 fields, shared swizzles, descriptor fields, scheduler coordinates, TMEM
 addresses, and fragment placement are explicit scalar integer arithmetic.
@@ -681,5 +681,5 @@ part of the source resource shape and is not reusable storage.
 | TMEM lifecycle | `tcgen05.alloc`, `relinquish_alloc_permit`, `dealloc`, all CTA-group one and 512 columns |
 
 Any implementation that needs a multidimensional shared buffer, a layout or
-tile primitive, an inline CUDA call, a change below `tirx_kernels/kern/`, or a
+tile primitive, an inline CUDA call, a change below `tirx_kernels/tirx_lite/`, or a
 low-level-IR func-call exemption violates this frozen design.

@@ -24,13 +24,13 @@ num_clusters = min(cluster_work, NUM_SMS // cluster_size)
 active_cap = ACTIVE_CLUSTERS[cluster_size]
 num_clusters = min(cluster_work, active_cap)
 
-@K.kernel(grid=[CLUSTER_M, CLUSTER_N, num_clusters])
+@txl.kernel(grid=[CLUSTER_M, CLUSTER_N, num_clusters])
 def kernel(...):
-    _, _, cluster_work_id = K.cta_id()
-    work = K.local_scalar("int32", init=cluster_work_id)
-    with K.While(work < cluster_work):
+    _, _, cluster_work_id = txl.cta_id()
+    work = txl.local_scalar("int32", init=cluster_work_id)
+    with txl.While(work < cluster_work):
         ...
-        K.assign(work, work + num_clusters)
+        txl.assign(work, work + num_clusters)
 ```
 
 ## Rationale

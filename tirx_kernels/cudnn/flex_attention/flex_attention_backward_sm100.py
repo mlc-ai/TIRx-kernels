@@ -37,12 +37,12 @@ forward/LSE preparation, and gradient postprocessing remain outside the timed
 region.
 """
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 
 from ._flex_attention_backward_sm100 import data as _data
 from ._flex_attention_backward_sm100 import kernel as _kernel
 
-KERNEL_LANGUAGE = K
+KERNEL_LANGUAGE = txl
 
 KERNEL_META = {
     "name": "cudnn_sm100_flex_attention_backward",

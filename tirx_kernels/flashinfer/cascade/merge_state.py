@@ -19,7 +19,7 @@ source host launcher ``flashinfer::MergeState`` does.  One CTA per position,
 import os
 from typing import Any
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
 
 KERNEL_META = {
@@ -94,40 +94,40 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
     def widen_pair(dst, w, word):
         # vec_cast<float, DTypeIn>: one packed pair -> two f32.
         if is_f16:
-            # __half22float2: mov.b32 {lo, hi} + cvt.f32.f16 x2 (K.idioms spells the same sequence).
-            K.idioms.cast_f16x2_to_f32x2(dst, w, word)
+            # __half22float2: mov.b32 {lo, hi} + cvt.f32.f16 x2 (txl.idioms spells the same sequence).
+            txl.idioms.cast_f16x2_to_f32x2(dst, w, word)
         else:
             # __bfloat1622float2: mov.b32 {lo, hi} + cvt.f32.bf16 x2.
-            halves = K.alloc_local([2], "uint16")
-            K.ptx.mov.b32(halves[0], halves[1], word)
-            K.ptx.cvt.f32.bf16(dst[2 * w], halves[0])
-            K.ptx.cvt.f32.bf16(dst[2 * w + 1], halves[1])
+            halves = txl.alloc_local([2], "uint16")
+            txl.ptx.mov.b32(halves[0], halves[1], word)
+            txl.ptx.cvt.f32.bf16(dst[2 * w], halves[0])
+            txl.ptx.cvt.f32.bf16(dst[2 * w + 1], halves[1])
 
     def narrow_pair(dst, lo, hi):
         # vec_cast<DTypeO, float>: __float22half2_rn / __float22bfloat162_rn, hi operand first.
         if is_f16:
-            K.ptx.cvt.rn.f16x2.f32(dst, hi, lo)
+            txl.ptx.cvt.rn.f16x2.f32(dst, hi, lo)
         else:
-            K.ptx.cvt.rn.bf16x2.f32(dst, hi, lo)
+            txl.ptx.cvt.rn.bf16x2.f32(dst, hi, lo)
 
-    @K.kernel(warps=warps, arch="sm_100a", grid=seq_len)
+    @txl.kernel(warps=warps, arch="sm_100a", grid=seq_len)
     def merge_state(
-        v_a: K.gptr[dtype],
-        s_a: K.gptr[K.f32],
-        v_b: K.gptr[dtype],
-        s_b: K.gptr[K.f32],
-        v_merged: K.gptr[dtype],
-        s_merged: K.gptr[K.f32],
+        v_a: txl.gptr[dtype],
+        s_a: txl.gptr[txl.f32],
+        v_b: txl.gptr[dtype],
+        s_b: txl.gptr[txl.f32],
+        v_merged: txl.gptr[dtype],
+        s_merged: txl.gptr[txl.f32],
     ):
-        pos = K.cta_id()  # blockIdx.x
-        index_pos = K.Cast("int64", pos) if index_dtype == "int64" else pos
-        tid = K.thread_id()
+        pos = txl.cta_id()  # blockIdx.x
+        index_pos = txl.Cast("int64", pos) if index_dtype == "int64" else pos
+        tid = txl.thread_id()
         # The source launches a (bdx, bdy) block and reads threadIdx.x / threadIdx.y.
-        # Kern owns one flat thread axis of the same order (tid = ty * bdx + tx).
+        # tirx-lite owns one flat thread axis of the same order (tid = ty * bdx + tx).
         if bdx == 32:
             # One warp per head: the lane and warp ids are exactly (tx, ty).
-            tx = K.lane_id()
-            ty = K.warp_id()  # head_idx, warp-uniform
+            tx = txl.lane_id()
+            ty = txl.warp_id()  # head_idx, warp-uniform
         else:
             tx = tid & (bdx - 1)
             ty = tid >> bdx_shift  # head_idx
@@ -135,34 +135,34 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
         def body():
             # ---- blend weights from the two log2-sum-exp values (source L53-59) ----
             if fused_index:
-                row = K.local_scalar("uint32")
-                K.ptx.mad.lo.u32(
-                    row, K.cast(pos, "uint32"), K.uint32(num_heads), K.cast(ty, "uint32")
+                row = txl.local_scalar("uint32")
+                txl.ptx.mad.lo.u32(
+                    row, txl.cast(pos, "uint32"), txl.uint32(num_heads), txl.cast(ty, "uint32")
                 )
             else:
-                row = K.local_scalar(index_dtype, init=index_pos * num_heads + ty)
-            row64 = K.Cast("int64", row)
-            s_a_val = K.local_scalar("float32")
-            s_b_val = K.local_scalar("float32")
-            K.ptx.ld.global_.nc.b32(s_a_val, s_a.ptr_to([row64]))
-            K.ptx.ld.global_.nc.b32(s_b_val, s_b.ptr_to([row64]))
-            s_max = K.local_scalar("float32")
-            K.ptx.max.ftz.f32(s_max, s_a_val, s_b_val)
-            d_a = K.local_scalar("float32")
-            d_b = K.local_scalar("float32")
-            e_a = K.local_scalar("float32")
-            e_b = K.local_scalar("float32")
-            K.ptx.sub.ftz.f32(d_a, s_a_val, s_max)
-            K.ptx.ex2.approx.ftz.f32(e_a, d_a)  # math::ptx_exp2
-            K.ptx.sub.ftz.f32(d_b, s_b_val, s_max)
-            K.ptx.ex2.approx.ftz.f32(e_b, d_b)  # math::ptx_exp2
-            denom = K.local_scalar("float32")
-            K.ptx.add.ftz.f32(denom, e_a, e_b)
-            a_scale = K.local_scalar("float32")
-            b_scale = K.local_scalar("float32")
+                row = txl.local_scalar(index_dtype, init=index_pos * num_heads + ty)
+            row64 = txl.Cast("int64", row)
+            s_a_val = txl.local_scalar("float32")
+            s_b_val = txl.local_scalar("float32")
+            txl.ptx.ld.global_.nc.b32(s_a_val, s_a.ptr_to([row64]))
+            txl.ptx.ld.global_.nc.b32(s_b_val, s_b.ptr_to([row64]))
+            s_max = txl.local_scalar("float32")
+            txl.ptx.max.ftz.f32(s_max, s_a_val, s_b_val)
+            d_a = txl.local_scalar("float32")
+            d_b = txl.local_scalar("float32")
+            e_a = txl.local_scalar("float32")
+            e_b = txl.local_scalar("float32")
+            txl.ptx.sub.ftz.f32(d_a, s_a_val, s_max)
+            txl.ptx.ex2.approx.ftz.f32(e_a, d_a)  # math::ptx_exp2
+            txl.ptx.sub.ftz.f32(d_b, s_b_val, s_max)
+            txl.ptx.ex2.approx.ftz.f32(e_b, d_b)  # math::ptx_exp2
+            denom = txl.local_scalar("float32")
+            txl.ptx.add.ftz.f32(denom, e_a, e_b)
+            a_scale = txl.local_scalar("float32")
+            b_scale = txl.local_scalar("float32")
             # `/` under the production -use_fast_math build: div.approx.ftz.f32.
-            K.ptx.div.approx.ftz.f32(a_scale, e_a, denom)
-            K.ptx.div.approx.ftz.f32(b_scale, e_b, denom)
+            txl.ptx.div.approx.ftz.f32(a_scale, e_a, denom)
+            txl.ptx.div.approx.ftz.f32(b_scale, e_b, denom)
 
             # ---- cast_load of the vec_size slice: v_a (L61), then v_b (L62) ----
             # head_dim == bdx * vec, so the flat thread index already combines
@@ -173,21 +173,21 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
                 else row * head_dim + tx * vec
             )
             if fused_index:
-                slice_ = K.local_scalar("uint32")
-                K.ptx.mad.lo.u32(
+                slice_ = txl.local_scalar("uint32")
+                txl.ptx.mad.lo.u32(
                     slice_,
-                    K.cast(pos, "uint32"),
-                    K.uint32(num_heads * head_dim),
-                    K.cast(tid, "uint32") * K.uint32(vec),
+                    txl.cast(pos, "uint32"),
+                    txl.uint32(num_heads * head_dim),
+                    txl.cast(tid, "uint32") * txl.uint32(vec),
                 )
             else:
-                slice_ = K.local_scalar(index_dtype, init=vector_index)
-            slice64 = K.Cast("int64", slice_)
+                slice_ = txl.local_scalar(index_dtype, init=vector_index)
+            slice64 = txl.Cast("int64", slice_)
 
-            a_bits = K.alloc_local([nwords], "uint32")
-            a_vec = K.alloc_local([vec], "float32")
+            a_bits = txl.alloc_local([nwords], "uint32")
+            a_vec = txl.alloc_local([vec], "float32")
             for k in range(vec // 8):
-                K.ptx.ld.global_.nc.v4.b32(
+                txl.ptx.ld.global_.nc.v4.b32(
                     a_bits[4 * k],
                     a_bits[4 * k + 1],
                     a_bits[4 * k + 2],
@@ -197,10 +197,10 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
             for w in range(nwords):
                 widen_pair(a_vec, w, a_bits[w])
 
-            b_bits = K.alloc_local([nwords], "uint32")
-            b_vec = K.alloc_local([vec], "float32")
+            b_bits = txl.alloc_local([nwords], "uint32")
+            b_vec = txl.alloc_local([vec], "float32")
             for k in range(vec // 8):
-                K.ptx.ld.global_.nc.v4.b32(
+                txl.ptx.ld.global_.nc.v4.b32(
                     b_bits[4 * k],
                     b_bits[4 * k + 1],
                     b_bits[4 * k + 2],
@@ -212,18 +212,18 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
 
             # ---- v_merged[i] = a_scale * v_a[i] + b_scale * v_b[i] (L63-66) ----
             # nvcc contracts the source expression into mul(b_scale, v_b) + fma(a_scale, v_a, .).
-            o_vec = K.alloc_local([vec], "float32")
-            bt = K.alloc_local([vec], "float32")
+            o_vec = txl.alloc_local([vec], "float32")
+            bt = txl.alloc_local([vec], "float32")
             for i in range(vec):
-                K.ptx.mul.ftz.f32(bt[i], b_scale, b_vec[i])
-                K.ptx.fma.rn.ftz.f32(o_vec[i], a_scale, a_vec[i], bt[i])
+                txl.ptx.mul.ftz.f32(bt[i], b_scale, b_vec[i])
+                txl.ptx.fma.rn.ftz.f32(o_vec[i], a_scale, a_vec[i], bt[i])
 
             # ---- cast_store of the merged slice (L67) ----
-            o_bits = K.alloc_local([nwords], "uint32")
+            o_bits = txl.alloc_local([nwords], "uint32")
             for w in range(nwords):
                 narrow_pair(o_bits[w], o_vec[2 * w], o_vec[2 * w + 1])
             for k in range(vec // 8):
-                K.ptx.st.global_.v4.b32(
+                txl.ptx.st.global_.v4.b32(
                     v_merged.ptr_to([slice64 + 8 * k]),
                     o_bits[4 * k],
                     o_bits[4 * k + 1],
@@ -233,19 +233,19 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
 
             # One thread per head owns the scalar output, even though every
             # thread computed the same blend weights. Keep the optional-output guard.
-            with K.If(K.And(tx == 0, K.Not(K.isnullptr(s_merged.data)))), K.Then():
-                lg = K.local_scalar("float32")
-                lse = K.local_scalar("float32")
-                K.ptx.lg2.approx.ftz.f32(lg, denom)  # math::ptx_log2
-                K.ptx.add.ftz.f32(lse, s_max, lg)
-                K.ptx.st.global_.b32(s_merged.ptr_to([row64]), lse)
+            with txl.If(txl.And(tx == 0, txl.Not(txl.isnullptr(s_merged.data)))), txl.Then():
+                lg = txl.local_scalar("float32")
+                lse = txl.local_scalar("float32")
+                txl.ptx.lg2.approx.ftz.f32(lg, denom)  # math::ptx_log2
+                txl.ptx.add.ftz.f32(lse, s_max, lg)
+                txl.ptx.st.global_.b32(s_merged.ptr_to([row64]), lse)
 
         if nthreads % 32 == 0:
             body()
         else:
-            # The source block is exactly bdx * bdy threads; Kern pads it to whole
+            # The source block is exactly bdx * bdy threads; tirx-lite pads it to whole
             # warps, so the padding threads (which would alias head bdy) must idle.
-            with K.If(tid < nthreads), K.Then():
+            with txl.If(tid < nthreads), txl.Then():
                 body()
 
     return merge_state.func

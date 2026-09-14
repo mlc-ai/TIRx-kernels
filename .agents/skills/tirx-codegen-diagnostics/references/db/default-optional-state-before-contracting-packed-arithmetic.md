@@ -20,15 +20,15 @@ contractible arithmetic chain to code generation.
 ```python
 # before: optional state also makes the hot arithmetic conditional.
 _mul_pair(output, left, right)
-with K.If(have_state), K.Then():
+with txl.If(have_state), txl.Then():
     state_pair = _pack_pair(state_lo, state_hi)
     _sub_pair(output, output, state_pair)
 
 # after: the inactive path contributes the exact additive identity.
-state_pair = K.local_scalar("uint32", init=K.uint32(0))
-with K.If(have_state), K.Then():
-    K.assign(state_pair, _pack_pair(state_lo, state_hi))
-product = K.local_scalar("uint32")
+state_pair = txl.local_scalar("uint32", init=txl.uint32(0))
+with txl.If(have_state), txl.Then():
+    txl.assign(state_pair, _pack_pair(state_lo, state_hi))
+product = txl.local_scalar("uint32")
 _mul_pair(product, left, right)
 _sub_pair(output, product, state_pair)
 ```

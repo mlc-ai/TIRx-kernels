@@ -31,8 +31,8 @@ The implementation structure follows the reviewer-approved sketch
 
 from typing import Any
 
-import tirx_kernels.kern as K
-from tirx_kernels.flashinfer.utils.fp_quant_kern import (
+import tirx_kernels.tirx_lite as txl
+from tirx_kernels.flashinfer.utils.fp_quant_tirx_lite import (
     absmax_8,
     cvt_e2m1x8,
     cvt_f32_to_e4m3,
@@ -171,18 +171,18 @@ def _process_block(in_global, row_idx, col_idx, gs, *, dtype, k, fuse_silu):
     in_cols = 2 * k if fuse_silu else k
     elem_base = col_idx * NVFP4_SF_VEC_SIZE
     base = row_idx * in_cols + elem_base
-    v0 = ld_global_v4_u32(K.address_of(in_global[base]))
-    v1 = ld_global_v4_u32(K.address_of(in_global[base + 8]))
+    v0 = ld_global_v4_u32(txl.address_of(in_global[base]))
+    v1 = ld_global_v4_u32(txl.address_of(in_global[base + 8]))
     words = [v0[i] for i in range(4)] + [v1[i] for i in range(4)]
     if fuse_silu:
-        u0 = ld_global_v4_u32(K.address_of(in_global[base + k]))
-        u1 = ld_global_v4_u32(K.address_of(in_global[base + k + 8]))
+        u0 = ld_global_v4_u32(txl.address_of(in_global[base + k]))
+        u1 = ld_global_v4_u32(txl.address_of(in_global[base + k + 8]))
         uwords = [u0[i] for i in range(4)] + [u1[i] for i in range(4)]
         words = [silu_and_mul_pair(words[i], uwords[i], dtype) for i in range(8)]
 
     block_max = pair_max_to_f32(absmax_8(words, dtype), dtype)
     # _nvfp4_standard_quant_from_amax, fast-math path (utils:1588).
-    scale_float = mul_f32(gs, mul_f32(block_max, rcp_approx_ftz(K.float32(6.0))))
+    scale_float = mul_f32(gs, mul_f32(block_max, rcp_approx_ftz(txl.float32(6.0))))
     scale_fp8_u32 = cvt_f32_to_e4m3(scale_float)
     output_scale = nvfp4_compute_output_scale(scale_fp8_u32, gs)
 
@@ -194,11 +194,11 @@ def _process_block(in_global, row_idx, col_idx, gs, *, dtype, k, fuse_silu):
     packed_lo = cvt_e2m1x8(s[0:8])
     packed_hi = cvt_e2m1x8(s[8:16])
     packed64 = pack_u32x2_to_u64(packed_lo, packed_hi)
-    return K.cast(scale_fp8_u32, "uint8"), packed64
+    return txl.cast(scale_fp8_u32, "uint8"), packed64
 
 
 def _materialize(value):
-    local = K.local_scalar(str(value.ty.dtype), init=value)
+    local = txl.local_scalar(str(value.ty.dtype), init=value)
     return local
 
 
@@ -224,20 +224,20 @@ def get_kernel(
     if sf_layout == "linear":
         grid_x, block_x, total_sf_blocks = _linear_launch(m, k)
 
-        @K.kernel(warps=block_x // 32, arch="sm_100a", min_blocks_per_sm=2, grid=grid_x)
+        @txl.kernel(warps=block_x // 32, arch="sm_100a", min_blocks_per_sm=2, grid=grid_x)
         def nvfp4_quantize_linear(
-            in_global: K.gptr[dtype],
-            out_global: K.gptr[K.u8],
-            sf_out: K.gptr[K.u8],
-            m_rows: K.i32,
-            total_sf: K.i32,
-            gs: K.gptr[K.f32],
+            in_global: txl.gptr[dtype],
+            out_global: txl.gptr[txl.u8],
+            sf_out: txl.gptr[txl.u8],
+            m_rows: txl.i32,
+            total_sf: txl.i32,
+            gs: txl.gptr[txl.f32],
         ):
-            bx = K.cta_id()
-            tx = K.thread_id()
+            bx = txl.cta_id()
+            tx = txl.thread_id()
 
             if enable_pdl:
-                K.ptx.griddepcontrol.wait()
+                txl.ptx.griddepcontrol.wait()
 
             # Device global scale: one broadcast load per thread (:322-325).
             gs_val = ld_global_f32(gs, 0)
@@ -247,21 +247,21 @@ def get_kernel(
             # into up-front pointer-induction chains; the source binary
             # recomputes addresses per iteration.
             stride = opaque_i32(grid_x * _LINEAR_SF_BLOCKS_PER_TB)
-            sf_idx = K.local_scalar("int32", init=bx * _LINEAR_SF_BLOCKS_PER_TB + tx)
-            with K.While(sf_idx < total_sf):
-                row_idx = K.truncdiv(sf_idx, K.int32(nsb))
-                col_idx = K.truncmod(sf_idx, K.int32(nsb))
+            sf_idx = txl.local_scalar("int32", init=bx * _LINEAR_SF_BLOCKS_PER_TB + tx)
+            with txl.While(sf_idx < total_sf):
+                row_idx = txl.truncdiv(sf_idx, txl.int32(nsb))
+                col_idx = txl.truncmod(sf_idx, txl.int32(nsb))
                 scale_fp8, packed64 = _process_block(
                     in_global, row_idx, col_idx, gs_val, dtype=dtype, k=k, fuse_silu=fuse_silu
                 )
                 # Source order: SF byte store, then the output store (:351/:357).
-                st_global_u8(K.address_of(sf_out[sf_idx]), scale_fp8)
+                st_global_u8(txl.address_of(sf_out[sf_idx]), scale_fp8)
                 out_off = row_idx * (k // 2) + col_idx * 8
-                st_global_u64(K.address_of(out_global[out_off]), packed64)
-                K.assign(sf_idx, sf_idx + stride)
+                st_global_u64(txl.address_of(out_global[out_off]), packed64)
+                txl.assign(sf_idx, sf_idx + stride)
 
             if enable_pdl:
-                K.ptx.griddepcontrol.launch_dependents()
+                txl.ptx.griddepcontrol.launch_dependents()
 
         return nvfp4_quantize_linear.func
 
@@ -269,40 +269,40 @@ def get_kernel(
     needs_col_loop = nsb > block_x
     rows_per_block = 1 if needs_col_loop else block_x // nsb
 
-    @K.kernel(warps=(block_x + 31) // 32, arch="sm_100a", min_blocks_per_sm=2, grid=grid_x)
+    @txl.kernel(warps=(block_x + 31) // 32, arch="sm_100a", min_blocks_per_sm=2, grid=grid_x)
     def nvfp4_quantize_swizzled(
-        in_global: K.gptr[dtype],
-        out_global: K.gptr[K.u8],
-        sf_out: K.gptr[K.u8],
-        m_rows: K.i32,
-        padded_rows: K.i32,
-        gs: K.gptr[K.f32],
+        in_global: txl.gptr[dtype],
+        out_global: txl.gptr[txl.u8],
+        sf_out: txl.gptr[txl.u8],
+        m_rows: txl.i32,
+        padded_rows: txl.i32,
+        gs: txl.gptr[txl.f32],
     ):
-        bx = K.cta_id()
-        tx = K.thread_id()
+        bx = txl.cta_id()
+        tx = txl.thread_id()
 
         if enable_pdl:
-            K.ptx.griddepcontrol.wait()
+            txl.ptx.griddepcontrol.wait()
 
         gs_val = ld_global_f32(gs, 0)
 
         def col_body():
             # Large K (K/16 > 512): one row per block iteration with a column
             # loop (nvfp4_quantize.py:523-576).
-            row_idx = K.local_scalar("int32", init=bx)
-            with K.While(row_idx < padded_rows):
-                with K.If(row_idx >= m_rows):
-                    with K.Then():
+            row_idx = txl.local_scalar("int32", init=bx)
+            with txl.While(row_idx < padded_rows):
+                with txl.If(row_idx >= m_rows):
+                    with txl.Then():
                         # Padding row: zero-fill by ALL threads, stride block_x.
-                        sc_pad = K.local_scalar("int32", init=tx)
-                        with K.While(sc_pad < pad_cols):
+                        sc_pad = txl.local_scalar("int32", init=tx)
+                        with txl.While(sc_pad < pad_cols):
                             st_global_u8(
-                                K.address_of(sf_out[sf_offset(row_idx, sc_pad)]), K.uint8(0)
+                                txl.address_of(sf_out[sf_offset(row_idx, sc_pad)]), txl.uint8(0)
                             )
-                            K.assign(sc_pad, sc_pad + block_x)
-                    with K.Else():
-                        sc = K.local_scalar("int32", init=tx)
-                        with K.While(sc < nsb):
+                            txl.assign(sc_pad, sc_pad + block_x)
+                    with txl.Else():
+                        sc = txl.local_scalar("int32", init=tx)
+                        with txl.While(sc < nsb):
                             scale_fp8, packed64 = _process_block(
                                 in_global,
                                 row_idx,
@@ -313,42 +313,42 @@ def get_kernel(
                                 fuse_silu=fuse_silu,
                             )
                             # Source order: SF byte store, then output (:557/:563).
-                            st_global_u8(K.address_of(sf_out[sf_offset(row_idx, sc)]), scale_fp8)
+                            st_global_u8(txl.address_of(sf_out[sf_offset(row_idx, sc)]), scale_fp8)
                             out_off = row_idx * (k // 2) + sc * 8
-                            st_global_u64(K.address_of(out_global[out_off]), packed64)
-                            K.assign(sc, sc + block_x)
+                            st_global_u64(txl.address_of(out_global[out_off]), packed64)
+                            txl.assign(sc, sc + block_x)
                         # Padding SF columns of a data row (:568-574).
-                        sc_tail = K.local_scalar("int32", init=nsb + tx)
-                        with K.While(sc_tail < pad_cols):
+                        sc_tail = txl.local_scalar("int32", init=nsb + tx)
+                        with txl.While(sc_tail < pad_cols):
                             st_global_u8(
-                                K.address_of(sf_out[sf_offset(row_idx, sc_tail)]), K.uint8(0)
+                                txl.address_of(sf_out[sf_offset(row_idx, sc_tail)]), txl.uint8(0)
                             )
-                            K.assign(sc_tail, sc_tail + block_x)
-                K.assign(row_idx, row_idx + grid_x)
+                            txl.assign(sc_tail, sc_tail + block_x)
+                txl.assign(row_idx, row_idx + grid_x)
 
         def small_body():
             # Small K: multi-row processing (nvfp4_quantize.py:577-642).
-            row_in_block = _materialize(K.truncdiv(tx, K.int32(nsb)))
-            sf_idx_in_row = _materialize(K.truncmod(tx, K.int32(nsb)))
+            row_in_block = _materialize(txl.truncdiv(tx, txl.int32(nsb)))
+            sf_idx_in_row = _materialize(txl.truncmod(tx, txl.int32(nsb)))
 
-            row_batch_idx = K.local_scalar("int32")
-            row_idx2 = K.local_scalar("int32")
-            K.assign(row_batch_idx, bx)
-            K.assign(row_idx2, row_batch_idx * rows_per_block + row_in_block)
-            with K.While(row_batch_idx * rows_per_block < padded_rows):
-                with K.If(row_idx2 < padded_rows), K.Then():
-                    with K.If(row_idx2 >= m_rows):
-                        with K.Then():
+            row_batch_idx = txl.local_scalar("int32")
+            row_idx2 = txl.local_scalar("int32")
+            txl.assign(row_batch_idx, bx)
+            txl.assign(row_idx2, row_batch_idx * rows_per_block + row_in_block)
+            with txl.While(row_batch_idx * rows_per_block < padded_rows):
+                with txl.If(row_idx2 < padded_rows), txl.Then():
+                    with txl.If(row_idx2 >= m_rows):
+                        with txl.Then():
                             # Padding row: zero ALL padded SF columns; stride is
                             # threads_per_row == nsb (:597-603).
-                            local_sf = K.local_scalar("int32", init=sf_idx_in_row)
-                            with K.While(local_sf < pad_cols):
+                            local_sf = txl.local_scalar("int32", init=sf_idx_in_row)
+                            with txl.While(local_sf < pad_cols):
                                 st_global_u8(
-                                    K.address_of(sf_out[sf_offset(row_idx2, local_sf)]), K.uint8(0)
+                                    txl.address_of(sf_out[sf_offset(row_idx2, local_sf)]), txl.uint8(0)
                                 )
-                                K.assign(local_sf, local_sf + nsb)
-                        with K.Else():
-                            with K.If(sf_idx_in_row < nsb), K.Then():
+                                txl.assign(local_sf, local_sf + nsb)
+                        with txl.Else():
+                            with txl.If(sf_idx_in_row < nsb), txl.Then():
                                 scale_fp8, packed64 = _process_block(
                                     in_global,
                                     row_idx2,
@@ -360,25 +360,25 @@ def get_kernel(
                                 )
                                 # Source order: SF byte store, then output (:619/:625).
                                 st_global_u8(
-                                    K.address_of(sf_out[sf_offset(row_idx2, sf_idx_in_row)]),
+                                    txl.address_of(sf_out[sf_offset(row_idx2, sf_idx_in_row)]),
                                     scale_fp8,
                                 )
                                 out_off = row_idx2 * (k // 2) + sf_idx_in_row * 8
-                                st_global_u64(K.address_of(out_global[out_off]), packed64)
+                                st_global_u64(txl.address_of(out_global[out_off]), packed64)
                             # Padding SF columns of a data row (:627-638).
                             if pad_cols != nsb:
-                                pad_col = K.local_scalar("int32", init=nsb + sf_idx_in_row)
-                                with K.While(pad_col < pad_cols):
+                                pad_col = txl.local_scalar("int32", init=nsb + sf_idx_in_row)
+                                with txl.While(pad_col < pad_cols):
                                     st_global_u8(
-                                        K.address_of(sf_out[sf_offset(row_idx2, pad_col)]),
-                                        K.uint8(0),
+                                        txl.address_of(sf_out[sf_offset(row_idx2, pad_col)]),
+                                        txl.uint8(0),
                                     )
-                                    K.assign(pad_col, pad_col + nsb)
-                K.assign(row_batch_idx, row_batch_idx + grid_x)
-                K.assign(row_idx2, row_batch_idx * rows_per_block + row_in_block)
+                                    txl.assign(pad_col, pad_col + nsb)
+                txl.assign(row_batch_idx, row_batch_idx + grid_x)
+                txl.assign(row_idx2, row_batch_idx * rows_per_block + row_in_block)
 
         if block_x % 32:
-            with K.If(tx < block_x), K.Then():
+            with txl.If(tx < block_x), txl.Then():
                 col_body() if needs_col_loop else small_body()
         elif needs_col_loop:
             col_body()
@@ -386,7 +386,7 @@ def get_kernel(
             small_body()
 
         if enable_pdl:
-            K.ptx.griddepcontrol.launch_dependents()
+            txl.ptx.griddepcontrol.launch_dependents()
 
     return nvfp4_quantize_swizzled.func
 

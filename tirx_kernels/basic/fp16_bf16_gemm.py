@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import torch
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 import tvm
 from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
 
@@ -50,10 +50,10 @@ def _swizzle_for_row_bytes(row_bytes):
     """Pick the MMA-shared swizzle atom matching the tile row width (the 128/64/32B
     swizzle is selected from the row byte width)."""
     if row_bytes % 128 == 0:
-        return K.SW128B
+        return txl.SW128B
     if row_bytes % 64 == 0:
-        return K.SW64B
-    return K.SW32B
+        return txl.SW64B
+    return txl.SW32B
 
 
 # Per-shape tuning knobs (CTA_M=256 always): cta_n/cta_k MMA tile, l2_group_size (L2
@@ -185,12 +185,12 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
         a = params["a"]
         b = params["b"]
         d = params["d"]
-        a_map = K.stack_alloca("tensormap", 1)
-        b_map = K.stack_alloca("tensormap", 1)
-        d_map = K.stack_alloca("tensormap", 1)
+        a_map = txl.stack_alloca("tensormap", 1)
+        b_map = txl.stack_alloca("tensormap", 1)
+        d_map = txl.stack_alloca("tensormap", 1)
 
         def encode(descriptor, rank, data, *shape):
-            K.call_packed(
+            txl.call_packed(
                 "runtime.cuTensorMapEncodeTiled", descriptor, AB_DTYPE, rank, data, *shape
             )
 
@@ -222,12 +222,12 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
         host,
     ):
         a_map, b_map, d_map = host
-        cbx, _cby = K.cta_id_in_cluster([2, 1], preferred=[2, 1])
-        bx = K.cta_id()
-        warp_in_cta = K.warp_id()  # the entry's warp-uniform cta->warp scope id
+        cbx, _cby = txl.cta_id_in_cluster([2, 1], preferred=[2, 1])
+        bx = txl.cta_id()
+        warp_in_cta = txl.warp_id()  # the entry's warp-uniform cta->warp scope id
 
         def elected():
-            """The original's ``if K.cuda.elect_sync():`` — one lane per warp.
+            """The original's ``if txl.cuda.elect_sync():`` — one lane per warp.
 
             Read straight into the ``If`` *condition*, not materialised into a
             local first. The G3 hazard (port notes §4) is a value-returning
@@ -238,29 +238,29 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
             consumer is allocated at exactly the 255-register ceiling
             (``fp16_bf16_gemm_kern_NOTES.md``).
             """
-            return K.cuda.elect_sync() != K.uint32(0)
+            return txl.cuda.elect_sync() != txl.uint32(0)
 
         # orig:L259-263 — warp 0 prefetches the three descriptors.
-        with K.If(warp_in_cta == 0), K.Then():
-            with K.If(elected()), K.Then():
-                K.ptx.prefetch.tensormap(K.address_of(a_map))
-                K.ptx.prefetch.tensormap(K.address_of(b_map))
-                K.ptx.prefetch.tensormap(K.address_of(d_map))
+        with txl.If(warp_in_cta == 0), txl.Then():
+            with txl.If(elected()), txl.Then():
+                txl.ptx.prefetch.tensormap(txl.address_of(a_map))
+                txl.ptx.prefetch.tensormap(txl.address_of(b_map))
+                txl.ptx.prefetch.tensormap(txl.address_of(d_map))
 
         # ---------------- smem plan + protocol — orig:L265-295 --------------
         # Declaration order reproduces the original's byte layout. The pool's
         # commit is emitted for us at trace end (same high-water mark: nothing
         # is allocated after this point).
-        smem = K.smem_pool()
-        tmem_addr = smem.alloc((1,), K.u32)
+        smem = txl.smem_pool()
+        tmem_addr = smem.alloc((1,), txl.u32)
         # Input smem pipeline (full=tma expect_tx, empty=tcgen05 consumed).
-        smem_pipe = K.Pipeline(
+        smem_pipe = txl.Pipeline(
             smem, PIPE_DEPTH, full="tma", empty="tcgen05", init_empty=NUM_CONSUMER
         )
         # Accumulator tmem pipeline (full=tcgen05 commit, empty=mbar consumed).
-        tmem_pipe = K.Pipeline(smem, TMEM_SLOTS, full="tcgen05", empty="mbar", init_empty=2 * 128)
+        tmem_pipe = txl.Pipeline(smem, TMEM_SLOTS, full="tcgen05", empty="mbar", init_empty=2 * 128)
         # CLC tile scheduler: owns the work-stealing handshake + scheduling barriers.
-        clc = K.ClusterLaunchControlScheduler(
+        clc = txl.ClusterLaunchControlScheduler(
             smem.pool,
             num_m_tiles=NUM_M_TILES,
             num_n_tiles=NUM_N_TILES,
@@ -269,37 +269,37 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
             finish_arrivals=((2 + NUM_CONSUMER) * 2 + NUM_CONSUMER),
         )
         # Teardown handshake: 1-arrival cross-CTA mbarrier (OVERLAP) vs cluster_sync.
-        tmem_fin = K.Pipeline(smem, 1, full="mbar", empty="mbar", init_full=1)
+        tmem_fin = txl.Pipeline(smem, 1, full="mbar", empty="mbar", init_full=1)
         smem.pool.move_base_to(1024)
-        Asmem = smem.alloc((PIPE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), ab_type, swizzle=K.SW128B)
-        Bsmem = smem.alloc((PIPE_DEPTH, BLK_N, BLK_K), ab_type, swizzle=K.SW128B).buf
+        Asmem = smem.alloc((PIPE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), ab_type, swizzle=txl.SW128B)
+        Bsmem = smem.alloc((PIPE_DEPTH, BLK_N, BLK_K), ab_type, swizzle=txl.SW128B).buf
         Dsmem = smem.alloc((NUM_CONSUMER, NUM_D_TILES, BLK_M, EPI_N), ab_type, swizzle=D_SWIZZLE)
         smem_full_cta0 = smem_pipe.full.remote_view(0)
-        with K.If(warp_in_cta == 0), K.Then():
-            K.ptx.tcgen05.alloc.cta_group__2.sync.aligned.shared__cta.b32(
-                K.address_of(tmem_addr[0]), K.uint32(512)
+        with txl.If(warp_in_cta == 0), txl.Then():
+            txl.ptx.tcgen05.alloc.cta_group__2.sync.aligned.shared__cta.b32(
+                txl.address_of(tmem_addr[0]), txl.uint32(512)
             )
-            K.cuda.warp_sync()
-        K.ptx.fence.proxy.async_.shared__cta()
-        K.ptx.fence.mbarrier_init.release.cluster()
+            txl.cuda.warp_sync()
+        txl.ptx.fence.proxy.async_.shared__cta()
+        txl.ptx.fence.mbarrier_init.release.cluster()
         # OVERLAP shapes split the prologue cluster barrier: arrive (relaxed) here,
         # then each active role waits(acquire) after its own setup so the latency
         # overlaps it. No-overlap shapes keep the cheaper fused cluster_sync.
         if OVERLAP:
-            K.ptx.barrier.cluster.arrive.relaxed.aligned()
+            txl.ptx.barrier.cluster.arrive.relaxed.aligned()
         else:
-            K.cuda.cluster_sync()
+            txl.cuda.cluster_sync()
 
         def split_barrier_wait():
             if OVERLAP:
-                K.ptx.barrier.cluster.wait.acquire()
+                txl.ptx.barrier.cluster.wait.acquire()
 
         # ---------------- roles — orig:L306/L483 ----------------------------
         # K owns the functional partition, including the producer warpgroup's
         # loader/scheduler/MMA split. The register instruction remains on the
         # enclosing warpgroup scope because it is collective across all four
         # producer warps, including CTA-local idle participants.
-        sp = K.specialize()
+        sp = txl.specialize()
         producer_first = NUM_CONSUMER * 4
         mma_role = sp.role(
             "mma",
@@ -328,7 +328,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                 # -------- LOADER (TMA) -------- orig:L309-390
                 ld = clc.worker("ld_sched")
                 ld.init(bx // 2)
-                tma_cur = K.PipelineState(PIPE_DEPTH, 1)
+                tma_cur = txl.PipelineState(PIPE_DEPTH, 1)
                 split_barrier_wait()
 
                 def tma_load_stage(k_tile, m_idx, n_idx):
@@ -336,61 +336,61 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                     stage = tma_cur.stage
                     k = k_tile * BLK_K
                     b_n = (n_idx * 2 + cbx) * BLK_N
-                    mbar = K.cuda.cvta_generic_to_shared(smem_full_cta0.ptr_to([stage]))
+                    mbar = txl.cuda.cvta_generic_to_shared(smem_full_cta0.ptr_to([stage]))
                     # Each CTA loads its OWN A rows / B cols (they depend on cbx);
                     # cta_group=2 routes the completion mbarrier to the cluster,
                     # it is not a data multicast.
                     for c in range(NUM_CONSUMER):
                         a_m = ((m_idx * 2 + cbx) * NUM_CONSUMER + c) * BLK_M
                         if BLK_K == 128:
-                            K.ptx[_TMA_G2S_3D_2SM](
+                            txl.ptx[_TMA_G2S_3D_2SM](
                                 Asmem.ptr_to([stage, c, 0, 0]),
-                                K.address_of(a_map),
-                                K.int32(0),
-                                K.Cast("int32", a_m),
-                                K.Cast("int32", k // 64),
+                                txl.address_of(a_map),
+                                txl.int32(0),
+                                txl.Cast("int32", a_m),
+                                txl.Cast("int32", k // 64),
                                 mbar,
                             )
                         else:
-                            K.ptx[_TMA_G2S_2SM](
+                            txl.ptx[_TMA_G2S_2SM](
                                 Asmem.ptr_to([stage, c, 0, 0]),
-                                K.address_of(a_map),
-                                K.Cast("int32", k),
-                                K.Cast("int32", a_m),
+                                txl.address_of(a_map),
+                                txl.Cast("int32", k),
+                                txl.Cast("int32", a_m),
                                 mbar,
                             )
                     if BLK_K == 128:
-                        K.ptx[_TMA_G2S_3D_2SM](
+                        txl.ptx[_TMA_G2S_3D_2SM](
                             Bsmem.ptr_to([stage, 0, 0]),
-                            K.address_of(b_map),
-                            K.int32(0),
-                            K.Cast("int32", b_n),
-                            K.Cast("int32", k // 64),
+                            txl.address_of(b_map),
+                            txl.int32(0),
+                            txl.Cast("int32", b_n),
+                            txl.Cast("int32", k // 64),
                             mbar,
                         )
                     else:
-                        K.ptx[_TMA_G2S_2SM](
+                        txl.ptx[_TMA_G2S_2SM](
                             Bsmem.ptr_to([stage, 0, 0]),
-                            K.address_of(b_map),
-                            K.Cast("int32", k),
-                            K.Cast("int32", b_n),
+                            txl.address_of(b_map),
+                            txl.Cast("int32", k),
+                            txl.Cast("int32", b_n),
                             mbar,
                         )
                     # Loader-side expect_tx for the whole stage; cbx==0 owns the mbar.
-                    with K.If(cbx == 0), K.Then():
+                    with txl.If(cbx == 0), txl.Then():
                         smem_full_cta0.arrive(
                             stage, 2 * (NUM_CONSUMER * BLK_M * BLK_K + BLK_N * BLK_K) * ELEM_BYTES
                         )
 
                 def tma_load(m_idx, n_idx):
-                    with K.serial(Kdim // BLK_K) as k_tile:
+                    with txl.serial(Kdim // BLK_K) as k_tile:
                         tma_load_stage(k_tile, m_idx, n_idx)
                         tma_cur.advance()
 
                 # CLC loader: load the current tile, then consume the schedule
                 # for the next one.
-                with K.If(elected()), K.Then():
-                    with K.While(ld.valid()):
+                with txl.If(elected()), txl.Then():
+                    with txl.While(ld.valid()):
                         tma_load(ld.m_idx, ld.n_idx)
                         ld.consume()
                         ld.advance_coords()
@@ -406,14 +406,14 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                 # Preserve the source's warpgroup-local lowering; subtracting
                 # the role's global first warp expands every descriptor address.
                 pw = warp_in_cta % 4
-                mma_smem = K.PipelineState(PIPE_DEPTH, 0)
+                mma_smem = txl.PipelineState(PIPE_DEPTH, 0)
                 # tmem wait state: double-buffered (overlap, depth=MMA_PIPE) or a
                 # single slot toggled per tile (no-overlap, depth=1).
-                tmem_buf = K.PipelineState(TMEM_PHASE_DEPTH, 1)
-                desc_a = K.SmemDescriptor()
-                desc_b = K.SmemDescriptor()
-                desc_i = K.alloc_local((1,), "uint32")
-                accum = K.alloc_local((1,), "int32")
+                tmem_buf = txl.PipelineState(TMEM_PHASE_DEPTH, 1)
+                desc_a = txl.SmemDescriptor()
+                desc_b = txl.SmemDescriptor()
+                desc_i = txl.alloc_local((1,), "uint32")
+                accum = txl.alloc_local((1,), "int32")
                 split_barrier_wait()
 
                 def mma_stage(buf):
@@ -431,13 +431,13 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                         # tcgen05 descriptor holds the 14-bit address and the
                         # 14-bit leading-dim offset with bits 31:30 clear, so no
                         # offset this kernel forms can carry out of it.
-                        desc_a_ki = desc_a.desc + K.Cast(
+                        desc_a_ki = desc_a.desc + txl.Cast(
                             "uint64",
                             ((stage * NUM_CONSUMER + pw) * BLK_M * BLK_K) // 8
                             + (ki // 4) * BLK_M * 8
                             + 2 * (ki % 4),
                         )
-                        desc_b_ki = desc_b.desc + K.Cast(
+                        desc_b_ki = desc_b.desc + txl.Cast(
                             "uint64",
                             (stage * BLK_N * BLK_K) // 8 + (ki // 4) * BLK_N * 8 + 2 * (ki % 4),
                         )
@@ -446,23 +446,23 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                         # the first accumulates unconditionally, and only phase 0
                         # asks the runtime flag (0 on the first k-tile of a
                         # tile => overwrite, 1 after).
-                        acc_pred = K.ptx.pred(1) if ki else K.ptx.pred(K.Cast("bool", accum[0]))
-                        K.ptx[_MMA_F16_2SM](
-                            K.Cast("uint32", tmem_n),
+                        acc_pred = txl.ptx.pred(1) if ki else txl.ptx.pred(txl.Cast("bool", accum[0]))
+                        txl.ptx[_MMA_F16_2SM](
+                            txl.Cast("uint32", tmem_n),
                             desc_a_ki,
                             desc_b_ki,
                             desc_i[0],
                             *_MMA_KEEP_ALL_LANES,
                             acc_pred,
                         )
-                    K.assign(accum[0], 1)
+                    txl.assign(accum[0], 1)
                     smem_pipe.empty.arrive(mma_smem.stage, cta_group=2, cta_mask=3)
 
                 def mma():
                     slot = tmem_buf.stage if OVERLAP else pw
                     tmem_pipe.empty.wait(slot, tmem_buf.phase)
-                    K.assign(accum[0], 0)
-                    with K.serial(Kdim // BLK_K) as _k_tile:
+                    txl.assign(accum[0], 0)
+                    with txl.serial(Kdim // BLK_K) as _k_tile:
                         mma_stage(slot)
                         mma_smem.advance()
                     tmem_pipe.full.arrive(slot, cta_group=2, cta_mask=3)
@@ -473,7 +473,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                 # worker resets rather than inits.
                 mm = clc.worker("mma_sched")
                 mm.reset()
-                with K.If(elected()), K.Then():
+                with txl.If(elected()), txl.Then():
                     desc_a.init(
                         Asmem.ptr_to([0, 0, 0, 0]),
                         ldo=BLK_M * 8 if BLK_K == 128 else 0,
@@ -486,8 +486,8 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                         sdo=64,
                         swizzle=3,
                     )
-                    K.cuda.tcgen05.encode_instr_descriptor(
-                        K.address_of(desc_i[0]),
+                    txl.cuda.tcgen05.encode_instr_descriptor(
+                        txl.address_of(desc_i[0]),
                         d_dtype="float32",
                         a_dtype=AB_DTYPE,
                         b_dtype=AB_DTYPE,
@@ -498,7 +498,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                         trans_b=False,
                         n_cta_groups=2,
                     )
-                    with K.While(mm.valid()):
+                    with txl.While(mm.valid()):
                         mm.consume()
                         mma()
                         mm.mark_done_if_drained()
@@ -515,12 +515,12 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
 
         def consumer_body():
             # ============== CONSUMER / EPILOGUE warpgroup(s) ==============
-            wg = K.warp_id_in_role() >> 2  # the original's wg_id
-            wid = K.warp_id_in_role() & 3  # the original's warp_id (in warpgroup)
-            lane = K.lane_id()
+            wg = txl.warp_id_in_role() >> 2  # the original's wg_id
+            wid = txl.warp_id_in_role() & 3  # the original's warp_id (in warpgroup)
+            lane = txl.lane_id()
             wb = clc.worker("wb_sched")
             wb.init(bx // 2)
-            wb_buf = K.PipelineState(TMEM_PHASE_DEPTH, 0)
+            wb_buf = txl.PipelineState(TMEM_PHASE_DEPTH, 0)
             split_barrier_wait()
 
             def store_slice(dtile, db, regs, r0):
@@ -531,9 +531,9 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                 bank conflicts. Keep the slice loop in IR so layout lowering
                 shares its swizzle address algebra.
                 """
-                with K.unroll(EPI_N // 8) as jv:
+                with txl.unroll(EPI_N // 8) as jv:
                     base = r0 + jv * 4
-                    K.ptx.st.shared.v4.u32(
+                    txl.ptx.st.shared.v4.u32(
                         Dsmem.ptr_to([dtile, db, wid * 32 + lane, jv * 8]),
                         regs[base],
                         regs[base + 1],
@@ -543,22 +543,22 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
 
             def tma_store(dtile, db, m_idx, n_idx, i):
                 """The single-thread S2G store — orig:L532-548/L587-602."""
-                with K.If((wid == 0) & (lane == 0)), K.Then():
+                with txl.If((wid == 0) & (lane == 0)), txl.Then():
                     # Proxy fence by the single TMA-issuing thread; the
                     # warpgroup_sync above already made the writes CTA-visible,
                     # and an all-128-thread fence was the dominant stall.
-                    K.ptx.fence.proxy.async_.shared__cta()
+                    txl.ptx.fence.proxy.async_.shared__cta()
                     d_m = ((m_idx * 2 + cbx) * NUM_CONSUMER + wg) * BLK_M
                     d_n = n_idx * MMA_N + i * EPI_N
-                    K.ptx[_TMA_S2G_EVICT_FIRST](
-                        K.address_of(d_map),
-                        K.Cast("int32", d_n),
-                        K.Cast("int32", d_m),
+                    txl.ptx[_TMA_S2G_EVICT_FIRST](
+                        txl.address_of(d_map),
+                        txl.Cast("int32", d_n),
+                        txl.Cast("int32", d_m),
                         Dsmem.ptr_to([dtile, db, 0, 0]),
-                        K.uint64(_EVICT_FIRST_L2_POLICY),
+                        txl.uint64(_EVICT_FIRST_L2_POLICY),
                     )
                 # commit_group collectively reconverges the warpgroup (no post-sync).
-                K.ptx.cp.async_.bulk.commit_group()
+                txl.ptx.cp.async_.bulk.commit_group()
 
             def writeback(m_idx, n_idx):
                 slot = wb_buf.stage if OVERLAP else wg
@@ -568,25 +568,25 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                     # Fused per-chunk load+store, overlapping the next MMA. Keep
                     # Dreg_16b exactly EPI_N wide: a wider fragment spills
                     # registers (measured, orig:L501-503).
-                    Dreg_16b = K.alloc_local((EPI_N // 2,), "uint32", align=16)
+                    Dreg_16b = txl.alloc_local((EPI_N // 2,), "uint32", align=16)
                     for i in range(WB_PIPE_DEPTH):
-                        Dreg = K.alloc_local((EPI_N,), "float32")
+                        Dreg = txl.alloc_local((EPI_N,), "float32")
                         tn = tmem_base + i * EPI_N
-                        K.ptx[TMEM_LD_OVERLAP](
-                            *[Dreg[j] for j in range(EPI_N)], K.Cast("uint32", tn)
+                        txl.ptx[TMEM_LD_OVERLAP](
+                            *[Dreg[j] for j in range(EPI_N)], txl.Cast("uint32", tn)
                         )
-                        K.ptx.tcgen05.wait__ld.sync.aligned()
+                        txl.ptx.tcgen05.wait__ld.sync.aligned()
                         for j in range(EPI_N // 2):
                             # The packed cvt puts its second source in the low halfword.
-                            K.ptx[CVT_F32X2](Dreg_16b[j], Dreg[j * 2 + 1], Dreg[j * 2])
+                            txl.ptx[CVT_F32X2](Dreg_16b[j], Dreg[j * 2 + 1], Dreg[j * 2])
                         if i == WB_PIPE_DEPTH - 1:
                             tmem_pipe.empty.arrive(slot, remote=0, pred=True)
                         db = i % NUM_D_TILES
-                        K.ptx.cp.async_.bulk.wait_group.read(NUM_D_TILES - 1)
-                        K.cuda.warpgroup_sync(wg + 10)
+                        txl.ptx.cp.async_.bulk.wait_group.read(NUM_D_TILES - 1)
+                        txl.cuda.warpgroup_sync(wg + 10)
                         # the consumer is wg 0 here, so its D tile index is 0
                         store_slice(0, db, Dreg_16b, 0)
-                        K.cuda.warpgroup_sync(wg + 10)
+                        txl.cuda.warpgroup_sync(wg + 10)
                         tma_store(0, db, m_idx, n_idx, i)
                 else:
                     # No-overlap: load+cast every chunk, free the accumulator,
@@ -594,58 +594,58 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                     # sub-chunks so the f32 footprint stays 16 (not MMA_N) --
                     # otherwise the consumer spills (LDL/STL). orig:L549-568.
                     NOL = 16
-                    Dreg_16b = K.alloc_local((MMA_N // 2,), "uint32", align=16)
+                    Dreg_16b = txl.alloc_local((MMA_N // 2,), "uint32", align=16)
                     for i in range(MMA_N // NOL):
-                        Dreg = K.alloc_local((NOL,), "float32")
+                        Dreg = txl.alloc_local((NOL,), "float32")
                         tn = tmem_base + i * NOL
-                        K.ptx[_TMEM_LD_16](*[Dreg[j] for j in range(NOL)], K.Cast("uint32", tn))
-                        K.ptx.tcgen05.wait__ld.sync.aligned()
+                        txl.ptx[_TMEM_LD_16](*[Dreg[j] for j in range(NOL)], txl.Cast("uint32", tn))
+                        txl.ptx.tcgen05.wait__ld.sync.aligned()
                         for j in range(NOL // 2):
                             # Keep the logical (lo, hi) pair in low/high halfword order.
-                            K.ptx[CVT_F32X2](
+                            txl.ptx[CVT_F32X2](
                                 Dreg_16b[i * (NOL // 2) + j], Dreg[j * 2 + 1], Dreg[j * 2]
                             )
                     tmem_pipe.empty.arrive(wg, remote=0, pred=True)
                     for i in range(WB_PIPE_DEPTH):
                         db = i % NUM_D_TILES
-                        K.ptx.cp.async_.bulk.wait_group.read(NUM_D_TILES - 1)
-                        K.cuda.warpgroup_sync(wg + 10)
+                        txl.ptx.cp.async_.bulk.wait_group.read(NUM_D_TILES - 1)
+                        txl.cuda.warpgroup_sync(wg + 10)
                         store_slice(wg, db, Dreg_16b, (i * EPI_N) // 2)
-                        K.cuda.warpgroup_sync(wg + 10)
+                        txl.cuda.warpgroup_sync(wg + 10)
                         tma_store(wg, db, m_idx, n_idx, i)
 
             # CLC consumer: capture the current tile, consume the schedule for
             # the next (overlapping it with the MMA-output wait), then store the
             # captured tile. The capture must be a real local: `wb.m_idx` is a
             # live slot that `advance_coords()` rewrites.
-            cur_m = K.alloc_local((1,), "int32")
-            cur_n = K.alloc_local((1,), "int32")
-            with K.While(wb.valid()):
-                K.assign(cur_m[0], wb.m_idx)
-                K.assign(cur_n[0], wb.n_idx)
+            cur_m = txl.alloc_local((1,), "int32")
+            cur_n = txl.alloc_local((1,), "int32")
+            with txl.While(wb.valid()):
+                txl.assign(cur_m[0], wb.m_idx)
+                txl.assign(cur_n[0], wb.n_idx)
                 wb.consume_wg(wg, wid, lane)
                 wb.advance_coords()
                 writeback(cur_m[0], cur_n[0])
                 wb_buf.advance()
                 wb.mark_done_if_drained()
             # Drain any in-flight TMA stores before the tmem teardown.
-            K.ptx.cp.async_.bulk.wait_group(0)
+            txl.ptx.cp.async_.bulk.wait_group(0)
             if OVERLAP:
                 # Teardown: warpgroup_sync (all tmem reads done), then warp 0
                 # does a 1-arrival cross-CTA handshake before dealloc — lighter
                 # than a full cluster_sync.
-                K.cuda.warpgroup_sync(wg + 10)
-                with K.If((wid == 0) & (lane == 0)), K.Then():
+                txl.cuda.warpgroup_sync(wg + 10)
+                with txl.If((wid == 0) & (lane == 0)), txl.Then():
                     tmem_fin.full.arrive(0, remote=1 - cbx, pred=True)
-                with K.If(wid == 0), K.Then():
+                with txl.If(wid == 0), txl.Then():
                     tmem_fin.full.wait(0, 0)
 
         producer_group = warp_in_cta >> 2
-        with K.If(producer_group == NUM_CONSUMER):
-            with K.Then():
+        with txl.If(producer_group == NUM_CONSUMER):
+            with txl.Then():
                 producer_regs.emit()
                 emit_roles()
-            with K.Else():
+            with txl.Else():
                 with consumer:
                     if not OVERLAP:
                         consumer_regs.emit()
@@ -653,22 +653,22 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
 
         if not OVERLAP:
             # No-overlap keeps the full cluster_sync teardown.
-            K.cuda.cluster_sync()
-        with K.If(warp_in_cta == 0), K.Then():
+            txl.cuda.cluster_sync()
+        with txl.If(warp_in_cta == 0), txl.Then():
             # tcgen05 allocation/deallocation are warp-uniform. Read the
             # allocator's shared slot explicitly so the low-level IR contains a
             # real shared load.
-            K.ptx.tcgen05.relinquish_alloc_permit.cta_group__2.sync.aligned()
-            dealloc = K.alloc_local((1,), "uint32")
-            K.ptx.ld.shared.u32(dealloc[0], tmem_addr.ptr_to([0]))
-            K.ptx["tcgen05.dealloc.cta_group::2.sync.aligned.b32"](dealloc[0], K.uint32(512))
+            txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__2.sync.aligned()
+            dealloc = txl.alloc_local((1,), "uint32")
+            txl.ptx.ld.shared.u32(dealloc[0], tmem_addr.ptr_to([0]))
+            txl.ptx["tcgen05.dealloc.cta_group::2.sync.aligned.b32"](dealloc[0], txl.uint32(512))
 
     gemm.__annotations__ = {
-        "a": K.gptr[AB_DTYPE, (M, Kdim)],
-        "b": K.gptr[AB_DTYPE, (N, Kdim)],
-        "d": K.gptr[AB_DTYPE, (M, N)],
+        "a": txl.gptr[AB_DTYPE, (M, Kdim)],
+        "b": txl.gptr[AB_DTYPE, (N, Kdim)],
+        "d": txl.gptr[AB_DTYPE, (M, N)],
     }
-    return K.kernel(
+    return txl.kernel(
         warps=WARPS,
         arch="sm_100a",
         min_blocks_per_sm=1,

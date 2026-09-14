@@ -249,23 +249,26 @@ def test_before_uses_current_config_with_own_run_gpu(monkeypatch, tmp_path) -> N
     assert closed == ["old"]
 
 
-def test_current_contract_uses_after_kern_without_rebinding_before_kern(monkeypatch, tmp_path):
+def test_current_contract_uses_after_tirx_lite_without_rebinding_before_tirx_lite(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv(AB_CURRENT_BENCHMARK_ROOT_ENV, str(tmp_path))
     package_root = tmp_path / "tirx_kernels"
-    kern_root = package_root / "kern"
-    kern_root.mkdir(parents=True)
-    (kern_root / "__init__.py").write_text("MARKER = 'after'\n")
-    (package_root / "ab_kern_isolation.py").write_text(
-        "import tirx_kernels.kern as K\nKERN_MARKER = K.MARKER\nCONFIGS = [{'label': 'same'}]\n"
+    tirx_lite_root = package_root / "tirx_lite"
+    tirx_lite_root.mkdir(parents=True)
+    (tirx_lite_root / "__init__.py").write_text("MARKER = 'after'\n")
+    (package_root / "ab_tirx_lite_isolation.py").write_text(
+        "import tirx_kernels.tirx_lite as txl\n"
+        "TXL_MARKER = txl.MARKER\nCONFIGS = [{'label': 'same'}]\n"
     )
 
-    before_kern = ModuleType("tirx_kernels.kern")
-    before_kern.MARKER = "before"
-    monkeypatch.setitem(sys.modules, "tirx_kernels.kern", before_kern)
-    old_module = ModuleType("tirx_kernels.ab_kern_isolation")
+    before_tirx_lite = ModuleType("tirx_kernels.tirx_lite")
+    before_tirx_lite.MARKER = "before"
+    monkeypatch.setitem(sys.modules, "tirx_kernels.tirx_lite", before_tirx_lite)
+    old_module = ModuleType("tirx_kernels.ab_tirx_lite_isolation")
     old_module.__package__ = "tirx_kernels"
 
     current_module = ab_current_benchmark_module(old_module)
 
-    assert current_module.KERN_MARKER == "after"
-    assert sys.modules["tirx_kernels.kern"] is before_kern
+    assert current_module.TXL_MARKER == "after"
+    assert sys.modules["tirx_kernels.tirx_lite"] is before_tirx_lite

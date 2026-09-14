@@ -16,7 +16,7 @@ canonical warp count, and put all barrier initialization under one explicit CTA
 leader scope.
 
 ```python
-@K.kernel(warps=NUM_WARPS, arch="sm_100a", grid=(...), thread_layout="lane_warp")
+@txl.kernel(warps=NUM_WARPS, arch="sm_100a", grid=(...), thread_layout="lane_warp")
 ```
 
 ## Rationale

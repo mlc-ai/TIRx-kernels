@@ -14,7 +14,7 @@ import os
 from functools import cache
 from itertools import combinations, product
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 
 _TRY_WAIT_TICKS = 10_000_000
 _SMEM_CAPACITY = 232_448
@@ -80,37 +80,37 @@ def _advance(state):
 
 
 def _try_wait_acquire(dst, barrier, phase):
-    K.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
-        dst, barrier, K.cast(phase, "uint32")
+    txl.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
+        dst, barrier, txl.cast(phase, "uint32")
     )
 
 
 def _wait_plain(barrier, phase):
-    ready = K.local_scalar("uint32", init=K.uint32(0))
-    with K.While(ready == K.uint32(0)):
-        K.ptx.mbarrier.try_wait.parity.shared.b64(
-            ready, barrier, K.cast(phase, "uint32"), K.uint32(_TRY_WAIT_TICKS)
+    ready = txl.local_scalar("uint32", init=txl.uint32(0))
+    with txl.While(ready == txl.uint32(0)):
+        txl.ptx.mbarrier.try_wait.parity.shared.b64(
+            ready, barrier, txl.cast(phase, "uint32"), txl.uint32(_TRY_WAIT_TICKS)
         )
 
 
 def _wait_plain_if_needed(barrier, phase, speculative_ready):
-    with K.If(speculative_ready == K.uint32(0)):
-        with K.Then():
+    with txl.If(speculative_ready == txl.uint32(0)):
+        with txl.Then():
             _wait_plain(barrier, phase)
 
 
 def _elected():
-    elected_lane = K.local_scalar("uint32")
-    elected_pred = K.local_scalar("uint32")
-    K.ptx.elect_sync(elected_lane, elected_pred, K.uint32(0xFFFFFFFF))
-    return elected_pred == K.uint32(1)
+    elected_lane = txl.local_scalar("uint32")
+    elected_pred = txl.local_scalar("uint32")
+    txl.ptx.elect_sync(elected_lane, elected_pred, txl.uint32(0xFFFFFFFF))
+    return elected_pred == txl.uint32(1)
 
 
 def _descriptor_with_address(base, shared_address):
-    address_field = K.cast(
-        K.bitwise_and(K.shift_right(shared_address, K.uint32(4)), K.uint32(0x3FFF)), "uint64"
+    address_field = txl.cast(
+        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)), "uint64"
     )
-    return K.bitwise_or(K.uint64(base), address_field)
+    return txl.bitwise_or(txl.uint64(base), address_field)
 
 
 def _dtype_bits(dtype):
@@ -511,14 +511,14 @@ def _make_kernel(
         sfa = params["sfa"]
         sfb = params["sfb"]
         c = params["c"]
-        a_map = K.stack_alloca("tensormap", 1)
-        b_map = K.stack_alloca("tensormap", 1)
-        sfa_map = K.stack_alloca("tensormap", 1)
-        sfb_map = K.stack_alloca("tensormap", 1)
-        c_map = K.stack_alloca("tensormap", 1)
+        a_map = txl.stack_alloca("tensormap", 1)
+        b_map = txl.stack_alloca("tensormap", 1)
+        sfa_map = txl.stack_alloca("tensormap", 1)
+        sfb_map = txl.stack_alloca("tensormap", 1)
+        c_map = txl.stack_alloca("tensormap", 1)
 
         def encode(descriptor, dtype, rank, data, *fields):
-            K.call_packed("runtime.cuTensorMapEncodeTiled", descriptor, dtype, rank, data, *fields)
+            txl.call_packed("runtime.cuTensorMapEncodeTiled", descriptor, dtype, rank, data, *fields)
 
         a_contiguous_bytes = (M if a_major == "m" else K_dim) * ab_bits // 8
         b_contiguous_bytes = (N if b_major == "n" else K_dim) * ab_bits // 8
@@ -641,16 +641,16 @@ def _make_kernel(
     def kernel(a, b, sfa, sfb, c, amax, *, host):
         del a, b, sfa, sfb, c
         a_map, b_map, sfa_map, sfb_map, c_map = host
-        block_x, block_y, cluster_work_id = K.cta_id()
-        cluster_x, cluster_y = K.cta_id_in_cluster(
+        block_x, block_y, cluster_work_id = txl.cta_id()
+        cluster_x, cluster_y = txl.cta_id_in_cluster(
             [cluster_m, cluster_n], preferred=[cluster_m, cluster_n]
         )
         cluster_rank = cluster_x + cluster_m * cluster_y
         del block_x, block_y
-        warp = K.warp_id()
-        lane = K.lane_id()
+        warp = txl.warp_id()
+        lane = txl.lane_id()
 
-        roles = K.specialize(chain_dispatch=True)
+        roles = txl.specialize(chain_dispatch=True)
         if c_dtype == "float32":
             epilogue_role = roles.role("epilogue", warps=[0, 1, 2, 3], regs=64)
         elif c_dtype == "bfloat16" and cluster_size == 1:
@@ -660,114 +660,114 @@ def _make_kernel(
         mma_role = roles.role("mma", warps=[4])
         tma_role = roles.role("tma", warps=[5])
 
-        smem = K.alloc_buffer((shared_bytes,), K.u8, scope="shared.dyn", align=1024)
-        protocol_pool = K.smem_pool(base=smem)
-        ab_pipe = K.Pipeline(
-            protocol_pool, ab_stages, full="tma", empty="tcgen05", leader=K.bool(False)
+        smem = txl.alloc_buffer((shared_bytes,), txl.u8, scope="shared.dyn", align=1024)
+        protocol_pool = txl.smem_pool(base=smem)
+        ab_pipe = txl.Pipeline(
+            protocol_pool, ab_stages, full="tma", empty="tcgen05", leader=txl.bool(False)
         )
-        acc_pipe = K.Pipeline(
+        acc_pipe = txl.Pipeline(
             protocol_pool,
             acc_stages,
             full="tcgen05",
             empty="mbar",
             init_empty=4,
-            leader=K.bool(False),
+            leader=txl.bool(False),
         )
         if protocol_pool.bytes != tmem_dealloc_offset:
             raise AssertionError("protocol storage offsets changed")
-        tmem_dealloc = protocol_pool.alloc((1,), K.u64, align=8)
-        tmem_slot = protocol_pool.alloc((1,), K.u32, align=4)
+        tmem_dealloc = protocol_pool.alloc((1,), txl.u64, align=8)
+        tmem_slot = protocol_pool.alloc((1,), txl.u32, align=4)
         if protocol_pool.bytes != tmem_ptr_offset + 4:
             raise AssertionError("protocol storage header changed")
         del tmem_dealloc
 
         with tma_role:
-            K.ptx.prefetch.tensormap(K.address_of(a_map))
-            K.ptx.prefetch.tensormap(K.address_of(b_map))
-            K.ptx.prefetch.tensormap(K.address_of(sfa_map))
-            K.ptx.prefetch.tensormap(K.address_of(sfb_map))
-            K.ptx.prefetch.tensormap(K.address_of(c_map))
+            txl.ptx.prefetch.tensormap(txl.address_of(a_map))
+            txl.ptx.prefetch.tensormap(txl.address_of(b_map))
+            txl.ptx.prefetch.tensormap(txl.address_of(sfa_map))
+            txl.ptx.prefetch.tensormap(txl.address_of(sfb_map))
+            txl.ptx.prefetch.tensormap(txl.address_of(c_map))
 
-        with K.If(warp == 0):
-            with K.Then():
-                with K.If(_elected()):
-                    with K.Then():
-                        with K.unroll(0, ab_stages) as stage:
-                            K.ptx.mbarrier.init.shared.b64(
-                                ab_pipe.full.ptr_to([stage]), K.uint32(1)
+        with txl.If(warp == 0):
+            with txl.Then():
+                with txl.If(_elected()):
+                    with txl.Then():
+                        with txl.unroll(0, ab_stages) as stage:
+                            txl.ptx.mbarrier.init.shared.b64(
+                                ab_pipe.full.ptr_to([stage]), txl.uint32(1)
                             )
-                with K.If(_elected()):
-                    with K.Then():
-                        with K.unroll(0, ab_stages) as stage:
-                            K.ptx.mbarrier.init.shared.b64(
-                                ab_pipe.empty.ptr_to([stage]), K.uint32(cluster_m + cluster_n - 1)
+                with txl.If(_elected()):
+                    with txl.Then():
+                        with txl.unroll(0, ab_stages) as stage:
+                            txl.ptx.mbarrier.init.shared.b64(
+                                ab_pipe.empty.ptr_to([stage]), txl.uint32(cluster_m + cluster_n - 1)
                             )
 
-        with K.If(warp == 0):
-            with K.Then():
-                with K.If(_elected()):
-                    with K.Then():
-                        with K.unroll(0, acc_stages) as stage:
-                            K.ptx.mbarrier.init.shared.b64(
-                                acc_pipe.full.ptr_to([stage]), K.uint32(1)
+        with txl.If(warp == 0):
+            with txl.Then():
+                with txl.If(_elected()):
+                    with txl.Then():
+                        with txl.unroll(0, acc_stages) as stage:
+                            txl.ptx.mbarrier.init.shared.b64(
+                                acc_pipe.full.ptr_to([stage]), txl.uint32(1)
                             )
-                with K.If(_elected()):
-                    with K.Then():
-                        with K.unroll(0, acc_stages) as stage:
-                            K.ptx.mbarrier.init.shared.b64(
-                                acc_pipe.empty.ptr_to([stage]), K.uint32(4)
+                with txl.If(_elected()):
+                    with txl.Then():
+                        with txl.unroll(0, acc_stages) as stage:
+                            txl.ptx.mbarrier.init.shared.b64(
+                                acc_pipe.empty.ptr_to([stage]), txl.uint32(4)
                             )
-        K.ptx.fence.mbarrier_init.release.cluster()
+        txl.ptx.fence.mbarrier_init.release.cluster()
         if cluster_size > 1:
-            K.ptx.barrier.cluster.arrive.relaxed()
+            txl.ptx.barrier.cluster.arrive.relaxed()
 
-        smem_base = K.local_scalar("uint32")
-        K.assign(smem_base, K.cuda.cvta_generic_to_shared(smem.ptr_to([0])))
-        cluster_smem_base_u64 = K.local_scalar("uint64")
-        K.ptx.cvta.to.shared__cluster.u64(cluster_smem_base_u64, smem.ptr_to([0]))
-        cluster_smem_base = K.local_scalar("uint32", init=K.cast(cluster_smem_base_u64, "uint32"))
-        a_shared_base = K.local_scalar("uint32", init=smem_base + a_offset)
-        b_shared_base = K.local_scalar("uint32", init=smem_base + b_offset)
-        a_descriptor = K.local_scalar(
+        smem_base = txl.local_scalar("uint32")
+        txl.assign(smem_base, txl.cuda.cvta_generic_to_shared(smem.ptr_to([0])))
+        cluster_smem_base_u64 = txl.local_scalar("uint64")
+        txl.ptx.cvta.to.shared__cluster.u64(cluster_smem_base_u64, smem.ptr_to([0]))
+        cluster_smem_base = txl.local_scalar("uint32", init=txl.cast(cluster_smem_base_u64, "uint32"))
+        a_shared_base = txl.local_scalar("uint32", init=smem_base + a_offset)
+        b_shared_base = txl.local_scalar("uint32", init=smem_base + b_offset)
+        a_descriptor = txl.local_scalar(
             "uint64", init=_descriptor_with_address(a_desc_base, a_shared_base)
         )
-        b_descriptor = K.local_scalar(
+        b_descriptor = txl.local_scalar(
             "uint64", init=_descriptor_with_address(b_desc_base, b_shared_base)
         )
 
-        a_mcast_mask = K.local_scalar("uint32", init=K.uint32(0))
+        a_mcast_mask = txl.local_scalar("uint32", init=txl.uint32(0))
         for peer_n in range(cluster_n):
-            K.assign(
+            txl.assign(
                 a_mcast_mask,
-                K.bitwise_or(
-                    a_mcast_mask, K.uint32(1) << K.cast(cluster_x + cluster_m * peer_n, "uint32")
+                txl.bitwise_or(
+                    a_mcast_mask, txl.uint32(1) << txl.cast(cluster_x + cluster_m * peer_n, "uint32")
                 ),
             )
-        b_mcast_mask = K.local_scalar("uint32", init=K.uint32(0))
+        b_mcast_mask = txl.local_scalar("uint32", init=txl.uint32(0))
         for peer_m in range(cluster_m):
-            K.assign(
+            txl.assign(
                 b_mcast_mask,
-                K.bitwise_or(
-                    b_mcast_mask, K.uint32(1) << K.cast(peer_m + cluster_m * cluster_y, "uint32")
+                txl.bitwise_or(
+                    b_mcast_mask, txl.uint32(1) << txl.cast(peer_m + cluster_m * cluster_y, "uint32")
                 ),
             )
-        ab_consumer_mask = K.local_scalar("uint32", init=K.bitwise_or(a_mcast_mask, b_mcast_mask))
-        acc_producer_mask = K.local_scalar(
-            "uint32", init=K.uint32(1) << K.cast(cluster_rank, "uint32")
+        ab_consumer_mask = txl.local_scalar("uint32", init=txl.bitwise_or(a_mcast_mask, b_mcast_mask))
+        acc_producer_mask = txl.local_scalar(
+            "uint32", init=txl.uint32(1) << txl.cast(cluster_rank, "uint32")
         )
 
         if cluster_size > 1:
-            K.ptx.barrier.cluster.wait()
+            txl.ptx.barrier.cluster.wait()
         else:
-            K.ptx.bar.sync(K.uint32(0))
+            txl.ptx.bar.sync(txl.uint32(0))
 
         def scheduler_coords(work):
             if c_dtype == "float4_e2m1fn":
                 cluster_m_idx = work % cluster_m_tiles
                 quotient = work // cluster_m_tiles
             elif cluster_m_tiles & (cluster_m_tiles - 1) == 0:
-                cluster_m_idx = K.bitwise_and(work, K.int32(cluster_m_tiles - 1))
-                quotient = K.shift_right(work, K.uint32(cluster_m_tiles.bit_length() - 1))
+                cluster_m_idx = txl.bitwise_and(work, txl.int32(cluster_m_tiles - 1))
+                quotient = txl.shift_right(work, txl.uint32(cluster_m_tiles.bit_length() - 1))
             else:
                 cluster_m_idx = work % cluster_m_tiles
                 quotient = work // cluster_m_tiles
@@ -778,8 +778,8 @@ def _make_kernel(
                 cluster_n_idx = quotient
                 batch_idx = 0
             elif cluster_n_tiles & (cluster_n_tiles - 1) == 0:
-                cluster_n_idx = K.bitwise_and(quotient, K.int32(cluster_n_tiles - 1))
-                batch_idx = K.shift_right(quotient, K.uint32(cluster_n_tiles.bit_length() - 1))
+                cluster_n_idx = txl.bitwise_and(quotient, txl.int32(cluster_n_tiles - 1))
+                batch_idx = txl.shift_right(quotient, txl.uint32(cluster_n_tiles.bit_length() - 1))
             else:
                 cluster_n_idx = quotient % cluster_n_tiles
                 batch_idx = quotient // cluster_n_tiles
@@ -788,34 +788,34 @@ def _make_kernel(
             return tile_m_idx, tile_n_idx, batch_idx
 
         def advance_work(work):
-            K.assign(work, work + num_clusters)
+            txl.assign(work, work + num_clusters)
 
         with tma_role:
-            tma_state = K.PipelineState(ab_stages, phase=1)
-            work = K.local_scalar("int32", init=cluster_work_id)
-            count = K.local_scalar("int32")
-            speculative = K.local_scalar("uint32")
-            with K.While(work < cluster_work):
+            tma_state = txl.PipelineState(ab_stages, phase=1)
+            work = txl.local_scalar("int32", init=cluster_work_id)
+            count = txl.local_scalar("int32")
+            speculative = txl.local_scalar("uint32")
+            with txl.While(work < cluster_work):
                 tile_m_idx, tile_n_idx, batch_idx = scheduler_coords(work)
-                K.assign(count, 0)
-                K.assign(speculative, K.uint32(1))
-                with K.If(count < k_tiles):
-                    with K.Then():
+                txl.assign(count, 0)
+                txl.assign(speculative, txl.uint32(1))
+                with txl.If(count < k_tiles):
+                    with txl.Then():
                         _try_wait_acquire(
                             speculative, ab_pipe.empty.ptr_to([tma_state.stage]), tma_state.phase
                         )
-                with K.While(count < k_tiles):
+                with txl.While(count < k_tiles):
                     _wait_plain_if_needed(
                         ab_pipe.empty.ptr_to([tma_state.stage]), tma_state.phase, speculative
                     )
                     tma_elected = _elected()
-                    with K.If(tma_elected):
-                        with K.Then():
-                            K.ptx.mbarrier.arrive.expect_tx.shared.b64(
-                                ab_pipe.full.ptr_to([tma_state.stage]), K.uint32(ab_stage_bytes)
+                    with txl.If(tma_elected):
+                        with txl.Then():
+                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                ab_pipe.full.ptr_to([tma_state.stage]), txl.uint32(ab_stage_bytes)
                             )
-                    with K.If(tma_elected):
-                        with K.Then():
+                    with txl.If(tma_elected):
+                        with txl.Then():
                             a_coord_m = tile_m_idx * m_tile
                             a_coord_k = count * k_tile
                             if a_major == "m":
@@ -825,20 +825,20 @@ def _make_kernel(
                             a_coord_0 = a_coord_m if a_major == "m" else a_coord_k
                             a_coord_1 = a_coord_k if a_major == "m" else a_coord_m
                             if cluster_n == 1:
-                                K.ptx[
+                                txl.ptx[
                                     "cp.async.bulk.tensor.3d.shared::cta.global.tile"
                                     ".mbarrier::complete_tx::bytes.L2::cache_hint"
                                 ](
                                     smem.ptr_to([a_offset + tma_state.stage * a_stage_bytes]),
-                                    K.address_of(a_map),
-                                    K.cast(a_coord_0, "int32"),
-                                    K.cast(a_coord_1, "int32"),
-                                    K.cast(batch_idx, "int32"),
+                                    txl.address_of(a_map),
+                                    txl.cast(a_coord_0, "int32"),
+                                    txl.cast(a_coord_1, "int32"),
+                                    txl.cast(batch_idx, "int32"),
                                     ab_pipe.full.ptr_to([tma_state.stage]),
-                                    K.uint64(tma_cache_hint),
+                                    txl.uint64(tma_cache_hint),
                                 )
                             else:
-                                K.ptx[
+                                txl.ptx[
                                     "cp.async.bulk.tensor.3d.shared::cluster.global.tile"
                                     ".mbarrier::complete_tx::bytes.multicast::cluster"
                                     ".L2::cache_hint"
@@ -847,16 +847,16 @@ def _make_kernel(
                                     + a_offset
                                     + tma_state.stage * a_stage_bytes
                                     + cluster_y * (a_stage_bytes // cluster_n),
-                                    K.address_of(a_map),
-                                    K.cast(a_coord_0, "int32"),
-                                    K.cast(a_coord_1, "int32"),
-                                    K.cast(batch_idx, "int32"),
+                                    txl.address_of(a_map),
+                                    txl.cast(a_coord_0, "int32"),
+                                    txl.cast(a_coord_1, "int32"),
+                                    txl.cast(batch_idx, "int32"),
                                     ab_pipe.full.ptr_to([tma_state.stage]),
-                                    K.cast(a_mcast_mask, "uint16"),
-                                    K.uint64(tma_cache_hint),
+                                    txl.cast(a_mcast_mask, "uint16"),
+                                    txl.uint64(tma_cache_hint),
                                 )
-                    with K.If(tma_elected):
-                        with K.Then():
+                    with txl.If(tma_elected):
+                        with txl.Then():
                             for b_copy in range(b_tma_copies):
                                 b_coord_n = tile_n_idx * n_tile
                                 if b_major == "n":
@@ -874,20 +874,20 @@ def _make_kernel(
                                     + b_copy * b_tma_copy_bytes
                                 )
                                 if cluster_m == 1:
-                                    K.ptx[
+                                    txl.ptx[
                                         "cp.async.bulk.tensor.3d.shared::cta.global.tile"
                                         ".mbarrier::complete_tx::bytes.L2::cache_hint"
                                     ](
                                         smem.ptr_to([b_smem_offset]),
-                                        K.address_of(b_map),
-                                        K.cast(b_coord_0, "int32"),
-                                        K.cast(b_coord_1, "int32"),
-                                        K.cast(batch_idx, "int32"),
+                                        txl.address_of(b_map),
+                                        txl.cast(b_coord_0, "int32"),
+                                        txl.cast(b_coord_1, "int32"),
+                                        txl.cast(batch_idx, "int32"),
                                         ab_pipe.full.ptr_to([tma_state.stage]),
-                                        K.uint64(tma_cache_hint),
+                                        txl.uint64(tma_cache_hint),
                                     )
                                 else:
-                                    K.ptx[
+                                    txl.ptx[
                                         "cp.async.bulk.tensor.3d.shared::cluster.global.tile"
                                         ".mbarrier::complete_tx::bytes.multicast::cluster"
                                         ".L2::cache_hint"
@@ -895,35 +895,35 @@ def _make_kernel(
                                         cluster_smem_base
                                         + b_smem_offset
                                         + cluster_x * (b_tma_copy_bytes // cluster_m),
-                                        K.address_of(b_map),
-                                        K.cast(b_coord_0, "int32"),
-                                        K.cast(b_coord_1, "int32"),
-                                        K.cast(batch_idx, "int32"),
+                                        txl.address_of(b_map),
+                                        txl.cast(b_coord_0, "int32"),
+                                        txl.cast(b_coord_1, "int32"),
+                                        txl.cast(batch_idx, "int32"),
                                         ab_pipe.full.ptr_to([tma_state.stage]),
-                                        K.cast(b_mcast_mask, "uint16"),
-                                        K.uint64(tma_cache_hint),
+                                        txl.cast(b_mcast_mask, "uint16"),
+                                        txl.uint64(tma_cache_hint),
                                     )
-                    with K.If(tma_elected):
-                        with K.Then():
+                    with txl.If(tma_elected):
+                        with txl.Then():
                             sfa_linear = cluster_y * sfa_piece_values
                             sfa_coord_0 = sfa_linear % 256
                             sfa_coord_1 = count * sf_k_box + sfa_linear // 256
                             if cluster_n == 1:
-                                K.ptx[
+                                txl.ptx[
                                     "cp.async.bulk.tensor.4d.shared::cta.global.tile"
                                     ".mbarrier::complete_tx::bytes.L2::cache_hint"
                                 ](
                                     smem.ptr_to([sfa_offset + tma_state.stage * sfa_stage_bytes]),
-                                    K.address_of(sfa_map),
-                                    K.cast(sfa_coord_0, "int32"),
-                                    K.cast(sfa_coord_1, "int32"),
-                                    K.cast(tile_m_idx, "int32"),
-                                    K.cast(batch_idx, "int32"),
+                                    txl.address_of(sfa_map),
+                                    txl.cast(sfa_coord_0, "int32"),
+                                    txl.cast(sfa_coord_1, "int32"),
+                                    txl.cast(tile_m_idx, "int32"),
+                                    txl.cast(batch_idx, "int32"),
                                     ab_pipe.full.ptr_to([tma_state.stage]),
-                                    K.uint64(tma_cache_hint),
+                                    txl.uint64(tma_cache_hint),
                                 )
                             else:
-                                K.ptx[
+                                txl.ptx[
                                     "cp.async.bulk.tensor.4d.shared::cluster.global.tile"
                                     ".mbarrier::complete_tx::bytes.multicast::cluster"
                                     ".L2::cache_hint"
@@ -932,38 +932,38 @@ def _make_kernel(
                                     + sfa_offset
                                     + tma_state.stage * sfa_stage_bytes
                                     + cluster_y * (sfa_stage_bytes // cluster_n),
-                                    K.address_of(sfa_map),
-                                    K.cast(sfa_coord_0, "int32"),
-                                    K.cast(sfa_coord_1, "int32"),
-                                    K.cast(tile_m_idx, "int32"),
-                                    K.cast(batch_idx, "int32"),
+                                    txl.address_of(sfa_map),
+                                    txl.cast(sfa_coord_0, "int32"),
+                                    txl.cast(sfa_coord_1, "int32"),
+                                    txl.cast(tile_m_idx, "int32"),
+                                    txl.cast(batch_idx, "int32"),
                                     ab_pipe.full.ptr_to([tma_state.stage]),
-                                    K.cast(a_mcast_mask, "uint16"),
-                                    K.uint64(tma_cache_hint),
+                                    txl.cast(a_mcast_mask, "uint16"),
+                                    txl.uint64(tma_cache_hint),
                                 )
-                    with K.If(tma_elected):
-                        with K.Then():
+                    with txl.If(tma_elected):
+                        with txl.Then():
                             sfb_linear = cluster_x * sfb_piece_values
                             sfb_coord_0 = sfb_linear % 256
                             sfb_quotient = sfb_linear // 256
                             sfb_coord_1 = count * sf_k_box + sfb_quotient % sf_k_box
                             sfb_coord_2 = tile_n_idx * sfb_n_box + sfb_quotient // sf_k_box
                             if cluster_m == 1:
-                                K.ptx[
+                                txl.ptx[
                                     "cp.async.bulk.tensor.4d.shared::cta.global.tile"
                                     ".mbarrier::complete_tx::bytes.L2::cache_hint"
                                 ](
                                     smem.ptr_to([sfb_offset + tma_state.stage * sfb_stage_bytes]),
-                                    K.address_of(sfb_map),
-                                    K.cast(sfb_coord_0, "int32"),
-                                    K.cast(sfb_coord_1, "int32"),
-                                    K.cast(sfb_coord_2, "int32"),
-                                    K.cast(batch_idx, "int32"),
+                                    txl.address_of(sfb_map),
+                                    txl.cast(sfb_coord_0, "int32"),
+                                    txl.cast(sfb_coord_1, "int32"),
+                                    txl.cast(sfb_coord_2, "int32"),
+                                    txl.cast(batch_idx, "int32"),
                                     ab_pipe.full.ptr_to([tma_state.stage]),
-                                    K.uint64(tma_cache_hint),
+                                    txl.uint64(tma_cache_hint),
                                 )
                             else:
-                                K.ptx[
+                                txl.ptx[
                                     "cp.async.bulk.tensor.4d.shared::cluster.global.tile"
                                     ".mbarrier::complete_tx::bytes.multicast::cluster"
                                     ".L2::cache_hint"
@@ -972,82 +972,82 @@ def _make_kernel(
                                     + sfb_offset
                                     + tma_state.stage * sfb_stage_bytes
                                     + cluster_x * (sfb_stage_bytes // cluster_m),
-                                    K.address_of(sfb_map),
-                                    K.cast(sfb_coord_0, "int32"),
-                                    K.cast(sfb_coord_1, "int32"),
-                                    K.cast(sfb_coord_2, "int32"),
-                                    K.cast(batch_idx, "int32"),
+                                    txl.address_of(sfb_map),
+                                    txl.cast(sfb_coord_0, "int32"),
+                                    txl.cast(sfb_coord_1, "int32"),
+                                    txl.cast(sfb_coord_2, "int32"),
+                                    txl.cast(batch_idx, "int32"),
                                     ab_pipe.full.ptr_to([tma_state.stage]),
-                                    K.cast(b_mcast_mask, "uint16"),
-                                    K.uint64(tma_cache_hint),
+                                    txl.cast(b_mcast_mask, "uint16"),
+                                    txl.uint64(tma_cache_hint),
                                 )
                     _advance(tma_state)
-                    K.assign(count, count + 1)
-                    K.assign(speculative, K.uint32(1))
-                    with K.If(count < k_tiles):
-                        with K.Then():
+                    txl.assign(count, count + 1)
+                    txl.assign(speculative, txl.uint32(1))
+                    with txl.If(count < k_tiles):
+                        with txl.Then():
                             _try_wait_acquire(
                                 speculative,
                                 ab_pipe.empty.ptr_to([tma_state.stage]),
                                 tma_state.phase,
                             )
                 advance_work(work)
-            with K.unroll(0, ab_stages) as unused_stage:
+            with txl.unroll(0, ab_stages) as unused_stage:
                 _wait_plain(ab_pipe.empty.ptr_to([tma_state.stage]), tma_state.phase)
                 _advance(tma_state)
             del unused_stage
 
         with mma_role:
-            K.ptx.bar.sync(K.uint32(3), K.uint32(160))
-            tmem_base = K.local_scalar("uint32")
-            K.ptx.ld.shared.b32(tmem_base, tmem_slot.ptr_to([0]))
-            sfa_shared_base = K.local_scalar("uint32", init=smem_base + sfa_offset)
-            sfb_shared_base = K.local_scalar("uint32", init=smem_base + sfb_offset)
-            sfa_descriptor = K.local_scalar(
+            txl.ptx.bar.sync(txl.uint32(3), txl.uint32(160))
+            tmem_base = txl.local_scalar("uint32")
+            txl.ptx.ld.shared.b32(tmem_base, tmem_slot.ptr_to([0]))
+            sfa_shared_base = txl.local_scalar("uint32", init=smem_base + sfa_offset)
+            sfb_shared_base = txl.local_scalar("uint32", init=smem_base + sfb_offset)
+            sfa_descriptor = txl.local_scalar(
                 "uint64", init=_descriptor_with_address(sf_desc_base, sfa_shared_base)
             )
-            sfb_descriptor = K.local_scalar(
+            sfb_descriptor = txl.local_scalar(
                 "uint64", init=_descriptor_with_address(sf_desc_base, sfb_shared_base)
             )
-            mma_state = K.PipelineState(ab_stages, phase=0)
-            acc_state = K.PipelineState(acc_stages, phase=1)
-            work = K.local_scalar("int32", init=cluster_work_id)
-            count = K.local_scalar("int32")
-            speculative = K.local_scalar("uint32")
-            accumulate = K.local_scalar("uint32")
-            with K.While(work < cluster_work):
-                K.assign(count, 0)
-                K.assign(speculative, K.uint32(1))
-                with K.If(count < k_tiles):
-                    with K.Then():
+            mma_state = txl.PipelineState(ab_stages, phase=0)
+            acc_state = txl.PipelineState(acc_stages, phase=1)
+            work = txl.local_scalar("int32", init=cluster_work_id)
+            count = txl.local_scalar("int32")
+            speculative = txl.local_scalar("uint32")
+            accumulate = txl.local_scalar("uint32")
+            with txl.While(work < cluster_work):
+                txl.assign(count, 0)
+                txl.assign(speculative, txl.uint32(1))
+                with txl.If(count < k_tiles):
+                    with txl.Then():
                         _try_wait_acquire(
                             speculative, ab_pipe.full.ptr_to([mma_state.stage]), mma_state.phase
                         )
                 _wait_plain(acc_pipe.empty.ptr_to([acc_state.stage]), acc_state.phase)
-                K.assign(accumulate, K.uint32(0))
-                with K.While(count < k_tiles):
+                txl.assign(accumulate, txl.uint32(0))
+                with txl.While(count < k_tiles):
                     _wait_plain_if_needed(
                         ab_pipe.full.ptr_to([mma_state.stage]), mma_state.phase, speculative
                     )
                     for sf_chunk in range(sfa_chunks):
-                        with K.If(_elected()):
-                            with K.Then():
-                                K.ptx["tcgen05.cp.cta_group::1.32x128b.warpx4"](
-                                    K.cast(tmem_base + sfa_tmem_column + sf_chunk * 4, "uint32"),
+                        with txl.If(_elected()):
+                            with txl.Then():
+                                txl.ptx["tcgen05.cp.cta_group::1.32x128b.warpx4"](
+                                    txl.cast(tmem_base + sfa_tmem_column + sf_chunk * 4, "uint32"),
                                     sfa_descriptor
-                                    + K.cast(
+                                    + txl.cast(
                                         mma_state.stage * (sfa_stage_bytes // 16) + sf_chunk * 32,
                                         "uint64",
                                     ),
                                 )
                     for sf_chunk in range(sfb_chunks):
                         sfb_shared_chunk = (sf_chunk % sfb_n_box) * sf_k_box + sf_chunk // sfb_n_box
-                        with K.If(_elected()):
-                            with K.Then():
-                                K.ptx["tcgen05.cp.cta_group::1.32x128b.warpx4"](
-                                    K.cast(tmem_base + sfb_tmem_column + sf_chunk * 4, "uint32"),
+                        with txl.If(_elected()):
+                            with txl.Then():
+                                txl.ptx["tcgen05.cp.cta_group::1.32x128b.warpx4"](
+                                    txl.cast(tmem_base + sfb_tmem_column + sf_chunk * 4, "uint32"),
                                     sfb_descriptor
-                                    + K.cast(
+                                    + txl.cast(
                                         mma_state.stage * (sfb_stage_bytes // 16)
                                         + sfb_shared_chunk * 32,
                                         "uint64",
@@ -1066,47 +1066,47 @@ def _make_kernel(
                             sfa_scale_offset = 0
                             sfb_scale_offset = 0
                             sf_selector = kblock * 0x40000000
-                        sfa_tmem_addr = K.cast(
-                            tmem_base + sfa_tmem_column + sfa_scale_offset + K.uint32(sf_selector),
+                        sfa_tmem_addr = txl.cast(
+                            tmem_base + sfa_tmem_column + sfa_scale_offset + txl.uint32(sf_selector),
                             "uint32",
                         )
-                        sfb_tmem_addr = K.cast(
-                            tmem_base + sfb_tmem_column + sfb_scale_offset + K.uint32(sf_selector),
+                        sfb_tmem_addr = txl.cast(
+                            tmem_base + sfb_tmem_column + sfb_scale_offset + txl.uint32(sf_selector),
                             "uint32",
                         )
-                        runtime_instr_desc = K.bitwise_and(
-                            K.uint32(instr_desc), K.uint32(0x9FFFFFCF)
+                        runtime_instr_desc = txl.bitwise_and(
+                            txl.uint32(instr_desc), txl.uint32(0x9FFFFFCF)
                         )
-                        runtime_instr_desc = K.bitwise_or(
+                        runtime_instr_desc = txl.bitwise_or(
                             runtime_instr_desc,
-                            K.bitwise_and(
-                                K.shift_right(sfa_tmem_addr, K.uint32(1)), K.uint32(0x60000000)
+                            txl.bitwise_and(
+                                txl.shift_right(sfa_tmem_addr, txl.uint32(1)), txl.uint32(0x60000000)
                             ),
                         )
-                        runtime_instr_desc = K.bitwise_or(
+                        runtime_instr_desc = txl.bitwise_or(
                             runtime_instr_desc,
-                            K.bitwise_and(
-                                K.shift_right(sfb_tmem_addr, K.uint32(26)), K.uint32(0x30)
+                            txl.bitwise_and(
+                                txl.shift_right(sfb_tmem_addr, txl.uint32(26)), txl.uint32(0x30)
                             ),
                         )
-                        with K.If(_elected()):
-                            with K.Then():
+                        with txl.If(_elected()):
+                            with txl.Then():
                                 mma_kind = "mxf4nvf4" if ab_dtype == "float4_e2m1fn" else "mxf8f6f4"
-                                K.ptx[
+                                txl.ptx[
                                     "tcgen05.mma.cta_group::1.kind::"
                                     + mma_kind
                                     + ".block_scale.block"
                                     + str(sf_vec_size)
                                 ](
-                                    K.cast(tmem_base + acc_state.stage * n_tile, "uint32"),
+                                    txl.cast(tmem_base + acc_state.stage * n_tile, "uint32"),
                                     a_descriptor
-                                    + K.cast(
+                                    + txl.cast(
                                         mma_state.stage * (a_stage_bytes // 16)
                                         + kblock * (2 if a_major == "k" else 256),
                                         "uint64",
                                     ),
                                     b_descriptor
-                                    + K.cast(
+                                    + txl.cast(
                                         mma_state.stage * (b_stage_bytes // 16)
                                         + kblock * (2 if b_major == "k" else 256),
                                         "uint64",
@@ -1114,73 +1114,73 @@ def _make_kernel(
                                     runtime_instr_desc,
                                     sfa_tmem_addr,
                                     sfb_tmem_addr,
-                                    K.ptx.pred(K.cast(accumulate, "bool")),
+                                    txl.ptx.pred(txl.cast(accumulate, "bool")),
                                 )
-                        K.assign(accumulate, K.uint32(1))
-                    with K.If(_elected()):
-                        with K.Then():
+                        txl.assign(accumulate, txl.uint32(1))
+                    with txl.If(_elected()):
+                        with txl.Then():
                             if cluster_size == 1:
-                                K.ptx[
+                                txl.ptx[
                                     "tcgen05.commit.cta_group::1.mbarrier::arrive::one"
                                     ".shared::cluster.b64"
                                 ](ab_pipe.empty.ptr_to([mma_state.stage]))
                             else:
-                                K.ptx[
+                                txl.ptx[
                                     "tcgen05.commit.cta_group::1.mbarrier::arrive::one"
                                     ".shared::cluster.multicast::cluster.b64"
                                 ](
                                     ab_pipe.empty.ptr_to([mma_state.stage]),
-                                    K.cast(ab_consumer_mask, "uint16"),
+                                    txl.cast(ab_consumer_mask, "uint16"),
                                 )
                     _advance(mma_state)
-                    K.assign(count, count + 1)
-                    K.assign(speculative, K.uint32(1))
-                    with K.If(count < k_tiles):
-                        with K.Then():
+                    txl.assign(count, count + 1)
+                    txl.assign(speculative, txl.uint32(1))
+                    with txl.If(count < k_tiles):
+                        with txl.Then():
                             _try_wait_acquire(
                                 speculative, ab_pipe.full.ptr_to([mma_state.stage]), mma_state.phase
                             )
-                with K.If(_elected()):
-                    with K.Then():
+                with txl.If(_elected()):
+                    with txl.Then():
                         if cluster_size == 1:
-                            K.ptx[
+                            txl.ptx[
                                 "tcgen05.commit.cta_group::1.mbarrier::arrive::one"
                                 ".shared::cluster.b64"
                             ](acc_pipe.full.ptr_to([acc_state.stage]))
                         else:
-                            K.ptx[
+                            txl.ptx[
                                 "tcgen05.commit.cta_group::1.mbarrier::arrive::one"
                                 ".shared::cluster.multicast::cluster.b64"
                             ](
                                 acc_pipe.full.ptr_to([acc_state.stage]),
-                                K.cast(acc_producer_mask, "uint16"),
+                                txl.cast(acc_producer_mask, "uint16"),
                             )
                 _advance(acc_state)
                 advance_work(work)
-            with K.If((cluster_rank % 2) == 0):
-                with K.Then():
+            with txl.If((cluster_rank % 2) == 0):
+                with txl.Then():
                     for _ in range(acc_stages - 1):
                         _advance(acc_state)
                     _wait_plain(acc_pipe.empty.ptr_to([acc_state.stage]), acc_state.phase)
 
         with epilogue_role:
-            with K.If(warp == 0):
-                with K.Then():
-                    K.ptx["tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"](
-                        tmem_slot.ptr_to([0]), K.uint32(512)
+            with txl.If(warp == 0):
+                with txl.Then():
+                    txl.ptx["tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"](
+                        tmem_slot.ptr_to([0]), txl.uint32(512)
                     )
-            K.ptx.bar.sync(K.uint32(3), K.uint32(160))
-            tmem_base = K.local_scalar("uint32")
-            K.ptx.ld.shared.b32(tmem_base, tmem_slot.ptr_to([0]))
-            acc_state = K.PipelineState(acc_stages, phase=0)
+            txl.ptx.bar.sync(txl.uint32(3), txl.uint32(160))
+            tmem_base = txl.local_scalar("uint32")
+            txl.ptx.ld.shared.b32(tmem_base, tmem_slot.ptr_to([0]))
+            acc_state = txl.PipelineState(acc_stages, phase=0)
             if use_derived_c_stage:
                 c_stage = None
             else:
-                c_stage = K.local_scalar("int32", init=0)
-            work = K.local_scalar("int32", init=cluster_work_id)
-            values = K.alloc_local((epilogue_values,), "float32")
-            absolute = K.alloc_local((epilogue_values,), "float32")
-            maxima = K.alloc_local((epilogue_values // 2,), "float32")
+                c_stage = txl.local_scalar("int32", init=0)
+            work = txl.local_scalar("int32", init=cluster_work_id)
+            values = txl.alloc_local((epilogue_values,), "float32")
+            absolute = txl.alloc_local((epilogue_values,), "float32")
+            maxima = txl.alloc_local((epilogue_values // 2,), "float32")
             packed_pair_dtype = (
                 "uint8"
                 if c_dtype == "float4_e2m1fn"
@@ -1188,36 +1188,36 @@ def _make_kernel(
                 if c_dtype.startswith("float8_")
                 else "uint32"
             )
-            packed_pairs = K.alloc_local((epilogue_values // 2,), packed_pair_dtype)
-            packed = K.alloc_local((epilogue_values,), "uint32")
+            packed_pairs = txl.alloc_local((epilogue_values // 2,), packed_pair_dtype)
+            packed = txl.alloc_local((epilogue_values,), "uint32")
             if c_major == "n":
-                c_store_offsets = K.alloc_local((c_store_vectors,), "int32")
-            tile_amax = K.local_scalar("float32")
-            warp_amax = K.local_scalar("float32")
+                c_store_offsets = txl.alloc_local((c_store_vectors,), "int32")
+            tile_amax = txl.local_scalar("float32")
+            warp_amax = txl.local_scalar("float32")
 
             def emit_epilogue_subtile(subtile):
                 if use_derived_c_stage:
-                    c_stage_index = K.bitwise_and(subtile, K.int32(1))
+                    c_stage_index = txl.bitwise_and(subtile, txl.int32(1))
                 else:
                     c_stage_index = c_stage
-                tmem_load_addr = K.local_scalar(
+                tmem_load_addr = txl.local_scalar(
                     "uint32",
                     init=tmem_base + (warp << 21) + acc_state.stage * n_tile + subtile * epi_n,
                 )
                 if c_dtype == "float4_e2m1fn":
-                    K.ptx["tcgen05.ld.sync.aligned.32x32b.x64.b32"](
+                    txl.ptx["tcgen05.ld.sync.aligned.32x32b.x64.b32"](
                         *[values[index] for index in range(64)], tmem_load_addr
                     )
                 elif c_major == "m" and c_bits <= 16:
-                    K.ptx["tcgen05.ld.sync.aligned.16x256b.x4.b32"](
+                    txl.ptx["tcgen05.ld.sync.aligned.16x256b.x4.b32"](
                         *[values[index] for index in range(16)], tmem_load_addr
                     )
-                    K.ptx["tcgen05.ld.sync.aligned.16x256b.x4.b32"](
+                    txl.ptx["tcgen05.ld.sync.aligned.16x256b.x4.b32"](
                         *[values[index] for index in range(16, 32)],
-                        tmem_load_addr + K.uint32(1 << 20),
+                        tmem_load_addr + txl.uint32(1 << 20),
                     )
                 else:
-                    K.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
+                    txl.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
                         *[values[index] for index in range(32)], tmem_load_addr
                     )
                 if c_major == "n":
@@ -1232,18 +1232,18 @@ def _make_kernel(
                             + lane * bytes_per_thread
                             + vector * 16
                         )
-                        swizzled = K.bitwise_xor(
+                        swizzled = txl.bitwise_xor(
                             unswizzled,
-                            K.bitwise_and(
-                                K.shift_right(unswizzled, K.uint32(3)), K.uint32(swizzle_mask)
+                            txl.bitwise_and(
+                                txl.shift_right(unswizzled, txl.uint32(3)), txl.uint32(swizzle_mask)
                             ),
                         )
-                        K.assign(c_store_offsets[vector], K.cast(swizzled - smem_base, "int32"))
+                        txl.assign(c_store_offsets[vector], txl.cast(swizzled - smem_base, "int32"))
                 for index in range(epilogue_values):
-                    K.ptx.abs.f32(absolute[index], values[index])
+                    txl.ptx.abs.f32(absolute[index], values[index])
                 ternary_groups = epilogue_values // 3
                 for index in range(ternary_groups):
-                    K.ptx.max.NaN.f32(
+                    txl.ptx.max.NaN.f32(
                         maxima[index],
                         absolute[index * 3],
                         absolute[index * 3 + 1],
@@ -1251,14 +1251,14 @@ def _make_kernel(
                     )
                 remainder = epilogue_values % 3
                 if remainder == 1:
-                    K.ptx.max.NaN.f32(
+                    txl.ptx.max.NaN.f32(
                         maxima[ternary_groups - 1],
                         maxima[ternary_groups - 1],
                         absolute[epilogue_values - 1],
                     )
                     reduction_width = ternary_groups
                 elif remainder == 2:
-                    K.ptx.max.NaN.f32(
+                    txl.ptx.max.NaN.f32(
                         maxima[ternary_groups],
                         absolute[epilogue_values - 2],
                         absolute[epilogue_values - 1],
@@ -1269,7 +1269,7 @@ def _make_kernel(
                 while reduction_width > 1:
                     ternary_groups = reduction_width // 3
                     for index in range(ternary_groups):
-                        K.ptx.max.NaN.f32(
+                        txl.ptx.max.NaN.f32(
                             maxima[index],
                             maxima[index * 3],
                             maxima[index * 3 + 1],
@@ -1277,14 +1277,14 @@ def _make_kernel(
                         )
                     remainder = reduction_width % 3
                     if remainder == 1:
-                        K.ptx.max.NaN.f32(
+                        txl.ptx.max.NaN.f32(
                             maxima[ternary_groups - 1],
                             maxima[ternary_groups - 1],
                             maxima[reduction_width - 1],
                         )
                         reduction_width = ternary_groups
                     elif remainder == 2:
-                        K.ptx.max.NaN.f32(
+                        txl.ptx.max.NaN.f32(
                             maxima[ternary_groups],
                             maxima[reduction_width - 2],
                             maxima[reduction_width - 1],
@@ -1292,87 +1292,87 @@ def _make_kernel(
                         reduction_width = ternary_groups + 1
                     else:
                         reduction_width = ternary_groups
-                K.ptx.max.NaN.f32(maxima[0], maxima[0], K.float32(0.0))
-                K.ptx.max.f32(tile_amax, tile_amax, maxima[0])
+                txl.ptx.max.NaN.f32(maxima[0], maxima[0], txl.float32(0.0))
+                txl.ptx.max.f32(tile_amax, tile_amax, maxima[0])
 
                 if c_dtype == "float32":
                     for index in range(32):
-                        K.assign(packed[index], K.reinterpret("uint32", values[index]))
+                        txl.assign(packed[index], txl.reinterpret("uint32", values[index]))
                     packed_words = 32
                 elif c_dtype in {"float16", "bfloat16"}:
                     for index in range(16):
                         if c_dtype == "float16":
-                            K.ptx.cvt.rn.f16x2.f32(
+                            txl.ptx.cvt.rn.f16x2.f32(
                                 packed[index], values[index * 2 + 1], values[index * 2]
                             )
                         else:
-                            K.ptx.cvt.rn.bf16x2.f32(
+                            txl.ptx.cvt.rn.bf16x2.f32(
                                 packed[index], values[index * 2 + 1], values[index * 2]
                             )
                     packed_words = 16
                 elif c_dtype in {"float8_e4m3fn", "float8_e5m2"}:
                     for index in range(16):
                         if c_dtype == "float8_e4m3fn":
-                            K.ptx.cvt.rn.satfinite.e4m3x2.f32(
+                            txl.ptx.cvt.rn.satfinite.e4m3x2.f32(
                                 packed_pairs[index], values[index * 2 + 1], values[index * 2]
                             )
                         else:
-                            K.ptx.cvt.rn.satfinite.e5m2x2.f32(
+                            txl.ptx.cvt.rn.satfinite.e5m2x2.f32(
                                 packed_pairs[index], values[index * 2 + 1], values[index * 2]
                             )
                     if c_major != "n":
                         for index in range(8):
-                            K.assign(
+                            txl.assign(
                                 packed[index],
-                                K.bitwise_or(
-                                    K.bitwise_and(
-                                        K.cast(packed_pairs[index * 2], "uint32"), K.uint32(0xFFFF)
+                                txl.bitwise_or(
+                                    txl.bitwise_and(
+                                        txl.cast(packed_pairs[index * 2], "uint32"), txl.uint32(0xFFFF)
                                     ),
-                                    K.shift_left(
-                                        K.bitwise_and(
-                                            K.cast(packed_pairs[index * 2 + 1], "uint32"),
-                                            K.uint32(0xFFFF),
+                                    txl.shift_left(
+                                        txl.bitwise_and(
+                                            txl.cast(packed_pairs[index * 2 + 1], "uint32"),
+                                            txl.uint32(0xFFFF),
                                         ),
-                                        K.uint32(16),
+                                        txl.uint32(16),
                                     ),
                                 ),
                             )
                     packed_words = 8
                 else:
                     for index in range(32):
-                        K.ptx.cvt.rn.satfinite.e2m1x2.f32(
+                        txl.ptx.cvt.rn.satfinite.e2m1x2.f32(
                             packed_pairs[index], values[index * 2 + 1], values[index * 2]
                         )
                     for index in range(8):
-                        K.assign(
+                        txl.assign(
                             packed[index],
-                            K.bitwise_or(
-                                K.bitwise_or(
-                                    K.bitwise_and(
-                                        K.cast(packed_pairs[index * 4], "uint32"), K.uint32(0xFF)
+                            txl.bitwise_or(
+                                txl.bitwise_or(
+                                    txl.bitwise_and(
+                                        txl.cast(packed_pairs[index * 4], "uint32"), txl.uint32(0xFF)
                                     ),
-                                    K.shift_left(
-                                        K.bitwise_and(
-                                            K.cast(packed_pairs[index * 4 + 1], "uint32"),
-                                            K.uint32(0xFF),
+                                    txl.shift_left(
+                                        txl.bitwise_and(
+                                            txl.cast(packed_pairs[index * 4 + 1], "uint32"),
+                                            txl.uint32(0xFF),
                                         ),
-                                        K.uint32(8),
+                                        txl.uint32(8),
                                     ),
                                 ),
-                                K.bitwise_or(
-                                    K.shift_left(
-                                        K.bitwise_and(
-                                            K.cast(packed_pairs[index * 4 + 2], "uint32"),
-                                            K.uint32(0xFF),
+                                txl.bitwise_or(
+                                    txl.shift_left(
+                                        txl.bitwise_and(
+                                            txl.cast(packed_pairs[index * 4 + 2], "uint32"),
+                                            txl.uint32(0xFF),
                                         ),
-                                        K.uint32(16),
+                                        txl.uint32(16),
                                     ),
-                                    K.shift_left(
-                                        K.bitwise_and(
-                                            K.cast(packed_pairs[index * 4 + 3], "uint32"),
-                                            K.uint32(0xFF),
+                                    txl.shift_left(
+                                        txl.bitwise_and(
+                                            txl.cast(packed_pairs[index * 4 + 3], "uint32"),
+                                            txl.uint32(0xFF),
                                         ),
-                                        K.uint32(24),
+                                        txl.uint32(24),
                                     ),
                                 ),
                             ),
@@ -1383,14 +1383,14 @@ def _make_kernel(
                     if c_dtype in {"float8_e4m3fn", "float8_e5m2"}:
                         for vector in range(c_store_vectors):
                             pair = vector * 8
-                            K.ptx["st.shared.v4.b16"](
+                            txl.ptx["st.shared.v4.b16"](
                                 smem.ptr_to([c_store_offsets[vector]]),
                                 packed_pairs[pair],
                                 packed_pairs[pair + 1],
                                 packed_pairs[pair + 2],
                                 packed_pairs[pair + 3],
                             )
-                            K.ptx["st.shared.v4.b16"](
+                            txl.ptx["st.shared.v4.b16"](
                                 smem.ptr_to([c_store_offsets[vector] + 8]),
                                 packed_pairs[pair + 4],
                                 packed_pairs[pair + 5],
@@ -1399,7 +1399,7 @@ def _make_kernel(
                             )
                     else:
                         for vector in range(c_store_vectors):
-                            K.ptx.st.shared.v4.b32(
+                            txl.ptx.st.shared.v4.b32(
                                 smem.ptr_to([c_store_offsets[vector]]),
                                 packed[vector * 4],
                                 packed[vector * 4 + 1],
@@ -1416,58 +1416,58 @@ def _make_kernel(
                     )
                     for index in range(32):
                         unswizzled = scalar_base + (index % 8) * 128 + (index // 8) * 1024
-                        swizzled = K.bitwise_xor(
+                        swizzled = txl.bitwise_xor(
                             unswizzled,
-                            K.bitwise_and(K.shift_right(unswizzled, K.uint32(3)), K.uint32(112)),
+                            txl.bitwise_and(txl.shift_right(unswizzled, txl.uint32(3)), txl.uint32(112)),
                         )
-                        K.ptx.st.shared.b32(
-                            smem.ptr_to([K.cast(swizzled - smem_base, "int32")]), packed[index]
+                        txl.ptx.st.shared.b32(
+                            smem.ptr_to([txl.cast(swizzled - smem_base, "int32")]), packed[index]
                         )
                 elif c_bits == 16:
                     thread = warp * 32 + lane
-                    temporary = K.bitwise_or(
-                        K.bitwise_and(thread << 5, K.int32(6144)),
-                        K.bitwise_and(thread, K.int32(40)),
+                    temporary = txl.bitwise_or(
+                        txl.bitwise_and(thread << 5, txl.int32(6144)),
+                        txl.bitwise_and(thread, txl.int32(40)),
                     )
-                    raw_address = K.bitwise_or(
-                        K.bitwise_or(K.bitwise_and(thread << 7, K.int32(896)), temporary << 1),
-                        K.bitwise_and(thread << 6, K.int32(1024)),
+                    raw_address = txl.bitwise_or(
+                        txl.bitwise_or(txl.bitwise_and(thread << 7, txl.int32(896)), temporary << 1),
+                        txl.bitwise_and(thread << 6, txl.int32(1024)),
                     )
                     first_unswizzled = (
                         smem_base + c_offset + c_stage_index * c_stage_bytes + raw_address
                     )
-                    first_swizzled = K.bitwise_xor(
+                    first_swizzled = txl.bitwise_xor(
                         first_unswizzled,
-                        K.bitwise_and(K.shift_right(first_unswizzled, K.uint32(3)), K.uint32(112)),
+                        txl.bitwise_and(txl.shift_right(first_unswizzled, txl.uint32(3)), txl.uint32(112)),
                     )
                     second_unswizzled = first_unswizzled + 32
-                    second_swizzled = K.bitwise_xor(
+                    second_swizzled = txl.bitwise_xor(
                         second_unswizzled,
-                        K.bitwise_and(K.shift_right(second_unswizzled, K.uint32(3)), K.uint32(112)),
+                        txl.bitwise_and(txl.shift_right(second_unswizzled, txl.uint32(3)), txl.uint32(112)),
                     )
-                    K.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
-                        smem.ptr_to([K.cast(first_swizzled - smem_base, "int32")]),
+                    txl.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
+                        smem.ptr_to([txl.cast(first_swizzled - smem_base, "int32")]),
                         packed[0],
                         packed[1],
                         packed[2],
                         packed[3],
                     )
-                    K.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
-                        smem.ptr_to([K.cast(first_swizzled - smem_base + 2048, "int32")]),
+                    txl.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
+                        smem.ptr_to([txl.cast(first_swizzled - smem_base + 2048, "int32")]),
                         packed[4],
                         packed[5],
                         packed[6],
                         packed[7],
                     )
-                    K.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
-                        smem.ptr_to([K.cast(second_swizzled - smem_base, "int32")]),
+                    txl.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
+                        smem.ptr_to([txl.cast(second_swizzled - smem_base, "int32")]),
                         packed[8],
                         packed[9],
                         packed[10],
                         packed[11],
                     )
-                    K.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
-                        smem.ptr_to([K.cast(second_swizzled - smem_base + 2048, "int32")]),
+                    txl.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
+                        smem.ptr_to([txl.cast(second_swizzled - smem_base + 2048, "int32")]),
                         packed[12],
                         packed[13],
                         packed[14],
@@ -1475,129 +1475,129 @@ def _make_kernel(
                     )
                 else:
                     thread = warp * 32 + lane
-                    raw_address = K.bitwise_or(
-                        K.bitwise_and(thread, K.int32(224)),
-                        K.bitwise_and(thread << 7, K.int32(3968)),
+                    raw_address = txl.bitwise_or(
+                        txl.bitwise_and(thread, txl.int32(224)),
+                        txl.bitwise_and(thread << 7, txl.int32(3968)),
                     )
                     first_unswizzled = (
                         smem_base + c_offset + c_stage_index * c_stage_bytes + raw_address
                     )
-                    first_swizzled = K.bitwise_xor(
+                    first_swizzled = txl.bitwise_xor(
                         first_unswizzled,
-                        K.bitwise_and(K.shift_right(first_unswizzled, K.uint32(3)), K.uint32(112)),
+                        txl.bitwise_and(txl.shift_right(first_unswizzled, txl.uint32(3)), txl.uint32(112)),
                     )
                     second_unswizzled = first_unswizzled + 16
-                    second_swizzled = K.bitwise_xor(
+                    second_swizzled = txl.bitwise_xor(
                         second_unswizzled,
-                        K.bitwise_and(K.shift_right(second_unswizzled, K.uint32(3)), K.uint32(112)),
+                        txl.bitwise_and(txl.shift_right(second_unswizzled, txl.uint32(3)), txl.uint32(112)),
                     )
-                    K.ptx.stmatrix.sync.aligned.m16n8.x4.trans.shared.b8(
-                        smem.ptr_to([K.cast(first_swizzled - smem_base, "int32")]),
+                    txl.ptx.stmatrix.sync.aligned.m16n8.x4.trans.shared.b8(
+                        smem.ptr_to([txl.cast(first_swizzled - smem_base, "int32")]),
                         packed[0],
                         packed[1],
                         packed[2],
                         packed[3],
                     )
-                    K.ptx.stmatrix.sync.aligned.m16n8.x4.trans.shared.b8(
-                        smem.ptr_to([K.cast(second_swizzled - smem_base, "int32")]),
+                    txl.ptx.stmatrix.sync.aligned.m16n8.x4.trans.shared.b8(
+                        smem.ptr_to([txl.cast(second_swizzled - smem_base, "int32")]),
                         packed[4],
                         packed[5],
                         packed[6],
                         packed[7],
                     )
-                K.ptx.fence.proxy.async_.shared__cta()
-                K.ptx.bar.sync(K.uint32(2), K.uint32(128))
-                with K.If(warp == 0):
-                    with K.Then():
+                txl.ptx.fence.proxy.async_.shared__cta()
+                txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
+                with txl.If(warp == 0):
+                    with txl.Then():
                         if c_major == "n":
-                            K.ptx[
+                            txl.ptx[
                                 "cp.async.bulk.tensor.3d.global.shared::cta.tile"
                                 ".bulk_group.L2::cache_hint"
                             ](
-                                K.address_of(c_map),
-                                K.cast(tile_n_idx * n_tile + subtile * epi_n, "int32"),
-                                K.cast(tile_m_idx * m_tile, "int32"),
-                                K.cast(batch_idx, "int32"),
+                                txl.address_of(c_map),
+                                txl.cast(tile_n_idx * n_tile + subtile * epi_n, "int32"),
+                                txl.cast(tile_m_idx * m_tile, "int32"),
+                                txl.cast(batch_idx, "int32"),
                                 smem.ptr_to([c_offset + c_stage_index * c_stage_bytes]),
-                                K.uint64(tma_cache_hint),
+                                txl.uint64(tma_cache_hint),
                             )
                         else:
                             for row_copy in range(c_bits // 8):
-                                K.ptx[
+                                txl.ptx[
                                     "cp.async.bulk.tensor.3d.global.shared::cta.tile"
                                     ".bulk_group.L2::cache_hint"
                                 ](
-                                    K.address_of(c_map),
-                                    K.cast(
+                                    txl.address_of(c_map),
+                                    txl.cast(
                                         tile_m_idx * m_tile + row_copy * (epi_m // (c_bits // 8)),
                                         "int32",
                                     ),
-                                    K.cast(tile_n_idx * n_tile + subtile * epi_n, "int32"),
-                                    K.cast(batch_idx, "int32"),
+                                    txl.cast(tile_n_idx * n_tile + subtile * epi_n, "int32"),
+                                    txl.cast(batch_idx, "int32"),
                                     smem.ptr_to(
                                         [c_offset + c_stage_index * c_stage_bytes + row_copy * 4096]
                                     ),
-                                    K.uint64(tma_cache_hint),
+                                    txl.uint64(tma_cache_hint),
                                 )
-                        K.ptx.cp.async_.bulk.commit_group()
-                        K.ptx.cp.async_.bulk.wait_group.read(c_stages - 1)
-                K.ptx.bar.sync(K.uint32(2), K.uint32(128))
+                        txl.ptx.cp.async_.bulk.commit_group()
+                        txl.ptx.cp.async_.bulk.wait_group.read(c_stages - 1)
+                txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
                 if not use_derived_c_stage:
                     if (c_stages & (c_stages - 1)) == 0:
-                        K.assign(c_stage, K.bitwise_and(c_stage + 1, c_stages - 1))
+                        txl.assign(c_stage, txl.bitwise_and(c_stage + 1, c_stages - 1))
                     else:
-                        K.assign(c_stage, K.Select(c_stage == c_stages - 1, 0, c_stage + 1))
+                        txl.assign(c_stage, txl.Select(c_stage == c_stages - 1, 0, c_stage + 1))
 
-            with K.While(work < cluster_work):
+            with txl.While(work < cluster_work):
                 tile_m_idx, tile_n_idx, batch_idx = scheduler_coords(work)
                 _wait_plain(acc_pipe.full.ptr_to([acc_state.stage]), acc_state.phase)
-                K.assign(tile_amax, K.float32(0.0))
-                subtile = K.local_scalar("int32", init=0)
-                with K.While(subtile < epilogue_subtiles):
+                txl.assign(tile_amax, txl.float32(0.0))
+                subtile = txl.local_scalar("int32", init=0)
+                with txl.While(subtile < epilogue_subtiles):
                     emit_epilogue_subtile(subtile)
-                    K.assign(subtile, subtile + 1)
+                    txl.assign(subtile, subtile + 1)
 
-                K.ptx.redux_sync.max.NaN.f32(warp_amax, tile_amax, K.uint32(0xFFFFFFFF))
-                with K.If(lane == 0):
-                    with K.Then():
-                        K.ptx.st.shared.b32(smem.ptr_to([amax_offset + warp * 4]), warp_amax)
-                K.ptx.bar.sync(K.uint32(2), K.uint32(128))
-                with K.If((warp == 0) & (lane == 0)):
-                    with K.Then():
-                        block_amax = K.local_scalar("float32")
-                        next_amax = K.local_scalar("float32")
-                        K.ptx.ld.shared.b32(block_amax, smem.ptr_to([amax_offset]))
-                        K.ptx.max.f32(block_amax, block_amax, K.float32(0.0))
+                txl.ptx.redux_sync.max.NaN.f32(warp_amax, tile_amax, txl.uint32(0xFFFFFFFF))
+                with txl.If(lane == 0):
+                    with txl.Then():
+                        txl.ptx.st.shared.b32(smem.ptr_to([amax_offset + warp * 4]), warp_amax)
+                txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
+                with txl.If((warp == 0) & (lane == 0)):
+                    with txl.Then():
+                        block_amax = txl.local_scalar("float32")
+                        next_amax = txl.local_scalar("float32")
+                        txl.ptx.ld.shared.b32(block_amax, smem.ptr_to([amax_offset]))
+                        txl.ptx.max.f32(block_amax, block_amax, txl.float32(0.0))
                         for slot in range(1, 4):
-                            K.ptx.ld.shared.b32(next_amax, smem.ptr_to([amax_offset + slot * 4]))
-                            K.ptx.max.f32(block_amax, block_amax, next_amax)
-                        atomic_old = K.local_scalar("int32")
-                        K.ptx.atom.global_.max.s32(
-                            atomic_old, amax.ptr_to([0]), K.reinterpret("int32", block_amax)
+                            txl.ptx.ld.shared.b32(next_amax, smem.ptr_to([amax_offset + slot * 4]))
+                            txl.ptx.max.f32(block_amax, block_amax, next_amax)
+                        atomic_old = txl.local_scalar("int32")
+                        txl.ptx.atom.global_.max.s32(
+                            atomic_old, amax.ptr_to([0]), txl.reinterpret("int32", block_amax)
                         )
-                with K.If(_elected()):
-                    with K.Then():
-                        K.ptx.mbarrier.arrive.shared.b64(
-                            acc_pipe.empty.ptr_to([acc_state.stage]), K.uint32(1)
+                with txl.If(_elected()):
+                    with txl.Then():
+                        txl.ptx.mbarrier.arrive.shared.b64(
+                            acc_pipe.empty.ptr_to([acc_state.stage]), txl.uint32(1)
                         )
                 _advance(acc_state)
                 advance_work(work)
 
-            K.ptx.bar.sync(K.uint32(2), K.uint32(128))
-            with K.If(warp == 0):
-                with K.Then():
-                    K.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](tmem_base, K.uint32(512))
-            K.ptx.cp.async_.bulk.wait_group.read(0)
+            txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
+            with txl.If(warp == 0):
+                with txl.Then():
+                    txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](tmem_base, txl.uint32(512))
+            txl.ptx.cp.async_.bulk.wait_group.read(0)
 
     kernel.__annotations__ = {
-        "a": K.gptr[K.u8, (M * K_dim * L * ab_bits // 8,)],
-        "b": K.gptr[K.u8, (N * K_dim * L * ab_bits // 8,)],
-        "sfa": K.gptr[K.u8, (L * _ceil_div(M, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)],
-        "sfb": K.gptr[K.u8, (L * _ceil_div(N, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)],
-        "c": K.gptr[K.u8, (M * N * L * c_bits // 8,)],
-        "amax": K.gptr[K.f32, (1,)],
+        "a": txl.gptr[txl.u8, (M * K_dim * L * ab_bits // 8,)],
+        "b": txl.gptr[txl.u8, (N * K_dim * L * ab_bits // 8,)],
+        "sfa": txl.gptr[txl.u8, (L * _ceil_div(M, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)],
+        "sfb": txl.gptr[txl.u8, (L * _ceil_div(N, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)],
+        "c": txl.gptr[txl.u8, (M * N * L * c_bits // 8,)],
+        "amax": txl.gptr[txl.f32, (1,)],
     }
-    return K.kernel(
+    return txl.kernel(
         warps=6,
         arch="sm_100a",
         min_blocks_per_sm=1,

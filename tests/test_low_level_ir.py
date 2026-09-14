@@ -5,34 +5,34 @@ from typing import ClassVar
 
 import pytest
 
-import tirx_kernels.kern as K
-from tirx_kernels.kern.low_level_ir import LowLevelIRContractError, check_low_level_ir
+import tirx_kernels.tirx_lite as txl
 from tirx_kernels.runner import run_kernel_test
+from tirx_kernels.tirx_lite.low_level_ir import LowLevelIRContractError, check_low_level_ir
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
 
 
 def _build_kernel_with_buffer_access(scope: str, access: str):
-    @K.kernel(warps=1, arch="sm_100a", grid=False, check_ir=True)
-    def probe(global_buffer: K.gptr("float32")):
+    @txl.kernel(warps=1, arch="sm_100a", grid=False, check_ir=True)
+    def probe(global_buffer: txl.gptr("float32")):
         buffer = (
-            global_buffer if scope == "global" else K.alloc_buffer([1], "float32", scope="shared")
+            global_buffer if scope == "global" else txl.alloc_buffer([1], "float32", scope="shared")
         )
         if access == "load":
-            local = K.alloc_local([1], "float32")
-            K.buffer_store(local, buffer[0], [0])
+            local = txl.alloc_local([1], "float32")
+            txl.buffer_store(local, buffer[0], [0])
         elif access == "store":
-            K.buffer_store(buffer, K.float32(1), [0])
+            txl.buffer_store(buffer, txl.float32(1), [0])
         else:
-            K.keep_alive(K.address_of(buffer[0]))
+            txl.keep_alive(txl.address_of(buffer[0]))
 
     return probe
 
 
 def _kernel_with_func_call(callee: str):
-    @K.kernel(warps=1, arch="sm_100a", grid=False, check_ir=False)
+    @txl.kernel(warps=1, arch="sm_100a", grid=False, check_ir=False)
     def main():
-        K.cuda.func_call(callee, source_code="__device__ void ignored() {}")
+        txl.cuda.func_call(callee, source_code="__device__ void ignored() {}")
 
     return main.func
 
@@ -71,9 +71,9 @@ def test_address_of_tensor_load_is_not_a_memory_read(scope):
 
 
 def test_address_of_still_checks_memory_reads_in_its_index():
-    @K.kernel(warps=1, arch="sm_100a", grid=False, check_ir=False)
-    def probe(indices: K.gptr("int32"), values: K.gptr("float32")):
-        K.keep_alive(K.address_of(values[indices[0]]))
+    @txl.kernel(warps=1, arch="sm_100a", grid=False, check_ir=False)
+    def probe(indices: txl.gptr("int32"), values: txl.gptr("float32")):
+        txl.keep_alive(txl.address_of(values[indices[0]]))
 
     with pytest.raises(LowLevelIRContractError) as error:
         check_low_level_ir(probe.func)
@@ -120,11 +120,11 @@ def test_only_exact_kernel_local_helpers_are_exempt():
 
 def test_setmaxnreg_requires_pinned_entry_allocation():
     def build(min_blocks_per_sm):
-        @K.kernel(
+        @txl.kernel(
             warps=4, arch="sm_100a", min_blocks_per_sm=min_blocks_per_sm, grid=False, check_ir=False
         )
         def probe():
-            K.ptx.setmaxnreg.dec.sync.aligned.u32(K.uint32(64))
+            txl.ptx.setmaxnreg.dec.sync.aligned.u32(txl.uint32(64))
 
         return probe.func
 
@@ -216,12 +216,12 @@ def test_correctness_runner_does_not_hide_runtime_reference_errors(monkeypatch):
         run_kernel_test("probe", {}, registry={"probe": KernelModule})
 
 
-def test_kern_smem_descriptor_uniformity_stays_in_low_level_contract():
-    @K.kernel(warps=1, arch="sm_100a", grid=False)
+def test_tirx_lite_smem_descriptor_uniformity_stays_in_low_level_contract():
+    @txl.kernel(warps=1, arch="sm_100a", grid=False)
     def probe():
-        descriptor = K.SmemDescriptor()
+        descriptor = txl.SmemDescriptor()
         descriptor.make_lo_uniform()
-        descriptor.add_16B_offset(K.int32(1))
+        descriptor.add_16B_offset(txl.int32(1))
 
     report = check_low_level_ir(probe.func)
 

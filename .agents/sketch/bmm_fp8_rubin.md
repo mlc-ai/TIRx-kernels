@@ -28,13 +28,13 @@ After the independent sketch reviewer returns PASS, this file is immutable.
 
 ## Transcription boundary and invariants
 
-The executable module is one parameterized K-language port and must import the
-device language only as `import tirx_kernels.kern as K`. It may use raw
-`K.ptx[...]` instructions, scalar K control flow, opaque TensorMaps, rank-one
+The executable module is one parameterized tirx-lite port and must import the
+device language only as `import tirx_kernels.tirx_lite as txl`. It may use raw
+`txl.ptx[...]` instructions, scalar txl control flow, opaque TensorMaps, rank-one
 shared allocations, local register arrays, and ordinary integer helpers. It
 must not use a tile primitive, a first-class mapping object, a direct TVM script
-namespace, `K.cuda.func_call`, or any inline-CUDA function-call exemption. It
-must not modify anything under `tirx_kernels/kern/`.
+namespace, `txl.cuda.func_call`, or any inline-CUDA function-call exemption. It
+must not modify anything under `tirx_kernels/tirx_lite/`.
 
 All source mappings are lowered before tracing into scalar extents, strides,
 byte offsets, XOR swizzle arithmetic, TensorMap fields, and integer UMMA

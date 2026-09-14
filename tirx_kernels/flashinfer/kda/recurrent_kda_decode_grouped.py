@@ -48,7 +48,7 @@ from unittest import SkipTest
 
 import torch
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 
 # Sibling import: the one-warp port is the canonical home for the shared PTX,
 # bf16-conversion and shuffle helpers (mamba's convention, e.g.
@@ -104,7 +104,7 @@ def _row_lengths(num_seqs: int, num_tokens: int, empty_rows: int) -> list[int]:
 # The one-warp sibling supplies the shared scalar math, BF16 conversion and
 # shuffle helpers; imported below.  What this kernel needs on top of those is
 # the packed-FP32 granule arithmetic, three non-FTZ scalar forms the sibling
-# does not use, and shared-memory accessors -- ``kern.low_level_ir`` forbids
+# does not use, and shared-memory accessors -- ``tirx_lite.low_level_ir`` forbids
 # TensorLoad/BufferStore on ``shared`` exactly as it does on ``global``, so
 # every SMEM touch goes through ``ptr_to`` and raw PTX.
 # ---------------------------------------------------------------------------
@@ -161,13 +161,13 @@ def _sub_bf16(bf_bits, f):
 
 def _pack_f32x2(lo, hi):
     """One ``.f32x2`` operand: ``lo`` is the low half, i.e. the lower address."""
-    return K.cuda.make_float2(lo, hi)
+    return txl.cuda.make_float2(lo, hi)
 
 
 def _vmul(a, b):
     """``mul.f32x2`` -- two packed FP32 lanes."""
-    out = K.local_scalar("uint64")
-    K.ptx.mul.f32x2(out, a, b)
+    out = txl.local_scalar("uint64")
+    txl.ptx.mul.f32x2(out, a, b)
     return out
 
 
@@ -178,26 +178,26 @@ def _vadd(a, b):
     multiply and add; there is no ``fma.*.f32x2`` anywhere in its PTX, so the
     port must not fuse them either.
     """
-    out = K.local_scalar("uint64")
-    K.ptx.add.f32x2(out, a, b)
+    out = txl.local_scalar("uint64")
+    txl.ptx.add.f32x2(out, a, b)
     return out
 
 
 def _ld_shared_b32(buffer, index):
     """``ld.shared.b32``."""
-    out = K.local_scalar("uint32")
-    K.ptx.ld.shared.b32(out, buffer.ptr_to([index]))
-    return K.reinterpret("float32", out)
+    out = txl.local_scalar("uint32")
+    txl.ptx.ld.shared.b32(out, buffer.ptr_to([index]))
+    return txl.reinterpret("float32", out)
 
 
 def _st_shared_f32(buffer, index, value):
     """``st.shared.b32``."""
-    K.ptx.st.shared.b32(buffer.ptr_to([index]), K.reinterpret("uint32", value))
+    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret("uint32", value))
 
 
 def _st_shared_f32_pred(buffer, index, value, pred):
     """``@p st.shared.b32`` -- the ``lane == 0 and wid < SW`` publication."""
-    K.ptx.st.shared.b32(buffer.ptr_to([index]), K.reinterpret("uint32", value), pred=pred)
+    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret("uint32", value), pred=pred)
 
 
 def _ld_shared_granule(buffer, index):
@@ -206,9 +206,9 @@ def _ld_shared_granule(buffer, index):
     A granule is 8 contiguous FP32 (32 B), which the source reads as two 16 B
     vectors; ``index`` is an FP32 element index and must be 16 B aligned.
     """
-    pairs = K.alloc_local((4,), "uint64")
-    K.ptx.ld.shared.v2.b64(pairs[0], pairs[1], buffer.ptr_to([index]))
-    K.ptx.ld.shared.v2.b64(pairs[2], pairs[3], buffer.ptr_to([index + 4]))
+    pairs = txl.alloc_local((4,), "uint64")
+    txl.ptx.ld.shared.v2.b64(pairs[0], pairs[1], buffer.ptr_to([index]))
+    txl.ptx.ld.shared.v2.b64(pairs[2], pairs[3], buffer.ptr_to([index + 4]))
     return pairs
 
 
@@ -218,8 +218,8 @@ def _ld_global_granule_no_alloc(buffer, index):
     Mirrors the source's ``autovec_copy(..., CacheEvictionPriority.NO_ALLOCATE)``
     on the state load (recurrent_kda.py:571).
     """
-    words = K.alloc_local((4,), "uint32")
-    K.ptx["ld.global.L1::no_allocate.v4.b32"](
+    words = txl.alloc_local((4,), "uint32")
+    txl.ptx["ld.global.L1::no_allocate.v4.b32"](
         words[0], words[1], words[2], words[3], buffer.ptr_to([index])
     )
     return words
@@ -227,7 +227,7 @@ def _ld_global_granule_no_alloc(buffer, index):
 
 def _st_global_granule_no_alloc(buffer, index, words):
     """``st.global.L1::no_allocate.v4.b32`` -- one 16 B BF16 checkpoint granule."""
-    K.ptx["st.global.L1::no_allocate.v4.b32"](
+    txl.ptx["st.global.L1::no_allocate.v4.b32"](
         buffer.ptr_to([index]), words[0], words[1], words[2], words[3]
     )
 
@@ -263,8 +263,8 @@ def _softplus(x):
     minimax chain.  Only GATE_MODE=1 uses it, and no benchmark row does, so this
     is a correctness obligation rather than a performance-alignment target.
     """
-    sp = K.log1p(_exp2(_mul(x, LOG2_E)))
-    return K.Select(x > SOFTPLUS_LINEAR_THRESHOLD, x, sp)
+    sp = txl.log1p(_exp2(_mul(x, LOG2_E)))
+    return txl.Select(x > SOFTPLUS_LINEAR_THRESHOLD, x, sp)
 
 
 def _grouped_tiling(num_tokens: int) -> dict[str, int]:
@@ -475,102 +475,102 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
     SSM_IDX_ELEMENTS = spec["SSM_IDX_ELEMENTS"]
     NAT_ELEMENTS = spec["NAT_ELEMENTS"]
 
-    @K.kernel(warps=NUM_WARPS, arch="sm_100a", grid=(NUM_VALUE_HEADS, NUM_SEQS, VSPLIT))
+    @txl.kernel(warps=NUM_WARPS, arch="sm_100a", grid=(NUM_VALUE_HEADS, NUM_SEQS, VSPLIT))
     def _recurrent_kda_decode_grouped(
-        q: K.gptr[K.bf16, (QK_ELEMENTS,)],
-        k: K.gptr[K.bf16, (QK_ELEMENTS,)],
-        v: K.gptr[K.bf16, (V_ELEMENTS,)],
-        g: K.gptr[K.bf16, (V_ELEMENTS,)],
-        beta: K.gptr[K.bf16, (BETA_ELEMENTS,)],
-        a_log: K.gptr[K.f32, (A_LOG_ELEMENTS,)],
-        dt_bias: K.gptr[K.f32, (DT_BIAS_ELEMENTS,)],
-        cu: K.gptr[K.i32, (CU_ELEMENTS,)],
-        ssm_idx: K.gptr[K.i32, (SSM_IDX_ELEMENTS,)],
-        nat: K.gptr[K.i32, (NAT_ELEMENTS,)],
-        state: K.gptr[K.bf16, (STATE_ELEMENTS,)],
-        out: K.gptr[K.bf16, (V_ELEMENTS,)],
-        q_total: K.i32,
-        g_stride_q: K.i32,
-        state_slot_stride: K.i64,
-        scale: K.f32,
-        lower_bound: K.f32,
+        q: txl.gptr[txl.bf16, (QK_ELEMENTS,)],
+        k: txl.gptr[txl.bf16, (QK_ELEMENTS,)],
+        v: txl.gptr[txl.bf16, (V_ELEMENTS,)],
+        g: txl.gptr[txl.bf16, (V_ELEMENTS,)],
+        beta: txl.gptr[txl.bf16, (BETA_ELEMENTS,)],
+        a_log: txl.gptr[txl.f32, (A_LOG_ELEMENTS,)],
+        dt_bias: txl.gptr[txl.f32, (DT_BIAS_ELEMENTS,)],
+        cu: txl.gptr[txl.i32, (CU_ELEMENTS,)],
+        ssm_idx: txl.gptr[txl.i32, (SSM_IDX_ELEMENTS,)],
+        nat: txl.gptr[txl.i32, (NAT_ELEMENTS,)],
+        state: txl.gptr[txl.bf16, (STATE_ELEMENTS,)],
+        out: txl.gptr[txl.bf16, (V_ELEMENTS,)],
+        q_total: txl.i32,
+        g_stride_q: txl.i32,
+        state_slot_stride: txl.i64,
+        scale: txl.f32,
+        lower_bound: txl.f32,
     ):
         # TIRX_TRANSCRIBE_START recurrent_kda_decode_grouped
         # --- CTA and thread coordinates (recurrent_kda.py:512-524) -------------
-        hv, n, vz = K.cta_id()
-        tid = K.thread_id()
-        lane = K.lane_id()
-        wid = K.warp_id()
-        h = K.local_scalar(K.i32)
-        d = K.local_scalar(K.i32)
-        K.assign(h, hv // RATIO)
-        K.assign(d, tid % HEAD_DIM)  # phase-A element base
+        hv, n, vz = txl.cta_id()
+        tid = txl.thread_id()
+        lane = txl.lane_id()
+        wid = txl.warp_id()
+        h = txl.local_scalar(txl.i32)
+        d = txl.local_scalar(txl.i32)
+        txl.assign(h, hv // RATIO)
+        txl.assign(d, tid % HEAD_DIM)  # phase-A element base
         if NUM_TOKENS == 1:
             # Single-use coordinates are cheaper as expressions: materializing
             # them extends their live range across phase A on the decode shape.
-            v_idx: K.int32 = vz * CPB + tid // KS
-            part: K.int32 = tid % KS
+            v_idx: txl.int32 = vz * CPB + tid // KS
+            part: txl.int32 = tid % KS
         else:
             # The recurrent loop reuses both coordinates for every token.
             # Compute them once rather than rebuilding their address DAG.
-            v_idx_local = K.local_scalar(K.i32)
-            part_local = K.local_scalar(K.i32)
-            K.assign(v_idx_local, vz * CPB + tid // KS)
-            K.assign(part_local, tid % KS)
-            v_idx: K.int32 = v_idx_local
-            part: K.int32 = part_local
+            v_idx_local = txl.local_scalar(txl.i32)
+            part_local = txl.local_scalar(txl.i32)
+            txl.assign(v_idx_local, vz * CPB + tid // KS)
+            txl.assign(part_local, tid % KS)
+            v_idx: txl.int32 = v_idx_local
+            part: txl.int32 = part_local
 
         # --- shared memory (recurrent_kda.py:526-541) --------------------------
         # The pool is the single owner of type, layout, offsets, and total size.
-        smem = K.smem_pool()
-        s_eg = smem.alloc((NUM_TOKENS * HEAD_DIM,), K.f32, align=16)
-        s_kr = smem.alloc((NUM_TOKENS * HEAD_DIM,), K.f32, align=16)
-        s_qr = smem.alloc((NUM_TOKENS * HEAD_DIM,), K.f32, align=16)
-        s_red = smem.alloc((NUM_TOKENS * 16,), K.f32, align=16)
+        smem = txl.smem_pool()
+        s_eg = smem.alloc((NUM_TOKENS * HEAD_DIM,), txl.f32, align=16)
+        s_kr = smem.alloc((NUM_TOKENS * HEAD_DIM,), txl.f32, align=16)
+        s_qr = smem.alloc((NUM_TOKENS * HEAD_DIM,), txl.f32, align=16)
+        s_red = smem.alloc((NUM_TOKENS * 16,), txl.f32, align=16)
 
         # --- row bounds (recurrent_kda.py:543-544) -----------------------------
-        token_base: K.int32 = _load_i32(cu, n)
-        seq_len: K.int32 = _load_i32(cu, n + 1) - token_base
+        token_base: txl.int32 = _load_i32(cu, n)
+        seq_len: txl.int32 = _load_i32(cu, n + 1) - token_base
 
         # --- initial checkpoint slot (recurrent_kda.py:551-560) ----------------
         # `nat` is read only for T > 1; SGLang never supplies it, so FlashInfer
         # substitutes a cached ones vector and `ic` collapses to 0.
-        ic: K.int32 = 0
+        ic: txl.int32 = 0
         if NUM_TOKENS > 1:
-            ic = K.min(K.max(_load_i32(nat, n) - 1, 0), NUM_TOKENS - 1)
-        slot0: K.int32 = K.max(_load_i32(ssm_idx, n * NUM_TOKENS + ic), 0)
+            ic = txl.min(txl.max(_load_i32(nat, n) - 1, 0), NUM_TOKENS - 1)
+        slot0: txl.int32 = txl.max(_load_i32(ssm_idx, n * NUM_TOKENS + ic), 0)
 
         # --- state load: one (8, G) granule per thread (recurrent_kda.py:562-574)
         # Element (e, gi) sits at e + gi*KS*8 + part*8, so each granule's eight
         # elements are contiguous: one 16B eviction-hinted vector load.
-        head_row: K.int32 = hv * HEAD_DIM * HEAD_DIM + v_idx * HEAD_DIM
-        read_base = K.cast(slot0, "int64") * K.cast(STATE_SLOT_STRIDE, "int64") + K.cast(
+        head_row: txl.int32 = hv * HEAD_DIM * HEAD_DIM + v_idx * HEAD_DIM
+        read_base = txl.cast(slot0, "int64") * txl.cast(STATE_SLOT_STRIDE, "int64") + txl.cast(
             head_row, "int64"
         )
-        s_pairs = K.alloc_local((4 * G,), "uint64")  # THE recurrent carry
-        s_words = K.alloc_local((4 * G,), "uint32")  # BF16 pairs, widened after the barrier
+        s_pairs = txl.alloc_local((4 * G,), "uint64")  # THE recurrent carry
+        s_words = txl.alloc_local((4 * G,), "uint32")  # BF16 pairs, widened after the barrier
         for gi in range(G):
             words = _ld_global_granule_no_alloc(
-                state, read_base + K.cast(gi * KS * 8 + part * 8, "int64")
+                state, read_base + txl.cast(gi * KS * 8 + part * 8, "int64")
             )
             for pr in range(4):
-                K.assign(s_words[gi * 4 + pr], words[pr])
+                txl.assign(s_words[gi * 4 + pr], words[pr])
 
         # --- loop-invariant gate constants (recurrent_kda.py:576-586) ----------
-        av: K.float32 = K.float32(1.0)
+        av: txl.float32 = txl.float32(1.0)
         if GATE_MODE != GATE_MODE_PRECOMPUTED:
-            av = _exp2(_mul(_load_f32(a_log, h), K.float32(LOG2_E)))
-        dtb = K.alloc_local((EPT,), "float32")
+            av = _exp2(_mul(_load_f32(a_log, h), txl.float32(LOG2_E)))
+        dtb = txl.alloc_local((EPT,), "float32")
         for e in range(EPT):
-            K.assign(dtb[e], _load_f32(dt_bias, h * HEAD_DIM + d + e * NT))
+            txl.assign(dtb[e], _load_f32(dt_bias, h * HEAD_DIM + d + e * NT))
 
         # =======================================================================
         # Phase A: stage every token's gate/key/query (recurrent_kda.py:588-640)
         # Thread mapping is `d + e*NT` here, NOT the (v_idx, part) mapping below.
         # =======================================================================
-        slots = K.alloc_local((NUM_TOKENS,), "int32")
-        ves = K.alloc_local((NUM_TOKENS,), "uint16")  # stays BF16 until :681
-        bbs = K.alloc_local((NUM_TOKENS,), "float32")
+        slots = txl.alloc_local((NUM_TOKENS,), "int32")
+        ves = txl.alloc_local((NUM_TOKENS,), "uint16")  # stays BF16 until :681
+        bbs = txl.alloc_local((NUM_TOKENS,), "float32")
 
         # Issue every token's global loads before consuming any of them.  With a
         # cold L2 -- which is what bench_suite measures, and what an inference
@@ -578,38 +578,38 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
         # not by instruction count.  Loading and consuming one token at a time keeps
         # only EPT*3+2 requests outstanding; hoisting all T tokens keeps T times as
         # many.
-        q_bits = K.alloc_local((NUM_TOKENS * EPT,), "uint16")
-        k_bits = K.alloc_local((NUM_TOKENS * EPT,), "uint16")
-        g_bits = K.alloc_local((NUM_TOKENS * EPT,), "uint16")
-        b_bits = K.alloc_local((NUM_TOKENS,), "uint16")
+        q_bits = txl.alloc_local((NUM_TOKENS * EPT,), "uint16")
+        k_bits = txl.alloc_local((NUM_TOKENS * EPT,), "uint16")
+        g_bits = txl.alloc_local((NUM_TOKENS * EPT,), "uint16")
+        b_bits = txl.alloc_local((NUM_TOKENS,), "uint16")
         for t in range(NUM_TOKENS):
-            K.assign(slots[t], _load_i32(ssm_idx, n * NUM_TOKENS + t))
+            txl.assign(slots[t], _load_i32(ssm_idx, n * NUM_TOKENS + t))
             # Out-of-row tokens clamp to token 0 so the loads stay in bounds; the
             # value is discarded by the `active` predicate in phase B.
-            pidx: K.int32 = K.if_then_else(t < seq_len, token_base + t, 0)
-            K.assign(ves[t], _load_bf16_bits(v, (pidx * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx))
-            K.assign(b_bits[t], _load_bf16_bits(beta, pidx * NUM_VALUE_HEADS + hv))
+            pidx: txl.int32 = txl.if_then_else(t < seq_len, token_base + t, 0)
+            txl.assign(ves[t], _load_bf16_bits(v, (pidx * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx))
+            txl.assign(b_bits[t], _load_bf16_bits(beta, pidx * NUM_VALUE_HEADS + hv))
             for e in range(EPT):
-                de_l: K.int32 = d + e * NT
-                K.assign(
+                de_l: txl.int32 = d + e * NT
+                txl.assign(
                     q_bits[t * EPT + e],
                     _load_bf16_bits(q, (pidx * NUM_HEADS + h) * HEAD_DIM + de_l),
                 )
-                K.assign(
+                txl.assign(
                     k_bits[t * EPT + e],
                     _load_bf16_bits(k, (pidx * NUM_HEADS + h) * HEAD_DIM + de_l),
                 )
-                K.assign(
+                txl.assign(
                     g_bits[t * EPT + e],
                     _load_bf16_bits(g, pidx * g_stride_q + hv * HEAD_DIM + de_l),
                 )
         for t in range(NUM_TOKENS):
-            K.assign(bbs[t], _bf16_to_f32(b_bits[t]))
+            txl.assign(bbs[t], _bf16_to_f32(b_bits[t]))
 
-            sqp: K.float32 = K.float32(0.0)
-            skp: K.float32 = K.float32(0.0)
+            sqp: txl.float32 = txl.float32(0.0)
+            skp: txl.float32 = txl.float32(0.0)
             for e in range(EPT):
-                de: K.int32 = d + e * NT
+                de: txl.int32 = d + e * NT
                 qe = q_bits[t * EPT + e]
                 ke = k_bits[t * EPT + e]
                 ge = g_bits[t * EPT + e]
@@ -618,20 +618,20 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
                 sqp = _fma_bf16(qe, qe, sqp)
                 skp = _fma_bf16(ke, ke, skp)
 
-                x: K.float32 = _add_bf16(ge, dtb[e])
-                gate: K.float32 = K.float32(0.0)
+                x: txl.float32 = _add_bf16(ge, dtb[e])
+                gate: txl.float32 = txl.float32(0.0)
                 if GATE_MODE == GATE_MODE_SOFTPLUS:
                     gate = _mul(_softplus(x), _neg(av))
                 else:
                     # The negation is its own instruction; it is not folded into a
                     # negative LOG2_E constant (recurrent_kda.py:623-627).
-                    sig_e = _exp2(_mul(_mul(av, _neg(x)), K.float32(LOG2_E)))
-                    gate = _mul(lower_bound, _rcp_rn(_add(sig_e, K.float32(1.0))))
+                    sig_e = _exp2(_mul(_mul(av, _neg(x)), txl.float32(LOG2_E)))
+                    gate = _mul(lower_bound, _rcp_rn(_add(sig_e, txl.float32(1.0))))
 
                 # The staged key/query are the RAW values; L2 normalization is a
                 # scalar factor applied in phase B.  They convert here because the
                 # staging planes are FP32.
-                _st_shared_f32(s_eg, t * HEAD_DIM + de, _exp2(_mul(gate, K.float32(LOG2_E))))
+                _st_shared_f32(s_eg, t * HEAD_DIM + de, _exp2(_mul(gate, txl.float32(LOG2_E))))
                 _st_shared_f32(s_kr, t * HEAD_DIM + de, _bf16_to_f32(ke))
                 _st_shared_f32(s_qr, t * HEAD_DIM + de, _bf16_to_f32(qe))
 
@@ -640,12 +640,12 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
             # associative and the checkpoints must be exact, so the order matters.
             sqp = _warp_reduce_sum(sqp)
             skp = _warp_reduce_sum(skp)
-            publish = K.And(lane == 0, wid < SW)
+            publish = txl.And(lane == 0, wid < SW)
             _st_shared_f32_pred(s_red, t * 16 + wid, sqp, publish)
             _st_shared_f32_pred(s_red, t * 16 + 8 + wid, skp, publish)
 
         # The ONLY barrier: it separates the two thread-index mappings.
-        K.cuda.cta_sync()
+        txl.cuda.cta_sync()
 
         # Nothing in phase A reads the state, so this placement reaches only
         # scheduling: same op, same extent, same instruction, same dependence order
@@ -658,41 +658,41 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
         for gi in range(G):
             for pr in range(4):
                 w = s_words[gi * 4 + pr]
-                lo = _bf16_to_f32(K.cast(w, "uint16"))
-                hi = _bf16_to_f32(K.cast(K.shift_right(w, K.uint32(16)), "uint16"))
-                K.assign(s_pairs[gi * 4 + pr], _pack_f32x2(lo, hi))
+                lo = _bf16_to_f32(txl.cast(w, "uint16"))
+                hi = _bf16_to_f32(txl.cast(txl.shift_right(w, txl.uint32(16)), "uint16"))
+                txl.assign(s_pairs[gi * 4 + pr], _pack_f32x2(lo, hi))
 
         # =======================================================================
         # Phase B: sequential recurrence over the tokens (recurrent_kda.py:645-717)
         # =======================================================================
-        kreg = K.alloc_local((4 * G,), "uint64")  # keys, loaded in pass 1, reused in pass 2
-        pvec = K.alloc_local((4,), "uint64")
-        ovec = K.alloc_local((4,), "uint64")
-        pf = K.alloc_local((8,), "float32")
-        words_w = K.alloc_local((4,), "uint32")
+        kreg = txl.alloc_local((4 * G,), "uint64")  # keys, loaded in pass 1, reused in pass 2
+        pvec = txl.alloc_local((4,), "uint64")
+        ovec = txl.alloc_local((4,), "uint64")
+        pf = txl.alloc_local((8,), "float32")
+        words_w = txl.alloc_local((4,), "uint32")
 
         for t in range(NUM_TOKENS):
-            slot: K.int32 = slots[t]
+            slot: txl.int32 = slots[t]
             in_row = t < seq_len
-            active = K.And(in_row, slot >= 0)
-            with K.If(active):
-                with K.Then():
-                    pidx_b: K.int32 = token_base + t
-                    base_t: K.int32 = t * HEAD_DIM + part * 8
+            active = txl.And(in_row, slot >= 0)
+            with txl.If(active):
+                with txl.Then():
+                    pidx_b: txl.int32 = token_base + t
+                    base_t: txl.int32 = t * HEAD_DIM + part * 8
 
                     # ---- L2 factors (recurrent_kda.py:657-664); eps is hardcoded ----
-                    sqt: K.float32 = K.float32(0.0)
-                    skt: K.float32 = K.float32(0.0)
+                    sqt: txl.float32 = txl.float32(0.0)
+                    skt: txl.float32 = txl.float32(0.0)
                     for w in range(SW):
                         sqt = _add(sqt, _ld_shared_b32(s_red, t * 16 + w))
                         skt = _add(skt, _ld_shared_b32(s_red, t * 16 + 8 + w))
-                    rk: K.float32 = _rsqrt_no_ftz(_add(skt, K.float32(L2_EPS)))
-                    rq: K.float32 = _mul(_rsqrt_no_ftz(_add(sqt, K.float32(L2_EPS))), scale)
+                    rk: txl.float32 = _rsqrt_no_ftz(_add(skt, txl.float32(L2_EPS)))
+                    rq: txl.float32 = _mul(_rsqrt_no_ftz(_add(sqt, txl.float32(L2_EPS))), scale)
 
                     # ---- pass 1: decay the state, accumulate the raw prediction ----
                     # gi == 0 is peeled so pvec is initialized by a mul, not fill+add.
                     #
-                    # The four granule passes are `K.serial`, not python `range`,
+                    # The four granule passes are `txl.serial`, not python `range`,
                     # so the emitted CUDA keeps a real `for` over the 4*G packed
                     # pairs and nvcc unrolls it itself.  Unrolling them here
                     # instead hands ptxas one 300-instruction straight line whose
@@ -704,52 +704,52 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
                     # trace-unrolled with no effect on the schedule.
                     egp = _ld_shared_granule(s_eg, base_t)
                     krp = _ld_shared_granule(s_kr, base_t)
-                    with K.serial(4) as pr:
+                    with txl.serial(4) as pr:
                         sv = _vmul(s_pairs[pr], egp[pr])
-                        K.assign(s_pairs[pr], sv)
-                        K.assign(kreg[pr], krp[pr])
-                        K.assign(pvec[pr], _vmul(krp[pr], sv))
-                    with K.serial(1, G) as gi:
+                        txl.assign(s_pairs[pr], sv)
+                        txl.assign(kreg[pr], krp[pr])
+                        txl.assign(pvec[pr], _vmul(krp[pr], sv))
+                    with txl.serial(1, G) as gi:
                         egp = _ld_shared_granule(s_eg, base_t + gi * KS * 8)
                         krp = _ld_shared_granule(s_kr, base_t + gi * KS * 8)
-                        with K.serial(4) as pr:
+                        with txl.serial(4) as pr:
                             sv = _vmul(s_pairs[gi * 4 + pr], egp[pr])
-                            K.assign(s_pairs[gi * 4 + pr], sv)
-                            K.assign(kreg[gi * 4 + pr], krp[pr])
+                            txl.assign(s_pairs[gi * 4 + pr], sv)
+                            txl.assign(kreg[gi * 4 + pr], krp[pr])
                             # mul then add -- the source emits no fma.*.f32x2.
-                            K.assign(pvec[pr], _vadd(pvec[pr], _vmul(krp[pr], sv)))
+                            txl.assign(pvec[pr], _vadd(pvec[pr], _vmul(krp[pr], sv)))
 
                     # ---- balanced 8-term tree, then the KS butterfly join ----
                     for pr in range(4):
-                        K.assign(pf[2 * pr], K.cuda.float2_x(pvec[pr]))
-                        K.assign(pf[2 * pr + 1], K.cuda.float2_y(pvec[pr]))
-                    pred: K.float32 = _add(
+                        txl.assign(pf[2 * pr], txl.cuda.float2_x(pvec[pr]))
+                        txl.assign(pf[2 * pr + 1], txl.cuda.float2_y(pvec[pr]))
+                    pred: txl.float32 = _add(
                         _add(_add(pf[0], pf[1]), _add(pf[2], pf[3])),
                         _add(_add(pf[4], pf[5]), _add(pf[6], pf[7])),
                     )
                     pred = _ks_join(pred, KS)
 
                     # ---- delta rule (:681): rk appears TWICE, by design ----
-                    deltak: K.float32 = _mul(_mul(rk, bbs[t]), _sub_bf16(ves[t], _mul(rk, pred)))
+                    deltak: txl.float32 = _mul(_mul(rk, bbs[t]), _sub_bf16(ves[t], _mul(rk, pred)))
                     dpair = _pack_f32x2(deltak, deltak)
 
                     # ---- pass 2: rank-1 update, accumulate the raw output ----
                     qrp = _ld_shared_granule(s_qr, base_t)
-                    with K.serial(4) as pr:
+                    with txl.serial(4) as pr:
                         sv = _vadd(s_pairs[pr], _vmul(kreg[pr], dpair))
-                        K.assign(s_pairs[pr], sv)
-                        K.assign(ovec[pr], _vmul(qrp[pr], sv))
-                    with K.serial(1, G) as gi:
+                        txl.assign(s_pairs[pr], sv)
+                        txl.assign(ovec[pr], _vmul(qrp[pr], sv))
+                    with txl.serial(1, G) as gi:
                         qrp = _ld_shared_granule(s_qr, base_t + gi * KS * 8)
-                        with K.serial(4) as pr:
+                        with txl.serial(4) as pr:
                             sv = _vadd(s_pairs[gi * 4 + pr], _vmul(kreg[gi * 4 + pr], dpair))
-                            K.assign(s_pairs[gi * 4 + pr], sv)
-                            K.assign(ovec[pr], _vadd(ovec[pr], _vmul(qrp[pr], sv)))
+                            txl.assign(s_pairs[gi * 4 + pr], sv)
+                            txl.assign(ovec[pr], _vadd(ovec[pr], _vmul(qrp[pr], sv)))
 
                     for pr in range(4):
-                        K.assign(pf[2 * pr], K.cuda.float2_x(ovec[pr]))
-                        K.assign(pf[2 * pr + 1], K.cuda.float2_y(ovec[pr]))
-                    o: K.float32 = _add(
+                        txl.assign(pf[2 * pr], txl.cuda.float2_x(ovec[pr]))
+                        txl.assign(pf[2 * pr + 1], txl.cuda.float2_y(ovec[pr]))
+                    o: txl.float32 = _add(
                         _add(_add(pf[0], pf[1]), _add(pf[2], pf[3])),
                         _add(_add(pf[4], pf[5]), _add(pf[6], pf[7])),
                     )
@@ -762,45 +762,45 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
                         out,
                         (pidx_b * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx,
                         _f32_to_bf16(_mul(o, rq)),
-                        K.cast(part == 0, "int32"),
+                        txl.cast(part == 0, "int32"),
                     )
 
                     # ---- BF16 checkpoint write, eviction-hinted (:702-713) ----
-                    write_base = K.cast(slot, "int64") * K.cast(
+                    write_base = txl.cast(slot, "int64") * txl.cast(
                         STATE_SLOT_STRIDE, "int64"
-                    ) + K.cast(head_row, "int64")
+                    ) + txl.cast(head_row, "int64")
                     for gi in range(G):
                         for pr in range(4):
-                            K.assign(
+                            txl.assign(
                                 words_w[pr],
                                 _pack_bf16x2(
-                                    K.cuda.float2_y(s_pairs[gi * 4 + pr]),
-                                    K.cuda.float2_x(s_pairs[gi * 4 + pr]),
+                                    txl.cuda.float2_y(s_pairs[gi * 4 + pr]),
+                                    txl.cuda.float2_x(s_pairs[gi * 4 + pr]),
                                 ),
                             )
                         _st_global_granule_no_alloc(
-                            state, write_base + K.cast(gi * KS * 8 + part * 8, "int64"), words_w
+                            state, write_base + txl.cast(gi * KS * 8 + part * 8, "int64"), words_w
                         )
-                with K.Else():
+                with txl.Else():
                     # Pad rows still own their output element: the host allocates `out`
                     # uninitialized because the kernel defines every slot.
                     _store_bf16_bits_pred(
                         out,
                         ((token_base + t) * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx,
-                        K.uint16(0),
-                        K.And(in_row, part == 0),
+                        txl.uint16(0),
+                        txl.And(in_row, part == 0),
                     )
 
         # --- orphan packed suffix (recurrent_kda.py:719-725) --------------------
         # Carrier tokens owned by no row.  Reachable only in the T == 1 decode
         # layout: spec mode sizes `out` as N*NUM_TOKENS while cu_seqlens must step
         # by T, so q_total == cu[n_seq] there and this loop is empty.
-        with K.If(K.And(K.And(n == 0, vz == 0), tid < HEAD_DIM)), K.Then():
-            covered: K.int32 = _load_i32(cu, NUM_SEQS)
-            with K.serial(covered, q_total, unroll=False) as pos:
+        with txl.If(txl.And(txl.And(n == 0, vz == 0), tid < HEAD_DIM)), txl.Then():
+            covered: txl.int32 = _load_i32(cu, NUM_SEQS)
+            with txl.serial(covered, q_total, unroll=False) as pos:
                 for e in range(EPT):
                     _store_bf16_bits(
-                        out, (pos * NUM_VALUE_HEADS + hv) * HEAD_DIM + tid + e * NT, K.uint16(0)
+                        out, (pos * NUM_VALUE_HEADS + hv) * HEAD_DIM + tid + e * NT, txl.uint16(0)
                     )
 
     return _recurrent_kda_decode_grouped

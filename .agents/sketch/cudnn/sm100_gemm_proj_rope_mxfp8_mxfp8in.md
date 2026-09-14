@@ -36,9 +36,9 @@ covers the non-persistent x32 T2R branch; the second covers persistent x8.
 
 ## No first-class layout invariant
 
-The executable device body imports only `tirx_kernels.kern as K`. It may not
+The executable device body imports only `tirx_kernels.tirx_lite as txl`. It may not
 construct, pass, return, or store a first-class layout, invoke a tile
-primitive, allocate multidimensional shared memory, call `K.cuda.func_call`,
+primitive, allocate multidimensional shared memory, call `txl.cuda.func_call`,
 embed CUDA source, or rely on a low-level-IR exemption. All shared storage is
 one rank-1 dynamic `u8` arena. TensorMap fields, swizzles, descriptor fields,
 scheduler coordinates, TMEM addresses, and fragment placement are explicit
@@ -710,8 +710,8 @@ includes four padding values per row; that padding is not reusable storage.
 | TMEM lifecycle | CTA-group-one alloc/relinquish/dealloc, 512 columns |
 
 Any implementation requiring a multidimensional shared buffer, first-class
-layout, tile primitive, embedded CUDA, `K.cuda.func_call`, change under
-`tirx_kernels/kern/`, or low-level-IR exemption violates this frozen design.
+layout, tile primitive, embedded CUDA, `txl.cuda.func_call`, change under
+`tirx_kernels/tirx_lite/`, or low-level-IR exemption violates this frozen design.
 
 ## Bidirectional source / sketch / PTX map
 

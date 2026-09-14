@@ -25,14 +25,14 @@ b_hi = _bf16_to_f32(_high_half(b_word))
 next_lo, next_hi = _fma_f32x2(a_lo, a_hi, b_lo, b_hi, accum_lo, accum_hi)
 
 # after: the inputs remain BF16 carriers and each result accumulates in FP32.
-a_lo_bits = K.cast(a_word, "uint16")
-a_hi_bits = K.cast(K.shift_right(a_word, K.uint32(16)), "uint16")
-b_lo_bits = K.cast(b_word, "uint16")
-b_hi_bits = K.cast(K.shift_right(b_word, K.uint32(16)), "uint16")
-next_lo = K.local_scalar("float32")
-next_hi = K.local_scalar("float32")
-K.ptx.fma.rn.f32.bf16(next_lo, a_lo_bits, b_lo_bits, accum_lo)
-K.ptx.fma.rn.f32.bf16(next_hi, a_hi_bits, b_hi_bits, accum_hi)
+a_lo_bits = txl.cast(a_word, "uint16")
+a_hi_bits = txl.cast(txl.shift_right(a_word, txl.uint32(16)), "uint16")
+b_lo_bits = txl.cast(b_word, "uint16")
+b_hi_bits = txl.cast(txl.shift_right(b_word, txl.uint32(16)), "uint16")
+next_lo = txl.local_scalar("float32")
+next_hi = txl.local_scalar("float32")
+txl.ptx.fma.rn.f32.bf16(next_lo, a_lo_bits, b_lo_bits, accum_lo)
+txl.ptx.fma.rn.f32.bf16(next_hi, a_hi_bits, b_hi_bits, accum_hi)
 ```
 
 ## Rationale

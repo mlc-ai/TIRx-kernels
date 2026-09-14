@@ -26,8 +26,8 @@ The implementation structure follows the reviewer-approved sketch
 import os
 from typing import Any
 
-import tirx_kernels.kern as K
-from tirx_kernels.flashinfer.utils.fp_quant_kern import (
+import tirx_kernels.tirx_lite as txl
+from tirx_kernels.flashinfer.utils.fp_quant_tirx_lite import (
     absmax_4,
     absmax_8,
     cvt_e2m1x8,
@@ -190,11 +190,11 @@ def _process_block(in_global, row_idx, col_idx, *, dtype, k):
     SF byte first, then the two 8-byte output groups (source order).
     """
     elem_base = col_idx * MXFP4_SF_VEC_SIZE
-    base = K.cast(row_idx, "int64") * k + elem_base
-    v0 = ld_global_v4_u32(K.address_of(in_global[base]))
-    v1 = ld_global_v4_u32(K.address_of(in_global[base + 8]))
-    v2 = ld_global_v4_u32(K.address_of(in_global[base + 16]))
-    v3 = ld_global_v4_u32(K.address_of(in_global[base + 24]))
+    base = txl.cast(row_idx, "int64") * k + elem_base
+    v0 = ld_global_v4_u32(txl.address_of(in_global[base]))
+    v1 = ld_global_v4_u32(txl.address_of(in_global[base + 8]))
+    v2 = ld_global_v4_u32(txl.address_of(in_global[base + 16]))
+    v3 = ld_global_v4_u32(txl.address_of(in_global[base + 24]))
     words = [v0[i] for i in range(4)] + [v1[i] for i in range(4)]
     words += [v2[i] for i in range(4)] + [v3[i] for i in range(4)]
 
@@ -202,7 +202,7 @@ def _process_block(in_global, row_idx, col_idx, *, dtype, k):
     max_second = absmax_8(words[8:16], dtype)
     block_max = pair_max_to_f32(hmax2(max_first, max_second, dtype), dtype)
 
-    scale_ue8m0_u32 = float_to_ue8m0(mul_f32(block_max, rcp_approx_ftz(K.float32(6.0))))
+    scale_ue8m0_u32 = float_to_ue8m0(mul_f32(block_max, rcp_approx_ftz(txl.float32(6.0))))
     inv_scale = ue8m0_to_inv_scale(scale_ue8m0_u32)
 
     s = []
@@ -219,8 +219,8 @@ def _process_block(in_global, row_idx, col_idx, *, dtype, k):
 def _load_block_4t(words, in_global, row_idx, col_idx, thread_in_sf, *, k):
     """Issue one 128-bit input load for a 4T/SF thread."""
     elem_idx = col_idx * MXFP4_SF_VEC_SIZE + thread_in_sf * 8
-    in_off = K.cast(row_idx, "int64") * k + elem_idx
-    K.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], K.address_of(in_global[in_off]))
+    in_off = txl.cast(row_idx, "int64") * k + elem_idx
+    txl.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], txl.address_of(in_global[in_off]))
 
 
 def _float_to_ue8m0_nonnegative(value):
@@ -231,52 +231,52 @@ def _float_to_ue8m0_nonnegative(value):
     explicit tiny-value select preserves its special subnormal threshold, and
     clamping the input bits to infinity preserves the source's NaN/Inf result.
     """
-    bits = K.reinterpret("uint32", value)
-    rounded = K.shift_right(bits + K.uint32(0x7FFFFF), K.uint32(23))
-    rounded = K.min(rounded, K.uint32(254))
-    p_tiny = K.local_scalar("uint32")
-    K.ptx.setp.le.u32(p_tiny, bits, K.uint32(0x400000))
-    out = K.local_scalar("uint32")
-    K.ptx.selp.u32(out, K.uint32(0), rounded, K.ptx.pred(p_tiny))
+    bits = txl.reinterpret("uint32", value)
+    rounded = txl.shift_right(bits + txl.uint32(0x7FFFFF), txl.uint32(23))
+    rounded = txl.min(rounded, txl.uint32(254))
+    p_tiny = txl.local_scalar("uint32")
+    txl.ptx.setp.le.u32(p_tiny, bits, txl.uint32(0x400000))
+    out = txl.local_scalar("uint32")
+    txl.ptx.selp.u32(out, txl.uint32(0), rounded, txl.ptx.pred(p_tiny))
     return out
 
 
 def _fp16_block_max_to_ue8m0(value):
     """Convert an exact FP16-derived nonnegative block max to its MXFP4 scale."""
-    bits = K.reinterpret("uint32", value)
-    rounded_exp = K.shift_right(bits + K.uint32(0x3FFFFF), K.uint32(23))
-    finite = K.max(K.cast(rounded_exp, "int32") - K.int32(2), K.int32(0))
-    special = K.local_scalar("uint32")
-    K.ptx.setp.ge.u32(special, bits, K.uint32(0x7F800000))
-    out = K.local_scalar("uint32")
-    K.ptx.selp.u32(out, K.uint32(254), K.cast(finite, "uint32"), K.ptx.pred(special))
+    bits = txl.reinterpret("uint32", value)
+    rounded_exp = txl.shift_right(bits + txl.uint32(0x3FFFFF), txl.uint32(23))
+    finite = txl.max(txl.cast(rounded_exp, "int32") - txl.int32(2), txl.int32(0))
+    special = txl.local_scalar("uint32")
+    txl.ptx.setp.ge.u32(special, bits, txl.uint32(0x7F800000))
+    out = txl.local_scalar("uint32")
+    txl.ptx.selp.u32(out, txl.uint32(254), txl.cast(finite, "uint32"), txl.ptx.pred(special))
     return out
 
 
 def _ue8m0_to_inv_scale_bounded(ue8m0_val):
     """Convert a UE8M0 value known to be in [0, 254] to inverse scale."""
-    p_zero = K.local_scalar("uint32")
-    K.ptx.setp.eq.u32(p_zero, ue8m0_val, K.uint32(0))
-    new_exp = K.uint32(254) - ue8m0_val
-    inv = K.reinterpret("float32", K.shift_left(new_exp, K.uint32(23)))
-    out = K.local_scalar("float32")
-    K.ptx.selp.f32(out, K.float32(0.0), inv, K.ptx.pred(p_zero))
+    p_zero = txl.local_scalar("uint32")
+    txl.ptx.setp.eq.u32(p_zero, ue8m0_val, txl.uint32(0))
+    new_exp = txl.uint32(254) - ue8m0_val
+    inv = txl.reinterpret("float32", txl.shift_left(new_exp, txl.uint32(23)))
+    out = txl.local_scalar("float32")
+    txl.ptx.selp.f32(out, txl.float32(0.0), inv, txl.ptx.pred(p_zero))
     return out
 
 
 def _st_scale_4t(addr, scale, thread_in_sf):
     """Store one scale from the leader lane without a divergent branch."""
-    predicate = K.cast(thread_in_sf == K.int32(0), "uint32")
-    K.ptx.st.global_.b8(addr, K.cast(scale, "uint8"), pred=predicate)
+    predicate = txl.cast(thread_in_sf == txl.int32(0), "uint32")
+    txl.ptx.st.global_.b8(addr, txl.cast(scale, "uint8"), pred=predicate)
 
 
 def _reduce_absmax_4t_packed(words, dtype):
     """Reduce a four-thread absmax while it remains packed FP16x2/BF16x2."""
     packed = absmax_4([words[i] for i in range(4)], dtype)
-    shuffled = K.local_scalar("uint32")
-    K.ptx.shfl_sync.bfly.b32(shuffled, packed, K.uint32(1), K.uint32(31), K.uint32(0xFFFFFFFF))
+    shuffled = txl.local_scalar("uint32")
+    txl.ptx.shfl_sync.bfly.b32(shuffled, packed, txl.uint32(1), txl.uint32(31), txl.uint32(0xFFFFFFFF))
     packed = hmax2(packed, shuffled, dtype)
-    K.ptx.shfl_sync.bfly.b32(shuffled, packed, K.uint32(2), K.uint32(31), K.uint32(0xFFFFFFFF))
+    txl.ptx.shfl_sync.bfly.b32(shuffled, packed, txl.uint32(2), txl.uint32(31), txl.uint32(0xFFFFFFFF))
     return hmax2(packed, shuffled, dtype)
 
 
@@ -287,34 +287,34 @@ def _fp16_packed_max_to_ue8m0(packed_max):
     subnormal, Inf, and NaN values keep the established f32 fallback so their
     edge-case behavior remains identical to FlashInfer.
     """
-    lo = K.bitwise_and(packed_max, K.uint32(0xFFFF))
-    hi = K.shift_right(packed_max, K.uint32(16))
-    max_half = K.max(lo, hi)
-    scale = K.local_scalar("uint32")
-    with K.If(K.And(max_half >= K.uint32(0x0400), max_half < K.uint32(0x7C00))):
-        with K.Then():
-            rounded_exp = K.shift_right(max_half + K.uint32(0x01FF), K.uint32(10))
-            K.assign(scale, rounded_exp + K.uint32(110))
-        with K.Else():
-            K.assign(scale, _fp16_block_max_to_ue8m0(pair_max_to_f32(packed_max, "float16")))
+    lo = txl.bitwise_and(packed_max, txl.uint32(0xFFFF))
+    hi = txl.shift_right(packed_max, txl.uint32(16))
+    max_half = txl.max(lo, hi)
+    scale = txl.local_scalar("uint32")
+    with txl.If(txl.And(max_half >= txl.uint32(0x0400), max_half < txl.uint32(0x7C00))):
+        with txl.Then():
+            rounded_exp = txl.shift_right(max_half + txl.uint32(0x01FF), txl.uint32(10))
+            txl.assign(scale, rounded_exp + txl.uint32(110))
+        with txl.Else():
+            txl.assign(scale, _fp16_block_max_to_ue8m0(pair_max_to_f32(packed_max, "float16")))
     return scale
 
 
 def _bf16_packed_max_to_ue8m0(packed_max):
     """Convert a packed BF16x2 absmax to the exact source scale."""
-    lo = K.bitwise_and(packed_max, K.uint32(0xFFFF))
-    hi = K.shift_right(packed_max, K.uint32(16))
-    max_bf16 = K.max(lo, hi)
-    scale = K.local_scalar("uint32")
-    with K.If(K.And(max_bf16 >= K.uint32(0x0080), max_bf16 < K.uint32(0x7F80))):
-        with K.Then():
-            rounded_exp = K.shift_right(max_bf16 + K.uint32(0x003F), K.uint32(7))
-            K.assign(scale, rounded_exp - K.uint32(2))
-        with K.Else():
+    lo = txl.bitwise_and(packed_max, txl.uint32(0xFFFF))
+    hi = txl.shift_right(packed_max, txl.uint32(16))
+    max_bf16 = txl.max(lo, hi)
+    scale = txl.local_scalar("uint32")
+    with txl.If(txl.And(max_bf16 >= txl.uint32(0x0080), max_bf16 < txl.uint32(0x7F80))):
+        with txl.Then():
+            rounded_exp = txl.shift_right(max_bf16 + txl.uint32(0x003F), txl.uint32(7))
+            txl.assign(scale, rounded_exp - txl.uint32(2))
+        with txl.Else():
             block_max = pair_max_to_f32(packed_max, "bfloat16")
-            K.assign(
+            txl.assign(
                 scale,
-                _float_to_ue8m0_nonnegative(mul_f32(block_max, rcp_approx_ftz(K.float32(6.0)))),
+                _float_to_ue8m0_nonnegative(mul_f32(block_max, rcp_approx_ftz(txl.float32(6.0)))),
             )
     return scale
 
@@ -322,26 +322,26 @@ def _bf16_packed_max_to_ue8m0(packed_max):
 def _cvt_e2m1x8_scaled_packed(words, scale_ue8m0, dtype):
     """Scale four packed FP16x2/BF16x2 words and convert them directly to FP4."""
     inv_bias = 142 if dtype == "float16" else 254
-    inv_exp = K.max(K.int32(inv_bias) - K.cast(scale_ue8m0, "int32"), K.int32(0))
+    inv_exp = txl.max(txl.int32(inv_bias) - txl.cast(scale_ue8m0, "int32"), txl.int32(0))
     shift = 10 if dtype == "float16" else 7
-    inv_packed = K.cast(K.shift_left(K.cast(inv_exp, "uint32"), K.uint32(shift)), "uint16")
-    inv_pair = K.local_scalar("uint32")
-    K.ptx.mov.b32(inv_pair, inv_packed, inv_packed)
+    inv_packed = txl.cast(txl.shift_left(txl.cast(inv_exp, "uint32"), txl.uint32(shift)), "uint16")
+    inv_pair = txl.local_scalar("uint32")
+    txl.ptx.mov.b32(inv_pair, inv_packed, inv_packed)
 
-    bytes_ = K.alloc_local((4,), "uint8")
+    bytes_ = txl.alloc_local((4,), "uint8")
     for i in range(4):
-        scaled = K.local_scalar("uint32")
+        scaled = txl.local_scalar("uint32")
         if dtype == "float16":
-            K.ptx.mul.rn.f16x2(scaled, words[i], inv_pair)
-            K.ptx.cvt.rn.satfinite.e2m1x2.f16x2(bytes_[i], scaled)
+            txl.ptx.mul.rn.f16x2(scaled, words[i], inv_pair)
+            txl.ptx.cvt.rn.satfinite.e2m1x2.f16x2(bytes_[i], scaled)
         else:
-            K.ptx.mul.rn.bf16x2(scaled, words[i], inv_pair)
-            K.ptx.cvt.rn.satfinite.e2m1x2.bf16x2(bytes_[i], scaled)
+            txl.ptx.mul.rn.bf16x2(scaled, words[i], inv_pair)
+            txl.ptx.cvt.rn.satfinite.e2m1x2.bf16x2(bytes_[i], scaled)
 
-    w0 = K.cast(bytes_[0], "uint16") | (K.cast(bytes_[1], "uint16") << K.uint16(8))
-    w1 = K.cast(bytes_[2], "uint16") | (K.cast(bytes_[3], "uint16") << K.uint16(8))
-    packed = K.local_scalar("uint32")
-    K.ptx.mov.b32(packed, w0, w1)
+    w0 = txl.cast(bytes_[0], "uint16") | (txl.cast(bytes_[1], "uint16") << txl.uint16(8))
+    w1 = txl.cast(bytes_[2], "uint16") | (txl.cast(bytes_[3], "uint16") << txl.uint16(8))
+    packed = txl.local_scalar("uint32")
+    txl.ptx.mov.b32(packed, w0, w1)
     return packed
 
 
@@ -361,20 +361,20 @@ def _quantize_block_4t(words, *, dtype, fp16_mode=0):
         scale_ue8m0_u32 = (
             _fp16_block_max_to_ue8m0(block_max)
             if fp16_mode
-            else _float_to_ue8m0_nonnegative(mul_f32(block_max, rcp_approx_ftz(K.float32(6.0))))
+            else _float_to_ue8m0_nonnegative(mul_f32(block_max, rcp_approx_ftz(txl.float32(6.0))))
         )
     if packed_mode:
-        packed_u32 = K.local_scalar("uint32")
-        with K.If(scale_ue8m0_u32 >= K.uint32(112)):
-            with K.Then():
-                K.assign(packed_u32, _cvt_e2m1x8_scaled_packed(words, scale_ue8m0_u32, dtype))
-            with K.Else():
+        packed_u32 = txl.local_scalar("uint32")
+        with txl.If(scale_ue8m0_u32 >= txl.uint32(112)):
+            with txl.Then():
+                txl.assign(packed_u32, _cvt_e2m1x8_scaled_packed(words, scale_ue8m0_u32, dtype))
+            with txl.Else():
                 inv_scale = _ue8m0_to_inv_scale_bounded(scale_ue8m0_u32)
                 scaled = []
                 for i in range(4):
                     lo, hi = float2_scaled(words[i], inv_scale, dtype)
                     scaled.extend((lo, hi))
-                K.assign(packed_u32, cvt_e2m1x8(scaled))
+                txl.assign(packed_u32, cvt_e2m1x8(scaled))
     else:
         inv_scale = _ue8m0_to_inv_scale_bounded(scale_ue8m0_u32)
         scaled = []
@@ -386,8 +386,8 @@ def _quantize_block_4t(words, *, dtype, fp16_mode=0):
 
 
 def _store_block_4t(packed_u32, out_global, row_idx, col_idx, thread_in_sf, *, k):
-    out_off = K.cast(row_idx, "int64") * (k // 2) + col_idx * 16 + thread_in_sf * 4
-    K.ptx.st.global_.b32(K.address_of(out_global[out_off]), packed_u32)
+    out_off = txl.cast(row_idx, "int64") * (k // 2) + col_idx * 16 + thread_in_sf * 4
+    txl.ptx.st.global_.b32(txl.address_of(out_global[out_off]), packed_u32)
 
 
 def _finish_block_4t(words, out_global, row_idx, col_idx, thread_in_sf, *, dtype, k, fp16_mode=0):
@@ -411,7 +411,7 @@ def _process_block_4t(
     in_global, out_global, row_idx, col_idx, thread_in_sf, *, dtype, k, fp16_mode=0
 ):
     """Quantize one fourth of an SF block with the source 4T/SF mapping."""
-    words = K.alloc_local((4,), "uint32")
+    words = txl.alloc_local((4,), "uint32")
     _load_block_4t(words, in_global, row_idx, col_idx, thread_in_sf, k=k)
     return _finish_block_4t(
         words, out_global, row_idx, col_idx, thread_in_sf, dtype=dtype, k=k, fp16_mode=fp16_mode
@@ -422,7 +422,7 @@ def _process_block_4t_scale_first(
     in_global, out_global, sf_addr, row_idx, col_idx, thread_in_sf, *, dtype, k, fp16_mode=0
 ):
     """One-batch 4T/SF path with a predicated scale store before output."""
-    words = K.alloc_local((4,), "uint32")
+    words = txl.alloc_local((4,), "uint32")
     _load_block_4t(words, in_global, row_idx, col_idx, thread_in_sf, k=k)
     return _finish_block_4t_scale_first(
         words,
@@ -438,7 +438,7 @@ def _process_block_4t_scale_first(
 
 
 def _materialize(value):
-    local = K.local_scalar(str(value.ty.dtype), init=value)
+    local = txl.local_scalar(str(value.ty.dtype), init=value)
     return local
 
 
@@ -505,30 +505,30 @@ def get_kernel(
         )
         unroll_all_batches = threads_per_sf == _4T_THREADS_PER_SF and m == 1024 and k == 2048
 
-        @K.kernel(
+        @txl.kernel(
             warps=(block_x + 31) // 32,
             arch="sm_100a",
             min_blocks_per_sm=min_blocks_per_sm,
             grid=grid_x,
         )
         def mxfp4_quantize_linear(
-            in_global: K.gptr[dtype], out_global: K.gptr[K.u8], sf_out: K.gptr[K.u8]
+            in_global: txl.gptr[dtype], out_global: txl.gptr[txl.u8], sf_out: txl.gptr[txl.u8]
         ):
-            bx = K.cta_id()
-            tx = K.thread_id()
+            bx = txl.cta_id()
+            tx = txl.thread_id()
 
             if enable_pdl:
-                K.ptx.griddepcontrol.wait()
+                txl.ptx.griddepcontrol.wait()
 
             if threads_per_sf > 1:
-                warp_idx = K.truncdiv(tx, K.int32(WARP_SIZE))
-                lane_idx = K.truncmod(tx, K.int32(WARP_SIZE))
+                warp_idx = txl.truncdiv(tx, txl.int32(WARP_SIZE))
+                lane_idx = txl.truncmod(tx, txl.int32(WARP_SIZE))
                 sf_per_warp = WARP_SIZE // threads_per_sf
-                sf_idx_in_warp = K.truncdiv(lane_idx, K.int32(threads_per_sf))
-                thread_in_sf = K.truncmod(lane_idx, K.int32(threads_per_sf))
+                sf_idx_in_warp = txl.truncdiv(lane_idx, txl.int32(threads_per_sf))
+                thread_in_sf = txl.truncmod(lane_idx, txl.int32(threads_per_sf))
                 sf_in_block = warp_idx * sf_per_warp + sf_idx_in_warp
             else:
-                thread_in_sf = K.int32(0)
+                thread_in_sf = txl.int32(0)
                 sf_in_block = tx
 
             def process_one(sf_idx):
@@ -537,18 +537,18 @@ def get_kernel(
                         # Load two independent grid-stride iterations before
                         # consuming either, increasing the cold-cache miss window
                         # on low-SM devices without changing the one-iteration case.
-                        words0 = K.alloc_local((4,), "uint32")
-                        words1 = K.alloc_local((4,), "uint32")
-                        _load_block_4t(words0, in_global, K.int32(0), sf_idx, thread_in_sf, k=k)
-                        sf_idx1 = K.local_scalar("int32", init=sf_idx + sf_stride)
-                        with K.If(sf_idx1 < total_sf_blocks), K.Then():
+                        words0 = txl.alloc_local((4,), "uint32")
+                        words1 = txl.alloc_local((4,), "uint32")
+                        _load_block_4t(words0, in_global, txl.int32(0), sf_idx, thread_in_sf, k=k)
+                        sf_idx1 = txl.local_scalar("int32", init=sf_idx + sf_stride)
+                        with txl.If(sf_idx1 < total_sf_blocks), txl.Then():
                             _load_block_4t(
-                                words1, in_global, K.int32(0), sf_idx1, thread_in_sf, k=k
+                                words1, in_global, txl.int32(0), sf_idx1, thread_in_sf, k=k
                             )
                         scale_ue8m0_u32 = _finish_block_4t(
                             words0,
                             out_global,
-                            K.int32(0),
+                            txl.int32(0),
                             sf_idx,
                             thread_in_sf,
                             dtype=dtype,
@@ -559,20 +559,20 @@ def get_kernel(
                         scale_ue8m0_u32 = _process_block_4t(
                             in_global,
                             out_global,
-                            K.int32(0),
+                            txl.int32(0),
                             sf_idx,
                             thread_in_sf,
                             dtype=dtype,
                             k=k,
                             fp16_mode=fp16_mode,
                         )
-                    _st_scale_4t(K.address_of(sf_out[sf_idx]), scale_ue8m0_u32, thread_in_sf)
+                    _st_scale_4t(txl.address_of(sf_out[sf_idx]), scale_ue8m0_u32, thread_in_sf)
                     if pipeline_two:
-                        with K.If(sf_idx1 < total_sf_blocks), K.Then():
+                        with txl.If(sf_idx1 < total_sf_blocks), txl.Then():
                             scale_ue8m0_u32_1 = _finish_block_4t(
                                 words1,
                                 out_global,
-                                K.int32(0),
+                                txl.int32(0),
                                 sf_idx1,
                                 thread_in_sf,
                                 dtype=dtype,
@@ -580,18 +580,18 @@ def get_kernel(
                                 fp16_mode=fp16_mode,
                             )
                             _st_scale_4t(
-                                K.address_of(sf_out[sf_idx1]), scale_ue8m0_u32_1, thread_in_sf
+                                txl.address_of(sf_out[sf_idx1]), scale_ue8m0_u32_1, thread_in_sf
                             )
                 else:
-                    row_idx = K.truncdiv(sf_idx, K.int32(nsb))
-                    col_idx = K.truncmod(sf_idx, K.int32(nsb))
+                    row_idx = txl.truncdiv(sf_idx, txl.int32(nsb))
+                    col_idx = txl.truncmod(sf_idx, txl.int32(nsb))
                     scale_ue8m0_u32, packed64_0, packed64_1 = _process_block(
                         in_global, row_idx, col_idx, dtype=dtype, k=k
                     )
-                    st_global_u8(K.address_of(sf_out[sf_idx]), K.cast(scale_ue8m0_u32, "uint8"))
-                    out_off = K.cast(row_idx, "int64") * (k // 2) + col_idx * 16
-                    st_global_u64(K.address_of(out_global[out_off]), packed64_0)
-                    st_global_u64(K.address_of(out_global[out_off + 8]), packed64_1)
+                    st_global_u8(txl.address_of(sf_out[sf_idx]), txl.cast(scale_ue8m0_u32, "uint8"))
+                    out_off = txl.cast(row_idx, "int64") * (k // 2) + col_idx * 16
+                    st_global_u64(txl.address_of(out_global[out_off]), packed64_0)
+                    st_global_u64(txl.address_of(out_global[out_off + 8]), packed64_1)
 
             if unroll_all_batches:
                 sf_base = bx * sf_blocks_per_tb + sf_in_block
@@ -599,17 +599,17 @@ def get_kernel(
                     process_one(sf_base + batch * sf_stride)
                 tail_idx = sf_base + (total_sf_blocks // sf_stride) * sf_stride
                 if total_sf_blocks % sf_stride:
-                    with K.If(tail_idx < total_sf_blocks), K.Then():
+                    with txl.If(tail_idx < total_sf_blocks), txl.Then():
                         process_one(tail_idx)
             elif direct_one_batch:
                 process_one(bx * sf_blocks_per_tb + sf_in_block)
             else:
-                sf_idx = K.local_scalar("int32", init=bx * sf_blocks_per_tb + sf_in_block)
-                with K.While(sf_idx < total_sf_blocks):
+                sf_idx = txl.local_scalar("int32", init=bx * sf_blocks_per_tb + sf_in_block)
+                with txl.While(sf_idx < total_sf_blocks):
                     process_one(sf_idx)
-                    K.assign(sf_idx, sf_idx + sf_stride * (2 if pipeline_two else 1))
+                    txl.assign(sf_idx, sf_idx + sf_stride * (2 if pipeline_two else 1))
             if enable_pdl:
-                K.ptx.griddepcontrol.launch_dependents()
+                txl.ptx.griddepcontrol.launch_dependents()
 
         return mxfp4_quantize_linear.func
 
@@ -643,41 +643,41 @@ def get_kernel(
         and nsb == pad_cols
     )
 
-    @K.kernel(
+    @txl.kernel(
         warps=(block_x + 31) // 32, arch="sm_100a", min_blocks_per_sm=min_blocks_per_sm, grid=grid_x
     )
     def mxfp4_quantize_swizzled(
-        in_global: K.gptr[dtype], out_global: K.gptr[K.u8], sf_out: K.gptr[K.u8]
+        in_global: txl.gptr[dtype], out_global: txl.gptr[txl.u8], sf_out: txl.gptr[txl.u8]
     ):
-        bx = K.cta_id()
-        tx = K.thread_id()
+        bx = txl.cta_id()
+        tx = txl.thread_id()
 
         if enable_pdl:
-            K.ptx.griddepcontrol.wait()
+            txl.ptx.griddepcontrol.wait()
 
         def body():
-            col_unit_idx = _materialize(K.truncdiv(tx, K.int32(threads_per_sf)))
-            thread_in_sf = _materialize(K.truncmod(tx, K.int32(threads_per_sf)))
-            row_idx = K.local_scalar("int32", init=bx)
-            with K.While(row_idx < padded_m):
-                with K.If(row_idx >= m):
-                    with K.Then():
-                        sc_pad = K.local_scalar("int32", init=col_unit_idx)
-                        with K.While(sc_pad < pad_cols):
-                            with K.If(thread_in_sf == 0), K.Then():
+            col_unit_idx = _materialize(txl.truncdiv(tx, txl.int32(threads_per_sf)))
+            thread_in_sf = _materialize(txl.truncmod(tx, txl.int32(threads_per_sf)))
+            row_idx = txl.local_scalar("int32", init=bx)
+            with txl.While(row_idx < padded_m):
+                with txl.If(row_idx >= m):
+                    with txl.Then():
+                        sc_pad = txl.local_scalar("int32", init=col_unit_idx)
+                        with txl.While(sc_pad < pad_cols):
+                            with txl.If(thread_in_sf == 0), txl.Then():
                                 st_global_u8(
-                                    K.address_of(sf_out[sf_offset(row_idx, sc_pad)]), K.uint8(0)
+                                    txl.address_of(sf_out[sf_offset(row_idx, sc_pad)]), txl.uint8(0)
                                 )
-                            K.assign(sc_pad, sc_pad + col_units_per_block)
-                    with K.Else():
-                        sc = K.local_scalar("int32", init=col_unit_idx)
-                        with K.While(sc < nsb):
+                            txl.assign(sc_pad, sc_pad + col_units_per_block)
+                    with txl.Else():
+                        sc = txl.local_scalar("int32", init=col_unit_idx)
+                        with txl.While(sc < nsb):
                             if threads_per_sf == _4T_THREADS_PER_SF and needs_col_loop:
-                                words0 = K.alloc_local((4,), "uint32")
-                                words1 = K.alloc_local((4,), "uint32")
+                                words0 = txl.alloc_local((4,), "uint32")
+                                words1 = txl.alloc_local((4,), "uint32")
                                 _load_block_4t(words0, in_global, row_idx, sc, thread_in_sf, k=k)
-                                sc1 = K.local_scalar("int32", init=sc + col_units_per_block)
-                                with K.If(sc1 < nsb), K.Then():
+                                sc1 = txl.local_scalar("int32", init=sc + col_units_per_block)
+                                with txl.If(sc1 < nsb), txl.Then():
                                     _load_block_4t(
                                         words1, in_global, row_idx, sc1, thread_in_sf, k=k
                                     )
@@ -706,16 +706,16 @@ def get_kernel(
                                 scale_ue8m0_u32, packed64_0, packed64_1 = _process_block(
                                     in_global, row_idx, sc, dtype=dtype, k=k
                                 )
-                                out_off = K.cast(row_idx, "int64") * (k // 2) + sc * 16
-                                st_global_u64(K.address_of(out_global[out_off]), packed64_0)
-                                st_global_u64(K.address_of(out_global[out_off + 8]), packed64_1)
+                                out_off = txl.cast(row_idx, "int64") * (k // 2) + sc * 16
+                                st_global_u64(txl.address_of(out_global[out_off]), packed64_0)
+                                st_global_u64(txl.address_of(out_global[out_off + 8]), packed64_1)
                             _st_scale_4t(
-                                K.address_of(sf_out[sf_offset(row_idx, sc)]),
+                                txl.address_of(sf_out[sf_offset(row_idx, sc)]),
                                 scale_ue8m0_u32,
                                 thread_in_sf,
                             )
                             if threads_per_sf == _4T_THREADS_PER_SF and needs_col_loop:
-                                with K.If(sc1 < nsb), K.Then():
+                                with txl.If(sc1 < nsb), txl.Then():
                                     scale_ue8m0_u32_1 = _finish_block_4t(
                                         words1,
                                         out_global,
@@ -727,46 +727,46 @@ def get_kernel(
                                         fp16_mode=fp16_mode,
                                     )
                                     _st_scale_4t(
-                                        K.address_of(sf_out[sf_offset(row_idx, sc1)]),
+                                        txl.address_of(sf_out[sf_offset(row_idx, sc1)]),
                                         scale_ue8m0_u32_1,
                                         thread_in_sf,
                                     )
-                                K.assign(sc, sc + 2 * col_units_per_block)
+                                txl.assign(sc, sc + 2 * col_units_per_block)
                             else:
-                                K.assign(sc, sc + col_units_per_block)
-                        sc_tail = K.local_scalar("int32", init=nsb + col_unit_idx)
-                        with K.While(sc_tail < pad_cols):
-                            with K.If(thread_in_sf == 0), K.Then():
+                                txl.assign(sc, sc + col_units_per_block)
+                        sc_tail = txl.local_scalar("int32", init=nsb + col_unit_idx)
+                        with txl.While(sc_tail < pad_cols):
+                            with txl.If(thread_in_sf == 0), txl.Then():
                                 st_global_u8(
-                                    K.address_of(sf_out[sf_offset(row_idx, sc_tail)]), K.uint8(0)
+                                    txl.address_of(sf_out[sf_offset(row_idx, sc_tail)]), txl.uint8(0)
                                 )
-                            K.assign(sc_tail, sc_tail + col_units_per_block)
-                K.assign(row_idx, row_idx + grid_x)
+                            txl.assign(sc_tail, sc_tail + col_units_per_block)
+                txl.assign(row_idx, row_idx + grid_x)
 
         def small_body():
-            row_in_block = _materialize(K.truncdiv(tx, K.int32(threads_per_row)))
-            local_tidx = _materialize(K.truncmod(tx, K.int32(threads_per_row)))
-            sf_idx_in_row = _materialize(K.truncdiv(local_tidx, K.int32(threads_per_sf)))
-            thread_in_sf = _materialize(K.truncmod(local_tidx, K.int32(threads_per_sf)))
+            row_in_block = _materialize(txl.truncdiv(tx, txl.int32(threads_per_row)))
+            local_tidx = _materialize(txl.truncmod(tx, txl.int32(threads_per_row)))
+            sf_idx_in_row = _materialize(txl.truncdiv(local_tidx, txl.int32(threads_per_sf)))
+            thread_in_sf = _materialize(txl.truncmod(local_tidx, txl.int32(threads_per_sf)))
 
-            row_batch_idx = K.local_scalar("int32")
-            row_idx2 = K.local_scalar("int32")
-            K.assign(row_batch_idx, bx)
-            K.assign(row_idx2, row_batch_idx * rows_per_block + row_in_block)
-            with K.While(row_batch_idx * rows_per_block < padded_m):
-                with K.If(row_idx2 < padded_m), K.Then():
-                    with K.If(row_idx2 >= m):
-                        with K.Then():
-                            with K.If(thread_in_sf == 0), K.Then():
-                                local_sf = K.local_scalar("int32", init=sf_idx_in_row)
-                                with K.While(local_sf < pad_cols):
+            row_batch_idx = txl.local_scalar("int32")
+            row_idx2 = txl.local_scalar("int32")
+            txl.assign(row_batch_idx, bx)
+            txl.assign(row_idx2, row_batch_idx * rows_per_block + row_in_block)
+            with txl.While(row_batch_idx * rows_per_block < padded_m):
+                with txl.If(row_idx2 < padded_m), txl.Then():
+                    with txl.If(row_idx2 >= m):
+                        with txl.Then():
+                            with txl.If(thread_in_sf == 0), txl.Then():
+                                local_sf = txl.local_scalar("int32", init=sf_idx_in_row)
+                                with txl.While(local_sf < pad_cols):
                                     st_global_u8(
-                                        K.address_of(sf_out[sf_offset(row_idx2, local_sf)]),
-                                        K.uint8(0),
+                                        txl.address_of(sf_out[sf_offset(row_idx2, local_sf)]),
+                                        txl.uint8(0),
                                     )
-                                    K.assign(local_sf, local_sf + nsb)
-                        with K.Else():
-                            with K.If(sf_idx_in_row < nsb), K.Then():
+                                    txl.assign(local_sf, local_sf + nsb)
+                        with txl.Else():
+                            with txl.If(sf_idx_in_row < nsb), txl.Then():
                                 if threads_per_sf == _4T_THREADS_PER_SF:
                                     scale_ue8m0_u32 = _process_block_4t(
                                         in_global,
@@ -782,38 +782,38 @@ def get_kernel(
                                     scale_ue8m0_u32, packed64_0, packed64_1 = _process_block(
                                         in_global, row_idx2, sf_idx_in_row, dtype=dtype, k=k
                                     )
-                                    out_off = K.cast(row_idx2, "int64") * (k // 2) + (
+                                    out_off = txl.cast(row_idx2, "int64") * (k // 2) + (
                                         sf_idx_in_row * 16
                                     )
-                                    st_global_u64(K.address_of(out_global[out_off]), packed64_0)
-                                    st_global_u64(K.address_of(out_global[out_off + 8]), packed64_1)
+                                    st_global_u64(txl.address_of(out_global[out_off]), packed64_0)
+                                    st_global_u64(txl.address_of(out_global[out_off + 8]), packed64_1)
                                 _st_scale_4t(
-                                    K.address_of(sf_out[sf_offset(row_idx2, sf_idx_in_row)]),
+                                    txl.address_of(sf_out[sf_offset(row_idx2, sf_idx_in_row)]),
                                     scale_ue8m0_u32,
                                     thread_in_sf,
                                 )
                             if pad_cols != nsb:
-                                with K.If(thread_in_sf == 0), K.Then():
-                                    pad_col = K.local_scalar("int32", init=nsb + sf_idx_in_row)
-                                    with K.While(pad_col < pad_cols):
+                                with txl.If(thread_in_sf == 0), txl.Then():
+                                    pad_col = txl.local_scalar("int32", init=nsb + sf_idx_in_row)
+                                    with txl.While(pad_col < pad_cols):
                                         st_global_u8(
-                                            K.address_of(sf_out[sf_offset(row_idx2, pad_col)]),
-                                            K.uint8(0),
+                                            txl.address_of(sf_out[sf_offset(row_idx2, pad_col)]),
+                                            txl.uint8(0),
                                         )
-                                        K.assign(pad_col, pad_col + nsb)
-                K.assign(row_batch_idx, row_batch_idx + grid_x)
-                K.assign(row_idx2, row_batch_idx * rows_per_block + row_in_block)
+                                        txl.assign(pad_col, pad_col + nsb)
+                txl.assign(row_batch_idx, row_batch_idx + grid_x)
+                txl.assign(row_idx2, row_batch_idx * rows_per_block + row_in_block)
 
         def small_body_direct():
-            row_in_block = _materialize(K.truncdiv(tx, K.int32(threads_per_row)))
-            local_tidx = _materialize(K.truncmod(tx, K.int32(threads_per_row)))
-            sf_idx_in_row = _materialize(K.truncdiv(local_tidx, K.int32(threads_per_sf)))
-            thread_in_sf = _materialize(K.truncmod(local_tidx, K.int32(threads_per_sf)))
+            row_in_block = _materialize(txl.truncdiv(tx, txl.int32(threads_per_row)))
+            local_tidx = _materialize(txl.truncmod(tx, txl.int32(threads_per_row)))
+            sf_idx_in_row = _materialize(txl.truncdiv(local_tidx, txl.int32(threads_per_sf)))
+            thread_in_sf = _materialize(txl.truncmod(local_tidx, txl.int32(threads_per_sf)))
             row_idx = bx * rows_per_block + row_in_block
             _process_block_4t_scale_first(
                 in_global,
                 out_global,
-                K.address_of(sf_out[sf_offset(row_idx, sf_idx_in_row)]),
+                txl.address_of(sf_out[sf_offset(row_idx, sf_idx_in_row)]),
                 row_idx,
                 sf_idx_in_row,
                 thread_in_sf,
@@ -823,10 +823,10 @@ def get_kernel(
             )
 
         def small_body_unrolled():
-            row_in_block = _materialize(K.truncdiv(tx, K.int32(threads_per_row)))
-            local_tidx = _materialize(K.truncmod(tx, K.int32(threads_per_row)))
-            sf_idx_in_row = _materialize(K.truncdiv(local_tidx, K.int32(threads_per_sf)))
-            thread_in_sf = _materialize(K.truncmod(local_tidx, K.int32(threads_per_sf)))
+            row_in_block = _materialize(txl.truncdiv(tx, txl.int32(threads_per_row)))
+            local_tidx = _materialize(txl.truncmod(tx, txl.int32(threads_per_row)))
+            sf_idx_in_row = _materialize(txl.truncdiv(local_tidx, txl.int32(threads_per_sf)))
+            thread_in_sf = _materialize(txl.truncmod(local_tidx, txl.int32(threads_per_sf)))
             row_stride = grid_x * rows_per_block
             row_base = bx * rows_per_block + row_in_block
 
@@ -842,23 +842,23 @@ def get_kernel(
                     fp16_mode=fp16_mode,
                 )
                 _st_scale_4t(
-                    K.address_of(sf_out[sf_offset(row_idx, sf_idx_in_row)]), scale, thread_in_sf
+                    txl.address_of(sf_out[sf_offset(row_idx, sf_idx_in_row)]), scale, thread_in_sf
                 )
 
             for batch in range(m // row_stride):
                 process_row(row_base + batch * row_stride)
             tail_row = row_base + (m // row_stride) * row_stride
             if m % row_stride:
-                with K.If(tail_row < m), K.Then():
+                with txl.If(tail_row < m), txl.Then():
                     process_row(tail_row)
 
         def small_body_static():
-            row_in_block = _materialize(K.truncdiv(tx, K.int32(threads_per_row)))
-            local_tidx = _materialize(K.truncmod(tx, K.int32(threads_per_row)))
-            sf_idx_in_row = _materialize(K.truncdiv(local_tidx, K.int32(threads_per_sf)))
-            thread_in_sf = _materialize(K.truncmod(local_tidx, K.int32(threads_per_sf)))
-            row_idx = K.local_scalar("int32", init=bx * rows_per_block + row_in_block)
-            with K.While(row_idx < m):
+            row_in_block = _materialize(txl.truncdiv(tx, txl.int32(threads_per_row)))
+            local_tidx = _materialize(txl.truncmod(tx, txl.int32(threads_per_row)))
+            sf_idx_in_row = _materialize(txl.truncdiv(local_tidx, txl.int32(threads_per_sf)))
+            thread_in_sf = _materialize(txl.truncmod(local_tidx, txl.int32(threads_per_sf)))
+            row_idx = txl.local_scalar("int32", init=bx * rows_per_block + row_in_block)
+            with txl.While(row_idx < m):
                 scale = _process_block_4t(
                     in_global,
                     out_global,
@@ -870,23 +870,23 @@ def get_kernel(
                     fp16_mode=fp16_mode,
                 )
                 _st_scale_4t(
-                    K.address_of(sf_out[sf_offset(row_idx, sf_idx_in_row)]), scale, thread_in_sf
+                    txl.address_of(sf_out[sf_offset(row_idx, sf_idx_in_row)]), scale, thread_in_sf
                 )
-                K.assign(row_idx, row_idx + grid_x * rows_per_block)
+                txl.assign(row_idx, row_idx + grid_x * rows_per_block)
 
         def small_body_pipelined():
-            row_in_block = _materialize(K.truncdiv(tx, K.int32(threads_per_row)))
-            local_tidx = _materialize(K.truncmod(tx, K.int32(threads_per_row)))
-            sf_idx_in_row = _materialize(K.truncdiv(local_tidx, K.int32(threads_per_sf)))
-            thread_in_sf = _materialize(K.truncmod(local_tidx, K.int32(threads_per_sf)))
+            row_in_block = _materialize(txl.truncdiv(tx, txl.int32(threads_per_row)))
+            local_tidx = _materialize(txl.truncmod(tx, txl.int32(threads_per_row)))
+            sf_idx_in_row = _materialize(txl.truncdiv(local_tidx, txl.int32(threads_per_sf)))
+            thread_in_sf = _materialize(txl.truncmod(local_tidx, txl.int32(threads_per_sf)))
             row_stride = grid_x * rows_per_block
-            row_idx = K.local_scalar("int32", init=bx * rows_per_block + row_in_block)
-            with K.While(row_idx < m):
-                words0 = K.alloc_local((4,), "uint32")
-                words1 = K.alloc_local((4,), "uint32")
+            row_idx = txl.local_scalar("int32", init=bx * rows_per_block + row_in_block)
+            with txl.While(row_idx < m):
+                words0 = txl.alloc_local((4,), "uint32")
+                words1 = txl.alloc_local((4,), "uint32")
                 _load_block_4t(words0, in_global, row_idx, sf_idx_in_row, thread_in_sf, k=k)
-                row_idx1 = K.local_scalar("int32", init=row_idx + row_stride)
-                with K.If(row_idx1 < m), K.Then():
+                row_idx1 = txl.local_scalar("int32", init=row_idx + row_stride)
+                with txl.If(row_idx1 < m), txl.Then():
                     _load_block_4t(words1, in_global, row_idx1, sf_idx_in_row, thread_in_sf, k=k)
                 scale0 = _finish_block_4t(
                     words0,
@@ -899,9 +899,9 @@ def get_kernel(
                     fp16_mode=fp16_mode,
                 )
                 _st_scale_4t(
-                    K.address_of(sf_out[sf_offset(row_idx, sf_idx_in_row)]), scale0, thread_in_sf
+                    txl.address_of(sf_out[sf_offset(row_idx, sf_idx_in_row)]), scale0, thread_in_sf
                 )
-                with K.If(row_idx1 < m), K.Then():
+                with txl.If(row_idx1 < m), txl.Then():
                     scale1 = _finish_block_4t(
                         words1,
                         out_global,
@@ -913,14 +913,14 @@ def get_kernel(
                         fp16_mode=fp16_mode,
                     )
                     _st_scale_4t(
-                        K.address_of(sf_out[sf_offset(row_idx1, sf_idx_in_row)]),
+                        txl.address_of(sf_out[sf_offset(row_idx1, sf_idx_in_row)]),
                         scale1,
                         thread_in_sf,
                     )
-                K.assign(row_idx, row_idx + 2 * row_stride)
+                txl.assign(row_idx, row_idx + 2 * row_stride)
 
         if block_x % 32:
-            with K.If(tx < block_x), K.Then():
+            with txl.If(tx < block_x), txl.Then():
                 body() if needs_col_loop else (
                     small_body_direct()
                     if direct_one_batch
@@ -948,7 +948,7 @@ def get_kernel(
             small_body()
 
         if enable_pdl:
-            K.ptx.griddepcontrol.launch_dependents()
+            txl.ptx.griddepcontrol.launch_dependents()
 
     return mxfp4_quantize_swizzled.func
 

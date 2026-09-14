@@ -45,7 +45,7 @@ the traced function only names an expression tree.
 q_begin: T.int32 = chunk_idx * target
 
 # after: native tracing spells the same register and evaluation boundary.
-q_begin = K.local_scalar(K.i32, init=chunk_idx * target, name="q_begin")
+q_begin = txl.local_scalar(txl.i32, init=chunk_idx * target, name="q_begin")
 ```
 
 Preserve an untyped parser assignment too when it acted as an inferred-width
@@ -59,9 +59,9 @@ x_offset = row * hidden + lane
 store_offset = batch * stride + x_offset
 
 # after: preserve the parser's inferred integer boundaries.
-x_offset = K.local_scalar(K.i32, init=row * hidden + lane, name="x_offset")
-store_offset = K.local_scalar(
-    K.i64, init=batch * stride + x_offset, name="store_offset"
+x_offset = txl.local_scalar(txl.i32, init=row * hidden + lane, name="x_offset")
+store_offset = txl.local_scalar(
+    txl.i64, init=batch * stride + x_offset, name="store_offset"
 )
 ```
 
@@ -125,7 +125,7 @@ The reverse direction has a limit. Hoisting address invariants the backend
 already merges changes almost nothing: one such hoist moved static SASS by five
 instructions and left the shift count untouched.
 
-`K.Bind` has its own lowering boundary. A let-bound quotient, index, or offset
+`txl.Bind` has its own lowering boundary. A let-bound quotient, index, or offset
 that feeds a buffer view or pointer expression can still be substituted into
 every address use. In one eight-warp PDL combine, that repeated dynamic division
 and address arithmetic produced 296 SASS instructions and 42 registers, and two
@@ -133,7 +133,7 @@ clean short-row campaigns measured 1.01773 and 1.01334 after/before.
 Materializing only the persistent indices, split bounds, and base offsets in
 one-element local slots restored the 280-instruction, 47-register SASS
 byte-for-byte across all three default specializations, and all 15 correctness
-configurations passed. Keep `K.Bind` for ordinary reused expressions, but
+configurations passed. Keep `txl.Bind` for ordinary reused expressions, but
 inspect generated CUDA when a value crosses buffer/view lowering and use a local
 slot where the let is expanded instead of forwarded.
 

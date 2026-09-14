@@ -33,7 +33,7 @@ atom each CTA stages only its half of the N operand, so a B stage is
 
 from functools import cache
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 
 from . import spec
 
@@ -58,17 +58,17 @@ def _warp_uniform(value):
     reference splits that arithmetic almost evenly between the two pipes where
     TIRx was running 4.25x as much per-thread.
     """
-    uniform = K.local_scalar("int32")
-    K.ptx["shfl_sync.idx.b32"](uniform, value, K.uint32(0), K.uint32(31), K.uint32(0xFFFFFFFF))
+    uniform = txl.local_scalar("int32")
+    txl.ptx["shfl_sync.idx.b32"](uniform, value, txl.uint32(0), txl.uint32(31), txl.uint32(0xFFFFFFFF))
     return uniform
 
 
 def _elected():
     """`elect.sync` over the full warp, the source's single-issuer predicate."""
-    elected_lane = K.local_scalar("uint32")
-    elected_pred = K.local_scalar("uint32")
-    K.ptx.elect_sync(elected_lane, elected_pred, K.uint32(0xFFFFFFFF))
-    return elected_pred == K.uint32(1)
+    elected_lane = txl.local_scalar("uint32")
+    elected_pred = txl.local_scalar("uint32")
+    txl.ptx.elect_sync(elected_lane, elected_pred, txl.uint32(0xFFFFFFFF))
+    return elected_pred == txl.uint32(1)
 
 
 def _try_wait_acquire(dst, barrier, phase):
@@ -77,8 +77,8 @@ def _try_wait_acquire(dst, barrier, phase):
     Four of these in the anchor export, at `PTX 863, 919, 1170, 1241`; their
     status predicates the blocking acquire that follows.
     """
-    K.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
-        dst, barrier, K.cast(phase, "uint32")
+    txl.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
+        dst, barrier, txl.cast(phase, "uint32")
     )
 
 
@@ -97,14 +97,14 @@ def _wait_plain(barrier, phase):
     to yield to and the sleep buys nothing the two extra instructions on every
     handshake do not cost back.
     """
-    ready = K.local_scalar("uint32", init=K.uint32(0))
-    with K.While(ready == K.uint32(0)):
+    ready = txl.local_scalar("uint32", init=txl.uint32(0))
+    with txl.While(ready == txl.uint32(0)):
         _try_wait_acquire(ready, barrier, phase)
 
 
 def _wait_plain_if_needed(barrier, phase, speculative_ready):
-    with K.If(speculative_ready == K.uint32(0)):
-        with K.Then():
+    with txl.If(speculative_ready == txl.uint32(0)):
+        with txl.Then():
             _wait_plain(barrier, phase)
 
 
@@ -129,17 +129,17 @@ def _arithmetic(vectorized, packed):
 
     def binary(mnemonic, out, left, right):
         if vectorized:
-            K.ptx[f"{mnemonic}.rn.f32x2"](
-                packed, K.cuda.make_float2(left[0], left[1]), K.cuda.make_float2(right[0], right[1])
+            txl.ptx[f"{mnemonic}.rn.f32x2"](
+                packed, txl.cuda.make_float2(left[0], left[1]), txl.cuda.make_float2(right[0], right[1])
             )
-            K.ptx["mov.b64"](out[0], out[1], packed)
+            txl.ptx["mov.b64"](out[0], out[1], packed)
         else:
             for half in range(2):
-                K.ptx[f"{mnemonic}.f32"](out[half], left[half], right[half])
+                txl.ptx[f"{mnemonic}.f32"](out[half], left[half], right[half])
 
     def unary(mnemonic, out, value):
         for half in range(2):
-            K.ptx[mnemonic](out[half], value[half])
+            txl.ptx[mnemonic](out[half], value[half])
 
     def fused(out, left, right, addend):
         """``left * right + addend`` as one instruction.
@@ -152,16 +152,16 @@ def _arithmetic(vectorized, packed):
         be written out here to reach the same instruction count.
         """
         if vectorized:
-            K.ptx["fma.rn.f32x2"](
+            txl.ptx["fma.rn.f32x2"](
                 packed,
-                K.cuda.make_float2(left[0], left[1]),
-                K.cuda.make_float2(right[0], right[1]),
-                K.cuda.make_float2(addend[0], addend[1]),
+                txl.cuda.make_float2(left[0], left[1]),
+                txl.cuda.make_float2(right[0], right[1]),
+                txl.cuda.make_float2(addend[0], addend[1]),
             )
-            K.ptx["mov.b64"](out[0], out[1], packed)
+            txl.ptx["mov.b64"](out[0], out[1], packed)
         else:
             for half in range(2):
-                K.ptx["fma.rn.f32"](out[half], left[half], right[half], addend[half])
+                txl.ptx["fma.rn.f32"](out[half], left[half], right[half], addend[half])
 
     def scaled(out, value, constant):
         binary("mul", out, value, _spread(constant))
@@ -183,7 +183,7 @@ def _arithmetic(vectorized, packed):
             binary("add", out, _spread(constant), scratch)
         else:
             for half in range(2):
-                K.ptx["sub.f32"](out[half], K.float32(constant), value[half])
+                txl.ptx["sub.f32"](out[half], txl.float32(constant), value[half])
 
     return {
         "binary": binary,
@@ -198,7 +198,7 @@ def _arithmetic(vectorized, packed):
 
 def _spread(constant):
     """One FP32 immediate as a pair, so it can feed either arithmetic mode."""
-    return (K.float32(constant), K.float32(constant))
+    return (txl.float32(constant), txl.float32(constant))
 
 
 def _sigmoid(ops, destination, value, scratch):
@@ -225,7 +225,7 @@ def _swizzled(row_offset, chunk, row_bytes):
     """
     chunks = row_bytes // 16
     if chunks == 1:
-        return row_offset + K.int32(chunk * 16)
+        return row_offset + txl.int32(chunk * 16)
     # Every caller passes `row * row_bytes`, so the low `log2(row_bytes)` bits
     # of `row_offset` are zero and both `chunk * 16` and the twist fit entirely
     # inside them. The chunk therefore ORs in rather than adds, and the twist
@@ -234,10 +234,10 @@ def _swizzled(row_offset, chunk, row_bytes):
     # `row_offset | (chunk ^ twist)` is one `LOP3` per chunk where the sum
     # followed by the XOR is two instructions, and this runs once per chunk per
     # fragment on every subtile.
-    twist = K.local_scalar(
-        "int32", init=((row_offset // K.int32(128)) % K.int32(chunks)) * K.int32(16)
+    twist = txl.local_scalar(
+        "int32", init=((row_offset // txl.int32(128)) % txl.int32(chunks)) * txl.int32(16)
     )
-    return K.local_scalar("int32", init=row_offset | (K.int32(chunk * 16) ^ twist))
+    return txl.local_scalar("int32", init=row_offset | (txl.int32(chunk * 16) ^ twist))
 
 
 def _tcgen05_commit(barrier, mask, cta_group, cluster_size):
@@ -247,12 +247,12 @@ def _tcgen05_commit(barrier, mask, cta_group, cluster_size):
     notify and takes the plain form.
     """
     if cluster_size > 1:
-        K.ptx[
+        txl.ptx[
             f"tcgen05.commit.{cta_group}.mbarrier::arrive::one"
             ".shared::cluster.multicast::cluster.b64"
-        ](barrier, K.cast(mask, "uint16"))
+        ](barrier, txl.cast(mask, "uint16"))
     else:
-        K.ptx[f"tcgen05.commit.{cta_group}.mbarrier::arrive::one.shared::cluster.b64"](barrier)
+        txl.ptx[f"tcgen05.commit.{cta_group}.mbarrier::arrive::one.shared::cluster.b64"](barrier)
 
 
 def _unpack_input(values, words, dtype, bits):
@@ -263,11 +263,11 @@ def _unpack_input(values, words, dtype, bits):
     """
     converter = "cvt.f32.bf16" if dtype == "bfloat16" else "cvt.f32.f16"
     for word in range(16):
-        low = K.local_scalar("uint16")
-        high = K.local_scalar("uint16")
-        K.ptx["mov.b32"](low, high, words[word])
-        K.ptx[converter](values[2 * word + 0], low)
-        K.ptx[converter](values[2 * word + 1], high)
+        low = txl.local_scalar("uint16")
+        high = txl.local_scalar("uint16")
+        txl.ptx["mov.b32"](low, high, words[word])
+        txl.ptx[converter](values[2 * word + 0], low)
+        txl.ptx[converter](values[2 * word + 1], high)
 
 
 def _pack_output(words, values, dtype, bits):
@@ -279,7 +279,7 @@ def _pack_output(words, values, dtype, bits):
     """
     converter = "cvt.rn.bf16x2.f32" if dtype == "bfloat16" else "cvt.rn.f16x2.f32"
     for word in range(16):
-        K.ptx[converter](words[word], values[2 * word + 1], values[2 * word + 0])
+        txl.ptx[converter](words[word], values[2 * word + 1], values[2 * word + 0])
 
 
 def _instruction_descriptor(M, N, a_major, b_major):
@@ -320,10 +320,10 @@ def _descriptor_base(ldo, sdo, swizzle):
 
 
 def _descriptor_with_address(base, shared_address):
-    address_field = K.cast(
-        K.bitwise_and(K.shift_right(shared_address, K.uint32(4)), K.uint32(0x3FFF)), "uint64"
+    address_field = txl.cast(
+        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)), "uint64"
     )
-    return K.bitwise_or(K.uint64(base), address_field)
+    return txl.bitwise_or(txl.uint64(base), address_field)
 
 
 _TMA_G2S_3D_CTA = (
@@ -354,12 +354,12 @@ def _tma_load(destination, descriptor, coords, barrier, mask, *, two_cta, desc_p
         stem = head + ".mbarrier::complete_tx::bytes" + _TMA_MCAST + tail
     if two_cta:
         stem = stem + ".cta_group::2"
-    address = K.address_of(descriptor) if desc_ptr is None else desc_ptr
-    arguments = [destination, address, *[K.cast(c, "int32") for c in coords], barrier]
+    address = txl.address_of(descriptor) if desc_ptr is None else desc_ptr
+    arguments = [destination, address, *[txl.cast(c, "int32") for c in coords], barrier]
     if mask is not None:
-        arguments.append(K.cast(mask, "uint16"))
-    arguments.append(K.uint64(0))
-    K.ptx[stem](*arguments)
+        arguments.append(txl.cast(mask, "uint16"))
+    arguments.append(txl.uint64(0))
+    txl.ptx[stem](*arguments)
 
 
 def _entry_point(names, body):
@@ -424,26 +424,26 @@ def _make_kernel(
     # Every payload crosses the launch boundary as a flat byte array; the logical
     # extents live in the tensor maps and in the scalar index arithmetic below.
     annotations = {
-        "a": K.gptr[K.u8, (byte_count(tokens_total, K_dim, ab_bits),)],
+        "a": txl.gptr[txl.u8, (byte_count(tokens_total, K_dim, ab_bits),)],
         "b": (
-            K.gptr["int64", (L,)]
+            txl.gptr["int64", (L,)]
             if weight_mode == "discrete"
-            else K.gptr[K.u8, (byte_count(N, K_dim, ab_bits) * L,)]
+            else txl.gptr[txl.u8, (byte_count(N, K_dim, ab_bits) * L,)]
         ),
-        "c": K.gptr[K.u8, (byte_count(tokens_total, N_out, c_bits),)],
-        "d_row": K.gptr[K.u8, (byte_count(tokens_total, N_out, d_bits),)],
+        "c": txl.gptr[txl.u8, (byte_count(tokens_total, N_out, c_bits),)],
+        "d_row": txl.gptr[txl.u8, (byte_count(tokens_total, N_out, d_bits),)],
     }
-    annotations["padded_offsets"] = K.gptr["int32", (L,)]
-    annotations["alpha"] = K.gptr["float32", (L,)]
-    annotations["beta"] = K.gptr["float32", (L,)]
+    annotations["padded_offsets"] = txl.gptr["int32", (L,)]
+    annotations["alpha"] = txl.gptr["float32", (L,)]
+    annotations["beta"] = txl.gptr["float32", (L,)]
     # ``generate_dprob`` is hard-coded True upstream, so both routing tensors
     # are part of every specialization's signature.
-    annotations["prob"] = K.gptr["float32", (tokens_total,)]
-    annotations["dprob"] = K.gptr["float32", (tokens_total,)]
+    annotations["prob"] = txl.gptr["float32", (tokens_total,)]
+    annotations["dprob"] = txl.gptr["float32", (tokens_total,)]
     if with_dbias:
-        annotations["dbias"] = K.gptr[K.u8, (L * N_out * 2,)]
+        annotations["dbias"] = txl.gptr[txl.u8, (L * N_out * 2,)]
     if derived["workspace_bytes"]:
-        annotations["workspace"] = K.gptr[K.u8, (derived["workspace_bytes"],)]
+        annotations["workspace"] = txl.gptr[txl.u8, (derived["workspace_bytes"],)]
 
     # ---- shapes the launch geometry and the barrier protocol depend on -------
     offsets = derived["smem_offsets"]
@@ -530,7 +530,7 @@ def _make_kernel(
     ab_tail = (1, 1, 1, 0, 3, 2, 0)
 
     def encode_map(descriptor, dtype, rank, data, *fields):
-        K.call_packed("runtime.cuTensorMapEncodeTiled", descriptor, dtype, rank, data, *fields)
+        txl.call_packed("runtime.cuTensorMapEncodeTiled", descriptor, dtype, rank, data, *fields)
 
     def encode_weight_maps(descriptors, b_data, batch):
         """The B TensorMap.
@@ -566,7 +566,7 @@ def _make_kernel(
         encode_map(descriptors["b"], "bfloat16", 3, b_data, *b_fields, *ab_tail)
 
     def host_prelude(params):
-        descriptors = {name: K.stack_alloca("tensormap", 1) for name in map_names}
+        descriptors = {name: txl.stack_alloca("tensormap", 1) for name in map_names}
         encode = encode_map
 
         # A is (tokens, K) k-major, so K is the contiguous extent.
@@ -632,14 +632,14 @@ def _make_kernel(
         maps = dict(zip(map_names, host))
 
         # ---- coordinates -------------------------------------------------
-        block_x, block_y, cluster_work_id = K.cta_id()
-        cluster_x, cluster_y = K.cta_id_in_cluster(
+        block_x, block_y, cluster_work_id = txl.cta_id()
+        cluster_x, cluster_y = txl.cta_id_in_cluster(
             [cluster_m, cluster_n], preferred=[cluster_m, cluster_n]
         )
         cluster_rank = _warp_uniform(cluster_x + cluster_m * cluster_y)
         del block_y
-        warp = _warp_uniform(K.warp_id())
-        lane = K.lane_id()
+        warp = _warp_uniform(txl.warp_id())
+        lane = txl.lane_id()
 
         # Position inside the two-CTA MMA pair, and the pair's coordinate in the
         # cluster. `cluster_v` is what distinguishes the two CTAs of a pair and
@@ -650,12 +650,12 @@ def _make_kernel(
         # Only the leader CTA of a two-CTA pair issues the MMA and the AB-full
         # arrival; with a single-CTA atom every CTA is its own leader.
         is_leader_cta = (
-            (block_x % K.int32(atom_thr)) == K.int32(0)
+            (block_x % txl.int32(atom_thr)) == txl.int32(0)
             if atom_thr > 1
-            else K.int32(0) == K.int32(0)
+            else txl.int32(0) == txl.int32(0)
         )
 
-        roles = K.specialize(chain_dispatch=True)
+        roles = txl.specialize(chain_dispatch=True)
         epilogue_role = roles.role("epilogue", warps=[0, 1, 2, 3])
         mma_role = roles.role("mma", warps=[4])
         tma_role = roles.role("tma", warps=[5])
@@ -663,25 +663,25 @@ def _make_kernel(
         sched_role = roles.role("scheduler", warps=[7])
 
         # ---- storage -----------------------------------------------------
-        smem = K.alloc_buffer((shared_bytes,), K.u8, scope="shared.dyn", align=1024)
-        protocol_pool = K.smem_pool(base=smem)
-        ab_pipe = K.Pipeline(
-            protocol_pool, ab_stages, full="tma", empty="tcgen05", leader=K.bool(False)
+        smem = txl.alloc_buffer((shared_bytes,), txl.u8, scope="shared.dyn", align=1024)
+        protocol_pool = txl.smem_pool(base=smem)
+        ab_pipe = txl.Pipeline(
+            protocol_pool, ab_stages, full="tma", empty="tcgen05", leader=txl.bool(False)
         )
-        acc_pipe = K.Pipeline(
+        acc_pipe = txl.Pipeline(
             protocol_pool,
             acc_stages,
             full="tcgen05",
             empty="mbar",
             init_empty=4 * atom_thr,
-            leader=K.bool(False),
+            leader=txl.bool(False),
         )
-        tile_pipe = K.Pipeline(
-            protocol_pool, tile_stages, full="mbar", empty="mbar", leader=K.bool(False)
+        tile_pipe = txl.Pipeline(
+            protocol_pool, tile_stages, full="mbar", empty="mbar", leader=txl.bool(False)
         )
         if protocol_pool.bytes != offsets["sinfo"]:
             raise AssertionError("protocol storage order changed before sInfo")
-        sinfo = protocol_pool.alloc((4 * tile_stages,), K.i32, align=16)
+        sinfo = protocol_pool.alloc((4 * tile_stages,), txl.i32, align=16)
         # The dynamic scheduler adds a one-stage cluster pipeline and the
         # 16-byte slot the elected CTA broadcasts the next work index into.
         # Both sit straight after sInfo, which is why every object below them
@@ -691,119 +691,119 @@ def _make_kernel(
         if sched == "dynamic":
             if protocol_pool.bytes != offsets["cluster_mbar"]:
                 raise AssertionError("scheduler cluster pipeline is misplaced")
-            sched_pipe = K.Pipeline(
-                protocol_pool, 1, full="mbar", empty="mbar", leader=K.bool(False)
+            sched_pipe = txl.Pipeline(
+                protocol_pool, 1, full="mbar", empty="mbar", leader=txl.bool(False)
             )
             if protocol_pool.bytes != offsets["cluster_broadcast"]:
                 raise AssertionError("scheduler broadcast slot is misplaced")
-            sched_broadcast = protocol_pool.alloc((4,), K.i32, align=16)
+            sched_broadcast = protocol_pool.alloc((4,), txl.i32, align=16)
         if protocol_pool.bytes != offsets["c_full"]:
             raise AssertionError("protocol storage order changed before the C pipeline")
-        c_pipe = K.Pipeline(
-            protocol_pool, c_stages, full="tma", empty="mbar", init_empty=4, leader=K.bool(False)
+        c_pipe = txl.Pipeline(
+            protocol_pool, c_stages, full="tma", empty="mbar", init_empty=4, leader=txl.bool(False)
         )
         if protocol_pool.bytes != offsets["tmem_dealloc"]:
             raise AssertionError("protocol storage order changed before the TMEM barrier")
-        tmem_dealloc = protocol_pool.alloc((1,), K.u64, align=8)
-        tmem_slot = protocol_pool.alloc((1,), K.u32, align=4)
+        tmem_dealloc = protocol_pool.alloc((1,), txl.u64, align=8)
+        tmem_slot = protocol_pool.alloc((1,), txl.u32, align=4)
 
         # ---- descriptor prefetch ----------------------------------------
         with tma_role:
             for name in map_names:
-                K.ptx.prefetch.tensormap(K.address_of(maps[name]))
+                txl.ptx.prefetch.tensormap(txl.address_of(maps[name]))
 
         # ---- barrier initialization, in the source's declaration order ----
-        with K.If(warp == 0):
-            with K.Then():
-                with K.If(_elected()):
-                    with K.Then():
-                        with K.unroll(0, ab_stages) as stage:
-                            K.ptx.mbarrier.init.shared.b64(
-                                ab_pipe.full.ptr_to([stage]), K.uint32(1)
+        with txl.If(warp == 0):
+            with txl.Then():
+                with txl.If(_elected()):
+                    with txl.Then():
+                        with txl.unroll(0, ab_stages) as stage:
+                            txl.ptx.mbarrier.init.shared.b64(
+                                ab_pipe.full.ptr_to([stage]), txl.uint32(1)
                             )
-                with K.If(_elected()):
-                    with K.Then():
-                        with K.unroll(0, ab_stages) as stage:
-                            K.ptx.mbarrier.init.shared.b64(
-                                ab_pipe.empty.ptr_to([stage]), K.uint32(ab_empty_arrivals)
+                with txl.If(_elected()):
+                    with txl.Then():
+                        with txl.unroll(0, ab_stages) as stage:
+                            txl.ptx.mbarrier.init.shared.b64(
+                                ab_pipe.empty.ptr_to([stage]), txl.uint32(ab_empty_arrivals)
                             )
-                with K.If(_elected()):
-                    with K.Then():
-                        with K.unroll(0, acc_stages) as stage:
-                            K.ptx.mbarrier.init.shared.b64(
-                                acc_pipe.full.ptr_to([stage]), K.uint32(1)
+                with txl.If(_elected()):
+                    with txl.Then():
+                        with txl.unroll(0, acc_stages) as stage:
+                            txl.ptx.mbarrier.init.shared.b64(
+                                acc_pipe.full.ptr_to([stage]), txl.uint32(1)
                             )
-                with K.If(_elected()):
-                    with K.Then():
-                        with K.unroll(0, acc_stages) as stage:
-                            K.ptx.mbarrier.init.shared.b64(
-                                acc_pipe.empty.ptr_to([stage]), K.uint32(4 * atom_thr)
+                with txl.If(_elected()):
+                    with txl.Then():
+                        with txl.unroll(0, acc_stages) as stage:
+                            txl.ptx.mbarrier.init.shared.b64(
+                                acc_pipe.empty.ptr_to([stage]), txl.uint32(4 * atom_thr)
                             )
-                with K.If(_elected()):
-                    with K.Then():
-                        with K.unroll(0, c_stages) as stage:
-                            K.ptx.mbarrier.init.shared.b64(c_pipe.full.ptr_to([stage]), K.uint32(1))
-                with K.If(_elected()):
-                    with K.Then():
-                        with K.unroll(0, c_stages) as stage:
-                            K.ptx.mbarrier.init.shared.b64(
-                                c_pipe.empty.ptr_to([stage]), K.uint32(4)
+                with txl.If(_elected()):
+                    with txl.Then():
+                        with txl.unroll(0, c_stages) as stage:
+                            txl.ptx.mbarrier.init.shared.b64(c_pipe.full.ptr_to([stage]), txl.uint32(1))
+                with txl.If(_elected()):
+                    with txl.Then():
+                        with txl.unroll(0, c_stages) as stage:
+                            txl.ptx.mbarrier.init.shared.b64(
+                                c_pipe.empty.ptr_to([stage]), txl.uint32(4)
                             )
-                with K.If(_elected()):
-                    with K.Then():
-                        with K.unroll(0, tile_stages) as stage:
-                            K.ptx.mbarrier.init.shared.b64(
-                                tile_pipe.full.ptr_to([stage]), K.uint32(32)
+                with txl.If(_elected()):
+                    with txl.Then():
+                        with txl.unroll(0, tile_stages) as stage:
+                            txl.ptx.mbarrier.init.shared.b64(
+                                tile_pipe.full.ptr_to([stage]), txl.uint32(32)
                             )
-                with K.If(_elected()):
-                    with K.Then():
-                        with K.unroll(0, tile_stages) as stage:
-                            K.ptx.mbarrier.init.shared.b64(
-                                tile_pipe.empty.ptr_to([stage]), K.uint32(224)
+                with txl.If(_elected()):
+                    with txl.Then():
+                        with txl.unroll(0, tile_stages) as stage:
+                            txl.ptx.mbarrier.init.shared.b64(
+                                tile_pipe.empty.ptr_to([stage]), txl.uint32(224)
                             )
 
         # The tile-info pipeline is built without `defer_sync`, so it publishes
         # itself here; the TMEM barrier belongs to the second epoch below.
-        K.ptx.fence.mbarrier_init.release.cluster()
-        K.ptx.bar.sync(K.uint32(0))
+        txl.ptx.fence.mbarrier_init.release.cluster()
+        txl.ptx.bar.sync(txl.uint32(0))
 
         # `TmemAllocator` is handed the deallocation barrier only under a
         # two-CTA atom, so a single-CTA specialization initializes one mbarrier
         # fewer: the exports count 23 for the anchor and 18 for `tile128_c1x1`,
         # one short of the 19 an unconditional init would leave.
         if sched == "dynamic" or atom_thr > 1:
-            with K.If(warp == 0):
-                with K.Then():
-                    with K.If(_elected()):
-                        with K.Then():
+            with txl.If(warp == 0):
+                with txl.Then():
+                    with txl.If(_elected()):
+                        with txl.Then():
                             if sched == "dynamic":
                                 # `internal_init` builds this pipeline with
                                 # `defer_sync=True`, so it is published by the
                                 # second epoch alongside the TMEM barrier.
-                                K.ptx.mbarrier.init.shared.b64(
-                                    sched_pipe.full.ptr_to([0]), K.uint32(1)
+                                txl.ptx.mbarrier.init.shared.b64(
+                                    sched_pipe.full.ptr_to([0]), txl.uint32(1)
                                 )
-                                K.ptx.mbarrier.init.shared.b64(
-                                    sched_pipe.empty.ptr_to([0]), K.uint32(32 * cluster_size)
+                                txl.ptx.mbarrier.init.shared.b64(
+                                    sched_pipe.empty.ptr_to([0]), txl.uint32(32 * cluster_size)
                                 )
                             if atom_thr > 1:
-                                K.ptx.mbarrier.init.shared.b64(
-                                    tmem_dealloc.ptr_to([0]), K.uint32(32)
+                                txl.ptx.mbarrier.init.shared.b64(
+                                    tmem_dealloc.ptr_to([0]), txl.uint32(32)
                                 )
-        K.ptx.fence.mbarrier_init.release.cluster()
+        txl.ptx.fence.mbarrier_init.release.cluster()
         if cluster_size > 1:
-            K.ptx.barrier.cluster.arrive.relaxed()
+            txl.ptx.barrier.cluster.arrive.relaxed()
 
         # ---- scalar addresses, descriptors, and multicast masks ----------
-        smem_base = K.local_scalar("uint32")
-        K.assign(smem_base, K.cuda.cvta_generic_to_shared(smem.ptr_to([0])))
-        cluster_smem_base_u64 = K.local_scalar("uint64")
-        K.ptx.cvta.to.shared__cluster.u64(cluster_smem_base_u64, smem.ptr_to([0]))
-        cluster_smem_base = K.local_scalar("uint32", init=K.cast(cluster_smem_base_u64, "uint32"))
-        a_descriptor = K.local_scalar(
+        smem_base = txl.local_scalar("uint32")
+        txl.assign(smem_base, txl.cuda.cvta_generic_to_shared(smem.ptr_to([0])))
+        cluster_smem_base_u64 = txl.local_scalar("uint64")
+        txl.ptx.cvta.to.shared__cluster.u64(cluster_smem_base_u64, smem.ptr_to([0]))
+        cluster_smem_base = txl.local_scalar("uint32", init=txl.cast(cluster_smem_base_u64, "uint32"))
+        a_descriptor = txl.local_scalar(
             "uint64", init=_descriptor_with_address(a_desc_base, smem_base + offsets["sA"])
         )
-        b_descriptor = K.local_scalar(
+        b_descriptor = txl.local_scalar(
             "uint64", init=_descriptor_with_address(b_desc_base, smem_base + offsets["sB"])
         )
 
@@ -811,12 +811,12 @@ def _make_kernel(
         # coordinate with one mode varying; the flat rank of `(v, m, n)` is
         # `v + atom_thr * m + cluster_m * n`.
         def cta_bit(v, m, n):
-            return K.uint32(1) << K.cast(v + atom_thr * m + cluster_m * n, "uint32")
+            return txl.uint32(1) << txl.cast(v + atom_thr * m + cluster_m * n, "uint32")
 
         def mask_union(bits):
-            accumulator = K.local_scalar("uint32", init=K.uint32(0))
+            accumulator = txl.local_scalar("uint32", init=txl.uint32(0))
             for bit in bits:
-                K.assign(accumulator, K.bitwise_or(accumulator, bit))
+                txl.assign(accumulator, txl.bitwise_or(accumulator, bit))
             return accumulator
 
         a_mcast_mask = mask_union(
@@ -836,14 +836,14 @@ def _make_kernel(
         )
 
         if cluster_size > 1:
-            K.ptx.barrier.cluster.wait()
+            txl.ptx.barrier.cluster.wait()
         else:
-            K.ptx.bar.sync(K.uint32(1))
+            txl.ptx.bar.sync(txl.uint32(1))
 
-        total_tokens = K.local_scalar("int32")
-        K.ptx.ld.global_.b32(total_tokens, named["padded_offsets"].ptr_to([L - 1]))
-        with K.If(total_tokens <= K.int32(0)), K.Then():
-            K.Return(K.int32(0))
+        total_tokens = txl.local_scalar("int32")
+        txl.ptx.ld.global_.b32(total_tokens, named["padded_offsets"].ptr_to([L - 1]))
+        with txl.If(total_tokens <= txl.int32(0)), txl.Then():
+            txl.Return(txl.int32(0))
 
         # ---- Role 1: warp 7, MoE persistent tile scheduler ----------------
         # `offs` is cumulative, so this expert's token count is the difference
@@ -857,86 +857,86 @@ def _make_kernel(
 
         def expert_tokens(expert):
             """Token count of one expert, from the cumulative offsets."""
-            upper = K.local_scalar("int32")
-            K.ptx.ld.global_.b32(upper, named["padded_offsets"].ptr_to([expert]))
-            tokens = K.local_scalar("int32", init=upper)
-            with K.If(expert > K.int32(0)), K.Then():
-                lower = K.local_scalar("int32")
-                K.ptx.ld.global_.b32(lower, named["padded_offsets"].ptr_to([expert - K.int32(1)]))
-                K.assign(tokens, tokens - lower)
+            upper = txl.local_scalar("int32")
+            txl.ptx.ld.global_.b32(upper, named["padded_offsets"].ptr_to([expert]))
+            tokens = txl.local_scalar("int32", init=upper)
+            with txl.If(expert > txl.int32(0)), txl.Then():
+                lower = txl.local_scalar("int32")
+                txl.ptx.ld.global_.b32(lower, named["padded_offsets"].ptr_to([expert - txl.int32(1)]))
+                txl.assign(tokens, tokens - lower)
             return tokens
 
         def expert_m_tiles(expert):
             tokens = expert_tokens(expert)
-            return (tokens + K.int32(cluster_tile_m - 1)) // K.int32(cluster_tile_m)
+            return (tokens + txl.int32(cluster_tile_m - 1)) // txl.int32(cluster_tile_m)
 
         with sched_role:
-            info_prod = K.PipelineState(tile_stages, phase=1)
+            info_prod = txl.PipelineState(tile_stages, phase=1)
             # Cached expert cursor: the walk stays inside one expert until the
             # linear index leaves it, which makes the common step O(1).
-            current_expert = K.local_scalar("int32", init=K.int32(0))
-            expert_tile_start = K.local_scalar("int32", init=K.int32(0))
-            expert_tile_end = K.local_scalar("int32", init=K.int32(0))
-            initialized = K.local_scalar("uint32", init=K.uint32(0))
-            work_linear = K.local_scalar("int32", init=cluster_work_id)
+            current_expert = txl.local_scalar("int32", init=txl.int32(0))
+            expert_tile_start = txl.local_scalar("int32", init=txl.int32(0))
+            expert_tile_end = txl.local_scalar("int32", init=txl.int32(0))
+            initialized = txl.local_scalar("uint32", init=txl.uint32(0))
+            work_linear = txl.local_scalar("int32", init=cluster_work_id)
 
-            record_expert = K.local_scalar("int32")
-            record_tile_m = K.local_scalar("int32")
-            record_tile_n = K.local_scalar("int32")
-            work_valid = K.local_scalar("uint32")
+            record_expert = txl.local_scalar("int32")
+            record_tile_m = txl.local_scalar("int32")
+            record_tile_n = txl.local_scalar("int32")
+            work_valid = txl.local_scalar("uint32")
 
             def resolve_work():
                 """Source `_get_work_tile_for_linear_idx`, cursor included."""
-                with K.If(initialized == K.uint32(0)), K.Then():
-                    K.assign(expert_tile_end, expert_m_tiles(K.int32(0)) * n_tile_count)
-                    K.assign(initialized, K.uint32(1))
-                with K.While(K.And(work_linear >= expert_tile_end, current_expert < K.int32(L))):
-                    K.assign(current_expert, current_expert + K.int32(1))
-                    K.assign(expert_tile_start, expert_tile_end)
-                    with K.If(current_expert < K.int32(L)), K.Then():
-                        K.assign(
+                with txl.If(initialized == txl.uint32(0)), txl.Then():
+                    txl.assign(expert_tile_end, expert_m_tiles(txl.int32(0)) * n_tile_count)
+                    txl.assign(initialized, txl.uint32(1))
+                with txl.While(txl.And(work_linear >= expert_tile_end, current_expert < txl.int32(L))):
+                    txl.assign(current_expert, current_expert + txl.int32(1))
+                    txl.assign(expert_tile_start, expert_tile_end)
+                    with txl.If(current_expert < txl.int32(L)), txl.Then():
+                        txl.assign(
                             expert_tile_end,
                             expert_tile_end + expert_m_tiles(current_expert) * n_tile_count,
                         )
-                K.assign(record_expert, K.int32(-1))
-                K.assign(record_tile_m, K.int32(0))
-                K.assign(record_tile_n, K.int32(0))
-                K.assign(work_valid, K.uint32(0))
-                with K.If(current_expert < K.int32(L)), K.Then():
-                    K.assign(work_valid, K.uint32(1))
-                    local_idx = K.local_scalar("int32", init=work_linear - expert_tile_start)
-                    m_count = K.local_scalar("int32", init=expert_m_tiles(current_expert))
-                    cluster_m_idx = K.local_scalar("int32")
-                    cluster_n_idx = K.local_scalar("int32")
+                txl.assign(record_expert, txl.int32(-1))
+                txl.assign(record_tile_m, txl.int32(0))
+                txl.assign(record_tile_n, txl.int32(0))
+                txl.assign(work_valid, txl.uint32(0))
+                with txl.If(current_expert < txl.int32(L)), txl.Then():
+                    txl.assign(work_valid, txl.uint32(1))
+                    local_idx = txl.local_scalar("int32", init=work_linear - expert_tile_start)
+                    m_count = txl.local_scalar("int32", init=expert_m_tiles(current_expert))
+                    cluster_m_idx = txl.local_scalar("int32")
+                    cluster_n_idx = txl.local_scalar("int32")
                     # Short side first: the shorter extent changes faster, so
                     # neighbouring clusters overlap in L2.
-                    with K.If(m_count <= K.int32(n_tile_count)):
-                        with K.Then():
-                            K.assign(cluster_m_idx, local_idx % m_count)
-                            K.assign(cluster_n_idx, local_idx // m_count)
-                        with K.Else():
-                            K.assign(cluster_n_idx, local_idx % K.int32(n_tile_count))
-                            K.assign(cluster_m_idx, local_idx // K.int32(n_tile_count))
-                    K.assign(record_expert, current_expert)
-                    K.assign(record_tile_m, cluster_m_idx * K.int32(cluster_m) + cluster_x)
-                    K.assign(record_tile_n, cluster_n_idx * K.int32(cluster_n) + cluster_y)
+                    with txl.If(m_count <= txl.int32(n_tile_count)):
+                        with txl.Then():
+                            txl.assign(cluster_m_idx, local_idx % m_count)
+                            txl.assign(cluster_n_idx, local_idx // m_count)
+                        with txl.Else():
+                            txl.assign(cluster_n_idx, local_idx % txl.int32(n_tile_count))
+                            txl.assign(cluster_m_idx, local_idx // txl.int32(n_tile_count))
+                    txl.assign(record_expert, current_expert)
+                    txl.assign(record_tile_m, cluster_m_idx * txl.int32(cluster_m) + cluster_x)
+                    txl.assign(record_tile_n, cluster_n_idx * txl.int32(cluster_n) + cluster_y)
 
             def publish_record(expert_value, tile_m_value, tile_n_value):
                 _wait_plain(tile_pipe.empty.ptr_to([info_prod.stage]), info_prod.phase)
-                with K.If(_elected()), K.Then():
+                with txl.If(_elected()), txl.Then():
                     base = info_prod.stage * 4
-                    K.ptx.st.shared.v4.b32(
+                    txl.ptx.st.shared.v4.b32(
                         sinfo.ptr_to([base]),
                         expert_value,
                         tile_m_value,
                         tile_n_value,
-                        K.int32(k_tiles),
+                        txl.int32(k_tiles),
                     )
-                K.ptx["fence.proxy.async.shared::cta"]()
-                K.ptx.bar.sync(K.uint32(4), K.uint32(32))
+                txl.ptx["fence.proxy.async.shared::cta"]()
+                txl.ptx.bar.sync(txl.uint32(4), txl.uint32(32))
                 # All 32 lanes of the scheduler warp arrive, matching the
                 # barrier's 32 arrivals.
-                K.ptx.mbarrier.arrive.shared.b64(tile_pipe.full.ptr_to([info_prod.stage]))
+                txl.ptx.mbarrier.arrive.shared.b64(tile_pipe.full.ptr_to([info_prod.stage]))
                 info_prod.advance()
 
             if sched == "dynamic":
@@ -945,9 +945,9 @@ def _make_kernel(
                 # into every peer's shared slot, so a whole cluster agrees on
                 # one work tile.
                 counter_offset = L * 128 if weight_mode == "discrete" else 0
-                sched_prod = K.PipelineState(1, phase=1)
-                sched_cons = K.PipelineState(1, phase=0)
-                is_leader_cluster = cluster_rank == K.int32(0)
+                sched_prod = txl.PipelineState(1, phase=1)
+                sched_cons = txl.PipelineState(1, phase=0)
+                is_leader_cluster = cluster_rank == txl.int32(0)
 
                 def fetch_single_cta():
                     """The whole cluster is one CTA, so there is nobody to tell.
@@ -958,84 +958,84 @@ def _make_kernel(
                     those instructions fault rather than degenerate. A lone CTA
                     just keeps the index it claimed.
                     """
-                    claimed = K.local_scalar("uint32", init=K.uint32(0))
-                    with K.If(lane == K.int32(0)), K.Then():
-                        K.ptx["atom.global.add.u32"](
-                            claimed, named["workspace"].ptr_to([counter_offset]), K.uint32(1)
+                    claimed = txl.local_scalar("uint32", init=txl.uint32(0))
+                    with txl.If(lane == txl.int32(0)), txl.Then():
+                        txl.ptx["atom.global.add.u32"](
+                            claimed, named["workspace"].ptr_to([counter_offset]), txl.uint32(1)
                         )
-                    K.ptx["shfl_sync.idx.b32"](
-                        claimed, claimed, K.uint32(0), K.uint32(31), K.uint32(0xFFFFFFFF)
+                    txl.ptx["shfl_sync.idx.b32"](
+                        claimed, claimed, txl.uint32(0), txl.uint32(31), txl.uint32(0xFFFFFFFF)
                     )
-                    K.assign(work_linear, K.cast(claimed, "int32"))
+                    txl.assign(work_linear, txl.cast(claimed, "int32"))
 
                 def fetch_linear():
-                    with K.If(is_leader_cluster), K.Then():
+                    with txl.If(is_leader_cluster), txl.Then():
                         _wait_plain(sched_pipe.empty.ptr_to([0]), sched_prod.phase)
-                        claimed = K.local_scalar("uint32", init=K.uint32(0))
-                        with K.If(lane == K.int32(0)), K.Then():
-                            K.ptx["atom.global.add.u32"](
-                                claimed, named["workspace"].ptr_to([counter_offset]), K.uint32(1)
+                        claimed = txl.local_scalar("uint32", init=txl.uint32(0))
+                        with txl.If(lane == txl.int32(0)), txl.Then():
+                            txl.ptx["atom.global.add.u32"](
+                                claimed, named["workspace"].ptr_to([counter_offset]), txl.uint32(1)
                             )
-                        K.ptx["shfl_sync.idx.b32"](
-                            claimed, claimed, K.uint32(0), K.uint32(31), K.uint32(0xFFFFFFFF)
+                        txl.ptx["shfl_sync.idx.b32"](
+                            claimed, claimed, txl.uint32(0), txl.uint32(31), txl.uint32(0xFFFFFFFF)
                         )
-                        with K.If(lane < K.int32(cluster_size)), K.Then():
-                            peer = K.local_scalar("uint32", init=K.cast(lane, "uint32"))
-                            remote_slot = K.local_scalar("uint32")
-                            remote_bar = K.local_scalar("uint32")
-                            local_slot = K.local_scalar("uint32")
-                            local_bar = K.local_scalar("uint32")
-                            K.assign(
+                        with txl.If(lane < txl.int32(cluster_size)), txl.Then():
+                            peer = txl.local_scalar("uint32", init=txl.cast(lane, "uint32"))
+                            remote_slot = txl.local_scalar("uint32")
+                            remote_bar = txl.local_scalar("uint32")
+                            local_slot = txl.local_scalar("uint32")
+                            local_bar = txl.local_scalar("uint32")
+                            txl.assign(
                                 local_slot,
-                                K.cuda.cvta_generic_to_shared(sched_broadcast.ptr_to([0])),
+                                txl.cuda.cvta_generic_to_shared(sched_broadcast.ptr_to([0])),
                             )
-                            K.assign(
+                            txl.assign(
                                 local_bar,
-                                K.cuda.cvta_generic_to_shared(sched_pipe.full.ptr_to([0])),
+                                txl.cuda.cvta_generic_to_shared(sched_pipe.full.ptr_to([0])),
                             )
-                            K.ptx["mapa.shared::cluster.u32"](remote_slot, local_slot, peer)
-                            K.ptx["mapa.shared::cluster.u32"](remote_bar, local_bar, peer)
-                            K.ptx["st_async.shared::cluster.mbarrier::complete_tx::bytes.u32"](
+                            txl.ptx["mapa.shared::cluster.u32"](remote_slot, local_slot, peer)
+                            txl.ptx["mapa.shared::cluster.u32"](remote_bar, local_bar, peer)
+                            txl.ptx["st_async.shared::cluster.mbarrier::complete_tx::bytes.u32"](
                                 remote_slot, claimed, remote_bar
                             )
-                            K.ptx["mbarrier.arrive.expect_tx.shared::cluster.b64"](
-                                remote_bar, K.uint32(4)
+                            txl.ptx["mbarrier.arrive.expect_tx.shared::cluster.b64"](
+                                remote_bar, txl.uint32(4)
                             )
                     sched_prod.advance()
                     _wait_plain(sched_pipe.full.ptr_to([0]), sched_cons.phase)
-                    fetched = K.local_scalar("int32")
-                    K.ptx.ld.shared.b32(fetched, sched_broadcast.ptr_to([0]))
+                    fetched = txl.local_scalar("int32")
+                    txl.ptx.ld.shared.b32(fetched, sched_broadcast.ptr_to([0]))
                     # Every CTA's scheduler warp releases onto the *leader's*
                     # empty barrier, which is why it is initialized with
                     # `32 * cluster_size` arrivals. Releasing locally leaves each
                     # CTA 32 short and the leader blocks on its next acquire.
-                    release_local = K.local_scalar("uint32")
-                    release_peer = K.local_scalar("uint32")
-                    K.assign(
-                        release_local, K.cuda.cvta_generic_to_shared(sched_pipe.empty.ptr_to([0]))
+                    release_local = txl.local_scalar("uint32")
+                    release_peer = txl.local_scalar("uint32")
+                    txl.assign(
+                        release_local, txl.cuda.cvta_generic_to_shared(sched_pipe.empty.ptr_to([0]))
                     )
-                    K.ptx["mapa.shared::cluster.u32"](release_peer, release_local, K.uint32(0))
-                    K.ptx["mbarrier.arrive.shared::cluster.b64"](release_peer, K.uint32(1))
+                    txl.ptx["mapa.shared::cluster.u32"](release_peer, release_local, txl.uint32(0))
+                    txl.ptx["mbarrier.arrive.shared::cluster.b64"](release_peer, txl.uint32(1))
                     sched_cons.advance()
-                    K.assign(work_linear, fetched)
+                    txl.assign(work_linear, fetched)
 
                 claim_next = fetch_linear if cluster_size > 1 else fetch_single_cta
                 claim_next()
                 resolve_work()
-                with K.While(work_valid == K.uint32(1)):
+                with txl.While(work_valid == txl.uint32(1)):
                     publish_record(record_expert, record_tile_m, record_tile_n)
                     claim_next()
                     resolve_work()
             else:
                 resolve_work()
-                with K.While(work_valid == K.uint32(1)):
+                with txl.While(work_valid == txl.uint32(1)):
                     publish_record(record_expert, record_tile_m, record_tile_n)
-                    K.assign(work_linear, work_linear + K.int32(num_persistent_clusters))
+                    txl.assign(work_linear, work_linear + txl.int32(num_persistent_clusters))
                     resolve_work()
 
             # Termination record: expert_idx = -1 stops the other seven warps.
-            publish_record(K.int32(-1), K.int32(0), K.int32(0))
-            with K.unroll(0, tile_stages):
+            publish_record(txl.int32(-1), txl.int32(0), txl.int32(0))
+            with txl.unroll(0, tile_stages):
                 _wait_plain(tile_pipe.empty.ptr_to([info_prod.stage]), info_prod.phase)
                 info_prod.advance()
 
@@ -1046,55 +1046,55 @@ def _make_kernel(
         def take_tile_info(state, slots, want_tiles=True):
             _wait_plain(tile_pipe.full.ptr_to([state.stage]), state.phase)
             base = state.stage * 4
-            K.ptx.ld.shared.b32(slots[0], sinfo.ptr_to([base]))
+            txl.ptx.ld.shared.b32(slots[0], sinfo.ptr_to([base]))
             if want_tiles:
-                K.ptx.ld.shared.b32(slots[1], sinfo.ptr_to([base + 1]))
-                K.ptx.ld.shared.b32(slots[2], sinfo.ptr_to([base + 2]))
-            K.ptx["fence.proxy.async.shared::cta"]()
+                txl.ptx.ld.shared.b32(slots[1], sinfo.ptr_to([base + 1]))
+                txl.ptx.ld.shared.b32(slots[2], sinfo.ptr_to([base + 2]))
+            txl.ptx["fence.proxy.async.shared::cta"]()
             # Every consumer thread arrives; the barrier carries 224 arrivals,
             # one per thread of the seven consumer warps.
-            K.ptx.mbarrier.arrive.shared.b64(tile_pipe.empty.ptr_to([state.stage]))
+            txl.ptx.mbarrier.arrive.shared.b64(tile_pipe.empty.ptr_to([state.stage]))
             state.advance()
 
         def expert_row_base(expert):
             """First padded row of an expert; the offsets are cumulative."""
-            base = K.local_scalar("int32", init=K.int32(0))
-            with K.If(expert > K.int32(0)), K.Then():
-                previous = K.local_scalar("int32")
-                K.ptx.ld.global_.b32(
-                    previous, named["padded_offsets"].ptr_to([expert - K.int32(1)])
+            base = txl.local_scalar("int32", init=txl.int32(0))
+            with txl.If(expert > txl.int32(0)), txl.Then():
+                previous = txl.local_scalar("int32")
+                txl.ptx.ld.global_.b32(
+                    previous, named["padded_offsets"].ptr_to([expert - txl.int32(1)])
                 )
-                K.assign(base, previous)
+                txl.assign(base, previous)
             return base
 
         # ---- Role 2: warp 5, persistent TMA producer ---------------------
         with tma_role:
-            ab_prod = K.PipelineState(ab_stages, phase=1)
+            ab_prod = txl.PipelineState(ab_stages, phase=1)
             # A second cursor kept one step ahead, so the next stage's
             # speculative probe can be issued before this stage's copies and
             # overlap their latency, as the source does.
-            ab_probe = K.PipelineState(ab_stages, phase=1)
+            ab_probe = txl.PipelineState(ab_stages, phase=1)
             ab_probe.advance()
-            info_cons = K.PipelineState(tile_stages, phase=0)
-            tile_expert = K.local_scalar("int32")
-            tile_m_idx = K.local_scalar("int32")
-            tile_n_idx = K.local_scalar("int32")
+            info_cons = txl.PipelineState(tile_stages, phase=0)
+            tile_expert = txl.local_scalar("int32")
+            tile_m_idx = txl.local_scalar("int32")
+            tile_n_idx = txl.local_scalar("int32")
             slots = (tile_expert, tile_m_idx, tile_n_idx)
-            speculative = K.local_scalar("uint32")
+            speculative = txl.local_scalar("uint32")
 
             take_tile_info(info_cons, slots)
-            with K.While(tile_expert >= K.int32(0)):
+            with txl.While(tile_expert >= txl.int32(0)):
                 row_base = expert_row_base(tile_expert)
-                a_row = K.local_scalar("int32", init=row_base + tile_m_idx * K.int32(cta_tile_m))
+                a_row = txl.local_scalar("int32", init=row_base + tile_m_idx * txl.int32(cta_tile_m))
                 if cluster_n > 1:
-                    K.assign(a_row, a_row + cluster_y * K.int32(a_cluster_piece))
+                    txl.assign(a_row, a_row + cluster_y * txl.int32(a_cluster_piece))
                 # The CTA pair splits B's N extent, so each CTA takes its own
                 # half: the export's B coordinate carries the same `cta_in_pair
                 # * 128` term that A's M coordinate does (PTX 920/926, both
                 # built from `%r5 << 7`).
-                n_base = K.local_scalar("int32", init=tile_n_idx * K.int32(cta_tile_n))
+                n_base = txl.local_scalar("int32", init=tile_n_idx * txl.int32(cta_tile_n))
                 if atom_thr > 1:
-                    K.assign(n_base, n_base + cluster_v * K.int32(b_tile_n))
+                    txl.assign(n_base, n_base + cluster_v * txl.int32(b_tile_n))
                 # On top of the pair split, the cluster's M extent multicasts B:
                 # each CTA fetches one `b_cluster_piece` slice and the pieces
                 # together fill the stage. The destination address already
@@ -1103,7 +1103,7 @@ def _make_kernel(
                 # of SMEM and the tile's upper columns duplicated its lower
                 # ones. A k-major B splits along N, an n-major B along K.
                 if b_split > 1 and b_major == "k":
-                    K.assign(n_base, n_base + cluster_m_coord * K.int32(b_cluster_piece))
+                    txl.assign(n_base, n_base + cluster_m_coord * txl.int32(b_cluster_piece))
 
                 # Descriptor addresses: dense weights use the grid-constant
                 # TensorMaps, discrete weights the per-expert image the
@@ -1114,46 +1114,46 @@ def _make_kernel(
                     # instead of from a grid constant. One 128-byte slot per
                     # expert -- the block-scaled sibling's second slot held SFB,
                     # which this kernel has no counterpart for.
-                    b_desc = named["workspace"].ptr_to([K.int32(128) * tile_expert])
+                    b_desc = named["workspace"].ptr_to([txl.int32(128) * tile_expert])
 
-                K.assign(speculative, K.uint32(1))
-                with K.If(K.int32(k_tiles) > K.int32(0)), K.Then():
+                txl.assign(speculative, txl.uint32(1))
+                with txl.If(txl.int32(k_tiles) > txl.int32(0)), txl.Then():
                     _try_wait_acquire(
                         speculative, ab_pipe.empty.ptr_to([ab_prod.stage]), ab_prod.phase
                     )
-                counter = K.local_scalar("int32", init=K.int32(0))
-                with K.While(counter < K.int32(k_tiles)):
+                counter = txl.local_scalar("int32", init=txl.int32(0))
+                with txl.While(counter < txl.int32(k_tiles)):
                     _wait_plain_if_needed(
                         ab_pipe.empty.ptr_to([ab_prod.stage]), ab_prod.phase, speculative
                     )
                     # `num_tma_load_bytes` counts the whole CTA pair, so the
                     # leader alone arrives for `atom_thr` stages' worth.
-                    with K.If(is_leader_cta), K.Then():
-                        with K.If(_elected()), K.Then():
-                            K.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                    with txl.If(is_leader_cta), txl.Then():
+                        with txl.If(_elected()), txl.Then():
+                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                                 ab_pipe.full.ptr_to([ab_prod.stage]),
-                                K.uint32(derived["ab_expect_tx_bytes"]),
+                                txl.uint32(derived["ab_expect_tx_bytes"]),
                             )
-                    with K.If(counter + K.int32(1) < K.int32(k_tiles)), K.Then():
+                    with txl.If(counter + txl.int32(1) < txl.int32(k_tiles)), txl.Then():
                         _try_wait_acquire(
                             speculative, ab_pipe.empty.ptr_to([ab_probe.stage]), ab_probe.phase
                         )
 
-                    k_coord = K.local_scalar("int32", init=counter * K.int32(k_tile))
+                    k_coord = txl.local_scalar("int32", init=counter * txl.int32(k_tile))
                     if atom_thr > 1:
                         # A two-CTA copy credits the *leader's* barrier: bit 24
                         # of a cluster shared address selects the CTA within the
                         # pair, and clearing it maps this CTA's barrier onto the
                         # even one. Crediting the local barrier instead leaves
                         # the leader permanently short of its expect_tx count.
-                        full_bar = K.local_scalar("uint32")
-                        K.assign(
+                        full_bar = txl.local_scalar("uint32")
+                        txl.assign(
                             full_bar,
                             cluster_smem_base
-                            + K.uint32(offsets["ab_full"])
-                            + K.cast(ab_prod.stage, "uint32") * K.uint32(8),
+                            + txl.uint32(offsets["ab_full"])
+                            + txl.cast(ab_prod.stage, "uint32") * txl.uint32(8),
                         )
-                        K.ptx["and.b32"](full_bar, full_bar, K.uint32(0xFEFFFFFF))
+                        txl.ptx["and.b32"](full_bar, full_bar, txl.uint32(0xFEFFFFFF))
                     else:
                         full_bar = ab_pipe.full.ptr_to([ab_prod.stage])
                     a_slot = smem.ptr_to([offsets["sA"] + ab_prod.stage * derived["a_stage_bytes"]])
@@ -1165,18 +1165,18 @@ def _make_kernel(
                     # address instead leaves the barrier permanently short.
                     a_destination = (
                         cluster_smem_base
-                        + K.uint32(offsets["sA"])
-                        + K.cast(ab_prod.stage, "uint32") * K.uint32(derived["a_stage_bytes"])
-                        + K.cast(cluster_y, "uint32")
-                        * K.uint32(derived["a_stage_bytes"] // cluster_n)
+                        + txl.uint32(offsets["sA"])
+                        + txl.cast(ab_prod.stage, "uint32") * txl.uint32(derived["a_stage_bytes"])
+                        + txl.cast(cluster_y, "uint32")
+                        * txl.uint32(derived["a_stage_bytes"] // cluster_n)
                         if cluster_n > 1
                         else a_slot
                     )
-                    with K.If(_elected()), K.Then():
+                    with txl.If(_elected()), txl.Then():
                         _tma_load(
                             a_destination,
                             maps["a"],
-                            (k_coord, a_row, K.int32(0)),
+                            (k_coord, a_row, txl.int32(0)),
                             full_bar,
                             a_mcast_mask if cluster_n > 1 else None,
                             two_cta=two_cta,
@@ -1185,31 +1185,31 @@ def _make_kernel(
                     b_block_bytes = derived["b_stage_bytes"] // b_tma_copies
                     b_k_coord = k_coord
                     if b_split > 1 and b_major == "n":
-                        b_k_coord = K.local_scalar(
-                            "int32", init=k_coord + cluster_m_coord * K.int32(b_cluster_piece)
+                        b_k_coord = txl.local_scalar(
+                            "int32", init=k_coord + cluster_m_coord * txl.int32(b_cluster_piece)
                         )
                     # A discrete descriptor covers one expert's own allocation,
                     # so its batch extent is 1 and the coordinate is 0; the dense
                     # descriptor spans every expert and indexes by expert.
-                    b_batch = tile_expert if weight_mode == "dense" else K.int32(0)
+                    b_batch = tile_expert if weight_mode == "dense" else txl.int32(0)
                     for block in range(b_tma_copies):
                         b_destination = (
                             cluster_smem_base
-                            + K.uint32(offsets["sB"])
-                            + K.cast(ab_prod.stage, "uint32") * K.uint32(derived["b_stage_bytes"])
-                            + K.uint32(block * b_block_bytes)
-                            + K.cast(cluster_m_coord, "uint32") * K.uint32(b_block_bytes // b_split)
+                            + txl.uint32(offsets["sB"])
+                            + txl.cast(ab_prod.stage, "uint32") * txl.uint32(derived["b_stage_bytes"])
+                            + txl.uint32(block * b_block_bytes)
+                            + txl.cast(cluster_m_coord, "uint32") * txl.uint32(b_block_bytes // b_split)
                             if (b_split > 1 or b_tma_copies > 1)
                             else b_slot
                         )
                         b_n_coord = (
                             n_base
                             if block == 0
-                            else K.local_scalar(
-                                "int32", init=n_base + K.int32(block * b_atom_elements)
+                            else txl.local_scalar(
+                                "int32", init=n_base + txl.int32(block * b_atom_elements)
                             )
                         )
-                        with K.If(_elected()), K.Then():
+                        with txl.If(_elected()), txl.Then():
                             b_coords = (
                                 (b_n_coord, b_k_coord, b_batch)
                                 if b_major == "n"
@@ -1224,54 +1224,54 @@ def _make_kernel(
                                 two_cta=two_cta,
                                 desc_ptr=None if weight_mode == "dense" else b_desc,
                             )
-                    K.assign(counter, counter + K.int32(1))
+                    txl.assign(counter, counter + txl.int32(1))
                     ab_prod.advance()
                     ab_probe.advance()
 
                 take_tile_info(info_cons, slots)
 
-            with K.unroll(0, ab_stages):
+            with txl.unroll(0, ab_stages):
                 _wait_plain(ab_pipe.empty.ptr_to([ab_prod.stage]), ab_prod.phase)
                 ab_prod.advance()
 
         # ---- Role 3: warp 4, persistent MMA -------------------------------
         with mma_role:
-            K.ptx.bar.sync(K.uint32(3), K.uint32(160))
-            acc_tmem_base = K.local_scalar("uint32")
-            K.ptx.ld.shared.b32(acc_tmem_base, tmem_slot.ptr_to([0]))
+            txl.ptx.bar.sync(txl.uint32(3), txl.uint32(160))
+            acc_tmem_base = txl.local_scalar("uint32")
+            txl.ptx.ld.shared.b32(acc_tmem_base, tmem_slot.ptr_to([0]))
 
-            ab_cons = K.PipelineState(ab_stages, phase=0)
-            ab_cons_probe = K.PipelineState(ab_stages, phase=0)
+            ab_cons = txl.PipelineState(ab_stages, phase=0)
+            ab_cons_probe = txl.PipelineState(ab_stages, phase=0)
             ab_cons_probe.advance()
-            acc_prod = K.PipelineState(acc_stages, phase=1)
-            mma_info = K.PipelineState(tile_stages, phase=0)
-            mma_expert = K.local_scalar("int32")
+            acc_prod = txl.PipelineState(acc_stages, phase=1)
+            mma_info = txl.PipelineState(tile_stages, phase=0)
+            mma_expert = txl.local_scalar("int32")
             mma_slots = (mma_expert, None, None)
-            ab_full_ready = K.local_scalar("uint32")
+            ab_full_ready = txl.local_scalar("uint32")
 
             take_tile_info(mma_info, mma_slots, want_tiles=False)
-            with K.While(mma_expert >= K.int32(0)):
-                K.assign(ab_full_ready, K.uint32(1))
-                with K.If(is_leader_cta), K.Then():
+            with txl.While(mma_expert >= txl.int32(0)):
+                txl.assign(ab_full_ready, txl.uint32(1))
+                with txl.If(is_leader_cta), txl.Then():
                     _try_wait_acquire(
                         ab_full_ready, ab_pipe.full.ptr_to([ab_cons.stage]), ab_cons.phase
                     )
                     _wait_plain(acc_pipe.empty.ptr_to([acc_prod.stage]), acc_prod.phase)
-                    accumulate = K.local_scalar("uint32", init=K.uint32(0))
+                    accumulate = txl.local_scalar("uint32", init=txl.uint32(0))
                     # Two real accumulator stages, each its own `cta_tile_n`
                     # columns of tensor memory, indexed by the pipeline stage --
                     # the block-scaled sibling folded a second region into the
                     # slack its scale-factor columns left over, which the derived
                     # column count here removes the need for.
-                    acc_column = K.local_scalar(
-                        "uint32", init=K.cast(acc_prod.stage, "uint32") * K.uint32(cta_tile_n)
+                    acc_column = txl.local_scalar(
+                        "uint32", init=txl.cast(acc_prod.stage, "uint32") * txl.uint32(cta_tile_n)
                     )
-                    counter = K.local_scalar("int32", init=K.int32(0))
-                    with K.While(counter < K.int32(k_tiles)):
+                    counter = txl.local_scalar("int32", init=txl.int32(0))
+                    with txl.While(counter < txl.int32(k_tiles)):
                         _wait_plain_if_needed(
                             ab_pipe.full.ptr_to([ab_cons.stage]), ab_cons.phase, ab_full_ready
                         )
-                        with K.If(counter + K.int32(1) < K.int32(k_tiles)), K.Then():
+                        with txl.If(counter + txl.int32(1) < txl.int32(k_tiles)), txl.Then():
                             _try_wait_acquire(
                                 ab_full_ready,
                                 ab_pipe.full.ptr_to([ab_cons_probe.stage]),
@@ -1281,11 +1281,11 @@ def _make_kernel(
                         # `kind::f16` contracts 16 at a time -- and only the
                         # first clears the accumulate field.
                         for kblock in range(4):
-                            with K.If(_elected()), K.Then():
-                                K.ptx[mma_mnemonic](
-                                    K.cast(acc_tmem_base + acc_column, "uint32"),
+                            with txl.If(_elected()), txl.Then():
+                                txl.ptx[mma_mnemonic](
+                                    txl.cast(acc_tmem_base + acc_column, "uint32"),
                                     a_descriptor
-                                    + K.cast(
+                                    + txl.cast(
                                         ab_cons.stage * (derived["a_stage_bytes"] // 16)
                                         + kblock * 2,
                                         "uint64",
@@ -1295,32 +1295,32 @@ def _make_kernel(
                                     # period along an n-major one; both steps are
                                     # read off the anchor and `bmajor_n` exports.
                                     b_descriptor
-                                    + K.cast(
+                                    + txl.cast(
                                         ab_cons.stage * (derived["b_stage_bytes"] // 16)
                                         + kblock * (2 if b_major == "k" else 128),
                                         "uint64",
                                     ),
-                                    K.uint32(instruction_descriptor),
+                                    txl.uint32(instruction_descriptor),
                                     # `disable_output_lane`: this kernel writes
                                     # every lane. The mask is one bit per lane
                                     # of the atom, so a CTA pair spells out
                                     # eight zero words and a single CTA four --
                                     # exactly what the two exports carry.
-                                    *([K.uint32(0)] * (4 * atom_thr)),
-                                    K.ptx.pred(K.cast(accumulate, "bool")),
+                                    *([txl.uint32(0)] * (4 * atom_thr)),
+                                    txl.ptx.pred(txl.cast(accumulate, "bool")),
                                 )
-                            K.assign(accumulate, K.uint32(1))
-                        with K.If(_elected()), K.Then():
+                            txl.assign(accumulate, txl.uint32(1))
+                        with txl.If(_elected()), txl.Then():
                             _tcgen05_commit(
                                 ab_pipe.empty.ptr_to([ab_cons.stage]),
                                 ab_consumer_mask,
                                 cta_group,
                                 cluster_size,
                             )
-                        K.assign(counter, counter + K.int32(1))
+                        txl.assign(counter, counter + txl.int32(1))
                         ab_cons.advance()
                         ab_cons_probe.advance()
-                    with K.If(_elected()), K.Then():
+                    with txl.If(_elected()), txl.Then():
                         _tcgen05_commit(
                             acc_pipe.full.ptr_to([acc_prod.stage]),
                             acc_producer_mask,
@@ -1336,8 +1336,8 @@ def _make_kernel(
             # never used: its own `acc_empty` receives nothing, so waiting on it
             # here is what hung every two-CTA specialization at the end of the
             # persistent loop.
-            with K.If(is_leader_cta), K.Then():
-                with K.unroll(0, acc_stages):
+            with txl.If(is_leader_cta), txl.Then():
+                with txl.unroll(0, acc_stages):
                     _wait_plain(acc_pipe.empty.ptr_to([acc_prod.stage]), acc_prod.phase)
                     acc_prod.advance()
 
@@ -1346,75 +1346,75 @@ def _make_kernel(
         # them, so the two agree on which C subtile belongs to which accumulator
         # subtile with no extra handshake.
         with c_role:
-            c_prod = K.PipelineState(c_stages, phase=1)
-            c_info = K.PipelineState(tile_stages, phase=0)
-            c_expert = K.local_scalar("int32")
-            c_tile_m = K.local_scalar("int32")
-            c_tile_n = K.local_scalar("int32")
+            c_prod = txl.PipelineState(c_stages, phase=1)
+            c_info = txl.PipelineState(tile_stages, phase=0)
+            c_expert = txl.local_scalar("int32")
+            c_tile_m = txl.local_scalar("int32")
+            c_tile_n = txl.local_scalar("int32")
             c_slots = (c_expert, c_tile_m, c_tile_n)
 
             take_tile_info(c_info, c_slots)
-            with K.While(c_expert >= K.int32(0)):
-                c_row = K.local_scalar(
-                    "int32", init=expert_row_base(c_expert) + c_tile_m * K.int32(cta_tile_m)
+            with txl.While(c_expert >= txl.int32(0)):
+                c_row = txl.local_scalar(
+                    "int32", init=expert_row_base(c_expert) + c_tile_m * txl.int32(cta_tile_m)
                 )
                 # The 2N interleaved column tile this work tile owns.
-                d_tile_n = K.local_scalar("int32", init=c_tile_n * K.int32(cta_tile_n * 2))
+                d_tile_n = txl.local_scalar("int32", init=c_tile_n * txl.int32(cta_tile_n * 2))
 
-                subtile = K.local_scalar("int32", init=K.int32(0))
-                with K.While(subtile < K.int32(epi_subtiles)):
+                subtile = txl.local_scalar("int32", init=txl.int32(0))
+                with txl.While(subtile < txl.int32(epi_subtiles)):
                     real_subtile = subtile
                     for half in range(2):
                         _wait_plain(c_pipe.empty.ptr_to([c_prod.stage]), c_prod.phase)
-                        with K.If(_elected()), K.Then():
-                            K.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                        with txl.If(_elected()), txl.Then():
+                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                                 c_pipe.full.ptr_to([c_prod.stage]),
-                                K.uint32(derived["c_stage_bytes"]),
+                                txl.uint32(derived["c_stage_bytes"]),
                             )
-                        column = K.local_scalar(
+                        column = txl.local_scalar(
                             "int32",
                             init=d_tile_n
-                            + (real_subtile * K.int32(2) + K.int32(half)) * K.int32(32),
+                            + (real_subtile * txl.int32(2) + txl.int32(half)) * txl.int32(32),
                         )
                         c_slot = smem.ptr_to(
                             [offsets["sC"] + c_prod.stage * derived["c_stage_bytes"]]
                         )
-                        with K.If(_elected()), K.Then():
+                        with txl.If(_elected()), txl.Then():
                             _tma_load(
                                 c_slot,
                                 maps["c"],
-                                (column, c_row, K.int32(0)),
+                                (column, c_row, txl.int32(0)),
                                 c_pipe.full.ptr_to([c_prod.stage]),
                                 None,
                                 two_cta=False,
                             )
                         c_prod.advance()
-                    K.assign(subtile, subtile + K.int32(1))
+                    txl.assign(subtile, subtile + txl.int32(1))
 
                 take_tile_info(c_info, c_slots)
 
-            with K.unroll(0, c_stages):
+            with txl.unroll(0, c_stages):
                 _wait_plain(c_pipe.empty.ptr_to([c_prod.stage]), c_prod.phase)
                 c_prod.advance()
 
         # ---- Role 4: warps 0-3, dGLU backward epilogue --------------------
         with epilogue_role:
-            with K.If(warp == K.int32(0)), K.Then():
+            with txl.If(warp == txl.int32(0)), txl.Then():
                 # `.sync.aligned`, so every lane of warp 0 executes it; the warp
                 # predicate is the only guard.
-                K.ptx[f"tcgen05.alloc.{cta_group}.sync.aligned.shared::cta.b32"](
-                    tmem_slot.ptr_to([0]), K.uint32(derived["num_tmem_alloc_cols"])
+                txl.ptx[f"tcgen05.alloc.{cta_group}.sync.aligned.shared::cta.b32"](
+                    tmem_slot.ptr_to([0]), txl.uint32(derived["num_tmem_alloc_cols"])
                 )
-            K.ptx.bar.sync(K.uint32(3), K.uint32(160))
-            tmem_base = K.local_scalar("uint32")
-            K.ptx.ld.shared.b32(tmem_base, tmem_slot.ptr_to([0]))
+            txl.ptx.bar.sync(txl.uint32(3), txl.uint32(160))
+            tmem_base = txl.local_scalar("uint32")
+            txl.ptx.ld.shared.b32(tmem_base, tmem_slot.ptr_to([0]))
 
-            acc_cons = K.PipelineState(acc_stages, phase=0)
-            c_cons = K.PipelineState(c_stages, phase=0)
-            epi_info = K.PipelineState(tile_stages, phase=0)
-            epi_expert = K.local_scalar("int32")
-            epi_tile_m = K.local_scalar("int32")
-            epi_tile_n = K.local_scalar("int32")
+            acc_cons = txl.PipelineState(acc_stages, phase=0)
+            c_cons = txl.PipelineState(c_stages, phase=0)
+            epi_info = txl.PipelineState(tile_stages, phase=0)
+            epi_expert = txl.local_scalar("int32")
+            epi_tile_m = txl.local_scalar("int32")
+            epi_tile_n = txl.local_scalar("int32")
             epi_slots = (epi_expert, epi_tile_m, epi_tile_n)
 
             # The register tile is walked two elements at a time throughout the
@@ -1434,14 +1434,14 @@ def _make_kernel(
             #
             # The flag still selects the dGeGLU up-branch filter below, where
             # the reference's two arms genuinely disagree.
-            packed_pair = K.local_scalar("uint64")
+            packed_pair = txl.local_scalar("uint64")
             ops = _arithmetic(True, packed_pair)
-            epi_lane = K.local_scalar("int32", init=K.thread_id() % K.int32(32))
-            epi_warp = _warp_uniform(K.thread_id() // K.int32(32))
+            epi_lane = txl.local_scalar("int32", init=txl.thread_id() % txl.int32(32))
+            epi_warp = _warp_uniform(txl.thread_id() // txl.int32(32))
 
             def dbias_warp_base():
-                return K.local_scalar(
-                    "int32", init=offsets["sDbias"] + epi_warp * K.int32(64 * 32 * 4)
+                return txl.local_scalar(
+                    "int32", init=offsets["sDbias"] + epi_warp * txl.int32(64 * 32 * 4)
                 )
 
             def dbias_transpose():
@@ -1457,21 +1457,21 @@ def _make_kernel(
                 banks instead of all landing on the same one.
                 """
                 warp_base = dbias_warp_base()
-                group = K.local_scalar("int32", init=epi_lane // K.int32(4))
-                sub = K.local_scalar("int32", init=epi_lane % K.int32(4))
+                group = txl.local_scalar("int32", init=epi_lane // txl.int32(4))
+                sub = txl.local_scalar("int32", init=epi_lane % txl.int32(4))
                 # `group ^ swizzle` for each of the eight constant swizzles.
                 twisted = [
-                    K.local_scalar("int32", init=group ^ K.int32(swizzle)) for swizzle in range(8)
+                    txl.local_scalar("int32", init=group ^ txl.int32(swizzle)) for swizzle in range(8)
                 ]
                 for n in range(32):
                     for column, fragment in ((n, rC1), (32 + n, rC2)):
-                        slot = K.local_scalar(
+                        slot = txl.local_scalar(
                             "int32",
                             init=warp_base
-                            + (K.int32(column * 32) + twisted[(column >> 1) & 7] * K.int32(4) + sub)
-                            * K.int32(4),
+                            + (txl.int32(column * 32) + twisted[(column >> 1) & 7] * txl.int32(4) + sub)
+                            * txl.int32(4),
                         )
-                        K.ptx.st.shared.b32(smem.ptr_to([slot]), fragment[n])
+                        txl.ptx.st.shared.b32(smem.ptr_to([slot]), fragment[n])
 
             def dbias_reduce(real_subtile, tile_base):
                 """Reduce the staged transpose into this expert's column sums.
@@ -1482,17 +1482,17 @@ def _make_kernel(
                 column.
                 """
                 warp_base = dbias_warp_base()
-                K.ptx.bar.sync(K.uint32(2), K.uint32(128))
+                txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
 
                 # Lanes 0-15 take the gate half's even columns, 16-31 the up
                 # half's, and each also takes the odd column beside it.
-                column_a = K.local_scalar(
+                column_a = txl.local_scalar(
                     "int32",
-                    init=(epi_lane % K.int32(16)) * K.int32(2)
-                    + (epi_lane // K.int32(16)) * K.int32(32),
+                    init=(epi_lane % txl.int32(16)) * txl.int32(2)
+                    + (epi_lane // txl.int32(16)) * txl.int32(32),
                 )
-                sums = [K.local_scalar("float32", init=K.float32(0.0)) for _ in range(2)]
-                quad = K.alloc_local((4,), "float32")
+                sums = [txl.local_scalar("float32", init=txl.float32(0.0)) for _ in range(2)]
+                quad = txl.alloc_local((4,), "float32")
                 # `column_a` is even, so both sides share one twist -- and once
                 # the byte scale is folded in, the twist occupies bits 4 to 6
                 # while the column and the warp base occupy bits 7 and above.
@@ -1500,15 +1500,15 @@ def _make_kernel(
                 # adding, which is the three-input `a | (b ^ c)` LOP3: one
                 # instruction per address where the add-then-XOR was two, on
                 # sixteen addresses every subtile.
-                swizzle = K.local_scalar(
-                    "int32", init=((column_a // K.int32(2)) % K.int32(8)) * K.int32(16)
+                swizzle = txl.local_scalar(
+                    "int32", init=((column_a // txl.int32(2)) % txl.int32(8)) * txl.int32(16)
                 )
                 for side in range(2):
-                    column = K.local_scalar("int32", init=column_a + K.int32(side))
-                    column_base = K.local_scalar("int32", init=warp_base + column * K.int32(128))
+                    column = txl.local_scalar("int32", init=column_a + txl.int32(side))
+                    column_base = txl.local_scalar("int32", init=warp_base + column * txl.int32(128))
                     for chunk in range(8):
-                        base = K.local_scalar(
-                            "int32", init=column_base | (K.int32(chunk * 16) ^ swizzle)
+                        base = txl.local_scalar(
+                            "int32", init=column_base | (txl.int32(chunk * 16) ^ swizzle)
                         )
                         # `sDbias` is placed 128-byte aligned and both terms of
                         # the offset are multiples of 16, so a chunk's four rows
@@ -1517,114 +1517,114 @@ def _make_kernel(
                         # it does not always choose to, and when it declines the
                         # cost is far out of proportion to the instruction count
                         # -- this read-back runs 64 loads per subtile.
-                        K.ptx["ld.shared.v4.b32"](
+                        txl.ptx["ld.shared.v4.b32"](
                             quad[0], quad[1], quad[2], quad[3], smem.ptr_to([base])
                         )
                         for j in range(4):
-                            K.ptx["add.f32"](sums[side], sums[side], quad[j])
+                            txl.ptx["add.f32"](sums[side], sums[side], quad[j])
 
                 # Combine the four warps through the front of the same buffer,
                 # which every warp has finished reading by now.
-                K.ptx.bar.sync(K.uint32(2), K.uint32(128))
-                partial = K.local_scalar(
+                txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
+                partial = txl.local_scalar(
                     "int32",
                     init=offsets["sDbias"]
-                    + (epi_warp * K.int32(64) + epi_lane * K.int32(2)) * K.int32(4),
+                    + (epi_warp * txl.int32(64) + epi_lane * txl.int32(2)) * txl.int32(4),
                 )
                 for side in range(2):
-                    K.ptx.st.shared.b32(smem.ptr_to([partial + K.int32(4 * side)]), sums[side])
-                K.ptx.bar.sync(K.uint32(2), K.uint32(128))
-                with K.If(epi_warp == K.int32(0)), K.Then():
-                    totals = [K.local_scalar("float32", init=K.float32(0.0)) for _ in range(2)]
-                    pair_in = K.alloc_local((2,), "float32")
+                    txl.ptx.st.shared.b32(smem.ptr_to([partial + txl.int32(4 * side)]), sums[side])
+                txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
+                with txl.If(epi_warp == txl.int32(0)), txl.Then():
+                    totals = [txl.local_scalar("float32", init=txl.float32(0.0)) for _ in range(2)]
+                    pair_in = txl.alloc_local((2,), "float32")
                     for other in range(4):
                         # The two sides sit next to each other and the address is
                         # 8-byte aligned, so one vector load covers both.
-                        K.ptx["ld.shared.v2.b32"](
+                        txl.ptx["ld.shared.v2.b32"](
                             pair_in[0],
                             pair_in[1],
                             smem.ptr_to(
                                 [
                                     offsets["sDbias"]
-                                    + (K.int32(other * 64) + epi_lane * K.int32(2)) * K.int32(4)
+                                    + (txl.int32(other * 64) + epi_lane * txl.int32(2)) * txl.int32(4)
                                 ]
                             ),
                         )
                         for side in range(2):
-                            K.ptx["add.f32"](totals[side], totals[side], pair_in[side])
+                            txl.ptx["add.f32"](totals[side], totals[side], pair_in[side])
                     # `n_base_d2` is `n_base_d1 + 32` and the up half's columns
                     # start at 32, so one expression covers both halves.
-                    n_offset = K.local_scalar(
+                    n_offset = txl.local_scalar(
                         "int32",
-                        init=tile_base + (real_subtile * K.int32(2)) * K.int32(32) + column_a,
+                        init=tile_base + (real_subtile * txl.int32(2)) * txl.int32(32) + column_a,
                     )
-                    packed = K.local_scalar("uint32")
-                    K.ptx["cvt.rn.bf16x2.f32"](packed, totals[1], totals[0])
+                    packed = txl.local_scalar("uint32")
+                    txl.ptx["cvt.rn.bf16x2.f32"](packed, totals[1], totals[0])
                     # A cluster covers `cluster_n` column tiles whether or not
                     # the output has that many, so the last cluster carries
                     # tiles past the end. The D store is a TMA and its
                     # descriptor drops those writes on its own; this accumulate
                     # is a plain reduction and needs the bound spelled out.
-                    with K.If(n_offset < K.int32(N_out)), K.Then():
-                        K.ptx["red.global.add.noftz.bf16x2"](
+                    with txl.If(n_offset < txl.int32(N_out)), txl.Then():
+                        txl.ptx["red.global.add.noftz.bf16x2"](
                             named["dbias"].ptr_to(
-                                [(epi_expert * K.int32(N_out) + n_offset) * K.int32(2)]
+                                [(epi_expert * txl.int32(N_out) + n_offset) * txl.int32(2)]
                             ),
                             packed,
                         )
 
-            rAcc = K.alloc_local((32,), "float32")
-            rC1 = K.alloc_local((32,), "float32")
-            rC2 = K.alloc_local((32,), "float32")
+            rAcc = txl.alloc_local((32,), "float32")
+            rC1 = txl.alloc_local((32,), "float32")
+            rC2 = txl.alloc_local((32,), "float32")
             d_words = 32 * d_bits // 32
             if d_bits == 32:
                 rD1, rD2 = rC1, rC2
             else:
-                rD1 = K.alloc_local((d_words,), "uint32")
-                rD2 = K.alloc_local((d_words,), "uint32")
+                rD1 = txl.alloc_local((d_words,), "uint32")
+                rD2 = txl.alloc_local((d_words,), "uint32")
             # Counts subtiles across the whole persistent loop, so the two D
             # slots keep alternating across work tiles.
-            prev_subtiles = K.local_scalar("int32", init=K.int32(0))
+            prev_subtiles = txl.local_scalar("int32", init=txl.int32(0))
 
             take_tile_info(epi_info, epi_slots)
-            with K.While(epi_expert >= K.int32(0)):
-                alpha_value = K.local_scalar("float32")
-                beta_value = K.local_scalar("float32")
-                K.ptx.ld.global_.b32(alpha_value, named["alpha"].ptr_to([epi_expert]))
-                K.ptx.ld.global_.b32(beta_value, named["beta"].ptr_to([epi_expert]))
-                square_alpha = K.local_scalar("float32", init=alpha_value * alpha_value)
+            with txl.While(epi_expert >= txl.int32(0)):
+                alpha_value = txl.local_scalar("float32")
+                beta_value = txl.local_scalar("float32")
+                txl.ptx.ld.global_.b32(alpha_value, named["alpha"].ptr_to([epi_expert]))
+                txl.ptx.ld.global_.b32(beta_value, named["beta"].ptr_to([epi_expert]))
+                square_alpha = txl.local_scalar("float32", init=alpha_value * alpha_value)
 
                 row_base = expert_row_base(epi_expert)
                 # Each accumulator stage owns its own `cta_tile_n` columns of
                 # tensor memory, and the MMA warp fills the stage this consumer
                 # cursor is about to read.
-                acc_column = K.local_scalar(
-                    "uint32", init=K.cast(acc_cons.stage, "uint32") * K.uint32(cta_tile_n)
+                acc_column = txl.local_scalar(
+                    "uint32", init=txl.cast(acc_cons.stage, "uint32") * txl.uint32(cta_tile_n)
                 )
 
-                thread_row = K.local_scalar(
+                thread_row = txl.local_scalar(
                     "int32",
                     init=row_base
-                    + (epi_tile_m // K.int32(atom_thr)) * K.int32(cta_tile_m * atom_thr)
-                    + (block_x % K.int32(atom_thr)) * K.int32(cta_tile_m)
-                    + K.thread_id()
+                    + (epi_tile_m // txl.int32(atom_thr)) * txl.int32(cta_tile_m * atom_thr)
+                    + (block_x % txl.int32(atom_thr)) * txl.int32(cta_tile_m)
+                    + txl.thread_id()
                     if atom_thr > 1
-                    else row_base + epi_tile_m * K.int32(cta_tile_m) + K.thread_id(),
+                    else row_base + epi_tile_m * txl.int32(cta_tile_m) + txl.thread_id(),
                 )
-                prob_value = K.local_scalar("float32")
-                K.ptx.ld.global_.b32(prob_value, named["prob"].ptr_to([thread_row]))
-                dprob_acc = K.local_scalar("float32", init=K.float32(0.0))
+                prob_value = txl.local_scalar("float32")
+                txl.ptx.ld.global_.b32(prob_value, named["prob"].ptr_to([thread_row]))
+                dprob_acc = txl.local_scalar("float32", init=txl.float32(0.0))
 
                 _wait_plain(acc_pipe.full.ptr_to([acc_cons.stage]), acc_cons.phase)
 
-                d_tile_base = K.local_scalar("int32", init=epi_tile_n * K.int32(cta_tile_n * 2))
+                d_tile_base = txl.local_scalar("int32", init=epi_tile_n * txl.int32(cta_tile_n * 2))
 
                 # The source pins `unroll=1` on this loop and its export
                 # carries `.pragma "nounroll"`; a `While` lowers with
                 # `#pragma unroll 1`, which is the shape the source has.
-                real_subtile = K.local_scalar("int32", init=K.int32(0))
-                subtile = K.local_scalar("int32", init=K.int32(0))
-                with K.While(subtile < K.int32(epi_subtiles)):
+                real_subtile = txl.local_scalar("int32", init=txl.int32(0))
+                subtile = txl.local_scalar("int32", init=txl.int32(0))
+                with txl.While(subtile < txl.int32(epi_subtiles)):
                     # A TMEM address is (lane << 16) | column. The source folds
                     # `(tid << 16) & 0xE00000` in so each epilogue warp reads its
                     # own row group; without it all four warps read warp 0's
@@ -1634,12 +1634,12 @@ def _make_kernel(
                     # are disjoint and the lane bits OR in. That folds the mask
                     # and the combine into one `LOP3` where the mask, the add
                     # and the move were three.
-                    tmem_lane = K.local_scalar("uint32")
-                    K.ptx["shl.b32"](tmem_lane, K.cast(K.thread_id(), "uint32"), K.uint32(16))
-                    K.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
+                    tmem_lane = txl.local_scalar("uint32")
+                    txl.ptx["shl.b32"](tmem_lane, txl.cast(txl.thread_id(), "uint32"), txl.uint32(16))
+                    txl.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
                         *[rAcc[i] for i in range(32)],
-                        (tmem_lane & K.uint32(0xE00000))
-                        | (tmem_base + acc_column + K.cast(real_subtile * K.int32(32), "uint32")),
+                        (tmem_lane & txl.uint32(0xE00000))
+                        | (tmem_base + acc_column + txl.cast(real_subtile * txl.int32(32), "uint32")),
                     )
 
                     # Two C stages per accumulator subtile: gate then up.
@@ -1659,12 +1659,12 @@ def _make_kernel(
                         # is opaque to ptxas: it cannot coalesce them away. The
                         # generated code carried 65 such call sites on an FP32-C
                         # specialization against none on a 16-bit one.
-                        raw = fragment if c_bits == 32 else K.alloc_local((c_words,), "uint32")
-                        c_row = K.local_scalar("int32", init=K.thread_id() * K.int32(c_row_bytes))
+                        raw = fragment if c_bits == 32 else txl.alloc_local((c_words,), "uint32")
+                        c_row = txl.local_scalar("int32", init=txl.thread_id() * txl.int32(c_row_bytes))
                         for word in range(0, c_words, 4):
                             # The descriptor swizzled this box on the way in, so
                             # the read walks the same permutation.
-                            K.ptx["ld.shared.v4.b32"](
+                            txl.ptx["ld.shared.v4.b32"](
                                 raw[word],
                                 raw[word + 1],
                                 raw[word + 2],
@@ -1678,9 +1678,9 @@ def _make_kernel(
                         # would hold the buffer for another forty-odd
                         # instructions, and with only two C stages the producer
                         # has no slack to absorb that.
-                        K.ptx["fence.proxy.async.shared::cta"]()
-                        with K.If(K.lane_id() == K.int32(0)), K.Then():
-                            K.ptx.mbarrier.arrive.shared.b64(c_pipe.empty.ptr_to([c_cons.stage]))
+                        txl.ptx["fence.proxy.async.shared::cta"]()
+                        with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                            txl.ptx.mbarrier.arrive.shared.b64(c_pipe.empty.ptr_to([c_cons.stage]))
                         c_cons.advance()
                         if c_bits != 32:
                             _unpack_input(fragment, raw, c_dtype, c_bits)
@@ -1693,7 +1693,7 @@ def _make_kernel(
                     # reused for every pair -- fresh scalars per element make
                     # ptxas superlinear (see `_arithmetic`).
                     def pair():
-                        return (K.local_scalar("float32"), K.local_scalar("float32"))
+                        return (txl.local_scalar("float32"), txl.local_scalar("float32"))
 
                     acc = pair()
                     gate = pair()
@@ -1712,7 +1712,7 @@ def _make_kernel(
                     # two halves in once per subtile, not once per element.
                     dprob_pair = pair()
                     for half in range(2):
-                        K.assign(dprob_pair[half], K.float32(0.0))
+                        txl.assign(dprob_pair[half], txl.float32(0.0))
 
                     for element in range(0, 32, 2):
                         span = (element, element + 1)
@@ -1760,9 +1760,9 @@ def _make_kernel(
                             # the two forms differ only on a NaN input, which a
                             # C-matrix element cannot be.
                             for half in range(2):
-                                K.ptx["min.f32"](y_gate[half], gate[half], K.float32(GEGLU_MAX))
-                                K.ptx["min.f32"](y_up[half], up[half], K.float32(GEGLU_MAX))
-                                K.ptx["max.f32"](y_up[half], y_up[half], K.float32(GEGLU_MIN))
+                                txl.ptx["min.f32"](y_gate[half], gate[half], txl.float32(GEGLU_MAX))
+                                txl.ptx["min.f32"](y_up[half], up[half], txl.float32(GEGLU_MAX))
+                                txl.ptx["max.f32"](y_up[half], y_up[half], txl.float32(GEGLU_MIN))
                             ops["scaled"](work, y_gate, GEGLU_ALPHA)  # 1.702 * y_gate
                             _sigmoid(ops, sig, work, scratch["c"])
                             offset_up = scratch["e"]
@@ -1792,46 +1792,46 @@ def _make_kernel(
                             # the arm its `vectorized_f32` selects.
                             keep = scratch["c"]
                             for half in range(2):
-                                predicate = K.local_scalar("bool")
-                                K.assign(
-                                    predicate, K.cast(gate[half] <= K.float32(GEGLU_MAX), "bool")
+                                predicate = txl.local_scalar("bool")
+                                txl.assign(
+                                    predicate, txl.cast(gate[half] <= txl.float32(GEGLU_MAX), "bool")
                                 )
-                                K.ptx["selp.f32"](
-                                    keep[half], y_gate[half], K.float32(0.0), predicate
+                                txl.ptx["selp.f32"](
+                                    keep[half], y_gate[half], txl.float32(0.0), predicate
                                 )
                             ops["product"](d_gate, d_gate, keep)
                             for half in range(2):
-                                predicate = K.local_scalar("bool")
+                                predicate = txl.local_scalar("bool")
                                 if vectorized_f32:
-                                    K.assign(
-                                        predicate, K.cast(up[half] >= K.float32(GEGLU_MIN), "bool")
+                                    txl.assign(
+                                        predicate, txl.cast(up[half] >= txl.float32(GEGLU_MIN), "bool")
                                     )
-                                    K.ptx["selp.f32"](
-                                        keep[half], y_up[half], K.float32(0.0), predicate
+                                    txl.ptx["selp.f32"](
+                                        keep[half], y_up[half], txl.float32(0.0), predicate
                                     )
                                 else:
-                                    K.assign(
+                                    txl.assign(
                                         predicate,
-                                        K.cast(
-                                            K.And(
-                                                up[half] >= K.float32(GEGLU_MIN),
-                                                up[half] <= K.float32(GEGLU_MAX),
+                                        txl.cast(
+                                            txl.And(
+                                                up[half] >= txl.float32(GEGLU_MIN),
+                                                up[half] <= txl.float32(GEGLU_MAX),
                                             ),
                                             "bool",
                                         ),
                                     )
-                                    K.ptx["selp.f32"](
-                                        keep[half], up[half], K.float32(0.0), predicate
+                                    txl.ptx["selp.f32"](
+                                        keep[half], up[half], txl.float32(0.0), predicate
                                     )
                             ops["product"](d_up, d_up, keep)
 
                         for half in range(2):
-                            K.assign(rC1[span[half]], d_gate[half])
-                            K.assign(rC2[span[half]], d_up[half])
+                            txl.assign(rC1[span[half]], d_gate[half])
+                            txl.assign(rC2[span[half]], d_up[half])
 
-                    folded_prob = K.local_scalar("float32")
-                    K.ptx["add.f32"](folded_prob, dprob_pair[0], dprob_pair[1])
-                    K.ptx["add.f32"](dprob_acc, dprob_acc, folded_prob)
+                    folded_prob = txl.local_scalar("float32")
+                    txl.ptx["add.f32"](folded_prob, dprob_pair[0], dprob_pair[1])
+                    txl.ptx["add.f32"](dprob_acc, dprob_acc, folded_prob)
 
                     # ---- convert D and stage it through SMEM -------------
                     # An FP32 D is already the gradient's own representation, so
@@ -1842,28 +1842,28 @@ def _make_kernel(
                         _pack_output(rD1, rC1, d_dtype, d_bits)
                         _pack_output(rD2, rC2, d_dtype, d_bits)
 
-                    with K.If(warp == K.int32(0)), K.Then():
+                    with txl.If(warp == txl.int32(0)), txl.Then():
                         # The D pipeline is a bulk-group counter, not an
                         # mbarrier: there is no D barrier in the storage map.
-                        K.ptx["cp.async.bulk.wait_group.read"](K.uint32(0))
-                    K.ptx.bar.sync(K.uint32(2), K.uint32(128))
+                        txl.ptx["cp.async.bulk.wait_group.read"](txl.uint32(0))
+                    txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
 
-                    slot1 = K.local_scalar("int32", init=prev_subtiles % K.int32(d_stages))
-                    K.assign(prev_subtiles, prev_subtiles + K.int32(1))
-                    slot2 = K.local_scalar("int32", init=prev_subtiles % K.int32(d_stages))
-                    K.assign(prev_subtiles, prev_subtiles + K.int32(1))
+                    slot1 = txl.local_scalar("int32", init=prev_subtiles % txl.int32(d_stages))
+                    txl.assign(prev_subtiles, prev_subtiles + txl.int32(1))
+                    slot2 = txl.local_scalar("int32", init=prev_subtiles % txl.int32(d_stages))
+                    txl.assign(prev_subtiles, prev_subtiles + txl.int32(1))
 
                     d_row_bytes = 32 * d_bits // 8
 
                     def stage_fragment(fragment, slot, region="sD"):
                         # Mirror of the C load: this thread owns one row of the
                         # 128x32 subtile.
-                        base = offsets[region] + slot * K.int32(derived["d_stage_bytes"])
-                        d_row = K.local_scalar("int32", init=K.thread_id() * K.int32(d_row_bytes))
+                        base = offsets[region] + slot * txl.int32(derived["d_stage_bytes"])
+                        d_row = txl.local_scalar("int32", init=txl.thread_id() * txl.int32(d_row_bytes))
                         for word in range(0, d_words, 4):
                             # Written through the same permutation the store
                             # descriptor reads back.
-                            K.ptx["st.shared.v4.b32"](
+                            txl.ptx["st.shared.v4.b32"](
                                 smem.ptr_to([base + _swizzled(d_row, word // 4, d_row_bytes)]),
                                 fragment[word],
                                 fragment[word + 1],
@@ -1874,37 +1874,37 @@ def _make_kernel(
                     # Both halves of one slot go out together, D then D_col.
                     stage_fragment(rD1, slot1)
                     stage_fragment(rD2, slot2)
-                    K.ptx["fence.proxy.async.shared::cta"]()
-                    K.ptx.bar.sync(K.uint32(2), K.uint32(128))
+                    txl.ptx["fence.proxy.async.shared::cta"]()
+                    txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
 
-                    with K.If(warp == K.int32(0)), K.Then():
+                    with txl.If(warp == txl.int32(0)), txl.Then():
                         # The two D subtiles of one accumulator subtile land in
                         # adjacent halves of the 2N region, which is why the
                         # column index is 2 * real_subtile + {0, 1}.
-                        d_row_coord = K.local_scalar(
-                            "int32", init=row_base + epi_tile_m * K.int32(cta_tile_m)
+                        d_row_coord = txl.local_scalar(
+                            "int32", init=row_base + epi_tile_m * txl.int32(cta_tile_m)
                         )
                         for map_name, region in (("d_row", "sD"),):
                             for half, slot in ((0, slot1), (1, slot2)):
-                                column = K.local_scalar(
+                                column = txl.local_scalar(
                                     "int32",
                                     init=d_tile_base
-                                    + (real_subtile * K.int32(2) + K.int32(half)) * K.int32(32),
+                                    + (real_subtile * txl.int32(2) + txl.int32(half)) * txl.int32(32),
                                 )
-                                K.ptx[
+                                txl.ptx[
                                     "cp.async.bulk.tensor.3d.global.shared::cta.tile"
                                     ".bulk_group.L2::cache_hint"
                                 ](
-                                    K.address_of(maps[map_name]),
-                                    K.cast(column, "int32"),
-                                    K.cast(d_row_coord, "int32"),
-                                    K.int32(0),
+                                    txl.address_of(maps[map_name]),
+                                    txl.cast(column, "int32"),
+                                    txl.cast(d_row_coord, "int32"),
+                                    txl.int32(0),
                                     smem.ptr_to(
-                                        [offsets[region] + slot * K.int32(derived["d_stage_bytes"])]
+                                        [offsets[region] + slot * txl.int32(derived["d_stage_bytes"])]
                                     ),
-                                    K.uint64(0),
+                                    txl.uint64(0),
                                 )
-                        K.ptx["cp.async.bulk.commit_group"]()
+                        txl.ptx["cp.async.bulk.commit_group"]()
                     # The dBias column sums are taken with the tile's D store
                     # already in flight. They read the activation fragments,
                     # which the packing only copied, and they touch their own
@@ -1916,9 +1916,9 @@ def _make_kernel(
                     if generate_dbias:
                         dbias_transpose()
                         dbias_reduce(real_subtile, d_tile_base)
-                    K.ptx.bar.sync(K.uint32(2), K.uint32(128))
-                    K.assign(real_subtile, real_subtile + K.int32(1))
-                    K.assign(subtile, subtile + K.int32(1))
+                    txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
+                    txl.assign(real_subtile, real_subtile + txl.int32(1))
+                    txl.assign(subtile, subtile + txl.int32(1))
 
                 # Release the accumulator stage once every subtile has been read
                 # out of it. One elected lane per epilogue warp arrives, and
@@ -1926,21 +1926,21 @@ def _make_kernel(
                 # where the accumulator lives -- hence its `4 * atom_thr`
                 # arrivals. Releasing locally leaves the leader's MMA waiting on
                 # a stage nobody frees.
-                with K.If(_elected()), K.Then():
-                    peer_bar = K.local_scalar("uint32")
-                    local_bar = K.local_scalar("uint32")
-                    K.assign(
+                with txl.If(_elected()), txl.Then():
+                    peer_bar = txl.local_scalar("uint32")
+                    local_bar = txl.local_scalar("uint32")
+                    txl.assign(
                         local_bar,
-                        K.cuda.cvta_generic_to_shared(acc_pipe.empty.ptr_to([acc_cons.stage])),
+                        txl.cuda.cvta_generic_to_shared(acc_pipe.empty.ptr_to([acc_cons.stage])),
                     )
-                    K.ptx["mapa.shared::cluster.u32"](
+                    txl.ptx["mapa.shared::cluster.u32"](
                         peer_bar,
                         local_bar,
-                        K.cast(
+                        txl.cast(
                             cluster_rank - cluster_v if atom_thr > 1 else cluster_rank, "uint32"
                         ),
                     )
-                    K.ptx["mbarrier.arrive.shared::cluster.b64"](peer_bar, K.uint32(1))
+                    txl.ptx["mbarrier.arrive.shared::cluster.b64"](peer_bar, txl.uint32(1))
                 acc_cons.advance()
 
                 # The next record is taken before the dProb tail, as the source
@@ -1949,33 +1949,33 @@ def _make_kernel(
                 # One reduction per thread per work tile. The returning form
                 # would put every one of these on the scoreboard for a value that
                 # is immediately discarded.
-                K.ptx["red.global.add.f32"](named["dprob"].ptr_to([thread_row]), dprob_acc)
+                txl.ptx["red.global.add.f32"](named["dprob"].ptr_to([thread_row]), dprob_acc)
 
             # Release the TMEM allocation permit, then synchronize the four
             # epilogue warps, then free the columns. Both tensor-memory
             # instructions are warp 0's -- each is `.sync.aligned`, and the
             # export predicates both on the allocator warp -- but the permit
             # goes *before* the barrier and the deallocation after it.
-            with K.If(warp == K.int32(0)), K.Then():
-                K.ptx[f"tcgen05.relinquish_alloc_permit.{cta_group}.sync.aligned"]()
-            K.ptx.bar.sync(K.uint32(2), K.uint32(128))
-            with K.If(warp == K.int32(0)), K.Then():
+            with txl.If(warp == txl.int32(0)), txl.Then():
+                txl.ptx[f"tcgen05.relinquish_alloc_permit.{cta_group}.sync.aligned"]()
+            txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
+            with txl.If(warp == txl.int32(0)), txl.Then():
                 if atom_thr > 1:
                     # A CTA pair frees its TMEM collectively: each CTA arrives on
                     # its peer's deallocation barrier and waits on its own before
                     # issuing the free.
-                    peer_dealloc = K.local_scalar("uint32")
-                    own_dealloc = K.local_scalar("uint32")
-                    K.assign(own_dealloc, K.cuda.cvta_generic_to_shared(tmem_dealloc.ptr_to([0])))
-                    K.ptx["mapa.shared::cluster.u32"](
-                        peer_dealloc, own_dealloc, K.cast(cluster_rank ^ K.int32(1), "uint32")
+                    peer_dealloc = txl.local_scalar("uint32")
+                    own_dealloc = txl.local_scalar("uint32")
+                    txl.assign(own_dealloc, txl.cuda.cvta_generic_to_shared(tmem_dealloc.ptr_to([0])))
+                    txl.ptx["mapa.shared::cluster.u32"](
+                        peer_dealloc, own_dealloc, txl.cast(cluster_rank ^ txl.int32(1), "uint32")
                     )
-                    K.ptx["mbarrier.arrive.shared::cluster.b64"](peer_dealloc, K.uint32(1))
-                    _wait_plain(tmem_dealloc.ptr_to([0]), K.uint32(0))
-                K.ptx[f"tcgen05.dealloc.{cta_group}.sync.aligned.b32"](
-                    tmem_base, K.uint32(derived["num_tmem_alloc_cols"])
+                    txl.ptx["mbarrier.arrive.shared::cluster.b64"](peer_dealloc, txl.uint32(1))
+                    _wait_plain(tmem_dealloc.ptr_to([0]), txl.uint32(0))
+                txl.ptx[f"tcgen05.dealloc.{cta_group}.sync.aligned.b32"](
+                    tmem_base, txl.uint32(derived["num_tmem_alloc_cols"])
                 )
-            K.ptx["cp.async.bulk.wait_group.read"](K.uint32(0))
+            txl.ptx["cp.async.bulk.wait_group.read"](txl.uint32(0))
 
         del (
             block_x,
@@ -2007,7 +2007,7 @@ def _make_kernel(
         """
 
         def helper_prelude(params):
-            descriptors = {"b": K.stack_alloca("tensormap", 1)}
+            descriptors = {"b": txl.stack_alloca("tensormap", 1)}
             # The template's address is a placeholder: it has to be a real
             # 16-byte-aligned allocation for the encode call to accept it, and
             # the copy below overwrites it per expert. The pointer array itself
@@ -2030,29 +2030,29 @@ def _make_kernel(
             host prelude encoded. That read is the one part of this that the
             source has no counterpart for.
             """
-            source: K.uint64 = K.reinterpret("uint64", K.address_of(source_map))
+            source: txl.uint64 = txl.reinterpret("uint64", txl.address_of(source_map))
             groups = []
             for group in range(2):
-                payload = K.alloc_local((4,), "uint64")
-                offset: K.uint64 = K.uint64(group * 32)
-                K.ptx.ld.global_.v4.b64(
+                payload = txl.alloc_local((4,), "uint64")
+                offset: txl.uint64 = txl.uint64(group * 32)
+                txl.ptx.ld.global_.v4.b64(
                     payload[0],
                     payload[1],
                     payload[2],
                     payload[3],
-                    K.reinterpret("handle", source + offset),
+                    txl.reinterpret("handle", source + offset),
                 )
                 groups.append(payload)
             return groups
 
         def write_tensormap_image(groups, destination, address):
             """Publish one image, substituting word 0, the global address."""
-            target: K.uint64 = K.reinterpret("uint64", destination)
+            target: txl.uint64 = txl.reinterpret("uint64", destination)
             for group, payload in enumerate(groups):
                 if group == 0:
-                    K.assign(payload[0], address)
-                K.ptx.st.global_.v4.b64(
-                    K.reinterpret("handle", target + K.uint64(group * 32)),
+                    txl.assign(payload[0], address)
+                txl.ptx.st.global_.v4.b64(
+                    txl.reinterpret("handle", target + txl.uint64(group * 32)),
                     payload[0],
                     payload[1],
                     payload[2],
@@ -2061,24 +2061,24 @@ def _make_kernel(
 
         def helper(operands, host):
             b, workspace = operands
-            expert = K.cta_id()[0]
+            expert = txl.cta_id()[0]
             if weight_mode == "discrete":
-                slot = K.local_scalar("int32", init=K.int32(128) * expert)
-                with K.If(_elected()), K.Then():
+                slot = txl.local_scalar("int32", init=txl.int32(128) * expert)
+                with txl.If(_elected()), txl.Then():
                     # This kernel is nothing but memory latency: three global
                     # reads and two writes on one lane. The expert pointer is
                     # loaded before the template image so the two round trips
                     # overlap instead of adding.
-                    address = K.local_scalar("uint64")
-                    K.ptx.ld.global_.b64(address, b.ptr_to([expert]))
+                    address = txl.local_scalar("uint64")
+                    txl.ptx.ld.global_.b64(address, b.ptr_to([expert]))
                     groups = read_tensormap_image(host[0])
                     write_tensormap_image(groups, workspace.ptr_to([slot]), address)
-                K.cuda.warp_sync()
+                txl.cuda.warp_sync()
             if sched == "dynamic":
                 counter_offset = L * 128 if weight_mode == "discrete" else 0
-                with K.If(expert == K.int32(0)), K.Then():
-                    with K.If(_elected()), K.Then():
-                        K.ptx.st.global_.b32(workspace.ptr_to([counter_offset]), K.int32(0))
+                with txl.If(expert == txl.int32(0)), txl.Then():
+                    with txl.If(_elected()), txl.Then():
+                        txl.ptx.st.global_.b32(workspace.ptr_to([counter_offset]), txl.int32(0))
 
         # The launch passes the per-expert pointer array for discrete weights
         # and `padded_offsets` (int32) for dense ones, so the first parameter
@@ -2093,10 +2093,10 @@ def _make_kernel(
                 helper((b, workspace), ())
 
         helper_body.__annotations__ = {
-            "b": K.gptr[pointer_dtype, (L,)],
-            "workspace": K.gptr[K.u8, (max(1, derived["workspace_bytes"]),)],
+            "b": txl.gptr[pointer_dtype, (L,)],
+            "workspace": txl.gptr[txl.u8, (max(1, derived["workspace_bytes"]),)],
         }
-        return K.kernel(
+        return txl.kernel(
             warps=1,
             arch="sm_100a",
             min_blocks_per_sm=1,
@@ -2106,7 +2106,7 @@ def _make_kernel(
 
     kernel = _entry_point(list(annotations), body)
     kernel.__annotations__ = dict(annotations)
-    main = K.kernel(
+    main = txl.kernel(
         warps=8,
         arch="sm_100a",
         min_blocks_per_sm=1,

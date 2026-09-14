@@ -27,8 +27,8 @@ if BATCHES == 1:
     batch = 0
 # after: exact non-negative power-of-two decode.
 elif N_TILES & (N_TILES - 1) == 0:
-    n_index = K.bitwise_and(quotient, K.int32(N_TILES - 1))
-    batch = K.shift_right(quotient, K.uint32(N_TILES.bit_length() - 1))
+    n_index = txl.bitwise_and(quotient, txl.int32(N_TILES - 1))
+    batch = txl.shift_right(quotient, txl.uint32(N_TILES.bit_length() - 1))
 else:
     n_index = quotient % N_TILES
     batch = quotient // N_TILES

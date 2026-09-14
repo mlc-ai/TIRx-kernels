@@ -22,7 +22,7 @@ import math
 from functools import lru_cache
 from typing import Any
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 
 KERNEL_META = {
     "name": "msa_sparse_atten_fwd_combine_sm100",
@@ -86,7 +86,7 @@ _TORCH_DTYPES = {
 # are moved as raw bytes and converted with PTX on the bit pattern. An fp8
 # partial buffer therefore binds as `uint8`, exactly as the forward port and
 # `flashmla/sparse_decode_head64.py` do.
-_KERN_DTYPES = {"bfloat16": K.bf16, "float16": K.f16, "float32": K.f32, "float8_e4m3": K.u8}
+_TXL_DTYPES = {"bfloat16": txl.bf16, "float16": txl.f16, "float32": txl.f32, "float8_e4m3": txl.u8}
 
 
 def _torch_dtype(name: str):
@@ -132,7 +132,7 @@ def _partial_bytes(name: str) -> int:
 # Target entry.
 #
 # Optional buffers stay in the signature and are simply never read when their
-# axis is off, which is what the kern sparse-decode combine does too
+# axis is off, which is what the tirx-lite sparse-decode combine does too
 # (`flashmla/sparse_decode_head64.py:1958`). The device code is unchanged
 # either way -- an unread pointer costs parameter space, not instructions --
 # and it keeps one launch ABI across the presence axes.
@@ -159,7 +159,7 @@ def make_kernel(
     """
     if (TILE_M * topk) % NUM_THREADS != 0:
         raise ValueError(f"topk={topk} violates can_implement: (tile_m*topk) % num_threads != 0")
-    partial_ty = _KERN_DTYPES[partial_dtype]
+    partial_ty = _TXL_DTYPES[partial_dtype]
     pbytes = _partial_bytes(partial_dtype)
     # 128-bit copies: 4 fp32, 8 bf16/fp16, 16 fp8 elements per transaction, so
     # the thread grid over a k-block row and the rows per thread follow the
@@ -197,43 +197,43 @@ def make_kernel(
     NUM_ROWS, OUT_ROWS, SPLITS_PT = o_rows, out_rows, splits_pt
     NUM_VALS = o_elems
 
-    @K.kernel(warps=WARPS, arch="sm_100a", min_blocks_per_sm=min_blocks_per_sm, grid=False)
+    @txl.kernel(warps=WARPS, arch="sm_100a", min_blocks_per_sm=min_blocks_per_sm, grid=False)
     def msa_sparse_atten_fwd_combine(
-        o_partial: K.gptr[partial_ty],
-        lse_partial: K.gptr[K.f32],
-        o_out: K.gptr[K.bf16],
-        lse_out: K.gptr[K.f32],
-        lse_temperature_partial: K.gptr[K.f32],
-        lse_temperature_out: K.gptr[K.f32],
-        cu_seqlens: K.gptr[K.i32],
-        seqused_q: K.gptr[K.i32],
-        split_counts: K.gptr[K.i32],
-        output_scale_ptr: K.gptr[K.f32],
-        stride_op_split: K.i32,
-        stride_op_q: K.i32,
-        stride_op_h: K.i32,
-        stride_lp_split: K.i32,
-        stride_lp_q: K.i32,
-        stride_o_q: K.i32,
-        stride_o_h: K.i32,
-        stride_l_q: K.i32,
-        stride_sc_q: K.i32,
-        qhead_per_kv: K.i32,
-        total_q: K.i32,
-        head_q: K.i32,
-        num_batches: K.i32,
-        head_div_mul: K.i32,
-        head_div_s1: K.i32,
-        head_div_s2: K.i32,
+        o_partial: txl.gptr[partial_ty],
+        lse_partial: txl.gptr[txl.f32],
+        o_out: txl.gptr[txl.bf16],
+        lse_out: txl.gptr[txl.f32],
+        lse_temperature_partial: txl.gptr[txl.f32],
+        lse_temperature_out: txl.gptr[txl.f32],
+        cu_seqlens: txl.gptr[txl.i32],
+        seqused_q: txl.gptr[txl.i32],
+        split_counts: txl.gptr[txl.i32],
+        output_scale_ptr: txl.gptr[txl.f32],
+        stride_op_split: txl.i32,
+        stride_op_q: txl.i32,
+        stride_op_h: txl.i32,
+        stride_lp_split: txl.i32,
+        stride_lp_q: txl.i32,
+        stride_o_q: txl.i32,
+        stride_o_h: txl.i32,
+        stride_l_q: txl.i32,
+        stride_sc_q: txl.i32,
+        qhead_per_kv: txl.i32,
+        total_q: txl.i32,
+        head_q: txl.i32,
+        num_batches: txl.i32,
+        head_div_mul: txl.i32,
+        head_div_s1: txl.i32,
+        head_div_s2: txl.i32,
     ):
         # ===== MSA COMBINE TRANSCRIPTION START =====
         # Grid: (ceil(seqlen*num_head / tile_m), ceil(head_dim / k_block), batch)
         # with the head axis innermost inside the flattened row index
         # (combine.py:401-418).
-        m_block, k_block, batch = K.cta_id(
+        m_block, k_block, batch = txl.cta_id(
             [(total_q * head_q + (TILE_M - 1)) // TILE_M, HEAD_DIM // K_BLOCK_SIZE, num_batches]
         )
-        tidx = K.thread_id()
+        tidx = txl.thread_id()
 
         # -------------------------------------------------------------------
         # Storage. One dynamic allocation carved into the source's five fields
@@ -241,22 +241,22 @@ def make_kernel(
         # is allocated whether or not the temperature axis is on -- the source
         # declares it unconditionally, and every later offset depends on it.
         # -------------------------------------------------------------------
-        pool = K.smem_pool()
-        raw = pool.alloc((SMEM_TOTAL,), K.u8, align=1024)
+        pool = txl.smem_pool()
+        raw = pool.alloc((SMEM_TOTAL,), txl.u8, align=1024)
         pool.commit(SMEM_TOTAL)
 
         def _view(shape, dtype, byte_offset):
-            return K.decl_buffer(
+            return txl.decl_buffer(
                 shape, dtype, data=raw.data, scope="shared.dyn", byte_offset=byte_offset, align=1024
             )
 
-        s_lse = _view((topk * TILE_M,), K.f32, OFF_SLSE)
-        s_maxvalid = _view((TILE_M,), K.i32, off_maxvalid)
+        s_lse = _view((topk * TILE_M,), txl.f32, OFF_SLSE)
+        s_maxvalid = _view((TILE_M,), txl.i32, off_maxvalid)
         s_o = _view((STAGES * TILE_M * K_BLOCK_SIZE,), partial_ty, off_so)
-        s_perm = _view((TILE_M * PERM_ROW,), K.bf16, off_sperm)
-        s_perm_i32 = _view((TILE_M * PERM_ROW // 2,), K.u32, off_sperm)
+        s_perm = _view((TILE_M * PERM_ROW,), txl.bf16, off_sperm)
+        s_perm_i32 = _view((TILE_M * PERM_ROW // 2,), txl.u32, off_sperm)
         if temperature:
-            s_lse_t = _view((topk * TILE_M,), K.f32, OFF_SLSE_T)
+            s_lse_t = _view((topk * TILE_M,), txl.f32, OFF_SLSE_T)
 
         # The thread decomposition the source's four tiled copies imply. These
         # are four distinct maps over the same 256 threads and they are never
@@ -264,40 +264,40 @@ def make_kernel(
         # the read-back pair walks it with order=(0, 1), and the two epilogue
         # pairs differ again in row stride and vector width. Conflating any two
         # of them addresses real memory and fails only on some shapes.
-        lse_row = K.local_scalar("int32", init=K.bitwise_and(tidx, 63))
-        lse_split0 = K.local_scalar("int32", init=K.shift_right(tidx, 6))
-        s2r_row = K.local_scalar("int32", init=K.shift_right(tidx, 2))
-        s2r_split0 = K.local_scalar("int32", init=K.bitwise_and(tidx, 3))
-        o_row0 = K.local_scalar("int32", init=K.shift_right(tidx, O_ROW_SHIFT))
-        o_col = K.local_scalar("int32", init=K.bitwise_and(tidx, O_COL_MASK) * O_ELEMS)
-        st_row0 = K.local_scalar("int32", init=K.shift_right(tidx, 4))
-        st_col = K.local_scalar("int32", init=K.bitwise_and(tidx, 15) * OUT_ELEMS)
+        lse_row = txl.local_scalar("int32", init=txl.bitwise_and(tidx, 63))
+        lse_split0 = txl.local_scalar("int32", init=txl.shift_right(tidx, 6))
+        s2r_row = txl.local_scalar("int32", init=txl.shift_right(tidx, 2))
+        s2r_split0 = txl.local_scalar("int32", init=txl.bitwise_and(tidx, 3))
+        o_row0 = txl.local_scalar("int32", init=txl.shift_right(tidx, O_ROW_SHIFT))
+        o_col = txl.local_scalar("int32", init=txl.bitwise_and(tidx, O_COL_MASK) * O_ELEMS)
+        st_row0 = txl.local_scalar("int32", init=txl.shift_right(tidx, 4))
+        st_col = txl.local_scalar("int32", init=txl.bitwise_and(tidx, 15) * OUT_ELEMS)
 
         def _ld_u32(buf, index):
             """``ld.global.u32``, the form the reference emits for every i32
             field it reads. The reinterpret is a bitcast and costs nothing."""
-            raw = K.local_scalar("uint32")
-            K.ptx.ld.global_.u32(raw, buf.ptr_to([index]))
-            return K.reinterpret("int32", raw)
+            raw = txl.local_scalar("uint32")
+            txl.ptx.ld.global_.u32(raw, buf.ptr_to([index]))
+            return txl.reinterpret("int32", raw)
 
         # -------------------------------------------------------------------
         # Prologue: varlen bounds and the K1 dependency (combine.py:531-550).
         # -------------------------------------------------------------------
-        q_offset = K.local_scalar("int32", init=_ld_u32(cu_seqlens, batch))
-        seqlen = K.local_scalar("int32")
+        q_offset = txl.local_scalar("int32", init=_ld_u32(cu_seqlens, batch))
+        seqlen = txl.local_scalar("int32")
         if seqused:
-            K.assign(seqlen, _ld_u32(seqused_q, batch))
+            txl.assign(seqlen, _ld_u32(seqused_q, batch))
         else:
-            K.assign(seqlen, _ld_u32(cu_seqlens, batch + 1) - q_offset)
-        max_idx = K.local_scalar("int32", init=seqlen * head_q)
+            txl.assign(seqlen, _ld_u32(cu_seqlens, batch + 1) - q_offset)
+        max_idx = txl.local_scalar("int32", init=seqlen * head_q)
 
-        with K.If(m_block * TILE_M < max_idx):
-            with K.Then():
+        with txl.If(m_block * TILE_M < max_idx):
+            with txl.Then():
                 # The source opens this block at :547 and closes it at :1125:
                 # the guard covers the WHOLE body, not just the wait. That is
                 # what retires a tail CTA before it reaches any barrier, so
                 # narrowing it to the wait would hang the remaining CTAs.
-                K.ptx.griddepcontrol.wait()
+                txl.ptx.griddepcontrol.wait()
 
                 def _divmod_row(idx):
                     """`decode_flat_row_idx` (combine.py:457-464).
@@ -306,21 +306,21 @@ def make_kernel(
                     seven-instruction sequence -- mul.hi + sub + shr + add + shr for the
                     quotient, mul.lo + sub for the remainder -- and not a `div.s32`.
                     """
-                    q0 = K.local_scalar("uint32")
-                    K.ptx.mul.hi.u32(
-                        q0, K.reinterpret("uint32", idx), K.reinterpret("uint32", head_div_mul)
+                    q0 = txl.local_scalar("uint32")
+                    txl.ptx.mul.hi.u32(
+                        q0, txl.reinterpret("uint32", idx), txl.reinterpret("uint32", head_div_mul)
                     )
-                    t = K.local_scalar("uint32", init=K.reinterpret("uint32", idx) - q0)
-                    t2 = K.local_scalar(
-                        "uint32", init=K.shift_right(t, K.reinterpret("uint32", head_div_s1)) + q0
+                    t = txl.local_scalar("uint32", init=txl.reinterpret("uint32", idx) - q0)
+                    t2 = txl.local_scalar(
+                        "uint32", init=txl.shift_right(t, txl.reinterpret("uint32", head_div_s1)) + q0
                     )
-                    quot = K.local_scalar(
+                    quot = txl.local_scalar(
                         "int32",
-                        init=K.reinterpret(
-                            "int32", K.shift_right(t2, K.reinterpret("uint32", head_div_s2))
+                        init=txl.reinterpret(
+                            "int32", txl.shift_right(t2, txl.reinterpret("uint32", head_div_s2))
                         ),
                     )
-                    rem = K.local_scalar("int32", init=idx - quot * head_q)
+                    rem = txl.local_scalar("int32", init=idx - quot * head_q)
                     return quot, rem
 
                 def _split_count(m_idx, head_idx, floor_div):
@@ -332,13 +332,13 @@ def make_kernel(
                     survives (combine.py:642 vs :709).
                     """
                     group = (
-                        K.local_scalar("int32", init=head_idx // qhead_per_kv)
+                        txl.local_scalar("int32", init=head_idx // qhead_per_kv)
                         if floor_div
-                        else K.local_scalar("int32", init=K.truncdiv(head_idx, qhead_per_kv))
+                        else txl.local_scalar("int32", init=txl.truncdiv(head_idx, qhead_per_kv))
                     )
                     return _ld_u32(split_counts, (q_offset + m_idx) * stride_sc_q + group)
 
-                NEG_INF = K.reinterpret("float32", K.uint32(0xFF800000))
+                NEG_INF = txl.reinterpret("float32", txl.uint32(0xFF800000))
 
                 def _widen_words(dst, m, words):
                     """Widen a 128-bit staged partial to fp32 lanes.
@@ -353,41 +353,41 @@ def make_kernel(
                         lo_op = "cvt.f32.bf16" if partial_dtype == "bfloat16" else "cvt.f32.f16"
                         for w in range(4):
                             for half in range(2):
-                                half_bits = K.local_scalar("uint16")
-                                K.ptx.mov.b16(
+                                half_bits = txl.local_scalar("uint16")
+                                txl.ptx.mov.b16(
                                     half_bits,
-                                    K.cast(
-                                        K.bitwise_and(K.shift_right(words[w], 16 * half), 0xFFFF),
+                                    txl.cast(
+                                        txl.bitwise_and(txl.shift_right(words[w], 16 * half), 0xFFFF),
                                         "uint16",
                                     ),
                                 )
-                                K.ptx[lo_op](dst[m * NUM_VALS + 2 * w + half], half_bits)
+                                txl.ptx[lo_op](dst[m * NUM_VALS + 2 * w + half], half_bits)
                     else:
                         # float8_e4m3: `cvt.rn.f16x2.e4m3x2` takes a byte PAIR and
                         # yields two halves, so four staged words are 8 conversions,
                         # not 16 with the high half thrown away.
                         for w in range(4):
                             for pair in range(2):
-                                bp = K.local_scalar("uint16")
-                                K.ptx.mov.b16(
+                                bp = txl.local_scalar("uint16")
+                                txl.ptx.mov.b16(
                                     bp,
-                                    K.cast(
-                                        K.bitwise_and(K.shift_right(words[w], 16 * pair), 0xFFFF),
+                                    txl.cast(
+                                        txl.bitwise_and(txl.shift_right(words[w], 16 * pair), 0xFFFF),
                                         "uint16",
                                     ),
                                 )
-                                h2 = K.local_scalar("uint32")
-                                K.ptx["cvt.rn.f16x2.e4m3x2"](h2, bp)
+                                h2 = txl.local_scalar("uint32")
+                                txl.ptx["cvt.rn.f16x2.e4m3x2"](h2, bp)
                                 for half in range(2):
-                                    hb = K.local_scalar("uint16")
-                                    K.ptx.mov.b16(
+                                    hb = txl.local_scalar("uint16")
+                                    txl.ptx.mov.b16(
                                         hb,
-                                        K.cast(
-                                            K.bitwise_and(K.shift_right(h2, 16 * half), 0xFFFF),
+                                        txl.cast(
+                                            txl.bitwise_and(txl.shift_right(h2, 16 * half), 0xFFFF),
                                             "uint16",
                                         ),
                                     )
-                                    K.ptx["cvt.f32.f16"](
+                                    txl.ptx["cvt.f32.f16"](
                                         dst[m * NUM_VALS + 4 * w + 2 * pair + half], hb
                                     )
 
@@ -396,11 +396,11 @@ def make_kernel(
                     (combine.py:939): one 128-bit shared read per staged row, widened
                     to fp32 when the partial dtype is narrower."""
                     ptr = s_o.ptr_to([stage * (TILE_M * K_BLOCK_SIZE) + row * K_BLOCK_SIZE + o_col])
-                    w = [K.local_scalar("uint32") for _ in range(4)]
-                    K.ptx.ld.shared.v4.b32(w[0], w[1], w[2], w[3], ptr)
+                    w = [txl.local_scalar("uint32") for _ in range(4)]
+                    txl.ptx.ld.shared.v4.b32(w[0], w[1], w[2], w[3], ptr)
                     if partial_dtype == "float32":
                         for v in range(4):
-                            K.assign(dst[m * NUM_VALS + v], K.reinterpret("float32", w[v]))
+                            txl.assign(dst[m * NUM_VALS + v], txl.reinterpret("float32", w[v]))
                     else:
                         _widen_words(dst, m, w)
 
@@ -411,8 +411,8 @@ def make_kernel(
                     it `st.shared.v4.f32` for fp32 partials and the same width for the
                     narrower ones, so the bit pattern is what varies, not the width.
                     """
-                    zero = K.local_scalar("uint32", init=K.uint32(0))
-                    K.ptx.st.shared.v4.b32(ptr, zero, zero, zero, zero)
+                    zero = txl.local_scalar("uint32", init=txl.uint32(0))
+                    txl.ptx.st.shared.v4.b32(ptr, zero, zero, zero, zero)
 
                 # -------------------------------------------------------------------
                 # Step 1: stage LSE_partial, -inf past a row's split count
@@ -434,77 +434,77 @@ def make_kernel(
                     # which is wrong for step 6, whose split index is absolute and
                     # reaches topk-1. The XOR only touches bits 2..4, so this form
                     # agrees with the export everywhere the export applies.
-                    return K.bitwise_xor(
-                        flat, K.shift_left(K.bitwise_and(K.shift_right(flat, 5), 7), 2)
+                    return txl.bitwise_xor(
+                        flat, txl.shift_left(txl.bitwise_and(txl.shift_right(flat, 5), 7), 2)
                     )
 
-                idx1 = K.local_scalar("int32", init=m_block * TILE_M + lse_row)
-                with K.If(idx1 < max_idx):
-                    with K.Then():
+                idx1 = txl.local_scalar("int32", init=m_block * TILE_M + lse_row)
+                with txl.If(idx1 < max_idx):
+                    with txl.Then():
                         m_idx1, head_idx1 = _divmod_row(idx1)
-                        row_count = K.local_scalar(
+                        row_count = txl.local_scalar(
                             "int32", init=_split_count(m_idx1, head_idx1, False)
                         )
-                        lse_row_base = K.local_scalar(
+                        lse_row_base = txl.local_scalar(
                             "int64",
-                            init=K.cast((q_offset + m_idx1), "int64") * K.cast(stride_lp_q, "int64")
-                            + K.cast(head_idx1, "int64"),
+                            init=txl.cast((q_offset + m_idx1), "int64") * txl.cast(stride_lp_q, "int64")
+                            + txl.cast(head_idx1, "int64"),
                         )
                         for i in range(SPLITS_PT):
                             si = lse_split0 + 4 * i
                             dst = s_lse.ptr_to([_slse_base(lse_split0, lse_row) + i * (4 * TILE_M)])
-                            with K.If(si < row_count):
-                                with K.Then():
-                                    K.ptx["cp.async.ca.shared.global"](
+                            with txl.If(si < row_count):
+                                with txl.Then():
+                                    txl.ptx["cp.async.ca.shared.global"](
                                         dst,
                                         lse_partial.ptr_to(
                                             [
                                                 lse_row_base
-                                                + K.cast(si, "int64")
-                                                * K.cast(stride_lp_split, "int64")
+                                                + txl.cast(si, "int64")
+                                                * txl.cast(stride_lp_split, "int64")
                                             ]
                                         ),
                                         4,
                                         4,
                                     )
                                     if temperature:
-                                        K.ptx["cp.async.ca.shared.global"](
+                                        txl.ptx["cp.async.ca.shared.global"](
                                             s_lse_t.ptr_to(
                                                 [_slse_base(lse_split0, lse_row) + i * (4 * TILE_M)]
                                             ),
                                             lse_temperature_partial.ptr_to(
                                                 [
                                                     lse_row_base
-                                                    + K.cast(si, "int64")
-                                                    * K.cast(stride_lp_split, "int64")
+                                                    + txl.cast(si, "int64")
+                                                    * txl.cast(stride_lp_split, "int64")
                                                 ]
                                             ),
                                             4,
                                             4,
                                         )
-                                with K.Else():
-                                    K.ptx.st.shared.u32(dst, K.uint32(0xFF800000))
+                                with txl.Else():
+                                    txl.ptx.st.shared.u32(dst, txl.uint32(0xFF800000))
                                     if temperature:
-                                        K.ptx.st.shared.u32(
+                                        txl.ptx.st.shared.u32(
                                             s_lse_t.ptr_to(
                                                 [_slse_base(lse_split0, lse_row) + i * (4 * TILE_M)]
                                             ),
-                                            K.uint32(0xFF800000),
+                                            txl.uint32(0xFF800000),
                                         )
-                    with K.Else():
+                    with txl.Else():
                         for i in range(SPLITS_PT):
-                            K.ptx.st.shared.u32(
+                            txl.ptx.st.shared.u32(
                                 s_lse.ptr_to([_slse_base(lse_split0, lse_row) + i * (4 * TILE_M)]),
-                                K.uint32(0xFF800000),
+                                txl.uint32(0xFF800000),
                             )
                             if temperature:
-                                K.ptx.st.shared.u32(
+                                txl.ptx.st.shared.u32(
                                     s_lse_t.ptr_to(
                                         [_slse_base(lse_split0, lse_row) + i * (4 * TILE_M)]
                                     ),
-                                    K.uint32(0xFF800000),
+                                    txl.uint32(0xFF800000),
                                 )
-                K.ptx.cp.async_.commit_group()
+                txl.ptx.cp.async_.commit_group()
 
                 # -------------------------------------------------------------------
                 # Step 2: per-row indices, split counts and raw GMEM element pointers,
@@ -512,23 +512,23 @@ def make_kernel(
                 # The out-of-range rows take a real predicated branch per row, with
                 # the -1/0/0 defaults materialized first.
                 # -------------------------------------------------------------------
-                hidx = K.alloc_local((NUM_ROWS,), "int32")
-                midx = K.alloc_local((NUM_ROWS,), "int32")
-                scount = K.alloc_local((NUM_ROWS,), "int32")
-                rowptr = K.alloc_local((NUM_ROWS,), "int64")
+                hidx = txl.alloc_local((NUM_ROWS,), "int32")
+                midx = txl.alloc_local((NUM_ROWS,), "int32")
+                scount = txl.alloc_local((NUM_ROWS,), "int32")
+                rowptr = txl.alloc_local((NUM_ROWS,), "int64")
 
                 for m in range(NUM_ROWS):
-                    K.assign(hidx[m], K.int32(-1))
-                    K.assign(midx[m], K.int32(0))
-                    K.assign(scount[m], K.int32(0))
-                    K.assign(rowptr[m], K.int64(0))
-                    idx2 = K.local_scalar("int32", init=m_block * TILE_M + o_row0 + m * O_ROW_STEP)
-                    with K.If(idx2 < max_idx):
-                        with K.Then():
+                    txl.assign(hidx[m], txl.int32(-1))
+                    txl.assign(midx[m], txl.int32(0))
+                    txl.assign(scount[m], txl.int32(0))
+                    txl.assign(rowptr[m], txl.int64(0))
+                    idx2 = txl.local_scalar("int32", init=m_block * TILE_M + o_row0 + m * O_ROW_STEP)
+                    with txl.If(idx2 < max_idx):
+                        with txl.Then():
                             q2, h2 = _divmod_row(idx2)
-                            K.assign(midx[m], q2)
-                            K.assign(hidx[m], h2)
-                            K.assign(scount[m], _split_count(q2, h2, True))
+                            txl.assign(midx[m], q2)
+                            txl.assign(hidx[m], h2)
+                            txl.assign(scount[m], _split_count(q2, h2, True))
                             # `(q_offset + m_idx)*head_q*D + h*D` is identically
                             # `q_offset*head_q*D + idx*D`, because idx is exactly
                             # `m_idx*head_q + h` -- the divmod result is multiplied
@@ -537,11 +537,11 @@ def make_kernel(
                             # this row's cp.async issue; the decomposition is still
                             # computed, because split_counts and the output store
                             # genuinely need m_idx and head_idx.
-                            K.assign(
+                            txl.assign(
                                 rowptr[m],
-                                K.cast(q_offset, "int64") * K.cast(stride_op_q, "int64")
-                                + K.cast(idx2, "int64") * K.cast(HEAD_DIM, "int64")
-                                + K.cast(k_block * K_BLOCK_SIZE, "int64"),
+                                txl.cast(q_offset, "int64") * txl.cast(stride_op_q, "int64")
+                                + txl.cast(idx2, "int64") * txl.cast(HEAD_DIM, "int64")
+                                + txl.cast(k_block * K_BLOCK_SIZE, "int64"),
                             )
 
                 def _load_o_partial(split, stage):
@@ -565,41 +565,41 @@ def make_kernel(
                         # copy nor the fill. Collapsing them into a single `and`
                         # would make a dead row write 16 zero bytes the reference
                         # never writes.
-                        with K.If(hidx[m] >= 0):
-                            with K.Then():
-                                with K.If(split < scount[m]):
-                                    with K.Then():
-                                        K.ptx["cp.async.cg.shared.global"](
+                        with txl.If(hidx[m] >= 0):
+                            with txl.Then():
+                                with txl.If(split < scount[m]):
+                                    with txl.Then():
+                                        txl.ptx["cp.async.cg.shared.global"](
                                             dst,
                                             o_partial.ptr_to(
                                                 [
                                                     rowptr[m]
-                                                    + K.cast(split, "int64")
-                                                    * K.cast(stride_op_split, "int64")
-                                                    + K.cast(o_col, "int64")
+                                                    + txl.cast(split, "int64")
+                                                    * txl.cast(stride_op_split, "int64")
+                                                    + txl.cast(o_col, "int64")
                                                 ]
                                             ),
                                             16,
                                             16,
                                         )
-                                    with K.Else():
+                                    with txl.Else():
                                         _store_zero_vec(dst)
 
                 for stage in range(STAGES - 1):
-                    _load_o_partial(K.int32(stage), stage)
-                    K.ptx.cp.async_.commit_group()
+                    _load_o_partial(txl.int32(stage), stage)
+                    txl.ptx.cp.async_.commit_group()
 
                 # -------------------------------------------------------------------
                 # Step 3: publish the staged LSE and read it back on the transposed
                 # map (combine.py:746-757). The barrier is required because step 1
                 # partitions sLSE by (split, row) and this reads it by (row, split).
                 # -------------------------------------------------------------------
-                K.ptx.cp.async_.wait_group(STAGES - 1)
-                K.ptx.bar.sync(K.uint32(0))
+                txl.ptx.cp.async_.wait_group(STAGES - 1)
+                txl.ptx.bar.sync(txl.uint32(0))
 
-                lse_reg = K.alloc_local((SPLITS_PT,), "float32")
+                lse_reg = txl.alloc_local((SPLITS_PT,), "float32")
                 for i in range(SPLITS_PT):
-                    K.ptx.ld.shared.f32(
+                    txl.ptx.ld.shared.f32(
                         lse_reg[i],
                         s_lse.ptr_to([_slse_base(s2r_split0, s2r_row) + i * (4 * TILE_M)]),
                     )
@@ -610,26 +610,26 @@ def make_kernel(
                 # shuffles -- laneMask 2 then 1.
                 # -------------------------------------------------------------------
                 def _shfl_bfly_f32(value, lane_mask):
-                    out = K.local_scalar("uint32")
-                    K.ptx.shfl_sync.bfly.b32(
+                    out = txl.local_scalar("uint32")
+                    txl.ptx.shfl_sync.bfly.b32(
                         out,
-                        K.reinterpret("uint32", value),
-                        K.uint32(lane_mask),
-                        K.uint32(31),
-                        K.uint32(0xFFFFFFFF),
+                        txl.reinterpret("uint32", value),
+                        txl.uint32(lane_mask),
+                        txl.uint32(31),
+                        txl.uint32(0xFFFFFFFF),
                     )
-                    return K.reinterpret("float32", out)
+                    return txl.reinterpret("float32", out)
 
                 def _shfl_bfly_i32(value, lane_mask):
-                    out = K.local_scalar("uint32")
-                    K.ptx.shfl_sync.bfly.b32(
+                    out = txl.local_scalar("uint32")
+                    txl.ptx.shfl_sync.bfly.b32(
                         out,
-                        K.reinterpret("uint32", value),
-                        K.uint32(lane_mask),
-                        K.uint32(31),
-                        K.uint32(0xFFFFFFFF),
+                        txl.reinterpret("uint32", value),
+                        txl.uint32(lane_mask),
+                        txl.uint32(31),
+                        txl.uint32(0xFFFFFFFF),
                     )
-                    return K.reinterpret("int32", out)
+                    return txl.reinterpret("int32", out)
 
                 # The tree over the thread's four register values is NaN-propagating.
                 def _max_tree(vals):
@@ -646,8 +646,8 @@ def make_kernel(
                         half = len(cur) // 2
                         nxt = []
                         for a in range(half):
-                            out = K.local_scalar("float32")
-                            K.ptx["max.NaN.f32"](out, cur[a], cur[a + half])
+                            out = txl.local_scalar("float32")
+                            txl.ptx["max.NaN.f32"](out, cur[a], cur[a + half])
                             nxt.append(out)
                         if len(cur) % 2:
                             nxt.append(cur[-1])
@@ -656,167 +656,167 @@ def make_kernel(
 
                 acc_max = _max_tree([lse_reg[i] for i in range(SPLITS_PT)])
                 other2 = _shfl_bfly_f32(acc_max, 2)
-                le2 = K.local_scalar("uint32")
-                K.ptx.setp.le.f32(le2, acc_max, other2)
-                nan2 = K.local_scalar("uint32")
-                K.ptx.setp.nan.f32(nan2, other2, other2)
-                pick = K.local_scalar("float32")
-                K.ptx.selp.f32(pick, other2, acc_max, K.ptx.pred(le2))
-                step2v = K.local_scalar("float32")
-                K.ptx.selp.f32(step2v, other2, pick, K.ptx.pred(nan2))
+                le2 = txl.local_scalar("uint32")
+                txl.ptx.setp.le.f32(le2, acc_max, other2)
+                nan2 = txl.local_scalar("uint32")
+                txl.ptx.setp.nan.f32(nan2, other2, other2)
+                pick = txl.local_scalar("float32")
+                txl.ptx.selp.f32(pick, other2, acc_max, txl.ptx.pred(le2))
+                step2v = txl.local_scalar("float32")
+                txl.ptx.selp.f32(step2v, other2, pick, txl.ptx.pred(nan2))
                 other1 = _shfl_bfly_f32(step2v, 1)
-                lse_max = K.local_scalar("float32")
-                K.ptx["max.f32"](lse_max, step2v, other1)
+                lse_max = txl.local_scalar("float32")
+                txl.ptx["max.f32"](lse_max, step2v, other1)
 
                 # The index of the last live split, reduced through the same butterfly
                 # shape but as a plain signed max.
-                cand = K.local_scalar("int32", init=K.int32(-1))
+                cand = txl.local_scalar("int32", init=txl.int32(-1))
                 for i in range(SPLITS_PT):
-                    live = K.local_scalar("uint32")
-                    K.ptx.setp.neu.f32(live, lse_reg[i], NEG_INF)
+                    live = txl.local_scalar("uint32")
+                    txl.ptx.setp.neu.f32(live, lse_reg[i], NEG_INF)
                     coord = s2r_split0 + 4 * i if i else s2r_split0
-                    sel = K.local_scalar("int32")
-                    K.ptx.selp.b32(sel, coord, cand, K.ptx.pred(live))
-                    K.assign(cand, sel)
+                    sel = txl.local_scalar("int32")
+                    txl.ptx.selp.b32(sel, coord, cand, txl.ptx.pred(live))
+                    txl.assign(cand, sel)
                 mv1 = _shfl_bfly_i32(cand, 2)
-                mvt = K.local_scalar("int32")
-                K.ptx["max.s32"](mvt, cand, mv1)
+                mvt = txl.local_scalar("int32")
+                txl.ptx["max.s32"](mvt, cand, mv1)
                 mv2 = _shfl_bfly_i32(mvt, 2 - 1)
-                max_valid = K.local_scalar("int32")
-                K.ptx["max.s32"](max_valid, mvt, mv2)
+                max_valid = txl.local_scalar("int32")
+                txl.ptx["max.s32"](max_valid, mvt, mv2)
 
                 # exp2 scales. `lse_max * LOG2_E` is hoisted above the -inf select, so
                 # the site carries five multiplies and not four.
-                is_ninf = K.local_scalar("uint32")
-                K.ptx.setp.eq.f32(is_ninf, lse_max, NEG_INF)
-                scaled_max = K.local_scalar("float32")
-                K.ptx["mul.f32"](scaled_max, lse_max, K.float32(LOG_2_E))
-                max_term = K.local_scalar("float32")
-                K.ptx.selp.f32(max_term, K.float32(0.0), scaled_max, K.ptx.pred(is_ninf))
+                is_ninf = txl.local_scalar("uint32")
+                txl.ptx.setp.eq.f32(is_ninf, lse_max, NEG_INF)
+                scaled_max = txl.local_scalar("float32")
+                txl.ptx["mul.f32"](scaled_max, lse_max, txl.float32(LOG_2_E))
+                max_term = txl.local_scalar("float32")
+                txl.ptx.selp.f32(max_term, txl.float32(0.0), scaled_max, txl.ptx.pred(is_ninf))
 
-                lse_sum = K.local_scalar("float32", init=K.float32(0.0))
+                lse_sum = txl.local_scalar("float32", init=txl.float32(0.0))
                 for i in range(SPLITS_PT):
-                    scaled = K.local_scalar("float32")
-                    K.ptx["mul.f32"](scaled, lse_reg[i], K.float32(LOG_2_E))
-                    arg = K.local_scalar("float32")
-                    K.ptx["sub.f32"](arg, scaled, max_term)
-                    K.ptx.ex2.approx.ftz.f32(lse_reg[i], arg)
-                    nxt = K.local_scalar("float32")
-                    K.ptx["add.f32"](nxt, lse_sum, lse_reg[i])
-                    K.assign(lse_sum, nxt)
+                    scaled = txl.local_scalar("float32")
+                    txl.ptx["mul.f32"](scaled, lse_reg[i], txl.float32(LOG_2_E))
+                    arg = txl.local_scalar("float32")
+                    txl.ptx["sub.f32"](arg, scaled, max_term)
+                    txl.ptx.ex2.approx.ftz.f32(lse_reg[i], arg)
+                    nxt = txl.local_scalar("float32")
+                    txl.ptx["add.f32"](nxt, lse_sum, lse_reg[i])
+                    txl.assign(lse_sum, nxt)
                 sum1 = _shfl_bfly_f32(lse_sum, 2)
-                sumt = K.local_scalar("float32")
-                K.ptx["add.f32"](sumt, lse_sum, sum1)
+                sumt = txl.local_scalar("float32")
+                txl.ptx["add.f32"](sumt, lse_sum, sum1)
                 sum2 = _shfl_bfly_f32(sumt, 1)
-                lse_sum_all = K.local_scalar("float32")
-                K.ptx["add.f32"](lse_sum_all, sumt, sum2)
+                lse_sum_all = txl.local_scalar("float32")
+                txl.ptx["add.f32"](lse_sum_all, sumt, sum2)
 
                 # The source's three conditions become two compares: `sum == 0.0` and
                 # `sum != sum` fuse into one unordered-equal.
-                final_lse = K.local_scalar("float32", init=NEG_INF)
-                inv_sum = K.local_scalar("float32", init=K.float32(0.0))
-                bad_idx = K.local_scalar("uint32")
-                K.ptx.setp.lt.s32(bad_idx, max_valid, K.int32(0))
-                bad_sum = K.local_scalar("uint32")
-                K.ptx.setp.equ.f32(bad_sum, lse_sum_all, K.float32(0.0))
-                degenerate = K.local_scalar("uint32")
-                K.ptx.or_.pred(degenerate, K.ptx.pred(bad_idx), K.ptx.pred(bad_sum))
-                with K.If(degenerate == K.uint32(0)):
-                    with K.Then():
-                        lg = K.local_scalar("float32")
-                        K.ptx.lg2.approx.ftz.f32(lg, lse_sum_all)
-                        K.ptx["fma.rn.f32"](final_lse, lg, K.float32(LN_2), lse_max)
-                        K.ptx["rcp.rn.f32"](inv_sum, lse_sum_all)
+                final_lse = txl.local_scalar("float32", init=NEG_INF)
+                inv_sum = txl.local_scalar("float32", init=txl.float32(0.0))
+                bad_idx = txl.local_scalar("uint32")
+                txl.ptx.setp.lt.s32(bad_idx, max_valid, txl.int32(0))
+                bad_sum = txl.local_scalar("uint32")
+                txl.ptx.setp.equ.f32(bad_sum, lse_sum_all, txl.float32(0.0))
+                degenerate = txl.local_scalar("uint32")
+                txl.ptx.or_.pred(degenerate, txl.ptx.pred(bad_idx), txl.ptx.pred(bad_sum))
+                with txl.If(degenerate == txl.uint32(0)):
+                    with txl.Then():
+                        lg = txl.local_scalar("float32")
+                        txl.ptx.lg2.approx.ftz.f32(lg, lse_sum_all)
+                        txl.ptx["fma.rn.f32"](final_lse, lg, txl.float32(LN_2), lse_max)
+                        txl.ptx["rcp.rn.f32"](inv_sum, lse_sum_all)
 
                 if temperature:
-                    t_reg = K.alloc_local((SPLITS_PT,), "float32")
+                    t_reg = txl.alloc_local((SPLITS_PT,), "float32")
                     for i in range(SPLITS_PT):
-                        K.ptx.ld.shared.f32(
+                        txl.ptx.ld.shared.f32(
                             t_reg[i],
                             s_lse_t.ptr_to([_slse_base(s2r_split0, s2r_row) + i * (4 * TILE_M)]),
                         )
                     t_max = _max_tree([t_reg[i] for i in range(SPLITS_PT)])
                     to2 = _shfl_bfly_f32(t_max, 2)
-                    tle = K.local_scalar("uint32")
-                    K.ptx.setp.le.f32(tle, t_max, to2)
-                    tnan = K.local_scalar("uint32")
-                    K.ptx.setp.nan.f32(tnan, to2, to2)
-                    tpick = K.local_scalar("float32")
-                    K.ptx.selp.f32(tpick, to2, t_max, K.ptx.pred(tle))
-                    tstep = K.local_scalar("float32")
-                    K.ptx.selp.f32(tstep, to2, tpick, K.ptx.pred(tnan))
+                    tle = txl.local_scalar("uint32")
+                    txl.ptx.setp.le.f32(tle, t_max, to2)
+                    tnan = txl.local_scalar("uint32")
+                    txl.ptx.setp.nan.f32(tnan, to2, to2)
+                    tpick = txl.local_scalar("float32")
+                    txl.ptx.selp.f32(tpick, to2, t_max, txl.ptx.pred(tle))
+                    tstep = txl.local_scalar("float32")
+                    txl.ptx.selp.f32(tstep, to2, tpick, txl.ptx.pred(tnan))
                     to1 = _shfl_bfly_f32(tstep, 1)
-                    t_max_all = K.local_scalar("float32")
-                    K.ptx["max.f32"](t_max_all, tstep, to1)
+                    t_max_all = txl.local_scalar("float32")
+                    txl.ptx["max.f32"](t_max_all, tstep, to1)
 
-                    t_ninf = K.local_scalar("uint32")
-                    K.ptx.setp.eq.f32(t_ninf, t_max_all, NEG_INF)
-                    t_scaled = K.local_scalar("float32")
-                    K.ptx["mul.f32"](t_scaled, t_max_all, K.float32(LOG_2_E))
-                    t_term = K.local_scalar("float32")
-                    K.ptx.selp.f32(t_term, K.float32(0.0), t_scaled, K.ptx.pred(t_ninf))
-                    t_sum = K.local_scalar("float32", init=K.float32(0.0))
+                    t_ninf = txl.local_scalar("uint32")
+                    txl.ptx.setp.eq.f32(t_ninf, t_max_all, NEG_INF)
+                    t_scaled = txl.local_scalar("float32")
+                    txl.ptx["mul.f32"](t_scaled, t_max_all, txl.float32(LOG_2_E))
+                    t_term = txl.local_scalar("float32")
+                    txl.ptx.selp.f32(t_term, txl.float32(0.0), t_scaled, txl.ptx.pred(t_ninf))
+                    t_sum = txl.local_scalar("float32", init=txl.float32(0.0))
                     for i in range(SPLITS_PT):
-                        sc = K.local_scalar("float32")
-                        K.ptx["mul.f32"](sc, t_reg[i], K.float32(LOG_2_E))
-                        ar = K.local_scalar("float32")
-                        K.ptx["sub.f32"](ar, sc, t_term)
-                        ev = K.local_scalar("float32")
-                        K.ptx.ex2.approx.ftz.f32(ev, ar)
-                        nx = K.local_scalar("float32")
-                        K.ptx["add.f32"](nx, t_sum, ev)
-                        K.assign(t_sum, nx)
+                        sc = txl.local_scalar("float32")
+                        txl.ptx["mul.f32"](sc, t_reg[i], txl.float32(LOG_2_E))
+                        ar = txl.local_scalar("float32")
+                        txl.ptx["sub.f32"](ar, sc, t_term)
+                        ev = txl.local_scalar("float32")
+                        txl.ptx.ex2.approx.ftz.f32(ev, ar)
+                        nx = txl.local_scalar("float32")
+                        txl.ptx["add.f32"](nx, t_sum, ev)
+                        txl.assign(t_sum, nx)
                     ts1 = _shfl_bfly_f32(t_sum, 2)
-                    tst = K.local_scalar("float32")
-                    K.ptx["add.f32"](tst, t_sum, ts1)
+                    tst = txl.local_scalar("float32")
+                    txl.ptx["add.f32"](tst, t_sum, ts1)
                     ts2 = _shfl_bfly_f32(tst, 1)
-                    t_sum_all = K.local_scalar("float32")
-                    K.ptx["add.f32"](t_sum_all, tst, ts2)
+                    t_sum_all = txl.local_scalar("float32")
+                    txl.ptx["add.f32"](t_sum_all, tst, ts2)
 
-                    final_lse_t = K.local_scalar("float32", init=NEG_INF)
-                    t_bad = K.local_scalar("uint32")
-                    K.ptx.setp.equ.f32(t_bad, t_sum_all, K.float32(0.0))
-                    t_degen = K.local_scalar("uint32")
-                    K.ptx.or_.pred(t_degen, K.ptx.pred(bad_idx), K.ptx.pred(t_bad))
-                    with K.If(t_degen == K.uint32(0)):
-                        with K.Then():
-                            tlg = K.local_scalar("float32")
-                            K.ptx.lg2.approx.ftz.f32(tlg, t_sum_all)
-                            K.ptx["fma.rn.f32"](final_lse_t, tlg, K.float32(LN_2), t_max_all)
+                    final_lse_t = txl.local_scalar("float32", init=NEG_INF)
+                    t_bad = txl.local_scalar("uint32")
+                    txl.ptx.setp.equ.f32(t_bad, t_sum_all, txl.float32(0.0))
+                    t_degen = txl.local_scalar("uint32")
+                    txl.ptx.or_.pred(t_degen, txl.ptx.pred(bad_idx), txl.ptx.pred(t_bad))
+                    with txl.If(t_degen == txl.uint32(0)):
+                        with txl.Then():
+                            tlg = txl.local_scalar("float32")
+                            txl.ptx.lg2.approx.ftz.f32(tlg, t_sum_all)
+                            txl.ptx["fma.rn.f32"](final_lse_t, tlg, txl.float32(LN_2), t_max_all)
 
                 for i in range(SPLITS_PT):
-                    K.ptx["mul.f32"](lse_reg[i], lse_reg[i], inv_sum)
+                    txl.ptx["mul.f32"](lse_reg[i], lse_reg[i], inv_sum)
                 # The scales overwrite the staged log-sum-exps in place; step 6 reads
                 # them back on the O-partial map, which is why :907 is a barrier.
                 for i in range(SPLITS_PT):
-                    K.ptx.st.shared.f32(
+                    txl.ptx.st.shared.f32(
                         s_lse.ptr_to([_slse_base(s2r_split0, s2r_row) + i * (4 * TILE_M)]),
                         lse_reg[i],
                     )
-                with K.If(s2r_split0 == 0):
-                    with K.Then():
-                        K.ptx.st.shared.u32(
-                            s_maxvalid.ptr_to([s2r_row]), K.reinterpret("uint32", max_valid)
+                with txl.If(s2r_split0 == 0):
+                    with txl.Then():
+                        txl.ptx.st.shared.u32(
+                            s_maxvalid.ptr_to([s2r_row]), txl.reinterpret("uint32", max_valid)
                         )
 
                 # -------------------------------------------------------------------
                 # Step 5: the authoritative LSE_out store (combine.py:880-898). The two
                 # zero-tests are OR-fused into one compare, as at :815.
                 # -------------------------------------------------------------------
-                with K.If(K.bitwise_or(s2r_split0, k_block) == 0):
-                    with K.Then():
-                        idx5 = K.local_scalar("int32", init=m_block * TILE_M + s2r_row)
-                        with K.If(idx5 < max_idx):
-                            with K.Then():
+                with txl.If(txl.bitwise_or(s2r_split0, k_block) == 0):
+                    with txl.Then():
+                        idx5 = txl.local_scalar("int32", init=m_block * TILE_M + s2r_row)
+                        with txl.If(idx5 < max_idx):
+                            with txl.Then():
                                 # `(q_offset + m_idx)*head_q + h` is identically
                                 # `q_offset*head_q + idx`, and these stores are the
                                 # only consumers of the decomposition here, so the
                                 # divmod drops out entirely.
-                                K.ptx.st.global_.f32(
+                                txl.ptx.st.global_.f32(
                                     lse_out.ptr_to([q_offset * stride_l_q + idx5]), final_lse
                                 )
                                 if temperature:
-                                    K.ptx.st.global_.f32(
+                                    txl.ptx.st.global_.f32(
                                         lse_temperature_out.ptr_to([q_offset * stride_l_q + idx5]),
                                         final_lse_t,
                                     )
@@ -826,43 +826,43 @@ def make_kernel(
                 # The barrier publishes both step-4 writes: the scales, which this
                 # thread reads on a different row map, and sMaxValidSplit.
                 # -------------------------------------------------------------------
-                K.ptx.bar.sync(K.uint32(0))
+                txl.ptx.bar.sync(txl.uint32(0))
 
-                thr_max_valid = K.local_scalar("int32")
-                first_mv = K.local_scalar("uint32")
-                K.ptx.ld.shared.u32(first_mv, s_maxvalid.ptr_to([o_row0]))
-                K.assign(thr_max_valid, K.reinterpret("int32", first_mv))
+                thr_max_valid = txl.local_scalar("int32")
+                first_mv = txl.local_scalar("uint32")
+                txl.ptx.ld.shared.u32(first_mv, s_maxvalid.ptr_to([o_row0]))
+                txl.assign(thr_max_valid, txl.reinterpret("int32", first_mv))
                 for m in range(1, NUM_ROWS):
-                    mv = K.local_scalar("uint32")
-                    K.ptx.ld.shared.u32(mv, s_maxvalid.ptr_to([o_row0 + m * O_ROW_STEP]))
-                    nxt = K.local_scalar("int32")
-                    K.ptx["max.s32"](nxt, thr_max_valid, K.reinterpret("int32", mv))
-                    K.assign(thr_max_valid, nxt)
+                    mv = txl.local_scalar("uint32")
+                    txl.ptx.ld.shared.u32(mv, s_maxvalid.ptr_to([o_row0 + m * O_ROW_STEP]))
+                    nxt = txl.local_scalar("int32")
+                    txl.ptx["max.s32"](nxt, thr_max_valid, txl.reinterpret("int32", mv))
+                    txl.assign(thr_max_valid, nxt)
 
                 # The accumulator is zeroed in the preheader, ahead of the zero-trip
                 # test, so a thread with no live split still carries zeros into step 7.
-                acc = K.alloc_local((NUM_ROWS * NUM_VALS,), "float32")
+                acc = txl.alloc_local((NUM_ROWS * NUM_VALS,), "float32")
                 for m in range(NUM_ROWS):
                     for v in range(NUM_VALS):
-                        K.assign(acc[m * NUM_VALS + v], K.float32(0.0))
+                        txl.assign(acc[m * NUM_VALS + v], txl.float32(0.0))
 
-                stage_load = K.local_scalar("int32", init=K.int32(STAGES - 1))
-                stage_compute = K.local_scalar("int32", init=K.int32(0))
-                scale = K.alloc_local((NUM_ROWS,), "float32")
-                part = K.alloc_local((NUM_ROWS * NUM_VALS,), "float32")
+                stage_load = txl.local_scalar("int32", init=txl.int32(STAGES - 1))
+                stage_compute = txl.local_scalar("int32", init=txl.int32(0))
+                scale = txl.alloc_local((NUM_ROWS,), "float32")
+                part = txl.alloc_local((NUM_ROWS * NUM_VALS,), "float32")
 
-                with K.serial(thr_max_valid + 1) as sp:
+                with txl.serial(thr_max_valid + 1) as sp:
                     # Issue the next stage BEFORE the shared scale reads. The two
                     # are independent -- the copy is indexed by the ring cursor and
                     # the scales by the absolute split -- so putting the global
                     # transfers in flight first lets them overlap the shared-load
                     # latency instead of queueing behind it.
-                    with K.If(sp + (STAGES - 1) <= thr_max_valid):
-                        with K.Then():
+                    with txl.If(sp + (STAGES - 1) <= thr_max_valid):
+                        with txl.Then():
                             _load_o_partial(sp + (STAGES - 1), stage_load)
-                    K.ptx.cp.async_.commit_group()
+                    txl.ptx.cp.async_.commit_group()
                     for m in range(NUM_ROWS):
-                        K.ptx.ld.shared.f32(
+                        txl.ptx.ld.shared.f32(
                             scale[m], s_lse.ptr_to([_slse_base(sp, o_row0 + m * O_ROW_STEP)])
                         )
                     # Advance the ring cursor branchlessly: STAGES is a power of two
@@ -872,8 +872,8 @@ def make_kernel(
                     # a branch; both put a chain on the cursor that gates the
                     # next iteration's shared addresses, and the branch costs
                     # most on short loops (topk=4 runs at most four iterations).
-                    K.assign(stage_load, K.bitwise_and(stage_load + 1, K.int32(STAGES - 1)))
-                    K.ptx.cp.async_.wait_group(STAGES - 1)
+                    txl.assign(stage_load, txl.bitwise_and(stage_load + 1, txl.int32(STAGES - 1)))
+                    txl.ptx.cp.async_.wait_group(STAGES - 1)
                     for m in range(NUM_ROWS):
                         _load_stage_vec(part, m, stage_compute, o_row0 + m * O_ROW_STEP)
                     # Advance the ring cursor branchlessly: STAGES is a power of two
@@ -883,22 +883,22 @@ def make_kernel(
                     # a branch; both put a chain on the cursor that gates the
                     # next iteration's shared addresses, and the branch costs
                     # most on short loops (topk=4 runs at most four iterations).
-                    K.assign(stage_compute, K.bitwise_and(stage_compute + 1, K.int32(STAGES - 1)))
+                    txl.assign(stage_compute, txl.bitwise_and(stage_compute + 1, txl.int32(STAGES - 1)))
                     for m in range(NUM_ROWS):
                         # `setp.leu.f32` is unordered, so a NaN scale skips the row too;
                         # the `hidx >= 0` half reuses the predicate step 2 computed.
-                        with K.If(K.And(hidx[m] >= 0, scale[m] > K.float32(0.0))):
-                            with K.Then():
+                        with txl.If(txl.And(hidx[m] >= 0, scale[m] > txl.float32(0.0))):
+                            with txl.Then():
                                 for v in range(NUM_VALS):
-                                    K.ptx["fma.rn.f32"](
+                                    txl.ptx["fma.rn.f32"](
                                         acc[m * NUM_VALS + v],
                                         part[m * NUM_VALS + v],
                                         scale[m],
                                         acc[m * NUM_VALS + v],
                                     )
 
-                K.ptx.cp.async_.wait_group(0)
-                K.ptx.bar.sync(K.uint32(0))
+                txl.ptx.cp.async_.wait_group(0)
+                txl.ptx.bar.sync(txl.uint32(0))
 
                 # -------------------------------------------------------------------
                 # Step 7a: scatter the accumulator into sO_perm in REAL column order
@@ -907,13 +907,13 @@ def make_kernel(
                 # a converted bf16 pair is one 32-bit shared store.
                 # -------------------------------------------------------------------
                 if output_scale:
-                    out_scale = K.local_scalar("float32")
-                    K.ptx.ld.global_.f32(out_scale, output_scale_ptr.ptr_to([0]))
+                    out_scale = txl.local_scalar("float32")
+                    txl.ptx.ld.global_.f32(out_scale, output_scale_ptr.ptr_to([0]))
                     # The packed operand is loop-invariant; the reference
                     # broadcasts it once (scale_fp32p_t8 PTX:1578), not once
                     # per pair.
-                    scale_pair = K.local_scalar("uint64")
-                    K.ptx.mov.b64(scale_pair, out_scale, out_scale)
+                    scale_pair = txl.local_scalar("uint64")
+                    txl.ptx.mov.b64(scale_pair, out_scale, out_scale)
 
                 def _fake_to_real(fake_col):
                     """Invert K1's STG.128 column permutation (copy_utils.py:861-906).
@@ -929,17 +929,17 @@ def make_kernel(
                         block, lane_w = 64, 16  # stg128_fp8_fake_col_to_real_col (:897)
                     else:
                         block, lane_w = 16, 4  # stg128_fake_col_to_real_col (:861)
-                    nt = K.bitwise_and(fake_col, -block)
-                    inner = K.bitwise_and(fake_col, block - 1)
-                    lane = K.truncdiv(inner, lane_w)
-                    slot = K.bitwise_and(inner, lane_w - 1)
-                    group = K.shift_right(slot, 1)
-                    elem = K.bitwise_and(slot, 1)
+                    nt = txl.bitwise_and(fake_col, -block)
+                    inner = txl.bitwise_and(fake_col, block - 1)
+                    lane = txl.truncdiv(inner, lane_w)
+                    slot = txl.bitwise_and(inner, lane_w - 1)
+                    group = txl.shift_right(slot, 1)
+                    elem = txl.bitwise_and(slot, 1)
                     return nt + group * 8 + lane * 2 + elem
 
                 for m in range(NUM_ROWS):
-                    with K.If(hidx[m] >= 0):
-                        with K.Then():
+                    with txl.If(hidx[m] >= 0):
+                        with txl.Then():
                             for vp in range(NUM_VALS // 2):
                                 v = 2 * vp
                                 # real_col for the pair; the two halves differ only in
@@ -952,20 +952,20 @@ def make_kernel(
                                     # ONE packed multiply per pair. A packed f32x2
                                     # operand is a single 64-bit value, so the pair
                                     # is packed with mov.b64 and unpacked after.
-                                    pk = K.local_scalar("uint64")
-                                    K.ptx.mov.b64(pk, lo, hi)
-                                    K.ptx.mul.f32x2(pk, pk, scale_pair)
-                                    scaled_hi = K.local_scalar("float32")
-                                    scaled_lo = K.local_scalar("float32")
-                                    K.ptx.mov.b64(scaled_lo, scaled_hi, pk)
+                                    pk = txl.local_scalar("uint64")
+                                    txl.ptx.mov.b64(pk, lo, hi)
+                                    txl.ptx.mul.f32x2(pk, pk, scale_pair)
+                                    scaled_hi = txl.local_scalar("float32")
+                                    scaled_lo = txl.local_scalar("float32")
+                                    txl.ptx.mov.b64(scaled_lo, scaled_hi, pk)
                                     hi, lo = scaled_hi, scaled_lo
-                                word = K.local_scalar("uint32")
-                                K.ptx["cvt.rn.bf16x2.f32"](word, hi, lo)
-                                K.ptx.st.shared.u32(
+                                word = txl.local_scalar("uint32")
+                                txl.ptx["cvt.rn.bf16x2.f32"](word, hi, lo)
+                                txl.ptx.st.shared.u32(
                                     s_perm_i32.ptr_to(
                                         [
                                             (o_row0 + m * O_ROW_STEP) * (PERM_ROW // 2)
-                                            + K.truncdiv(real_col, 2)
+                                            + txl.truncdiv(real_col, 2)
                                         ]
                                     ),
                                     word,
@@ -973,7 +973,7 @@ def make_kernel(
 
                 # The re-partition point: 7a wrote sO_perm on the O-partial map, 7b
                 # reads it on the output map, so every thread reads other threads' words.
-                K.ptx.bar.sync(K.uint32(0))
+                txl.ptx.bar.sync(txl.uint32(0))
 
                 # -------------------------------------------------------------------
                 # Step 7b: sO_perm -> registers -> GMEM, 128 bits at a time
@@ -981,22 +981,22 @@ def make_kernel(
                 # -------------------------------------------------------------------
                 for m in range(OUT_ROWS):
                     row_out = st_row0 + m * OUT_ROW_STEP
-                    w = [K.local_scalar("uint32") for _ in range(4)]
-                    K.ptx.ld.shared.v4.b32(
+                    w = [txl.local_scalar("uint32") for _ in range(4)]
+                    txl.ptx.ld.shared.v4.b32(
                         w[0],
                         w[1],
                         w[2],
                         w[3],
-                        s_perm_i32.ptr_to([row_out * (PERM_ROW // 2) + K.truncdiv(st_col, 2)]),
+                        s_perm_i32.ptr_to([row_out * (PERM_ROW // 2) + txl.truncdiv(st_col, 2)]),
                     )
-                    idx7 = K.local_scalar("int32", init=m_block * TILE_M + row_out)
-                    with K.If(idx7 < max_idx):
-                        with K.Then():
+                    idx7 = txl.local_scalar("int32", init=m_block * TILE_M + row_out)
+                    with txl.If(idx7 < max_idx):
+                        with txl.Then():
                             # Same identity as the partial address and the LSE
                             # store: the decomposition is multiplied straight back
                             # out and has no other consumer here, so four divmods
                             # per thread leave the store path.
-                            K.ptx.st.global_.v4.b32(
+                            txl.ptx.st.global_.v4.b32(
                                 o_out.ptr_to(
                                     [
                                         q_offset * stride_o_q
@@ -1384,7 +1384,7 @@ def tirx_args(data: dict[str, Any], outputs: dict[str, Any]) -> tuple:
     import torch
 
     def as_bits(t):
-        """fp8 reaches the kernel as raw ``uint8``; see ``_KERN_DTYPES``."""
+        """fp8 reaches the kernel as raw ``uint8``; see ``_TXL_DTYPES``."""
         return t.view(torch.uint8) if t.dtype == torch.float8_e4m3fn else t
 
     topk = data["topk"]

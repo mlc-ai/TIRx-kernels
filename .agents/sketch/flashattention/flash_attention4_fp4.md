@@ -404,7 +404,7 @@ fence("mbarrier_init.release.cluster"); barrier()   # cta-wide
 # ===========================================================================
 # Role dispatch -- flat `if` blocks in source order (:1737-1963)
 # ===========================================================================
-if warp == 15: set_register_budget(dec=24)                              # :1737-1739 (port: 48, K warpgroup-uniform)
+if warp == 15: set_register_budget(dec=24)                              # :1737-1739 (port: 48, txl warpgroup-uniform)
 if warp == 14: set_register_budget(dec=regs_other); load_warp()          # :1750-1782
 if warp == 12: set_register_budget(dec=regs_other); mma_warp()           # :1787-1843
 if warp == 13: set_register_budget(dec=regs_other); epilogue_warp()      # :1848-1861
@@ -858,7 +858,7 @@ sequence dimension: the 128-row box moves along dim 1, dim 2 selects the head).
 ## TIRx module and benchmark contract
 
 - `get_kernel(qk_format, pv_format, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, head_dim, is_causal)`
-  traces one `@K.kernel(warps=16, arch="sm_103a", min_blocks_per_sm=1, grid=...)`; `hardware_num_sms()` sizes
+  traces one `@txl.kernel(warps=16, arch="sm_103a", min_blocks_per_sm=1, grid=...)`; `hardware_num_sms()` sizes
   the persistent grid.
 - Inputs are quantized with flashinfer (`nvfp4_quantize` / `mxfp8_quantize`, `SfLayout.layout_128x4`) exactly as the
   fork's `bench_fp4.py`; the scale bytes are the contiguous `[b][h][s/128][d/(4 sf_vec)][32][4][4]` storage.

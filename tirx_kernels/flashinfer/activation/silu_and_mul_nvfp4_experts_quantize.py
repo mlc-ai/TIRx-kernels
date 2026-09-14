@@ -18,7 +18,7 @@ scope (fast-math reciprocal, E4M3 scale factors, no 4over6 refinement).
 
 from typing import Any
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 from tirx_kernels.runner import bench
 
 KERNEL_META = {
@@ -102,7 +102,7 @@ def _validate(dtype: str, n_experts: int, m: int, k: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Native PTX helpers (all ops expressed with K.ptx.* forms)
+# Native PTX helpers (all ops expressed with txl.ptx.* forms)
 # ---------------------------------------------------------------------------
 
 
@@ -113,27 +113,27 @@ def _fp32_vec_to_e2m1_16(vals):
     the byte gather is expressed as b16-pair shifts plus registered mov packs:
     `mov.b32 {w0, w1}` (2 x b16) and `mov.b64 {v0, v1}` (2 x b32).
     """
-    bytes_ = K.alloc_local([8], "uint8")
+    bytes_ = txl.alloc_local([8], "uint8")
     for i in range(8):
         # cvt.rn.satfinite.e2m1x2.f32 d, hi, lo (second source operand is the low lane)
-        K.ptx.cvt.rn.satfinite.e2m1x2.f32(bytes_[i], vals[2 * i + 1], vals[2 * i])
+        txl.ptx.cvt.rn.satfinite.e2m1x2.f32(bytes_[i], vals[2 * i + 1], vals[2 * i])
     w = [
-        K.cast(bytes_[i], "uint16") | (K.cast(bytes_[i + 1], "uint16") << K.uint16(8))
+        txl.cast(bytes_[i], "uint16") | (txl.cast(bytes_[i + 1], "uint16") << txl.uint16(8))
         for i in (0, 2, 4, 6)
     ]
-    v = K.alloc_local([2], "uint32")
-    K.ptx.mov.b32(v[0], w[0], w[1])
-    K.ptx.mov.b32(v[1], w[2], w[3])
-    out = K.local_scalar("uint64")
-    K.ptx.mov.b64(out, v[0], v[1])
+    v = txl.alloc_local([2], "uint32")
+    txl.ptx.mov.b32(v[0], w[0], w[1])
+    txl.ptx.mov.b32(v[1], w[2], w[3])
+    out = txl.local_scalar("uint64")
+    txl.ptx.mov.b64(out, v[0], v[1])
     return out
 
 
 def _habs2(dtype):
-    chain = K.ptx.abs.f16x2 if dtype == "float16" else K.ptx.abs.bf16x2
+    chain = txl.ptx.abs.f16x2 if dtype == "float16" else txl.ptx.abs.bf16x2
 
     def impl(a):
-        out = K.local_scalar("uint32")
+        out = txl.local_scalar("uint32")
         chain(out, a)
         return out
 
@@ -141,10 +141,10 @@ def _habs2(dtype):
 
 
 def _hmax2(dtype):
-    chain = K.ptx.max.f16x2 if dtype == "float16" else K.ptx.max.bf16x2
+    chain = txl.ptx.max.f16x2 if dtype == "float16" else txl.ptx.max.bf16x2
 
     def impl(a, b):
-        out = K.local_scalar("uint32")
+        out = txl.local_scalar("uint32")
         chain(out, a, b)
         return out
 
@@ -153,27 +153,27 @@ def _hmax2(dtype):
 
 def _hmax(dtype):
     # Scalar __hmax lowers to setp.gt.f16/bf16 + selp.b16 in the source.
-    cmp_chain = K.ptx.setp.gt.f16 if dtype == "float16" else K.ptx.setp.gt.bf16
+    cmp_chain = txl.ptx.setp.gt.f16 if dtype == "float16" else txl.ptx.setp.gt.bf16
 
     def impl(a, b):
-        pred = K.local_scalar("uint32")
-        out = K.local_scalar("uint16")
+        pred = txl.local_scalar("uint32")
+        out = txl.local_scalar("uint16")
         cmp_chain(pred, a, b)
-        K.ptx.selp.b16(out, a, b, K.ptx.pred(pred))
+        txl.ptx.selp.b16(out, a, b, txl.ptx.pred(pred))
         return out
 
     return impl
 
 
 def _unpack_lo_f32(word, dtype):
-    return K.cast(
-        K.reinterpret(dtype, K.cast(K.bitwise_and(word, K.uint32(0xFFFF)), "uint16")), "float32"
+    return txl.cast(
+        txl.reinterpret(dtype, txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")), "float32"
     )
 
 
 def _unpack_hi_f32(word, dtype):
-    return K.cast(
-        K.reinterpret(dtype, K.cast(K.shift_right(word, K.uint32(16)), "uint16")), "float32"
+    return txl.cast(
+        txl.reinterpret(dtype, txl.cast(txl.shift_right(word, txl.uint32(16)), "uint16")), "float32"
     )
 
 
@@ -187,210 +187,210 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
     hmax2 = _hmax2(dtype)
     hmax = _hmax(dtype)
 
-    @K.kernel(warps=(block_x + 31) // 32, arch="sm_100a", min_blocks_per_sm=4, grid=grid_x)
+    @txl.kernel(warps=(block_x + 31) // 32, arch="sm_100a", min_blocks_per_sm=4, grid=grid_x)
     def silu_and_mul_nvfp4_experts_quantize(
-        input_global: K.gptr[dtype],
-        sf_scale: K.gptr[K.f32],
-        out_global: K.gptr[K.u64],
-        sf_out: K.gptr[K.u8],
-        mask: K.gptr[K.i32],
-        num_rows: K.i32,
-        num_cols: K.i32,
-        num_experts: K.i32,
-        use_silu_and_mul: K.i32,  # source ABI is bool; i32 keeps the same branch shape
+        input_global: txl.gptr[dtype],
+        sf_scale: txl.gptr[txl.f32],
+        out_global: txl.gptr[txl.u64],
+        sf_out: txl.gptr[txl.u8],
+        mask: txl.gptr[txl.i32],
+        num_rows: txl.i32,
+        num_cols: txl.i32,
+        num_experts: txl.i32,
+        use_silu_and_mul: txl.i32,  # source ABI is bool; i32 keeps the same branch shape
     ):
-        bx = K.cta_id()
-        tx = K.thread_id()
+        bx = txl.cta_id()
+        tx = txl.thread_id()
 
         # Expert partition (quantization.cuh:642-663).
-        tid32 = K.local_scalar("int32", init=bx * block_x + tx)
-        stride = K.local_scalar("int32", init=K.truncdiv(grid_x * block_x, num_experts))
-        part_rem = K.truncmod(grid_x * block_x, num_experts)
-        expert_idx = K.local_scalar("int32")
-        tid_in_expert = K.local_scalar("int32")
-        actual_stride = K.local_scalar("int32")
-        K.assign(expert_idx, K.int32(0))
-        K.assign(tid_in_expert, K.int32(0))
-        K.assign(actual_stride, stride)
-        with K.If(part_rem > 0):
-            with K.Then():
-                bound = K.local_scalar("int32", init=part_rem * (stride + 1))
-                with K.If(tid32 < bound):
-                    with K.Then():
-                        K.assign(expert_idx, K.truncdiv(tid32, stride + 1))
-                        K.assign(tid_in_expert, K.truncmod(tid32, stride + 1))
-                        K.assign(actual_stride, stride + 1)
-                    with K.Else():
-                        K.assign(expert_idx, part_rem + K.truncdiv(tid32 - bound, stride))
-                        K.assign(tid_in_expert, K.truncmod(tid32 - bound, stride))
-                        K.assign(actual_stride, stride)
-            with K.Else():
-                K.assign(expert_idx, K.truncdiv(tid32, stride))
-                K.assign(tid_in_expert, K.truncmod(tid32, stride))
-                K.assign(actual_stride, stride)
+        tid32 = txl.local_scalar("int32", init=bx * block_x + tx)
+        stride = txl.local_scalar("int32", init=txl.truncdiv(grid_x * block_x, num_experts))
+        part_rem = txl.truncmod(grid_x * block_x, num_experts)
+        expert_idx = txl.local_scalar("int32")
+        tid_in_expert = txl.local_scalar("int32")
+        actual_stride = txl.local_scalar("int32")
+        txl.assign(expert_idx, txl.int32(0))
+        txl.assign(tid_in_expert, txl.int32(0))
+        txl.assign(actual_stride, stride)
+        with txl.If(part_rem > 0):
+            with txl.Then():
+                bound = txl.local_scalar("int32", init=part_rem * (stride + 1))
+                with txl.If(tid32 < bound):
+                    with txl.Then():
+                        txl.assign(expert_idx, txl.truncdiv(tid32, stride + 1))
+                        txl.assign(tid_in_expert, txl.truncmod(tid32, stride + 1))
+                        txl.assign(actual_stride, stride + 1)
+                    with txl.Else():
+                        txl.assign(expert_idx, part_rem + txl.truncdiv(tid32 - bound, stride))
+                        txl.assign(tid_in_expert, txl.truncmod(tid32 - bound, stride))
+                        txl.assign(actual_stride, stride)
+            with txl.Else():
+                txl.assign(expert_idx, txl.truncdiv(tid32, stride))
+                txl.assign(tid_in_expert, txl.truncmod(tid32, stride))
+                txl.assign(actual_stride, stride)
 
-        m_rows = K.truncdiv(num_rows, num_experts)
+        m_rows = txl.truncdiv(num_rows, num_experts)
         padded_m = (m_rows + 127) // 128 * 128
-        cols_per_row = K.local_scalar("int32", init=K.truncdiv(num_cols, K.int32(ELTS_PER_THREAD)))
-        use_mask = K.reinterpret("uint64", K.address_of(mask[0])) != K.uint64(0)
-        actual_cols = K.local_scalar("int32", init=cols_per_row)
-        with K.If(use_silu_and_mul != 0), K.Then():
-            K.assign(actual_cols, cols_per_row * 2)
+        cols_per_row = txl.local_scalar("int32", init=txl.truncdiv(num_cols, txl.int32(ELTS_PER_THREAD)))
+        use_mask = txl.reinterpret("uint64", txl.address_of(mask[0])) != txl.uint64(0)
+        actual_cols = txl.local_scalar("int32", init=cols_per_row)
+        with txl.If(use_silu_and_mul != 0), txl.Then():
+            txl.assign(actual_cols, cols_per_row * 2)
 
-        xw = K.alloc_local([8], "uint32")
-        yw = K.alloc_local([8], "uint32")
-        packed = K.local_scalar("uint32")
-        out_pair = K.alloc_local([2], "float32")
-        e_tmp = K.local_scalar("float32")
-        r_tmp = K.local_scalar("float32")
-        lm = K.local_scalar("uint32")
-        e4m3_u16 = K.local_scalar("uint16")
-        f16p = K.local_scalar("uint32")
-        fp = K.alloc_local([16], "float32")
-        e2m1_v = K.local_scalar("uint64")
-        sf_b8 = K.local_scalar("uint8")
+        xw = txl.alloc_local([8], "uint32")
+        yw = txl.alloc_local([8], "uint32")
+        packed = txl.local_scalar("uint32")
+        out_pair = txl.alloc_local([2], "float32")
+        e_tmp = txl.local_scalar("float32")
+        r_tmp = txl.local_scalar("float32")
+        lm = txl.local_scalar("uint32")
+        e4m3_u16 = txl.local_scalar("uint16")
+        f16p = txl.local_scalar("uint32")
+        fp = txl.alloc_local([16], "float32")
+        e2m1_v = txl.local_scalar("uint64")
+        sf_b8 = txl.local_scalar("uint8")
 
         # Grid-stride loop over this expert's chunks (quantization.cuh:675-720).
         def body():
-            global_idx = K.local_scalar("int32")
-            loop_bound = K.local_scalar("int32")
-            K.assign(global_idx, tid_in_expert + expert_idx * m_rows * cols_per_row)
-            K.assign(loop_bound, (expert_idx + 1) * m_rows * cols_per_row)
-            with K.While(global_idx < loop_bound):
-                row_idx = K.local_scalar("int32")
-                col_idx = K.local_scalar("int32")
-                row_idx_in_expert = K.local_scalar("int32")
-                K.assign(row_idx, K.truncdiv(global_idx, cols_per_row))
-                K.assign(col_idx, K.truncmod(global_idx, cols_per_row))
-                K.assign(row_idx_in_expert, row_idx - expert_idx * m_rows)
+            global_idx = txl.local_scalar("int32")
+            loop_bound = txl.local_scalar("int32")
+            txl.assign(global_idx, tid_in_expert + expert_idx * m_rows * cols_per_row)
+            txl.assign(loop_bound, (expert_idx + 1) * m_rows * cols_per_row)
+            with txl.While(global_idx < loop_bound):
+                row_idx = txl.local_scalar("int32")
+                col_idx = txl.local_scalar("int32")
+                row_idx_in_expert = txl.local_scalar("int32")
+                txl.assign(row_idx, txl.truncdiv(global_idx, cols_per_row))
+                txl.assign(col_idx, txl.truncmod(global_idx, cols_per_row))
+                txl.assign(row_idx_in_expert, row_idx - expert_idx * m_rows)
 
-                with K.If(use_mask), K.Then():
-                    mask_rows = K.local_scalar("int32")
-                    K.ptx.ld.global_.s32(mask_rows, mask.ptr_to([expert_idx]))
-                    with K.If(row_idx_in_expert >= mask_rows), K.Then():
-                        K.Break()
+                with txl.If(use_mask), txl.Then():
+                    mask_rows = txl.local_scalar("int32")
+                    txl.ptx.ld.global_.s32(mask_rows, mask.ptr_to([expert_idx]))
+                    with txl.If(row_idx_in_expert >= mask_rows), txl.Then():
+                        txl.Break()
 
-                in_offset = K.local_scalar(
-                    "int64", init=K.cast(row_idx, "int64") * actual_cols + col_idx
+                in_offset = txl.local_scalar(
+                    "int64", init=txl.cast(row_idx, "int64") * actual_cols + col_idx
                 )
-                K.ptx.ld.global_.v4.b32(
+                txl.ptx.ld.global_.v4.b32(
                     xw[0],
                     xw[1],
                     xw[2],
                     xw[3],
-                    K.address_of(input_global[in_offset * ELTS_PER_THREAD]),
+                    txl.address_of(input_global[in_offset * ELTS_PER_THREAD]),
                 )
-                K.ptx.ld.global_.v4.b32(
+                txl.ptx.ld.global_.v4.b32(
                     xw[4],
                     xw[5],
                     xw[6],
                     xw[7],
-                    K.address_of(input_global[in_offset * ELTS_PER_THREAD + 8]),
+                    txl.address_of(input_global[in_offset * ELTS_PER_THREAD + 8]),
                 )
-                with K.If(use_silu_and_mul != 0), K.Then():
-                    K.ptx.ld.global_.v4.b32(
+                with txl.If(use_silu_and_mul != 0), txl.Then():
+                    txl.ptx.ld.global_.v4.b32(
                         yw[0],
                         yw[1],
                         yw[2],
                         yw[3],
-                        K.address_of(input_global[(in_offset + cols_per_row) * ELTS_PER_THREAD]),
+                        txl.address_of(input_global[(in_offset + cols_per_row) * ELTS_PER_THREAD]),
                     )
-                    K.ptx.ld.global_.v4.b32(
+                    txl.ptx.ld.global_.v4.b32(
                         yw[4],
                         yw[5],
                         yw[6],
                         yw[7],
-                        K.address_of(
+                        txl.address_of(
                             input_global[(in_offset + cols_per_row) * ELTS_PER_THREAD + 8]
                         ),
                     )
                     # silu_and_mul (utils:1142-1166): fp32 silu*mul per element,
                     # rounded back to DTYPE pairs in place.
-                    with K.unroll(8) as i:
+                    with txl.unroll(8) as i:
                         x_lo = _unpack_lo_f32(xw[i], dtype)
                         x_hi = _unpack_hi_f32(xw[i], dtype)
                         y_lo = _unpack_lo_f32(yw[i], dtype)
                         y_hi = _unpack_hi_f32(yw[i], dtype)
-                        K.ptx.ex2.approx.ftz.f32(e_tmp, x_lo * K.float32(-1.4426950408889634))
-                        K.ptx.mov.b32(out_pair[0], (x_lo / (K.float32(1.0) + e_tmp)) * y_lo)
-                        K.ptx.ex2.approx.ftz.f32(e_tmp, x_hi * K.float32(-1.4426950408889634))
-                        K.ptx.mov.b32(out_pair[1], (x_hi / (K.float32(1.0) + e_tmp)) * y_hi)
+                        txl.ptx.ex2.approx.ftz.f32(e_tmp, x_lo * txl.float32(-1.4426950408889634))
+                        txl.ptx.mov.b32(out_pair[0], (x_lo / (txl.float32(1.0) + e_tmp)) * y_lo)
+                        txl.ptx.ex2.approx.ftz.f32(e_tmp, x_hi * txl.float32(-1.4426950408889634))
+                        txl.ptx.mov.b32(out_pair[1], (x_hi / (txl.float32(1.0) + e_tmp)) * y_hi)
                         if dtype == "float16":
-                            K.ptx.cvt.rn.f16x2.f32(packed, out_pair[1], out_pair[0])
+                            txl.ptx.cvt.rn.f16x2.f32(packed, out_pair[1], out_pair[0])
                         else:
-                            K.ptx.cvt.rn.bf16x2.f32(packed, out_pair[1], out_pair[0])
-                        K.ptx.mov.b32(xw[i], packed)
+                            txl.ptx.cvt.rn.bf16x2.f32(packed, out_pair[1], out_pair[0])
+                        txl.ptx.mov.b32(xw[i], packed)
 
-                out_offset = K.local_scalar(
-                    "int64", init=K.cast(row_idx, "int64") * cols_per_row + col_idx
+                out_offset = txl.local_scalar(
+                    "int64", init=txl.cast(row_idx, "int64") * cols_per_row + col_idx
                 )
 
                 # SFScale select (branch-lowered in the source).
-                sfscale_val = K.local_scalar("float32", init=K.float32(1.0))
+                sfscale_val = txl.local_scalar("float32", init=txl.float32(1.0))
                 with (
-                    K.If(K.reinterpret("uint64", K.address_of(sf_scale[0])) != K.uint64(0)),
-                    K.Then(),
+                    txl.If(txl.reinterpret("uint64", txl.address_of(sf_scale[0])) != txl.uint64(0)),
+                    txl.Then(),
                 ):
-                    K.ptx.ld.global_.f32(sfscale_val, sf_scale.ptr_to([expert_idx]))
+                    txl.ptx.ld.global_.f32(sfscale_val, sf_scale.ptr_to([expert_idx]))
 
                 # SF swizzled output address (utils:1096-1140 + quantization.cuh:706-714).
                 num_cols_padded = (
                     (num_cols + SF_VEC_SIZE * 4 - 1) // (SF_VEC_SIZE * 4) * (SF_VEC_SIZE * 4)
                 )
                 num_cols_sfout = num_cols_padded // SF_VEC_SIZE // 4
-                sf_expert_base = K.local_scalar(
+                sf_expert_base = txl.local_scalar(
                     "int32", init=expert_idx * padded_m * num_cols_sfout
                 )
                 num_k_tiles = (num_cols + SF_VEC_SIZE * 4 - 1) // (SF_VEC_SIZE * 4)
-                sf_off = K.local_scalar(
+                sf_off = txl.local_scalar(
                     "int32",
-                    init=K.truncdiv(row_idx_in_expert, K.int32(128)) * (num_k_tiles * 512)
-                    + K.truncdiv(col_idx, K.int32(4)) * 512
+                    init=txl.truncdiv(row_idx_in_expert, txl.int32(128)) * (num_k_tiles * 512)
+                    + txl.truncdiv(col_idx, txl.int32(4)) * 512
                     + (row_idx_in_expert % 32) * 16
-                    + K.truncdiv(row_idx_in_expert % 128, K.int32(32)) * 4
+                    + txl.truncdiv(row_idx_in_expert % 128, txl.int32(32)) * 4
                     + (col_idx % 4),
                 )
-                sf_byte = K.cast(sf_expert_base, "int64") * 4 + K.cast(sf_off, "int64")
+                sf_byte = txl.cast(sf_expert_base, "int64") * 4 + txl.cast(sf_off, "int64")
 
                 # Local abs-max over the 8 packed pairs (silu-rounded values).
-                K.assign(lm, habs2(xw[0]))
-                with K.unroll(7) as i:
-                    K.assign(lm, hmax2(lm, habs2(xw[i + 1])))
-                lm_lo = K.cast(K.bitwise_and(lm, K.uint32(0xFFFF)), "uint16")
-                lm_hi = K.cast(K.shift_right(lm, K.uint32(16)), "uint16")
-                vec_max = K.cast(K.reinterpret(dtype, hmax(lm_lo, lm_hi)), "float32")
+                txl.assign(lm, habs2(xw[0]))
+                with txl.unroll(7) as i:
+                    txl.assign(lm, hmax2(lm, habs2(xw[i + 1])))
+                lm_lo = txl.cast(txl.bitwise_and(lm, txl.uint32(0xFFFF)), "uint16")
+                lm_hi = txl.cast(txl.shift_right(lm, txl.uint32(16)), "uint16")
+                vec_max = txl.cast(txl.reinterpret(dtype, hmax(lm_lo, lm_hi)), "float32")
 
                 # SF computation (default env: fast-math rcp, E4M3).
-                K.ptx.rcp.approx.ftz.f32(r_tmp, K.float32(6.0))
+                txl.ptx.rcp.approx.ftz.f32(r_tmp, txl.float32(6.0))
                 sf_value = sfscale_val * (vec_max * r_tmp)
-                K.ptx.cvt.rn.satfinite.e4m3x2.f32(e4m3_u16, K.float32(0.0), sf_value)
-                K.assign(sf_b8, K.cast(e4m3_u16, "uint8"))
-                K.ptx.cvt.rn.f16x2.e4m3x2(f16p, e4m3_u16)
+                txl.ptx.cvt.rn.satfinite.e4m3x2.f32(e4m3_u16, txl.float32(0.0), sf_value)
+                txl.assign(sf_b8, txl.cast(e4m3_u16, "uint8"))
+                txl.ptx.cvt.rn.f16x2.e4m3x2(f16p, e4m3_u16)
                 sf_value_r = _unpack_lo_f32(f16p, "float16")
-                output_scale = K.local_scalar("float32", init=K.float32(0.0))
-                with K.If(vec_max != 0.0), K.Then():
-                    K.ptx.rcp.approx.ftz.f32(r_tmp, sfscale_val)
-                    K.ptx.rcp.approx.ftz.f32(e_tmp, sf_value_r * r_tmp)
-                    K.assign(output_scale, e_tmp)
+                output_scale = txl.local_scalar("float32", init=txl.float32(0.0))
+                with txl.If(vec_max != 0.0), txl.Then():
+                    txl.ptx.rcp.approx.ftz.f32(r_tmp, sfscale_val)
+                    txl.ptx.rcp.approx.ftz.f32(e_tmp, sf_value_r * r_tmp)
+                    txl.assign(output_scale, e_tmp)
 
                 # SF byte store (STG.8, per thread).
                 with (
-                    K.If(K.reinterpret("uint64", K.address_of(sf_out[0])) != K.uint64(0)),
-                    K.Then(),
+                    txl.If(txl.reinterpret("uint64", txl.address_of(sf_out[0])) != txl.uint64(0)),
+                    txl.Then(),
                 ):
-                    K.ptx.st.global_.b8(K.address_of(sf_out[sf_byte]), sf_b8)
+                    txl.ptx.st.global_.b8(txl.address_of(sf_out[sf_byte]), sf_b8)
 
                 # Scale to e2m1 and pack (fp32_vec_to_e2m1 source asm block).
-                with K.unroll(8) as i:
-                    K.ptx.mov.b32(fp[2 * i], _unpack_lo_f32(xw[i], dtype) * output_scale)
-                    K.ptx.mov.b32(fp[2 * i + 1], _unpack_hi_f32(xw[i], dtype) * output_scale)
-                K.assign(e2m1_v, _fp32_vec_to_e2m1_16([fp[i] for i in range(16)]))
-                K.ptx.st.global_.b64(K.address_of(out_global[out_offset]), e2m1_v)
+                with txl.unroll(8) as i:
+                    txl.ptx.mov.b32(fp[2 * i], _unpack_lo_f32(xw[i], dtype) * output_scale)
+                    txl.ptx.mov.b32(fp[2 * i + 1], _unpack_hi_f32(xw[i], dtype) * output_scale)
+                txl.assign(e2m1_v, _fp32_vec_to_e2m1_16([fp[i] for i in range(16)]))
+                txl.ptx.st.global_.b64(txl.address_of(out_global[out_offset]), e2m1_v)
 
-                K.assign(global_idx, global_idx + actual_stride)
+                txl.assign(global_idx, global_idx + actual_stride)
 
         if block_x % 32:
-            with K.If(tx < block_x), K.Then():
+            with txl.If(tx < block_x), txl.Then():
                 body()
         else:
             body()

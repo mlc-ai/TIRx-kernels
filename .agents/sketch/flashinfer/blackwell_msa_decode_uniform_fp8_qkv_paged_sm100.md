@@ -25,7 +25,7 @@ top-k=16, uniform `1 <= seqlen_q <= 32`, integral GQA with group size at most
 16, and the default Q-offset path. SM103, non-paged input, other dtypes,
 non-causal mode, explicit Q offsets, other page/head dimensions, and other
 MSA route families are out of scope. No tile primitive, first-class layout,
-`K.cuda.func_call`, or inline-CUDA function-call exemption is allowed.
+`txl.cuda.func_call`, or inline-CUDA function-call exemption is allowed.
 
 After the independent sketch reviewer returns PASS, this file is immutable.
 
@@ -837,9 +837,9 @@ rolled loops make the dynamic count larger.
 ## TIRx, correctness, and benchmark contract
 
 - The executable module imports the device language only as
-  `import tirx_kernels.kern as K` and uses rank-one SMEM plus explicit scalar
-  offset functions. It may use existing `K.ptx[...]` instruction families; it
-  must not modify `tirx_kernels/kern/`.
+  `import tirx_kernels.tirx_lite as txl` and uses rank-one SMEM plus explicit scalar
+  offset functions. It may use existing `txl.ptx[...]` instruction families; it
+  must not modify `tirx_kernels/tirx_lite/`.
 - `get_kernel`, `prepare_data`, `run_test`, `prepare_bench`, `run_gpu`,
   and `run_bench` are public. Source dependencies load lazily.
 - Correctness first compares source and TIRx on identical deterministic FP8

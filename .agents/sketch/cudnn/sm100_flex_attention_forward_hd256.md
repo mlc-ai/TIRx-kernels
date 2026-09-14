@@ -40,11 +40,11 @@ plans, optional FP32 LSE, partial/full N128 blocks, and empty plan rows.
 is SM103a.
 
 The executable imports the device language only as
-`import tirx_kernels.kern as K`. Every shared tensor is a rank-one linear
+`import tirx_kernels.tirx_lite as txl`. Every shared tensor is a rank-one linear
 allocation with explicit scalar byte offsets. No tile primitive, first-class
 layout/mapping object, `layout=` argument, direct TVM script namespace,
-`K.cuda.func_call`, inline-CUDA function-call exemption, or edit under
-`tirx_kernels/kern/` is allowed.
+`txl.cuda.func_call`, inline-CUDA function-call exemption, or edit under
+`tirx_kernels/tirx_lite/` is allowed.
 
 ## Source-order warp program
 

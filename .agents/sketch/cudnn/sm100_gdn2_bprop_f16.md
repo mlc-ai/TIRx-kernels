@@ -1196,9 +1196,9 @@ offsets.
 
 ## TIRx module and validation contract
 
-- The module imports only `tirx_kernels.kern as K`.  No `T`, `Tx`, `I`, no
+- The module imports only `tirx_kernels.tirx_lite as txl`.  No `T`, `Tx`, `I`, no
   `tirx.tile.*`, no tile primitive, and no first-class layout anywhere.
-- Every SMEM region is a byte range inside one flat `u8` arena.  `K.smem_pool`
+- Every SMEM region is a byte range inside one flat `u8` arena.  `txl.smem_pool`
   may own only the 984-byte barrier header; all data addressing is explicit
   scalar arithmetic over `arena.ptr_to([byte])`.
 - TMEM is integer columns through `tmem_cell(base, row, col)`.
