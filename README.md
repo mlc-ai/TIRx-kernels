@@ -126,15 +126,8 @@ Grouped by the FlashInfer Python entry point each port backs.
   [`selective_state_update_mtp_vertical`](tirx_kernels/flashinfer/mamba/selective_state_update_mtp_vertical.py) ⟨+sm_110a⟩,
   [`selective_state_update_mtp_horizontal`](tirx_kernels/flashinfer/mamba/selective_state_update_mtp_horizontal.py) ⟨+sm_110a⟩
 - **`flashinfer.kda`:**
-  [`flashkda_bf16_fused_m128`](tirx_kernels/flashinfer/kda/bf16_fused_m128.py),
   [`recurrent_kda_decode_one_warp`](tirx_kernels/flashinfer/kda/recurrent_kda_decode_one_warp.py) ⟨+sm_110a⟩,
-  [`recurrent_kda_decode_grouped`](tirx_kernels/flashinfer/kda/recurrent_kda_decode_grouped.py),
-  [`flashkda_decode_t1_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t1_precomputed.py),
-  [`flashkda_decode_t2_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t2_precomputed.py),
-  [`flashkda_decode_t3_lower_bound`](tirx_kernels/flashinfer/kda/flashkda_decode_t3_lower_bound.py),
-  [`flashkda_decode_t4_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t4_precomputed.py),
-  [`flashkda_decode_t5_gram`](tirx_kernels/flashinfer/kda/flashkda_decode_t5_gram.py),
-  [`flashkda_decode_t6_gram`](tirx_kernels/flashinfer/kda/flashkda_decode_t6_gram.py)
+  [`recurrent_kda_decode_grouped`](tirx_kernels/flashinfer/kda/recurrent_kda_decode_grouped.py)
 - **`flashinfer.gdn_decode`:**
   [`gdn_decode_bf16_ilp4`](tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_ilp4.py),
   [`gdn_decode_bf16_wide_vec_t1`](tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_wide_vec_t1.py),
@@ -143,6 +136,34 @@ Grouped by the FlashInfer Python entry point each port backs.
 - **`flashinfer.gdn_prefill`:**
   [`gdn_prefill_sm100`](tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py),
   [`gdn_cp_prefill_sm100`](tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py)
+- **`flashinfer.gemm`:**
+  [`bmm_fp8_rubin`](tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py) ⟨sm_107a⟩,
+  [`dense_blockscaled_gemm_sm107`](tirx_kernels/flashinfer/gemm/dense_blockscaled_gemm_sm107.py) ⟨sm_107a⟩,
+  [`grouped_gemm_masked_rubin`](tirx_kernels/flashinfer/gemm/grouped_gemm_masked_rubin.py) ⟨sm_107a⟩
+- **`flashinfer.fused_moe`:**
+  [`blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin`](tirx_kernels/flashinfer/fused_moe/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin.py) ⟨sm_107a⟩
+- **`flashinfer.topk`:**
+  [`fast_topk_clusters`](tirx_kernels/flashinfer/topk/fast_topk_clusters.py) ⟨+sm_110a⟩,
+  [`filtered_topk`](tirx_kernels/flashinfer/topk/filtered_topk.py) ⟨+sm_110a⟩,
+  [`radix_topk_multi_cta`](tirx_kernels/flashinfer/topk/radix_topk_multi_cta.py),
+  [`radix_topk_single_cta`](tirx_kernels/flashinfer/topk/radix_topk_single_cta.py),
+  [`stable_sort_topk_by_value`](tirx_kernels/flashinfer/topk/stable_sort_topk_by_value.py)
+
+#### Cake-generated kernels
+
+Ports of FlashInfer kernels that were themselves produced by Cake (the
+`backend="cake"` exports; upstream `csrc/cake_*`, the frozen generated
+`csrc/kda/flashkda_*` exports, the `csrc/blackwell_msa/` source exports, and the
+generated `csrc/tinygemm2_sm100.cu`).
+
+- **`flashinfer.kda`:**
+  [`flashkda_bf16_fused_m128`](tirx_kernels/flashinfer/kda/bf16_fused_m128.py),
+  [`flashkda_decode_t1_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t1_precomputed.py),
+  [`flashkda_decode_t2_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t2_precomputed.py),
+  [`flashkda_decode_t3_lower_bound`](tirx_kernels/flashinfer/kda/flashkda_decode_t3_lower_bound.py),
+  [`flashkda_decode_t4_precomputed`](tirx_kernels/flashinfer/kda/flashkda_decode_t4_precomputed.py),
+  [`flashkda_decode_t5_gram`](tirx_kernels/flashinfer/kda/flashkda_decode_t5_gram.py),
+  [`flashkda_decode_t6_gram`](tirx_kernels/flashinfer/kda/flashkda_decode_t6_gram.py)
 - **`flashinfer.cake_vsa`:**
   [`cake_vsa_blk128_compact_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_blk128_compact_sm100.py) ⟨sm_100a⟩,
   [`cake_vsa_ultrasparse_bsr_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_ultrasparse_bsr_sm100.py) ⟨sm_100a⟩,
@@ -155,18 +176,7 @@ Grouped by the FlashInfer Python entry point each port backs.
   [`blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103.py) ⟨sm_103a⟩,
   [`blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103`](tirx_kernels/flashinfer/msa_ops/blackwell_msa_reverse_prefill_bf16_paged_topk4_qload4_sm103.py) ⟨sm_103a⟩
 - **`flashinfer.gemm`:**
-  [`tinygemm2_sm100`](tirx_kernels/flashinfer/gemm/tinygemm2_sm100.py),
-  [`bmm_fp8_rubin`](tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py) ⟨sm_107a⟩,
-  [`dense_blockscaled_gemm_sm107`](tirx_kernels/flashinfer/gemm/dense_blockscaled_gemm_sm107.py) ⟨sm_107a⟩,
-  [`grouped_gemm_masked_rubin`](tirx_kernels/flashinfer/gemm/grouped_gemm_masked_rubin.py) ⟨sm_107a⟩
-- **`flashinfer.fused_moe`:**
-  [`blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin`](tirx_kernels/flashinfer/fused_moe/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin.py) ⟨sm_107a⟩
-- **`flashinfer.topk`:**
-  [`fast_topk_clusters`](tirx_kernels/flashinfer/topk/fast_topk_clusters.py) ⟨+sm_110a⟩,
-  [`filtered_topk`](tirx_kernels/flashinfer/topk/filtered_topk.py) ⟨+sm_110a⟩,
-  [`radix_topk_multi_cta`](tirx_kernels/flashinfer/topk/radix_topk_multi_cta.py),
-  [`radix_topk_single_cta`](tirx_kernels/flashinfer/topk/radix_topk_single_cta.py),
-  [`stable_sort_topk_by_value`](tirx_kernels/flashinfer/topk/stable_sort_topk_by_value.py)
+  [`tinygemm2_sm100`](tirx_kernels/flashinfer/gemm/tinygemm2_sm100.py)
 
 ### FlashMLA ports
 
