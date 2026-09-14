@@ -31,7 +31,7 @@ The public operation is exactly the source class's direct three-launch ABI:
 
 Bucketed-CSR construction, the forward O/LSE producer, allocation, zero fill,
 compilation and validation are host work outside the timed closure.  The
-kernel imports only `tirx_kernels.kern as K`; it uses no tile primitive, no
+kernel imports only `tirx_kernels.tirx_lite as txl`; it uses no tile primitive, no
 first-class layout, no multidimensional shared buffer and no CUDA function
 call.
 
@@ -647,5 +647,5 @@ normalization, batch-dependent block sizes, bucket transitions, i64 strides,
 
 The frozen representation contract is: `inspect_low_level_ir(...).ok`, no
 function calls, only rank-1 shared allocation, no tile primitive/layout, no
-inline CUDA source/call, and zero changes under `tirx_kernels/kern`, TVM or
+inline CUDA source/call, and zero changes under `tirx_kernels/tirx_lite`, TVM or
 low-level-IR exemptions.

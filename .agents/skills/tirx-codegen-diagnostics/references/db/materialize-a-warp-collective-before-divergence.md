@@ -19,8 +19,8 @@ materialized value everywhere else.
 warp_id = _shuffle_full_mask(raw_warp)
 
 # after: one collective, executed with the full warp, then reused as a value.
-warp_id = K.local_scalar("int32")
-K.assign(warp_id, _shuffle_full_mask(raw_warp))
+warp_id = txl.local_scalar("int32")
+txl.assign(warp_id, _shuffle_full_mask(raw_warp))
 ```
 
 Reuse the entry's already materialized value, bind the collective before the
@@ -41,7 +41,7 @@ eight correctness workloads.
 
 A recurrent KDA prefill hit the same boundary across 21 triangular pivot
 shuffles: plain aliases deadlocked wherever their consumers were divergent,
-while one local per pivot, one reused local, and `K.Bind` placed before the
+while one local per pivot, one reused local, and `txl.Bind` placed before the
 guard all passed the six-case correctness matrix.
 
 ## Boundary

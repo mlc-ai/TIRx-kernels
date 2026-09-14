@@ -38,13 +38,13 @@ After the independent sketch reviewer returns PASS, this file is immutable.
 
 ## Transcription boundary and invariants
 
-The executable module is one parameterized K-language port and imports the
-device language only as `import tirx_kernels.kern as K`. It may use raw
-`K.ptx[...]`, scalar K control flow, opaque TensorMaps, rank-one shared
+The executable module is one parameterized tirx-lite port and imports the
+device language only as `import tirx_kernels.tirx_lite as txl`. It may use raw
+`txl.ptx[...]`, scalar txl control flow, opaque TensorMaps, rank-one shared
 allocations, local register arrays, and ordinary integer helpers. It must not
-use a tile primitive, a first-class mapping/layout object, `K.cuda.func_call`,
+use a tile primitive, a first-class mapping/layout object, `txl.cuda.func_call`,
 an inline-CUDA function-call exemption, or any change under
-`tirx_kernels/kern/`.
+`tirx_kernels/tirx_lite/`.
 
 The production boundary is the SM107 branch reachable from `mm_fp4`: both
 operands are packed E2M1 FP4; scales are E4M3 with vector size 16 (NVFP4) or
@@ -608,7 +608,7 @@ checks both outputs with dtype-tight error bounds, using
 reference result is exactly representable; otherwise at most one output ULP
 plus the explicitly computed FP32 accumulation bound. NaNs, infinities,
 unwritten values, canary damage, or non-determinism are hard failures. Low-level
-IR must reject `K.cuda.func_call` and inline-CUDA function-call exemptions.
+IR must reject `txl.cuda.func_call` and inline-CUDA function-call exemptions.
 
 Performance is a later, permanently reviewer-free gate. Only `bench_suite`
 paired source/reference rows count, both sides must compile PTX 9.4 for

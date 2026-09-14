@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 from tvm.backend.cuda.lang.pipeline import MBarrier as _MBarrier
 from tvm.backend.cuda.lang.pipeline import Pipeline as _Pipeline
 from tvm.backend.cuda.lang.pipeline import PipelineState as _PipelineState
@@ -16,36 +16,36 @@ class PipelineState(_PipelineState):
     """The in-tree state model with its two parser macros traced natively."""
 
     def init(self, phase):
-        K.assign(self.stage, K.int32(0))
-        K.assign(self.phase, phase)
+        txl.assign(self.stage, txl.int32(0))
+        txl.assign(self.phase, phase)
 
     def advance(self):
         if self.depth > 1:
-            K.assign(self.stage, self.stage + K.int32(1))
-            with K.If(self.stage == self.depth), K.Then():
-                K.assign(self.stage, K.int32(0))
-                K.assign(self.phase, self.phase ^ K.int32(1))
+            txl.assign(self.stage, self.stage + txl.int32(1))
+            with txl.If(self.stage == self.depth), txl.Then():
+                txl.assign(self.stage, txl.int32(0))
+                txl.assign(self.phase, self.phase ^ txl.int32(1))
         else:
-            K.assign(self.phase, self.phase ^ K.int32(1))
+            txl.assign(self.phase, self.phase ^ txl.int32(1))
 
 
 class MBarrier(_MBarrier):
     """The in-tree mbarrier wrapper with native instruction-emitting methods."""
 
     def _init(self, count):
-        with K.If(self.leader), K.Then():
-            with K.unroll(0, self.depth) as i:
-                K.ptx.mbarrier.init.shared.b64(self.buf.ptr_to([i]), K.uint32(count))
+        with txl.If(self.leader), txl.Then():
+            with txl.unroll(0, self.depth) as i:
+                txl.ptx.mbarrier.init.shared.b64(self.buf.ptr_to([i]), txl.uint32(count))
 
     def _wait(self, stage, phase):
-        K.cuda.mbarrier_wait(self.buf.ptr_to([stage]), phase ^ self.phase_offset)
+        txl.cuda.mbarrier_wait(self.buf.ptr_to([stage]), phase ^ self.phase_offset)
 
     def _arrive(self, bar, pred=None, count=None):
-        count = K.uint32(1 if count is None else count)
+        count = txl.uint32(1 if count is None else count)
         if pred is None:
-            K.ptx.mbarrier.arrive.shared.b64(bar, count)
+            txl.ptx.mbarrier.arrive.shared.b64(bar, count)
         else:
-            K.ptx.mbarrier.arrive.shared.b64(bar, count, pred=pred)
+            txl.ptx.mbarrier.arrive.shared.b64(bar, count, pred=pred)
 
 
 class TMABar(MBarrier):
@@ -55,9 +55,9 @@ class TMABar(MBarrier):
 
     def _arrive_tma_local(self, bar, tx_count=None):
         if tx_count is None:
-            K.ptx.mbarrier.arrive.shared.b64(bar, K.uint32(1))
+            txl.ptx.mbarrier.arrive.shared.b64(bar, txl.uint32(1))
         else:
-            K.ptx.mbarrier.arrive.expect_tx.shared.b64(bar, K.uint32(tx_count))
+            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar, txl.uint32(tx_count))
 
 
 class TCGen05Bar(MBarrier):
@@ -65,14 +65,14 @@ class TCGen05Bar(MBarrier):
 
     def arrive(self, stage, cta_group=1, cta_mask=None, pred=None):
         if _tcgen05_commit_is_unicast(cta_mask):
-            K.ptx[
+            txl.ptx[
                 f"tcgen05.commit.cta_group::{cta_group}.mbarrier::arrive::one.shared::cluster.b64"
             ](self.buf.ptr_to([stage]), pred=pred)
         else:
-            K.ptx[
+            txl.ptx[
                 f"tcgen05.commit.cta_group::{cta_group}"
                 ".mbarrier::arrive::one.shared::cluster.multicast::cluster.b64"
-            ](self.buf.ptr_to([stage]), K.Cast("uint16", cta_mask), pred=pred)
+            ](self.buf.ptr_to([stage]), txl.Cast("uint16", cta_mask), pred=pred)
 
 
 _BAR_KINDS = {"tma": TMABar, "tcgen05": TCGen05Bar, "mbar": MBarrier}

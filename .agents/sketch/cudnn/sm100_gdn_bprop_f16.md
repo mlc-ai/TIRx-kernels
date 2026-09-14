@@ -80,10 +80,10 @@ advancement, register-budget changes, TensorMap replacement, store-group
 commit/wait, and TMEM allocation are schedule operations.
 
 The implementation imports device language only as
-`import tirx_kernels.kern as K`.  It uses no `T`, `Tx`, `I`, `tirx.tile.*`,
+`import tirx_kernels.tirx_lite as txl`.  It uses no `T`, `Tx`, `I`, `tirx.tile.*`,
 `TilePrimitiveCall`, first-class layout, rank>1 SMEM, inline CUDA source/call,
 or function-call exemption.  A single rank-1 `u8` arena is the only main shared
-allocation; `K.smem_pool(base=arena)` owns only the protocol prefix and all
+allocation; `txl.smem_pool(base=arena)` owns only the protocol prefix and all
 payload addresses are explicit scalar byte arithmetic.
 
 ## Complete non-executable sketch
@@ -588,21 +588,21 @@ if warp==8:
       for rev in range(item.cend-item.wstart):
         chunk=item.cend-1-rev; has_dstate=USE_DSTATE_IN or rev>0
 
-        wait(k_ready); gemm(SHARED_ACC0,K,K.T,accumulate=False); commit(kk_acc_ready)
+        wait(k_ready); gemm(SHARED_ACC0,K,txl.T,accumulate=False); commit(kk_acc_ready)
         # instruction_selection: tcgen05.mma.cta_group::1.kind::f16;
         # extent: 8 K=16 issues for [64,64,128], then one delayed tcgen05.commit
-        wait(q_ready); gemm(SHARED_ACC1,Q,K.T,False); commit(a_acc_ready)
+        wait(q_ready); gemm(SHARED_ACC1,Q,txl.T,False); commit(a_acc_ready)
         # instruction_selection: same family/extent, then one delayed commit
 
         if chunk>=FIRST_STATE_CHUNK:
             wait(state_ready); wait(kk_acc_done)
-            gemm(SHARED_ACC0,STATE.T,K.T,False); commit(k_state_ready)
+            gemm(SHARED_ACC0,STATE.T,txl.T,False); commit(k_state_ready)
             # instruction_selection: eight tcgen05.mma f16 issues and one commit;
             # checkpoint ownership intentionally continues through dK-state
 
         if has_dstate:
             wait(dstate_inp_ready); wait(dk_total_done)
-            gemm(DVDK_ACC,DSTATE_INP,K.T,False)
+            gemm(DVDK_ACC,DSTATE_INP,txl.T,False)
             commit(du_scale_ready); commit(dstate_inp_done)
             # instruction_selection: eight tcgen05.mma f16 issues and two commits
         else: wait(dk_total_done)
@@ -650,7 +650,7 @@ if warp==8:
 
         if chunk>=FIRST_STATE_CHUNK: wait(dq_scale_done)
         else: wait(dq_total_done)
-        gemm(DSTATE_INP,K.T,dA.T,accumulate=(chunk>=FIRST_STATE_CHUNK))
+        gemm(DSTATE_INP,txl.T,dA.T,accumulate=(chunk>=FIRST_STATE_CHUNK))
         commit(dq_total_ready); commit(a_done)
         # instruction_selection: four tcgen05.mma f16 issues; separate static
         # accumulate true/false sites, then two commits
@@ -661,7 +661,7 @@ if warp==8:
         commit(sdv_done)
 
         wait(dm_acc_done); wait(dk_attn_done)
-        gemm(DVDK_ACC,K.T,dM.T,True); gemm(DVDK_ACC,K.T,dM,True)
+        gemm(DVDK_ACC,txl.T,dM.T,True); gemm(DVDK_ACC,txl.T,dM,True)
         commit(dk_total_ready); commit(k_mma_done)
         # instruction_selection: two four-issue tcgen05.mma chains and two commits
       tile=consumer_next(tile)
@@ -1158,7 +1158,7 @@ sites in the 8-to-16 stage and 20 static
   every row.  PTX/SASS/NCU/codegen evidence is diagnostic only.
 - The representation gate requires a single rank-1 SMEM allocation, no
   low-level function calls or exemptions, and no changes under
-  `tirx_kernels/kern/`.
+  `tirx_kernels/tirx_lite/`.
 
 ## Instruction-selection evidence
 

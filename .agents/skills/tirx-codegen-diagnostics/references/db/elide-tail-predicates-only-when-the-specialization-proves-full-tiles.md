@@ -19,9 +19,9 @@ specialization that can receive a partial tile.
 full_tiles = all(int(length) % TILE == 0 for length in config["seq_lens"])
 
 if full_tiles:
-    K.assign(value, transformed)
+    txl.assign(value, transformed)
 else:
-    K.assign(value, K.if_then_else(index < runtime_extent, transformed, zero))
+    txl.assign(value, txl.if_then_else(index < runtime_extent, transformed, zero))
 ```
 
 ## Rationale

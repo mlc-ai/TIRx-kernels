@@ -36,14 +36,14 @@ assuming that a value of one is neutral.
 
 ```python
 # before: a second launch constraint duplicates the persistent grid cap.
-return K.kernel(
+return txl.kernel(
     warps=WARPS,
     min_blocks_per_sm=1,
     grid=[CLUSTER_M, CLUSTER_N, active_clusters],
 )(kernel)
 
 # after: the grid still limits concurrency; ptxas chooses allocation freely.
-return K.kernel(
+return txl.kernel(
     warps=WARPS,
     grid=[CLUSTER_M, CLUSTER_N, active_clusters],
 )(kernel)

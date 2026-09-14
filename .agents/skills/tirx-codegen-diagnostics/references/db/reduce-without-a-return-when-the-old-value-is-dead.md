@@ -14,11 +14,11 @@ discarded, and delete the dead destination.
 
 ```python
 # before: the warp waits on a global round trip for a value it drops.
-previous = K.local_scalar("float32")
-K.ptx["atom.global.add.f32"](previous, buffer.ptr_to([index]), value)
+previous = txl.local_scalar("float32")
+txl.ptx["atom.global.add.f32"](previous, buffer.ptr_to([index]), value)
 
 # after: same accumulate, no destination, no scoreboard entry.
-K.ptx["red.global.add.f32"](buffer.ptr_to([index]), value)
+txl.ptx["red.global.add.f32"](buffer.ptr_to([index]), value)
 ```
 
 ## Rationale

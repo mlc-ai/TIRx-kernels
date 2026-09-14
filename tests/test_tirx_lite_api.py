@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Contract tests for the kern kernel-facing API surface."""
+"""Contract tests for the tirx-lite kernel-facing API surface."""
 
-# NOTE: no `from __future__ import annotations` — kern kernels trace at
+# NOTE: no `from __future__ import annotations` — tirx-lite kernels trace at
 # decoration time and need live annotation objects (PEP 563 breaks them).
 
 from tvm_ffi import structural_walk
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 from tvm import ir, tirx
 
 
 def test_kernel_target_honors_prepared_compile_arch(monkeypatch):
-    @K.kernel(warps=1, arch="sm_100a", grid=False)
-    def probe(out: K.gptr("float32")):
-        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(1.0))
+    @txl.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: txl.gptr("float32")):
+        txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(1.0))
 
     monkeypatch.delenv("TIRX_PREPARE_CUDA_ARCH", raising=False)
     assert probe.target().arch == "sm_100a"
@@ -32,17 +32,17 @@ def test_kernel_target_honors_prepared_compile_arch(monkeypatch):
 
 
 def test_kernel_primfunc_preserves_sm107_architecture():
-    @K.kernel(warps=1, arch="sm_107a", grid=False)
-    def probe(out: K.gptr("float32")):
-        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(1.0))
+    @txl.kernel(warps=1, arch="sm_107a", grid=False)
+    def probe(out: txl.gptr("float32")):
+        txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(1.0))
 
     assert probe.arch == "sm_107a"
     assert probe.func.attrs["tirx.cuda_arch"] == "sm_107a"
 
 
 def _tir(build_body):
-    @K.kernel(warps=1, arch="sm_100a", grid=False)
-    def probe(out: K.gptr("float32")):
+    @txl.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: txl.gptr("float32")):
         build_body(out)
 
     return probe.func.script()
@@ -66,14 +66,14 @@ def test_mma_desc_loop_invariance_handles_unstaged_and_staged_tiles():
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
 
-            @K.kernel(warps=1, arch="sm_100a", grid=False)
-            def probe(out: K.gptr("uint64")):
+            @txl.kernel(warps=1, arch="sm_100a", grid=False)
+            def probe(out: txl.gptr("uint64")):
                 shape = (16, 128) if mode == "unstaged" else (2, 16, 128)
-                tile = K.smem_pool().alloc(shape, K.bf16, swizzle=K.SW128B)
-                with K.serial(2) as i:
+                tile = txl.smem_pool().alloc(shape, txl.bf16, swizzle=txl.SW128B)
+                with txl.serial(2) as i:
                     view = tile if mode == "unstaged" else tile[i if mode == "varying" else 0]
                     desc = view.mma_desc()
-                    K.ptx.st.global_.b64(out.ptr_to([i]), desc.value)
+                    txl.ptx.st.global_.b64(out.ptr_to([i]), desc.value)
 
         invariant = [w for w in caught if "encode is invariant" in str(w.message)]
         assert len(invariant) == (0 if mode == "varying" else 1)
@@ -82,13 +82,13 @@ def test_mma_desc_loop_invariance_handles_unstaged_and_staged_tiles():
 
 def test_local_scalar_init_matches_declare_then_assign():
     def two_statement(out):
-        x = K.local_scalar("float32")
-        K.assign(x, K.float32(3.0))
-        K.ptx.st.global_.f32(out.ptr_to([0]), x)
+        x = txl.local_scalar("float32")
+        txl.assign(x, txl.float32(3.0))
+        txl.ptx.st.global_.f32(out.ptr_to([0]), x)
 
     def init_form(out):
-        x = K.local_scalar("float32", init=K.float32(3.0))
-        K.ptx.st.global_.f32(out.ptr_to([0]), x)
+        x = txl.local_scalar("float32", init=txl.float32(3.0))
+        txl.ptx.st.global_.f32(out.ptr_to([0]), x)
 
     assert _tir(two_statement) == _tir(init_form)
 
@@ -97,32 +97,34 @@ def test_local_scalar_accepts_explicit_trace_name():
     seen = []
 
     def build(out):
-        counter = K.local_scalar("int32", init=K.int32(3), name="counter")
+        counter = txl.local_scalar("int32", init=txl.int32(3), name="counter")
         seen.append(counter.source.name)
-        K.ptx.st.global_.b32(out.ptr_to([0]), counter)
+        txl.ptx.st.global_.b32(out.ptr_to([0]), counter)
 
     _tir(build)
     assert seen == ["counter"]
 
 
 def test_sigmoid_tanh_approx_f32_has_materialized_ptx_call_contract():
-    @K.kernel(warps=1, arch="sm_100a", grid=False)
-    def probe(out: K.gptr("float32")):
-        result = K.idioms.sigmoid_tanh_approx_f32(K.float32(1.0))
-        K.ptx.st.global_.f32(out.ptr_to([0]), result)
+    @txl.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: txl.gptr("float32")):
+        result = txl.idioms.sigmoid_tanh_approx_f32(txl.float32(1.0))
+        txl.ptx.st.global_.f32(out.ptr_to([0]), result)
 
     names = []
     structural_walk(probe.func.body, (ir.Call, lambda op: names.append(op.op.name)))
     assert [name for name in names if name.startswith("tirx.ptx.")] == [
-        "tirx.ptx.tanh", "tirx.ptx.fma", "tirx.ptx.st"
+        "tirx.ptx.tanh",
+        "tirx.ptx.fma",
+        "tirx.ptx.st",
     ]
 
 
 def test_sigmoid_tanh_approx_f32_preserves_tanh_input():
-    @K.kernel(warps=1, arch="sm_100a", grid=False)
-    def probe(out: K.gptr("float32")):
-        result = K.idioms.sigmoid_tanh_approx_f32(tanh_input=K.float32(0.25))
-        K.ptx.st.global_.f32(out.ptr_to([0]), result)
+    @txl.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: txl.gptr("float32")):
+        result = txl.idioms.sigmoid_tanh_approx_f32(tanh_input=txl.float32(0.25))
+        txl.ptx.st.global_.f32(out.ptr_to([0]), result)
 
     (tanh,) = _calls_named(probe.func, "tirx.ptx.tanh")
     assert float(tanh.args[1]) == 0.25
@@ -134,23 +136,23 @@ def test_mamba_stochastic_conversion_uses_thor_fallback(monkeypatch):
     for arch in ("sm_100a", "sm_103a", "sm_107a", "sm_110a"):
         monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", arch)
 
-        @K.kernel(warps=1, arch="sm_100a", grid=False)
-        def probe(out: K.gptr("uint32")):
-            result = K.local_scalar("uint32")
-            _cvt_rs_f16x2_f32(result, K.float32(1.0), K.float32(-1.0), K.uint32(0x12340567))
-            K.ptx.st.global_.b32(out.ptr_to([0]), result)
+        @txl.kernel(warps=1, arch="sm_100a", grid=False)
+        def probe(out: txl.gptr("uint32")):
+            result = txl.local_scalar("uint32")
+            _cvt_rs_f16x2_f32(result, txl.float32(1.0), txl.float32(-1.0), txl.uint32(0x12340567))
+            txl.ptx.st.global_.b32(out.ptr_to([0]), result)
 
         native = _calls_named(probe.func, "tirx.ptx.cvt_rs_f16x2_f32")
         assert len(native) == (0 if arch == "sm_110a" else 1), arch
 
 
 def test_mbarrier_arrive_forwards_count_and_predicate():
-    @K.kernel(warps=1, arch="sm_100a", grid=False)
-    def probe(out: K.gptr("float32")):
-        barrier = K.MBarrier(K.smem_pool(), 1)
+    @txl.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: txl.gptr("float32")):
+        barrier = txl.MBarrier(txl.smem_pool(), 1)
         barrier.init(1)
-        barrier.arrive(0, pred=K.cuda.elect_sync(), count=2)
-        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+        barrier.arrive(0, pred=txl.cuda.elect_sync(), count=2)
+        txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
     (arrive,) = _calls_named(probe.func, "tirx.ptx.mbarrier_arrive")
     assert int(arrive.args[1]) == 2
@@ -159,32 +161,38 @@ def test_mbarrier_arrive_forwards_count_and_predicate():
 
 
 def test_stack_alloca_is_bound_exactly_once():
-    @K.kernel(warps=1, arch="sm_100a", grid=False)
-    def probe(out: K.gptr("float32")):
-        handle = K.stack_alloca("tensormap", 1)
-        K.keep_alive(handle)
-        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+    @txl.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: txl.gptr("float32")):
+        handle = txl.stack_alloca("tensormap", 1)
+        txl.keep_alive(handle)
+        txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
     statements = []
     structural_walk(probe.func.body, (tirx.Bind, lambda op: statements.append(op)))
-    assert sum(
-        getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_stack_alloca"
-        for op in statements
-    ) == 1
+    assert (
+        sum(
+            getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_stack_alloca"
+            for op in statements
+        )
+        == 1
+    )
 
 
 def test_call_packed_has_statement_semantics():
-    @K.kernel(warps=1, arch="sm_100a", grid=False, check_ir=False)
-    def probe(out: K.gptr("float32")):
-        K.call_packed("runtime.probe", K.int32(1))
-        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+    @txl.kernel(warps=1, arch="sm_100a", grid=False, check_ir=False)
+    def probe(out: txl.gptr("float32")):
+        txl.call_packed("runtime.probe", txl.int32(1))
+        txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
     statements = []
     structural_walk(probe.func.body, (tirx.Evaluate, lambda op: statements.append(op)))
-    assert sum(
-        getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_call_packed"
-        for op in statements
-    ) == 1
+    assert (
+        sum(
+            getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_call_packed"
+            for op in statements
+        )
+        == 1
+    )
 
 
 def test_retired_binding_forms_are_rejected_with_guidance():
@@ -192,23 +200,23 @@ def test_retired_binding_forms_are_rejected_with_guidance():
 
     for name in ("Bind", "let", "Let"):
         with pytest.raises(AttributeError, match="two spellings"):
-            getattr(K, name)
+            getattr(txl, name)
     with pytest.raises(AttributeError, match="emits itself"):
-        K.evaluate
+        txl.evaluate
 
 
 def test_kernel_build_runs_low_level_ir_check_by_default():
     import pytest
 
-    from tirx_kernels.kern.low_level_ir import LowLevelIRContractError
+    from tirx_kernels.tirx_lite.low_level_ir import LowLevelIRContractError
 
     def build(**kw):
-        @K.kernel(warps=1, arch="sm_100a", grid=False, **kw)
-        def probe(out: K.gptr("float32")):
+        @txl.kernel(warps=1, arch="sm_100a", grid=False, **kw)
+        def probe(out: txl.gptr("float32")):
             # a direct shared-memory buffer store is a contract violation
-            smem = K.alloc_buffer([4], "float32", scope="shared")
-            K.buffer_store(smem, K.float32(1.0), [0])
-            K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+            smem = txl.alloc_buffer([4], "float32", scope="shared")
+            txl.buffer_store(smem, txl.float32(1.0), [0])
+            txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
         return probe
 
@@ -220,18 +228,18 @@ def test_kernel_build_runs_low_level_ir_check_by_default():
 def test_specialize_register_targets_require_min_blocks_per_sm():
     import pytest
 
-    with pytest.raises(ValueError, match=r"setmaxnreg requires K\.kernel"):
+    with pytest.raises(ValueError, match=r"setmaxnreg requires txl\.kernel"):
 
-        @K.kernel(warps=4, arch="sm_100a", grid=False)
+        @txl.kernel(warps=4, arch="sm_100a", grid=False)
         def probe():
-            sp = K.specialize()
+            sp = txl.specialize()
             compute = sp.role("compute", range(4), regs=64)
             with compute:
                 pass
 
-    @K.kernel(warps=4, arch="sm_100a", grid=False)
+    @txl.kernel(warps=4, arch="sm_100a", grid=False)
     def unpinned_partition_without_register_targets():
-        sp = K.specialize()
+        sp = txl.specialize()
         compute = sp.role("compute", range(4))
         with compute:
             pass
@@ -241,23 +249,23 @@ def test_unsupported_tmem_buffer_scope_is_rejected():
     import pytest
 
     with pytest.raises(ValueError, match='scope="tmem"'):
-        K.alloc_buffer((1,), K.u32, scope="tmem")
+        txl.alloc_buffer((1,), txl.u32, scope="tmem")
     with pytest.raises(ValueError, match='scope="tmem"'):
-        K.decl_buffer((1,), K.u32, scope="tmem")
+        txl.decl_buffer((1,), txl.u32, scope="tmem")
 
     with pytest.raises(AttributeError, match="deliberately does not expose"):
-        K.TMEMPool
+        txl.TMEMPool
 
 
 def test_parser_and_raw_builder_entry_points_are_rejected():
     import pytest
 
     for name in ("parser", "ir"):
-        with pytest.raises(AttributeError, match=r"native K\.kernel"):
-            getattr(K, name)
+        with pytest.raises(AttributeError, match=r"native txl\.kernel"):
+            getattr(txl, name)
     for name in ("jit", "prim_func", "match_buffer", "device_entry"):
         with pytest.raises(AttributeError, match="deliberately does not expose"):
-            getattr(K, name)
+            getattr(txl, name)
 
 
 def test_thread_layout_is_not_a_kernel_entry_option():
@@ -265,26 +273,26 @@ def test_thread_layout_is_not_a_kernel_entry_option():
 
     with pytest.raises(TypeError, match="thread_layout"):
 
-        @K.kernel(warps=1, arch="sm_100a", thread_layout=False)
-        def probe(out: K.gptr(K.f32)):
-            K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+        @txl.kernel(warps=1, arch="sm_100a", thread_layout=False)
+        def probe(out: txl.gptr(txl.f32)):
+            txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
     with pytest.raises(TypeError):
-        K.thread_id([32])
+        txl.thread_id([32])
 
 
 def test_entry_usage_cap_does_not_shrink_cta_register_pool():
-    from tirx_kernels.kern.entry import cta_register_pool, entry_regs
+    from tirx_kernels.tirx_lite.entry import cta_register_pool, entry_regs
 
     assert entry_regs(warps=4, min_blocks_per_sm=2) == 255
     assert cta_register_pool(warps=4, min_blocks_per_sm=2) == 32768
 
-    @K.kernel(warps=4, arch="sm_100a", min_blocks_per_sm=2, grid=False)
-    def probe(out: K.gptr(K.f32)):
-        sp = K.specialize()
+    @txl.kernel(warps=4, arch="sm_100a", min_blocks_per_sm=2, grid=False)
+    def probe(out: txl.gptr(txl.f32)):
+        sp = txl.specialize()
         compute = sp.role("compute", range(4), regs=256)
         with compute:
-            K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+            txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
     calls = _calls_named(probe.func, "tirx.ptx.setmaxnreg")
     assert [(int(op.args[0]), op.args[1].value) for op in calls] == [(256, "inc")]
@@ -294,15 +302,15 @@ def test_specialize_uses_rounded_cta_register_pool_as_ceiling():
     import pytest
 
     def build(aux_regs):
-        @K.kernel(warps=20, arch="sm_100a", min_blocks_per_sm=1, grid=False)
-        def probe(out: K.gptr(K.f32)):
-            sp = K.specialize()
+        @txl.kernel(warps=20, arch="sm_100a", min_blocks_per_sm=1, grid=False)
+        def probe(out: txl.gptr(txl.f32)):
+            sp = txl.specialize()
             producer = sp.role("producer", range(0, 8), regs=104)
             consumer0 = sp.role("consumer0", range(8, 12), regs=120)
             consumer1 = sp.role("consumer1", range(12, 16), regs=112)
             auxiliary = sp.role("auxiliary", range(16, 20), regs=aux_regs)
             with producer:
-                K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+                txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
             with consumer0:
                 pass
             with consumer1:
@@ -320,9 +328,11 @@ def test_specialize_uses_rounded_cta_register_pool_as_ceiling():
 
 
 def test_gptr_shape_reuses_entry_scalar_parameters():
-    @K.kernel(warps=1, arch="sm_100a", grid=False)
-    def probe(out: K.gptr(K.f32, shape=lambda p: (p["rows"], p["cols"])), rows: K.i32, cols: K.i32):
-        K.ptx.st.global_.f32(out.ptr_to([0, 0]), K.float32(0))
+    @txl.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(
+        out: txl.gptr(txl.f32, shape=lambda p: (p["rows"], p["cols"])), rows: txl.i32, cols: txl.i32
+    ):
+        txl.ptx.st.global_.f32(out.ptr_to([0, 0]), txl.float32(0))
 
     out = probe.func.params[0]
     assert out.shape[0].same_as(probe.func.params[1])
@@ -334,9 +344,9 @@ def test_gptr_shape_rejects_unknown_scalar_parameters():
 
     with pytest.raises(ValueError, match="unknown scalar parameter 'missing'"):
 
-        @K.kernel(warps=1, arch="sm_100a", grid=False)
-        def probe(out: K.gptr(K.f32, shape=lambda p: (p["missing"],))):
-            K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+        @txl.kernel(warps=1, arch="sm_100a", grid=False)
+        def probe(out: txl.gptr(txl.f32, shape=lambda p: (p["missing"],))):
+            txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
 
 def test_retired_cuda_value_members_are_rejected_with_guidance():
@@ -344,13 +354,13 @@ def test_retired_cuda_value_members_are_rejected_with_guidance():
 
     for name in ("_shfl_xor_sync", "ldg", "any_sync", "atomic_add"):
         with pytest.raises(AttributeError, match="spelled DPS"):
-            getattr(K.cuda, name)
-    K.cuda.elect_sync  # exempt: pred= idiom
-    K.cuda.make_float2  # exempt: pure computation
+            getattr(txl.cuda, name)
+    txl.cuda.elect_sync  # exempt: pred= idiom
+    txl.cuda.make_float2  # exempt: pure computation
 
 
 def test_value_constructors_work_outside_kernel_trace():
-    value = K.uint64(0)
+    value = txl.uint64(0)
     assert str(value.ty.dtype) == "uint64"
 
 
@@ -359,16 +369,18 @@ def test_kernel_records_python_source_spans():
     import linecache
 
     def emit(out):
-        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+        txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
-    @K.kernel(warps=1, arch="sm_100a", grid=False)
-    def probe(out: K.gptr(K.f32)):
-        K.ptx.st.global_.f32(out.ptr_to([1]), K.float32(1))
+    @txl.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: txl.gptr(txl.f32)):
+        txl.ptx.st.global_.f32(out.ptr_to([1]), txl.float32(1))
         emit(out)
 
     assert probe.func.span is not None
     assert probe.func.span.source_name.name == inspect.getsourcefile(emit)
-    assert "@K.kernel" in linecache.getline(probe.func.span.source_name.name, probe.func.span.line)
+    assert "@txl.kernel" in linecache.getline(
+        probe.func.span.source_name.name, probe.func.span.line
+    )
 
     statements = probe.func.body.body.seq
     stores = [stmt for stmt in statements if type(stmt).__name__ == "Evaluate"]
@@ -391,8 +403,8 @@ def test_kernel_source_span_tracer_is_restored_after_failure():
     previous_trace = sys.gettrace()
     with pytest.raises(RuntimeError, match="trace failed"):
 
-        @K.kernel(warps=1, arch="sm_100a", grid=False)
-        def probe(out: K.gptr(K.f32)):
+        @txl.kernel(warps=1, arch="sm_100a", grid=False)
+        def probe(out: txl.gptr(txl.f32)):
             raise RuntimeError("trace failed")
 
     assert sys.gettrace() is previous_trace

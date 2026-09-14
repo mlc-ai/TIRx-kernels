@@ -22,20 +22,20 @@ cover a cold HBM fetch at the port's block time.
 ```python
 # before: the ring is the only prefetch; with 3 slots and 2 loads per block it
 # holds 1.5 blocks, so a cold-L2 fetch stalls the matrix warp.
-with K.serial(n_blocks - 1, unroll=False) as i:
+with txl.serial(n_blocks - 1, unroll=False) as i:
     n = n_max - 2 - i
     load_k(n)
     load_v(n)
 
 # after: pull block n-2 into L2 while the ring is busy with n and n-1.
 PREFETCH = 2 if kv_stage <= 3 else 0
-with K.serial(n_blocks - 1, unroll=False) as i:
+with txl.serial(n_blocks - 1, unroll=False) as i:
     n = n_max - 2 - i
     if PREFETCH:
-        with K.If(n - PREFETCH >= 0), K.Then():
-            with K.If(elected()), K.Then():
-                K.ptx["cp.async.bulk.prefetch.tensor.4d.L2.global.tile"](
-                    K.address_of(tmap_k), K.int32(0), K.Cast("int32", n_pf * BLK_N), head, batch
+        with txl.If(n - PREFETCH >= 0), txl.Then():
+            with txl.If(elected()), txl.Then():
+                txl.ptx["cp.async.bulk.prefetch.tensor.4d.L2.global.tile"](
+                    txl.address_of(tmap_k), txl.int32(0), txl.Cast("int32", n_pf * BLK_N), head, batch
                 )
                 # ... and the V box(es) of the same block
     load_k(n)

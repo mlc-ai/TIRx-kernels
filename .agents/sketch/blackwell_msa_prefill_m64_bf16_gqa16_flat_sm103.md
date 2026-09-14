@@ -38,11 +38,11 @@ are in scope. Other dtypes, head dimensions, GQA ratios, TopK values, paged KV,
 and other MSA schedules are out of scope.
 
 The executable module imports the device language only as
-`import tirx_kernels.kern as K`. It may use scalar K control flow, opaque
-TensorMaps, one-dimensional shared/register allocations, and raw `K.ptx[...]`
+`import tirx_kernels.tirx_lite as txl`. It may use scalar txl control flow, opaque
+TensorMaps, one-dimensional shared/register allocations, and raw `txl.ptx[...]`
 instructions. It uses no tile primitive, first-class layout or mapping object,
-`layout=` argument, direct TVM script namespace, `K.cuda.func_call`, inline-CUDA
-function-call exemption, or modification under `tirx_kernels/kern/`.
+`layout=` argument, direct TVM script namespace, `txl.cuda.func_call`, inline-CUDA
+function-call exemption, or modification under `tirx_kernels/tirx_lite/`.
 
 ## Pipeline at a glance
 

@@ -49,7 +49,7 @@ The static domain is:
 
 Out of scope: `(256,256)` (the separately dispatched `backward_hd256.py`),
 FP8 inputs, dropout, SM90, SM103/SM107 publication, mask planning, forward,
-preprocess, and postprocess. No code beneath `tirx_kernels/kern/` and no inline
+preprocess, and postprocess. No code beneath `tirx_kernels/tirx_lite/` and no inline
 CUDA function-call exemption belongs to this port.
 
 Static source constants are `M=N=128`, `Q_STAGE=1` for CTA group 2 and `2`

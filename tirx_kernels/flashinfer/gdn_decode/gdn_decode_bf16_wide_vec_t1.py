@@ -15,7 +15,7 @@ from unittest import SkipTest
 
 import torch
 
-import tirx_kernels.kern as TK
+import tirx_kernels.tirx_lite as txl
 from tirx_kernels.runner import bench
 
 KERNEL_META = {
@@ -58,112 +58,112 @@ def _shfl_bfly_f32(value, lane_xor):
     shuffle is emitted once here rather than re-emitted at every textual use
     of the returned value.
     """
-    shfl_bfly = TK.local_scalar("uint32")
-    TK.ptx.shfl_sync.bfly.b32(
+    shfl_bfly = txl.local_scalar("uint32")
+    txl.ptx.shfl_sync.bfly.b32(
         shfl_bfly,
-        TK.reinterpret("uint32", value),
-        TK.cast(lane_xor, "uint32"),
-        TK.uint32(31),
-        TK.uint32(4294967295),
+        txl.reinterpret("uint32", value),
+        txl.cast(lane_xor, "uint32"),
+        txl.uint32(31),
+        txl.uint32(4294967295),
     )
-    return TK.reinterpret("float32", shfl_bfly)
+    return txl.reinterpret("float32", shfl_bfly)
 
 
 def _local_scalar(dtype: str, value):
-    out = TK.alloc_local((1,), dtype)
-    TK.assign(out[0], value)
+    out = txl.alloc_local((1,), dtype)
+    txl.assign(out[0], value)
     return out
 
 
 def _load_state_bf16x8(buffer, index, values, value_offset):
-    words = TK.alloc_local((4,), "uint32", align=16)
-    TK.ptx["ld.global.L1::evict_first.v4.b32"](
+    words = txl.alloc_local((4,), "uint32", align=16)
+    txl.ptx["ld.global.L1::evict_first.v4.b32"](
         words[0], words[1], words[2], words[3], buffer.ptr_to([index])
     )
-    with TK.unroll(4) as pair:
-        TK.ptx.mov.b32(
+    with txl.unroll(4) as pair:
+        txl.ptx.mov.b32(
             values[value_offset + pair * 2],
-            TK.cuda.uint_as_float(TK.shift_left(words[pair], TK.uint32(16))),
+            txl.cuda.uint_as_float(txl.shift_left(words[pair], txl.uint32(16))),
         )
-        TK.ptx.mov.b32(
+        txl.ptx.mov.b32(
             values[value_offset + pair * 2 + 1],
-            TK.cuda.uint_as_float(TK.bitwise_and(words[pair], TK.uint32(0xFFFF0000))),
+            txl.cuda.uint_as_float(txl.bitwise_and(words[pair], txl.uint32(0xFFFF0000))),
         )
 
 
 def _load_state_bf16x8_vector_buffer(buffer, index, values, value_offset):
-    words = TK.alloc_local((4,), "uint32", align=16)
-    TK.ptx.ld.global_.v4.b32(
+    words = txl.alloc_local((4,), "uint32", align=16)
+    txl.ptx.ld.global_.v4.b32(
         words[0], words[1], words[2], words[3], buffer.ptr_to([index // ELEMS_PER_LANE])
     )
-    with TK.unroll(4) as pair:
-        TK.ptx.mov.b32(
+    with txl.unroll(4) as pair:
+        txl.ptx.mov.b32(
             values[value_offset + pair * 2],
-            TK.cuda.uint_as_float(TK.shift_left(words[pair], TK.uint32(16))),
+            txl.cuda.uint_as_float(txl.shift_left(words[pair], txl.uint32(16))),
         )
-        TK.ptx.mov.b32(
+        txl.ptx.mov.b32(
             values[value_offset + pair * 2 + 1],
-            TK.cuda.uint_as_float(TK.bitwise_and(words[pair], TK.uint32(0xFFFF0000))),
+            txl.cuda.uint_as_float(txl.bitwise_and(words[pair], txl.uint32(0xFFFF0000))),
         )
 
 
 def _load_bf16x8_bits(buffer, index, values):
-    words = TK.alloc_local((4,), "uint32", align=16)
-    TK.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
-    with TK.unroll(4) as pair:
-        TK.ptx.mov.b16(
-            values[pair * 2], TK.cast(TK.bitwise_and(words[pair], TK.uint32(0xFFFF)), "uint16")
+    words = txl.alloc_local((4,), "uint32", align=16)
+    txl.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
+    with txl.unroll(4) as pair:
+        txl.ptx.mov.b16(
+            values[pair * 2], txl.cast(txl.bitwise_and(words[pair], txl.uint32(0xFFFF)), "uint16")
         )
-        TK.ptx.mov.b16(
-            values[pair * 2 + 1], TK.cast(TK.shift_right(words[pair], TK.uint32(16)), "uint16")
+        txl.ptx.mov.b16(
+            values[pair * 2 + 1], txl.cast(txl.shift_right(words[pair], txl.uint32(16)), "uint16")
         )
 
 
 def _load_bf16x4_bits(buffer, index, values):
-    words = TK.alloc_local((2,), "uint32", align=8)
-    TK.ptx.ld.global_.v2.b32(words[0], words[1], buffer.ptr_to([index]))
-    with TK.unroll(2) as pair:
-        TK.ptx.mov.b16(
-            values[pair * 2], TK.cast(TK.bitwise_and(words[pair], TK.uint32(0xFFFF)), "uint16")
+    words = txl.alloc_local((2,), "uint32", align=8)
+    txl.ptx.ld.global_.v2.b32(words[0], words[1], buffer.ptr_to([index]))
+    with txl.unroll(2) as pair:
+        txl.ptx.mov.b16(
+            values[pair * 2], txl.cast(txl.bitwise_and(words[pair], txl.uint32(0xFFFF)), "uint16")
         )
-        TK.ptx.mov.b16(
-            values[pair * 2 + 1], TK.cast(TK.shift_right(words[pair], TK.uint32(16)), "uint16")
+        txl.ptx.mov.b16(
+            values[pair * 2 + 1], txl.cast(txl.shift_right(words[pair], txl.uint32(16)), "uint16")
         )
 
 
 def _store_state_f32x8(buffer, index, values, value_offset):
-    words = TK.alloc_local((4,), "uint32", align=16)
-    with TK.unroll(4) as pair:
-        TK.ptx.mov.b32(
+    words = txl.alloc_local((4,), "uint32", align=16)
+    with txl.unroll(4) as pair:
+        txl.ptx.mov.b32(
             words[pair],
-            TK.cuda.float22bfloat162_rn(
+            txl.cuda.float22bfloat162_rn(
                 values[value_offset + pair * 2], values[value_offset + pair * 2 + 1]
             ),
         )
-    TK.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
+    txl.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
 
 
 def _store_state_f32x8_vector_buffer(buffer, index, values, value_offset):
-    words = TK.alloc_local((4,), "uint32", align=16)
-    with TK.unroll(4) as pair:
-        TK.ptx.mov.b32(
+    words = txl.alloc_local((4,), "uint32", align=16)
+    with txl.unroll(4) as pair:
+        txl.ptx.mov.b32(
             words[pair],
-            TK.cuda.float22bfloat162_rn(
+            txl.cuda.float22bfloat162_rn(
                 values[value_offset + pair * 2], values[value_offset + pair * 2 + 1]
             ),
         )
-    TK.ptx["st.global.L1::evict_first.v4.b32"](
+    txl.ptx["st.global.L1::evict_first.v4.b32"](
         buffer.ptr_to([index // ELEMS_PER_LANE]), words[0], words[1], words[2], words[3]
     )
 
 
 def _packed_fma(lhs0, lhs1, rhs0, rhs1, acc0, acc1):
-    out = TK.local_scalar("uint64")
-    TK.ptx.fma.rn.f32x2(
+    out = txl.local_scalar("uint64")
+    txl.ptx.fma.rn.f32x2(
         out,
-        TK.cuda.make_float2(lhs0, lhs1),
-        TK.cuda.make_float2(rhs0, rhs1),
-        TK.cuda.make_float2(acc0, acc1),
+        txl.cuda.make_float2(lhs0, lhs1),
+        txl.cuda.make_float2(rhs0, rhs1),
+        txl.cuda.make_float2(acc0, acc1),
     )
     return out
 
@@ -247,40 +247,40 @@ def _make_gdn_decode_bf16_wide_vec_t1(
     CACHE_INTERMEDIATE_STATES,
     SAME_POOL,
 ):
-    @TK.kernel(
+    @txl.kernel(
         warps=NUM_WARPS, arch="sm_100a", grid=lambda p: p["batch"] * NUM_V_HEADS * NUM_V_TILES
     )
     def gdn_decode_bf16_wide_vec_t1(
-        state: TK.gptr[TK.bf16],
-        intermediate: TK.gptr[TK.bf16],
-        A_log: TK.gptr[TK.f32],
-        a: TK.gptr[TK.bf16],
-        dt_bias: TK.gptr[TK.f32],
-        q: TK.gptr[TK.bf16],
-        k: TK.gptr[TK.bf16],
-        v: TK.gptr[TK.bf16],
-        b_gate: TK.gptr[TK.bf16],
-        output: TK.gptr[TK.bf16],
-        read_indices: TK.gptr[TK.i32],
-        write_indices: TK.gptr[TK.i32],
-        state_slot_stride: TK.i64,
-        q_batch_stride: TK.i64,
-        k_batch_stride: TK.i64,
-        v_batch_stride: TK.i64,
-        batch: TK.i32,
+        state: txl.gptr[txl.bf16],
+        intermediate: txl.gptr[txl.bf16],
+        A_log: txl.gptr[txl.f32],
+        a: txl.gptr[txl.bf16],
+        dt_bias: txl.gptr[txl.f32],
+        q: txl.gptr[txl.bf16],
+        k: txl.gptr[txl.bf16],
+        v: txl.gptr[txl.bf16],
+        b_gate: txl.gptr[txl.bf16],
+        output: txl.gptr[txl.bf16],
+        read_indices: txl.gptr[txl.i32],
+        write_indices: txl.gptr[txl.i32],
+        state_slot_stride: txl.i64,
+        q_batch_stride: txl.i64,
+        k_batch_stride: txl.i64,
+        v_batch_stride: txl.i64,
+        batch: txl.i32,
     ):
-        smem = TK.smem_pool()
-        s_q = smem.alloc((K,), TK.f32, align=16)
-        s_k = smem.alloc((K,), TK.f32, align=16)
-        s_gb = smem.alloc((3,), TK.f32, align=16)
+        smem = txl.smem_pool()
+        s_q = smem.alloc((K,), txl.f32, align=16)
+        s_k = smem.alloc((K,), txl.f32, align=16)
+        s_gb = smem.alloc((3,), txl.f32, align=16)
         smem.commit(SHARED_BYTES)
-        linear_cta = TK.cta_id()
-        tid = TK.thread_id()
+        linear_cta = txl.cta_id()
+        tid = txl.thread_id()
         lane_in_warp = _local_scalar("int32", tid % 32)
         warp_raw = _local_scalar("int32", tid // 32)
 
-        state_vector = TK.decl_buffer(
-            (state_slot_stride * TK.cast(batch * POOL_FACTOR, "int64") // ELEMS_PER_LANE,),
+        state_vector = txl.decl_buffer(
+            (state_slot_stride * txl.cast(batch * POOL_FACTOR, "int64") // ELEMS_PER_LANE,),
             "uint32x4",
             data=state.data,
             scope="global",
@@ -296,210 +296,212 @@ def _make_gdn_decode_bf16_wide_vec_t1(
         n = _local_scalar("int32", cta_head[0] // NUM_V_HEADS)
         h = _local_scalar("int32", hv[0] // (NUM_V_HEADS // NUM_HEADS))
 
-        read_slot_raw = TK.local_scalar("int32")
-        TK.ptx.ld.global_.s32(read_slot_raw, read_indices.ptr_to([n[0]]))
+        read_slot_raw = txl.local_scalar("int32")
+        txl.ptx.ld.global_.s32(read_slot_raw, read_indices.ptr_to([n[0]]))
 
-        _max = TK.local_scalar("int32")
-        TK.ptx["max.s32"](_max, read_slot_raw, TK.int32(0))
+        _max = txl.local_scalar("int32")
+        txl.ptx["max.s32"](_max, read_slot_raw, txl.int32(0))
         read_slot = _local_scalar("int32", _max)
         write_slot = _local_scalar("int32", read_slot[0])
         if not SAME_POOL:
-            _ldg32 = TK.local_scalar("int32")
-            TK.ptx.ld.global_.s32(_ldg32, write_indices.ptr_to([n[0]]))
-            TK.ptx["max.s32"](write_slot[0], _ldg32, TK.int32(0))
+            _ldg32 = txl.local_scalar("int32")
+            txl.ptx.ld.global_.s32(_ldg32, write_indices.ptr_to([n[0]]))
+            txl.ptx["max.s32"](write_slot[0], _ldg32, txl.int32(0))
 
         read_state_base = _local_scalar(
             "int64",
-            TK.cast(read_slot[0], "int64") * state_slot_stride + TK.cast(hv[0] * V * K, "int64"),
+            txl.cast(read_slot[0], "int64") * state_slot_stride + txl.cast(hv[0] * V * K, "int64"),
         )
         write_state_base = _local_scalar("int64", read_state_base[0])
         if not SAME_POOL:
-            TK.assign(
+            txl.assign(
                 write_state_base[0],
-                TK.cast(write_slot[0], "int64") * state_slot_stride
-                + TK.cast(hv[0] * V * K, "int64"),
+                txl.cast(write_slot[0], "int64") * state_slot_stride
+                + txl.cast(hv[0] * V * K, "int64"),
             )
         # Phase 0: with the T=1-only kq value dead, independent warps can publish
         # normalized Q, normalized K, and the scalar gates concurrently.
-        with TK.If(warp_raw[0] == 0), TK.Then():
+        with txl.If(warp_raw[0] == 0), txl.Then():
             member_pre = _local_scalar("int32", lane_in_warp[0] % LANES_PER_GROUP)
             k_pre = _local_scalar("int32", member_pre[0] * ELEMS_PER_LANE)
-            q_bits = TK.alloc_local((ELEMS_PER_LANE,), "uint16")
-            r_q = TK.alloc_local((ELEMS_PER_LANE,), "float32")
+            q_bits = txl.alloc_local((ELEMS_PER_LANE,), "uint16")
+            r_q = txl.alloc_local((ELEMS_PER_LANE,), "float32")
             q_base = _local_scalar(
-                "int64", TK.cast(n[0], "int64") * q_batch_stride + h[0] * K + k_pre[0]
+                "int64", txl.cast(n[0], "int64") * q_batch_stride + h[0] * K + k_pre[0]
             )
             _load_bf16x8_bits(q, q_base[0], q_bits)
             for i in range(ELEMS_PER_LANE):
-                TK.ptx.cvt.f32.bf16(r_q[i], TK.cast(q_bits[i], "uint16"))
+                txl.ptx.cvt.f32.bf16(r_q[i], txl.cast(q_bits[i], "uint16"))
 
             if USE_QK_L2NORM:
                 sum_q = _local_scalar("float32", 0.0)
                 for i in range(ELEMS_PER_LANE):
-                    TK.ptx.fma.rn.f32.bf16(
+                    txl.ptx.fma.rn.f32.bf16(
                         sum_q[0],
-                        TK.cast(q_bits[i], "uint16"),
-                        TK.cast(q_bits[i], "uint16"),
+                        txl.cast(q_bits[i], "uint16"),
+                        txl.cast(q_bits[i], "uint16"),
                         sum_q[0],
                     )
                 for delta_index in range(4):
-                    delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
-                    TK.ptx["add.f32"](sum_q[0], sum_q[0], _shfl_bfly_f32(sum_q[0], delta[0]))
-                _add = TK.local_scalar("float32")
-                TK.ptx["add.f32"](_add, sum_q[0], TK.float32(1e-06))
-                _rsqrt = TK.local_scalar("float32")
-                TK.ptx["rsqrt.approx.ftz.f32"](_rsqrt, _add)
-                _mul = TK.local_scalar("float32")
-                TK.ptx["mul.f32"](_mul, _rsqrt, TK.float32(SCALE))
+                    delta = _local_scalar("int32", txl.shift_right(txl.int32(8), delta_index))
+                    txl.ptx["add.f32"](sum_q[0], sum_q[0], _shfl_bfly_f32(sum_q[0], delta[0]))
+                _add = txl.local_scalar("float32")
+                txl.ptx["add.f32"](_add, sum_q[0], txl.float32(1e-06))
+                _rsqrt = txl.local_scalar("float32")
+                txl.ptx["rsqrt.approx.ftz.f32"](_rsqrt, _add)
+                _mul = txl.local_scalar("float32")
+                txl.ptx["mul.f32"](_mul, _rsqrt, txl.float32(SCALE))
                 q_factor = _local_scalar("float32", _mul)
                 for i in range(ELEMS_PER_LANE):
-                    TK.ptx["mul.f32"](r_q[i], r_q[i], q_factor[0])
+                    txl.ptx["mul.f32"](r_q[i], r_q[i], q_factor[0])
             else:
                 for i in range(ELEMS_PER_LANE):
-                    TK.ptx["mul.f32"](r_q[i], r_q[i], TK.float32(SCALE))
+                    txl.ptx["mul.f32"](r_q[i], r_q[i], txl.float32(SCALE))
 
             for i in range(ELEMS_PER_LANE):
-                TK.ptx.st.shared.b32(s_q.ptr_to([k_pre[0] + i]), TK.reinterpret("uint32", r_q[i]))
+                txl.ptx.st.shared.b32(s_q.ptr_to([k_pre[0] + i]), txl.reinterpret("uint32", r_q[i]))
 
-        with TK.If(warp_raw[0] == 1), TK.Then():
+        with txl.If(warp_raw[0] == 1), txl.Then():
             member_pre = _local_scalar("int32", lane_in_warp[0] % LANES_PER_GROUP)
             k_pre = _local_scalar("int32", member_pre[0] * ELEMS_PER_LANE)
-            k_bits = TK.alloc_local((ELEMS_PER_LANE,), "uint16")
-            r_k = TK.alloc_local((ELEMS_PER_LANE,), "float32")
+            k_bits = txl.alloc_local((ELEMS_PER_LANE,), "uint16")
+            r_k = txl.alloc_local((ELEMS_PER_LANE,), "float32")
             k_base = _local_scalar(
-                "int64", TK.cast(n[0], "int64") * k_batch_stride + h[0] * K + k_pre[0]
+                "int64", txl.cast(n[0], "int64") * k_batch_stride + h[0] * K + k_pre[0]
             )
             _load_bf16x8_bits(k, k_base[0], k_bits)
             for i in range(ELEMS_PER_LANE):
-                TK.ptx.cvt.f32.bf16(r_k[i], TK.cast(k_bits[i], "uint16"))
+                txl.ptx.cvt.f32.bf16(r_k[i], txl.cast(k_bits[i], "uint16"))
 
             if USE_QK_L2NORM:
                 sum_k = _local_scalar("float32", 0.0)
                 for i in range(ELEMS_PER_LANE):
-                    TK.ptx.fma.rn.f32.bf16(
+                    txl.ptx.fma.rn.f32.bf16(
                         sum_k[0],
-                        TK.cast(k_bits[i], "uint16"),
-                        TK.cast(k_bits[i], "uint16"),
+                        txl.cast(k_bits[i], "uint16"),
+                        txl.cast(k_bits[i], "uint16"),
                         sum_k[0],
                     )
                 for delta_index in range(4):
-                    delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
-                    TK.ptx["add.f32"](sum_k[0], sum_k[0], _shfl_bfly_f32(sum_k[0], delta[0]))
-                _add2 = TK.local_scalar("float32")
-                TK.ptx["add.f32"](_add2, sum_k[0], TK.float32(1e-06))
-                _rsqrt2 = TK.local_scalar("float32")
-                TK.ptx["rsqrt.approx.ftz.f32"](_rsqrt2, _add2)
+                    delta = _local_scalar("int32", txl.shift_right(txl.int32(8), delta_index))
+                    txl.ptx["add.f32"](sum_k[0], sum_k[0], _shfl_bfly_f32(sum_k[0], delta[0]))
+                _add2 = txl.local_scalar("float32")
+                txl.ptx["add.f32"](_add2, sum_k[0], txl.float32(1e-06))
+                _rsqrt2 = txl.local_scalar("float32")
+                txl.ptx["rsqrt.approx.ftz.f32"](_rsqrt2, _add2)
                 k_factor = _local_scalar("float32", _rsqrt2)
                 for i in range(ELEMS_PER_LANE):
-                    TK.ptx["mul.f32"](r_k[i], r_k[i], k_factor[0])
+                    txl.ptx["mul.f32"](r_k[i], r_k[i], k_factor[0])
 
             for i in range(ELEMS_PER_LANE):
-                TK.ptx.st.shared.b32(s_k.ptr_to([k_pre[0] + i]), TK.reinterpret("uint32", r_k[i]))
+                txl.ptx.st.shared.b32(s_k.ptr_to([k_pre[0] + i]), txl.reinterpret("uint32", r_k[i]))
 
-        with TK.If(warp_raw[0] == 2), TK.Then():
-            A_value = TK.local_scalar("float32")
-            TK.ptx.ld.global_.b32(A_value, A_log.ptr_to([hv[0]]))
-            dt_value = TK.local_scalar("float32")
-            TK.ptx.ld.global_.b32(dt_value, dt_bias.ptr_to([hv[0]]))
-            a_bits = TK.local_scalar("uint16")
-            TK.ptx.ld.global_.b16(a_bits, a.ptr_to([n[0] * NUM_V_HEADS + hv[0]]))
-            _addbf = TK.local_scalar("float32")
-            TK.ptx.add.rn.f32.bf16(_addbf, TK.cast(a_bits, "uint16"), dt_value)
+        with txl.If(warp_raw[0] == 2), txl.Then():
+            A_value = txl.local_scalar("float32")
+            txl.ptx.ld.global_.b32(A_value, A_log.ptr_to([hv[0]]))
+            dt_value = txl.local_scalar("float32")
+            txl.ptx.ld.global_.b32(dt_value, dt_bias.ptr_to([hv[0]]))
+            a_bits = txl.local_scalar("uint16")
+            txl.ptx.ld.global_.b16(a_bits, a.ptr_to([n[0] * NUM_V_HEADS + hv[0]]))
+            _addbf = txl.local_scalar("float32")
+            txl.ptx.add.rn.f32.bf16(_addbf, txl.cast(a_bits, "uint16"), dt_value)
             x_value = _local_scalar("float32", _addbf)
-            _mul2 = TK.local_scalar("float32")
-            TK.ptx["mul.f32"](_mul2, x_value[0], TK.float32(LOG2_E))
-            _exp2 = TK.local_scalar("float32")
-            TK.ptx["ex2.approx.ftz.f32"](_exp2, _mul2)
+            _mul2 = txl.local_scalar("float32")
+            txl.ptx["mul.f32"](_mul2, x_value[0], txl.float32(LOG2_E))
+            _exp2 = txl.local_scalar("float32")
+            txl.ptx["ex2.approx.ftz.f32"](_exp2, _mul2)
             softplus_exp = _local_scalar("float32", _exp2)
-            _add3 = TK.local_scalar("float32")
-            TK.ptx["add.f32"](_add3, TK.float32(1.0), softplus_exp[0])
-            _log2 = TK.local_scalar("float32")
-            TK.ptx["lg2.approx.ftz.f32"](_log2, _add3)
+            _add3 = txl.local_scalar("float32")
+            txl.ptx["add.f32"](_add3, txl.float32(1.0), softplus_exp[0])
+            _log2 = txl.local_scalar("float32")
+            txl.ptx["lg2.approx.ftz.f32"](_log2, _add3)
             softplus_log2 = _local_scalar("float32", _log2)
-            _mul3 = TK.local_scalar("float32")
-            TK.ptx["mul.f32"](_mul3, softplus_log2[0], TK.float32(LN_2))
+            _mul3 = txl.local_scalar("float32")
+            txl.ptx["mul.f32"](_mul3, softplus_log2[0], txl.float32(LN_2))
             softplus_value = _local_scalar("float32", _mul3)
             use_softplus = _local_scalar(
                 "float32",
-                TK.if_then_else(x_value[0] <= TK.float32(20.0), TK.float32(1.0), TK.float32(0.0)),
+                txl.if_then_else(
+                    x_value[0] <= txl.float32(20.0), txl.float32(1.0), txl.float32(0.0)
+                ),
             )
-            _sub = TK.local_scalar("float32")
-            TK.ptx["sub.f32"](_sub, TK.float32(1.0), use_softplus[0])
+            _sub = txl.local_scalar("float32")
+            txl.ptx["sub.f32"](_sub, txl.float32(1.0), use_softplus[0])
             direct_weight = _local_scalar("float32", _sub)
-            _mul4 = TK.local_scalar("float32")
-            TK.ptx["mul.f32"](_mul4, x_value[0], direct_weight[0])
-            _fma = TK.local_scalar("float32")
-            TK.ptx["fma.rn.f32"](_fma, softplus_value[0], use_softplus[0], _mul4)
+            _mul4 = txl.local_scalar("float32")
+            txl.ptx["mul.f32"](_mul4, x_value[0], direct_weight[0])
+            _fma = txl.local_scalar("float32")
+            txl.ptx["fma.rn.f32"](_fma, softplus_value[0], use_softplus[0], _mul4)
             softplus_x = _local_scalar("float32", _fma)
-            _mul5 = TK.local_scalar("float32")
-            TK.ptx["mul.f32"](_mul5, A_value, TK.float32(LOG2_E))
-            _exp2_2 = TK.local_scalar("float32")
-            TK.ptx["ex2.approx.ftz.f32"](_exp2_2, _mul5)
+            _mul5 = txl.local_scalar("float32")
+            txl.ptx["mul.f32"](_mul5, A_value, txl.float32(LOG2_E))
+            _exp2_2 = txl.local_scalar("float32")
+            txl.ptx["ex2.approx.ftz.f32"](_exp2_2, _mul5)
             exp_A = _local_scalar("float32", _exp2_2)
-            _sub2 = TK.local_scalar("float32")
-            TK.ptx["sub.f32"](_sub2, TK.float32(0.0), exp_A[0])
-            _mul6 = TK.local_scalar("float32")
-            TK.ptx["mul.f32"](_mul6, _sub2, softplus_x[0])
+            _sub2 = txl.local_scalar("float32")
+            txl.ptx["sub.f32"](_sub2, txl.float32(0.0), exp_A[0])
+            _mul6 = txl.local_scalar("float32")
+            txl.ptx["mul.f32"](_mul6, _sub2, softplus_x[0])
             gate_exponent = _local_scalar("float32", _mul6)
 
-            with TK.If(lane_in_warp[0] == 0), TK.Then():
-                _mul7 = TK.local_scalar("float32")
-                TK.ptx["mul.f32"](_mul7, gate_exponent[0], TK.float32(LOG2_E))
-                _exp2_3 = TK.local_scalar("float32")
-                TK.ptx["ex2.approx.ftz.f32"](_exp2_3, _mul7)
+            with txl.If(lane_in_warp[0] == 0), txl.Then():
+                _mul7 = txl.local_scalar("float32")
+                txl.ptx["mul.f32"](_mul7, gate_exponent[0], txl.float32(LOG2_E))
+                _exp2_3 = txl.local_scalar("float32")
+                txl.ptx["ex2.approx.ftz.f32"](_exp2_3, _mul7)
                 g = _local_scalar("float32", _exp2_3)
-                TK.ptx.st.shared.b32(s_gb.ptr_to([0]), TK.reinterpret("uint32", g[0]))
+                txl.ptx.st.shared.b32(s_gb.ptr_to([0]), txl.reinterpret("uint32", g[0]))
 
-        with TK.If(warp_raw[0] == 3), TK.Then():
-            with TK.If(lane_in_warp[0] == 0), TK.Then():
-                b_bits = TK.local_scalar("uint16")
-                TK.ptx.ld.global_.b16(b_bits, b_gate.ptr_to([n[0] * NUM_V_HEADS + hv[0]]))
-                b_value = TK.local_scalar("float32")
-                TK.ptx.cvt.f32.bf16(b_value, TK.cast(b_bits, "uint16"))
-                _mul8 = TK.local_scalar("float32")
-                TK.ptx["mul.f32"](_mul8, b_value, TK.float32(-LOG2_E))
-                _exp2_4 = TK.local_scalar("float32")
-                TK.ptx["ex2.approx.ftz.f32"](_exp2_4, _mul8)
+        with txl.If(warp_raw[0] == 3), txl.Then():
+            with txl.If(lane_in_warp[0] == 0), txl.Then():
+                b_bits = txl.local_scalar("uint16")
+                txl.ptx.ld.global_.b16(b_bits, b_gate.ptr_to([n[0] * NUM_V_HEADS + hv[0]]))
+                b_value = txl.local_scalar("float32")
+                txl.ptx.cvt.f32.bf16(b_value, txl.cast(b_bits, "uint16"))
+                _mul8 = txl.local_scalar("float32")
+                txl.ptx["mul.f32"](_mul8, b_value, txl.float32(-LOG2_E))
+                _exp2_4 = txl.local_scalar("float32")
+                txl.ptx["ex2.approx.ftz.f32"](_exp2_4, _mul8)
                 exp_neg_b = _local_scalar("float32", _exp2_4)
-                _add4 = TK.local_scalar("float32")
-                TK.ptx["add.f32"](_add4, TK.float32(1.0), exp_neg_b[0])
-                _rcp = TK.local_scalar("float32")
-                TK.ptx["rcp.rn.f32"](_rcp, _add4)
+                _add4 = txl.local_scalar("float32")
+                txl.ptx["add.f32"](_add4, txl.float32(1.0), exp_neg_b[0])
+                _rcp = txl.local_scalar("float32")
+                txl.ptx["rcp.rn.f32"](_rcp, _add4)
                 beta = _local_scalar("float32", _rcp)
-                TK.ptx.st.shared.b32(s_gb.ptr_to([1]), TK.reinterpret("uint32", beta[0]))
+                txl.ptx.st.shared.b32(s_gb.ptr_to([1]), txl.reinterpret("uint32", beta[0]))
 
-        TK.cuda.cta_sync()
+        txl.cuda.cta_sync()
 
         # Phase 1: eight independent 16-lane groups.  Each source constexpr
         # iteration is physically unrolled and carries four state rows in registers.
         # The source compiler retains the same-token Q/K/g/beta shared values across
         # every unrolled V-row body, so materialize that physical register lifetime
         # explicitly: inline PTX shared loads are opaque to nvcc's CSE.
-        _lds32 = TK.local_scalar("uint32")
-        TK.ptx.ld.shared.b32(_lds32, s_gb.ptr_to([0]))
-        g_value = _local_scalar("float32", TK.reinterpret("float32", _lds32))
-        _lds32_2 = TK.local_scalar("uint32")
-        TK.ptx.ld.shared.b32(_lds32_2, s_gb.ptr_to([1]))
-        beta_value = _local_scalar("float32", TK.reinterpret("float32", _lds32_2))
-        r_k_main = TK.alloc_local((ELEMS_PER_LANE,), "float32")
-        r_q_main = TK.alloc_local((ELEMS_PER_LANE,), "float32")
+        _lds32 = txl.local_scalar("uint32")
+        txl.ptx.ld.shared.b32(_lds32, s_gb.ptr_to([0]))
+        g_value = _local_scalar("float32", txl.reinterpret("float32", _lds32))
+        _lds32_2 = txl.local_scalar("uint32")
+        txl.ptx.ld.shared.b32(_lds32_2, s_gb.ptr_to([1]))
+        beta_value = _local_scalar("float32", txl.reinterpret("float32", _lds32_2))
+        r_k_main = txl.alloc_local((ELEMS_PER_LANE,), "float32")
+        r_q_main = txl.alloc_local((ELEMS_PER_LANE,), "float32")
         for i in range(ELEMS_PER_LANE):
-            _lds32_3 = TK.local_scalar("uint32")
-            TK.ptx.ld.shared.b32(_lds32_3, s_k.ptr_to([k_start[0] + i]))
-            TK.ptx.mov.b32(r_k_main[i], TK.reinterpret("float32", _lds32_3))
-            _lds32_4 = TK.local_scalar("uint32")
-            TK.ptx.ld.shared.b32(_lds32_4, s_q.ptr_to([k_start[0] + i]))
-            TK.ptx.mov.b32(r_q_main[i], TK.reinterpret("float32", _lds32_4))
+            _lds32_3 = txl.local_scalar("uint32")
+            txl.ptx.ld.shared.b32(_lds32_3, s_k.ptr_to([k_start[0] + i]))
+            txl.ptx.mov.b32(r_k_main[i], txl.reinterpret("float32", _lds32_3))
+            _lds32_4 = txl.local_scalar("uint32")
+            txl.ptx.ld.shared.b32(_lds32_4, s_q.ptr_to([k_start[0] + i]))
+            txl.ptx.mov.b32(r_q_main[i], txl.reinterpret("float32", _lds32_4))
 
         for iter_index in range(ITERS_PER_GROUP):
             v_base = _local_scalar(
                 "int32", v_tile[0] * TILE_V + group[0] * ROWS_PER_GROUP + iter_index * ILP_ROWS
             )
             read_state_offset = _local_scalar(
-                "int64", read_state_base[0] + TK.cast(v_base[0] * K + k_start[0], "int64")
+                "int64", read_state_base[0] + txl.cast(v_base[0] * K + k_start[0], "int64")
             )
-            r_h = TK.alloc_local((ILP_ROWS * ELEMS_PER_LANE,), "float32")
-            state_bits = TK.alloc_local((ILP_ROWS * ELEMS_PER_LANE,), "uint16", align=16)
+            r_h = txl.alloc_local((ILP_ROWS * ELEMS_PER_LANE,), "float32")
+            state_bits = txl.alloc_local((ILP_ROWS * ELEMS_PER_LANE,), "uint16", align=16)
             for row in range(ILP_ROWS):
                 if TILE_V == 64:
                     _load_state_bf16x8_vector_buffer(
@@ -510,9 +512,9 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                         state, read_state_offset[0] + row * K, r_h, row * ELEMS_PER_LANE
                     )
 
-            sums = TK.alloc_local((ILP_ROWS,), "float32")
+            sums = txl.alloc_local((ILP_ROWS,), "float32")
             for row in range(ILP_ROWS):
-                TK.ptx.mov.b32(sums[row], TK.float32(0.0))
+                txl.ptx.mov.b32(sums[row], txl.float32(0.0))
 
             for pair in range(ELEMS_PER_LANE // 2):
                 for row in range(ILP_ROWS):
@@ -523,23 +525,23 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                             r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
                             g_value[0],
                             g_value[0],
-                            TK.float32(0.0),
-                            TK.float32(0.0),
+                            txl.float32(0.0),
+                            txl.float32(0.0),
                         ),
                     )
-                    TK.ptx.mov.b32(
-                        r_h[row * ELEMS_PER_LANE + pair * 2], TK.cuda.float2_x(pair_value[0])
+                    txl.ptx.mov.b32(
+                        r_h[row * ELEMS_PER_LANE + pair * 2], txl.cuda.float2_x(pair_value[0])
                     )
-                    TK.ptx.mov.b32(
-                        r_h[row * ELEMS_PER_LANE + pair * 2 + 1], TK.cuda.float2_y(pair_value[0])
+                    txl.ptx.mov.b32(
+                        r_h[row * ELEMS_PER_LANE + pair * 2 + 1], txl.cuda.float2_y(pair_value[0])
                     )
-                    TK.ptx["fma.rn.f32"](
+                    txl.ptx["fma.rn.f32"](
                         sums[row],
                         r_h[row * ELEMS_PER_LANE + pair * 2],
                         r_k_main[pair * 2],
                         sums[row],
                     )
-                    TK.ptx["fma.rn.f32"](
+                    txl.ptx["fma.rn.f32"](
                         sums[row],
                         r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
                         r_k_main[pair * 2 + 1],
@@ -547,27 +549,27 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                     )
 
             for delta_index in range(4):
-                delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
+                delta = _local_scalar("int32", txl.shift_right(txl.int32(8), delta_index))
                 for row in range(ILP_ROWS):
-                    TK.ptx["add.f32"](sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0]))
+                    txl.ptx["add.f32"](sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0]))
 
-            values = TK.alloc_local((ILP_ROWS,), "float32")
-            value_bits = TK.alloc_local((ILP_ROWS,), "uint16")
+            values = txl.alloc_local((ILP_ROWS,), "float32")
+            value_bits = txl.alloc_local((ILP_ROWS,), "uint16")
             v_input_base = _local_scalar(
-                "int64", TK.cast(n[0], "int64") * v_batch_stride + hv[0] * V + v_base[0]
+                "int64", txl.cast(n[0], "int64") * v_batch_stride + hv[0] * V + v_base[0]
             )
             if TILE_V == 128:
                 _load_bf16x4_bits(v, v_input_base[0], value_bits)
             else:
                 for row in range(ILP_ROWS):
-                    TK.ptx.ld.global_.b16(value_bits[row], v.ptr_to([v_input_base[0] + row]))
+                    txl.ptx.ld.global_.b16(value_bits[row], v.ptr_to([v_input_base[0] + row]))
             for row in range(ILP_ROWS):
-                _subbf = TK.local_scalar("float32")
-                TK.ptx.sub.rn.f32.bf16(_subbf, TK.cast(value_bits[row], "uint16"), sums[row])
-                TK.ptx["mul.f32"](values[row], _subbf, beta_value[0])
+                _subbf = txl.local_scalar("float32")
+                txl.ptx.sub.rn.f32.bf16(_subbf, txl.cast(value_bits[row], "uint16"), sums[row])
+                txl.ptx["mul.f32"](values[row], _subbf, beta_value[0])
 
             for row in range(ILP_ROWS):
-                TK.ptx.mov.b32(sums[row], TK.float32(0.0))
+                txl.ptx.mov.b32(sums[row], txl.float32(0.0))
             for pair in range(ELEMS_PER_LANE // 2):
                 q0 = _local_scalar("float32", r_q_main[pair * 2])
                 q1 = _local_scalar("float32", r_q_main[pair * 2 + 1])
@@ -583,37 +585,37 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                             r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
                         ),
                     )
-                    TK.ptx.mov.b32(
-                        r_h[row * ELEMS_PER_LANE + pair * 2], TK.cuda.float2_x(pair_value[0])
+                    txl.ptx.mov.b32(
+                        r_h[row * ELEMS_PER_LANE + pair * 2], txl.cuda.float2_x(pair_value[0])
                     )
-                    TK.ptx.mov.b32(
-                        r_h[row * ELEMS_PER_LANE + pair * 2 + 1], TK.cuda.float2_y(pair_value[0])
+                    txl.ptx.mov.b32(
+                        r_h[row * ELEMS_PER_LANE + pair * 2 + 1], txl.cuda.float2_y(pair_value[0])
                     )
-                    TK.ptx["fma.rn.f32"](
+                    txl.ptx["fma.rn.f32"](
                         sums[row], r_h[row * ELEMS_PER_LANE + pair * 2], q0[0], sums[row]
                     )
-                    TK.ptx["fma.rn.f32"](
+                    txl.ptx["fma.rn.f32"](
                         sums[row], r_h[row * ELEMS_PER_LANE + pair * 2 + 1], q1[0], sums[row]
                     )
 
             for delta_index in range(4):
-                delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
+                delta = _local_scalar("int32", txl.shift_right(txl.int32(8), delta_index))
                 for row in range(ILP_ROWS):
-                    TK.ptx["add.f32"](sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0]))
+                    txl.ptx["add.f32"](sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0]))
 
-            with TK.If(lane[0] == 0), TK.Then():
+            with txl.If(lane[0] == 0), txl.Then():
                 output_base = _local_scalar(
-                    "int64", TK.cast((n[0] * NUM_V_HEADS + hv[0]) * V + v_base[0], "int64")
+                    "int64", txl.cast((n[0] * NUM_V_HEADS + hv[0]) * V + v_base[0], "int64")
                 )
                 for row in range(ILP_ROWS):
-                    _bf16 = TK.local_scalar("uint16")
-                    TK.ptx.cvt.rn.bf16.f32(_bf16, sums[row])
-                    TK.ptx.st.global_.b16(output.ptr_to([output_base[0] + row]), _bf16)
+                    _bf16 = txl.local_scalar("uint16")
+                    txl.ptx.cvt.rn.bf16.f32(_bf16, sums[row])
+                    txl.ptx.st.global_.b16(output.ptr_to([output_base[0] + row]), _bf16)
 
             if CACHE_INTERMEDIATE_STATES:
                 intermediate_base = _local_scalar(
                     "int64",
-                    TK.cast(
+                    txl.cast(
                         (n[0] * NUM_V_HEADS + hv[0]) * V * K + v_base[0] * K + k_start[0], "int64"
                     ),
                 )
@@ -627,7 +629,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                     "int64",
                     read_state_offset[0]
                     if SAME_POOL
-                    else write_state_base[0] + TK.cast(v_base[0] * K + k_start[0], "int64"),
+                    else write_state_base[0] + txl.cast(v_base[0] * K + k_start[0], "int64"),
                 )
                 for row in range(ILP_ROWS):
                     if TILE_V == 64:

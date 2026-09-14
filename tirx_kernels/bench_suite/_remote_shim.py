@@ -269,8 +269,8 @@ def probe(tar_bytes: bytes, options_json: str) -> str:
         out["timings"]["extract_s"] = time.time() - started
         _install_tree(tree_root)
         import_started = time.time()
-        import tirx_kernels.kern.entry
-        import tirx_kernels.runner  # noqa: F401
+        import tirx_kernels.runner
+        import tirx_kernels.tirx_lite.entry  # noqa: F401
         from tirx_kernels.bench_suite import provenance
 
         out["timings"]["framework_import_s"] = time.time() - import_started

@@ -89,13 +89,13 @@ no spill.
 
   ```python
   # before: one elected region holds the waits, the arrivals and the issues.
-  with K.If(_elected()), K.Then():
+  with txl.If(_elected()), txl.Then():
       _wait_barrier(...)
       _expect_tx(...)
       _issue_transfer(...)
 
   # after: the waits run warp-wide; only what must be single-lane is predicated.
-  leader = K.cuda.elect_sync()
+  leader = txl.cuda.elect_sync()
   _wait_barrier(...)
   _expect_tx(..., pred=leader)
   _issue_transfer(..., pred=leader)
@@ -108,14 +108,14 @@ no spill.
 
   ```python
   # before: both unrolled arithmetic bodies survive behind half-warp control.
-  with K.If(lane < HALF), K.Then():
+  with txl.If(lane < HALF), txl.Then():
       result = _left_path(inputs)
-  with K.Else():
+  with txl.Else():
       result = _right_path(inputs)
 
   # after: one straight-line body selects with exact arithmetic identities.
-  right_weight = K.cast(lane // HALF, "float32")
-  left_weight = K.float32(1.0) - right_weight
+  right_weight = txl.cast(lane // HALF, "float32")
+  left_weight = txl.float32(1.0) - right_weight
   left = _left_path(inputs)
   right = _right_path(inputs)
   scaled_left = _packed_mul(left, left_weight)

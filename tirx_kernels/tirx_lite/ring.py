@@ -3,7 +3,7 @@
 
 """Unsigned subtract-wrap state for phase-tracked software rings."""
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 
 
 class RingState:
@@ -21,19 +21,19 @@ class RingState:
             raise ValueError(f"ring stride must be in [1, {depth}], got {stride!r}")
         self.depth = depth
         self.stride = stride
-        self.stage = K.local_scalar(K.u32, name="stage")
-        self.phase = K.local_scalar(K.u32, name="phase")
+        self.stage = txl.local_scalar(txl.u32, name="stage")
+        self.phase = txl.local_scalar(txl.u32, name="phase")
         self.init(stage, phase)
 
     def init(self, stage=0, phase=0):
-        K.assign(self.stage, K.Cast(K.u32, stage))
-        K.assign(self.phase, K.Cast(K.u32, phase))
+        txl.assign(self.stage, txl.Cast(txl.u32, stage))
+        txl.assign(self.phase, txl.Cast(txl.u32, phase))
 
     def advance(self):
-        K.assign(self.stage, self.stage + K.uint32(self.stride))
-        with K.If(self.stage >= K.uint32(self.depth)), K.Then():
-            K.assign(self.stage, self.stage - K.uint32(self.depth))
-            K.assign(self.phase, self.phase ^ K.uint32(1))
+        txl.assign(self.stage, self.stage + txl.uint32(self.stride))
+        with txl.If(self.stage >= txl.uint32(self.depth)), txl.Then():
+            txl.assign(self.stage, self.stage - txl.uint32(self.depth))
+            txl.assign(self.phase, self.phase ^ txl.uint32(1))
 
 
 __all__ = ["RingState"]

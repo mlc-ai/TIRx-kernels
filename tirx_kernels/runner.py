@@ -115,7 +115,7 @@ def prepared_gpu_benchmark(
 # Modules the A/B before tree shares byte-for-byte with the current checkout
 # (see bench_suite.ab._SHARED_HARNESS_PATHS). Their already-imported instances
 # are reused while the current benchmark module loads, so process-global side
-# effects (tvm registrations, compile hooks) never run twice. ``kern`` is
+# effects (tvm registrations, compile hooks) never run twice. ``tirx-lite`` is
 # deliberately absent: the before module must retain its revision's substrate
 # while the current benchmark contract imports the after revision's substrate.
 AB_SHARED_MODULE_PREFIXES = (

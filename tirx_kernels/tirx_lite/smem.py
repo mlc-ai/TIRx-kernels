@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
-"""Shared-memory allocation exposed as ``K.smem_pool`` plus address constructors.
+"""Shared-memory allocation exposed as ``txl.smem_pool`` plus address constructors.
 
 ``swizzle=None`` is the identity: a plain row-major tirx buffer. A swizzle
 mode makes the allocation a *composed* layout (the in-tree
@@ -76,7 +76,7 @@ class SmemDescriptor:
         """Broadcast the descriptor's low half without a device helper call.
 
         The TVM ``lang.smem_desc`` helper emits a ``tirx.cuda.func_call`` for
-        this operation.  Kern descriptors stay inside the low-level IR
+        this operation.  tirx-lite descriptors stay inside the low-level IR
         contract by spelling the same operation as the two descriptor moves
         and one warp shuffle directly.
         """
@@ -138,7 +138,7 @@ class KStep:
         return self.base
 
     def __repr__(self):
-        return f"<K.k_step base={self.base} steps={self._n_steps} linear={self._linear}>"
+        return f"<txl.k_step base={self.base} steps={self._n_steps} linear={self._linear}>"
 
 
 def _lint_invariant_encode(stage):
@@ -256,7 +256,7 @@ class KTile:
         return KTileView(self, stage)
 
     def __repr__(self):
-        return f"<K.tile {self.shape} {self.dtype} {self.swizzle.name}>"
+        return f"<txl.tile {self.shape} {self.dtype} {self.swizzle.name}>"
 
 
 class KTileView:
@@ -340,12 +340,12 @@ class KTileView:
         is the same, only which axis is K differs.
 
         This stays public for kernels that issue ``tcgen05.mma`` through bare
-        ``K.ptx`` rather than ``K.idioms.mma_chain``; the chain takes views and
+        ``txl.ptx`` rather than ``txl.idioms.mma_chain``; the chain takes views and
         encodes internally, so chain callers never call this.
         """
         return self.encode(major=major, mma_k=mma_k)[0]
 
-    # -- descriptor derivation, shared by mma_desc and K.idioms.mma_chain -----
+    # -- descriptor derivation, shared by mma_desc and txl.idioms.mma_chain -----
 
     def encode(self, major="k", mma_k=None, k0=0):
         """``(KDesc encoded at k == k0, off16_of)``.
@@ -498,7 +498,7 @@ class KTileView:
         return KDesc(desc, KStep(offset_of, max(n_steps, 1), linear, why), major), offset_of
 
     def __repr__(self):
-        return f"<K.tile.view stage={self.stage!r} of {self.tile!r}>"
+        return f"<txl.tile.view stage={self.stage!r} of {self.tile!r}>"
 
 
 class SmemPool:
@@ -563,6 +563,6 @@ def smem_pool(base=None):
     """
     session = _entry.current()
     if session.pool is not None:
-        raise RuntimeError("K.smem_pool() was already called for this kernel")
+        raise RuntimeError("txl.smem_pool() was already called for this kernel")
     session.pool = SmemPool(session, base)
     return session.pool

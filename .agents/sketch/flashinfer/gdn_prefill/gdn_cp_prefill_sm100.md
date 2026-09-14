@@ -253,7 +253,7 @@ def _t_precompute_sm100(K, Beta, T_out, Cu, K_HEADS, H_STATE,
         # instruction_selection: bar.sync 0; extent: one explicit source CTA sync after both pipelines
 
         if warp == 1:
-            descriptor_prefetch(K.tensor_map)
+            descriptor_prefetch(txl.tensor_map)
             # instruction_selection: prefetch.tensormap; extent: one K descriptor
             k_prod = acquire(k_bar, producer=True)
             # instruction_selection: mbarrier.try_wait.parity.shared.b64 loop; extent: one stage acquire
@@ -801,7 +801,7 @@ def _mn_precompute_sm100(K, V, T_in, Alpha, M_out, N_out, Cu,
         # Transfer MMA issuer: Z=M*K^T and M += Z*X; first block uses K*X.
         setmaxnreg("decrease", 72)
         # instruction_selection: setmaxnreg.dec.sync.aligned.u32; extent: current warp
-        descriptor_prefetch(K.tensor_map, V.tensor_map, T_in.tensor_map)
+        descriptor_prefetch(txl.tensor_map, V.tensor_map, T_in.tensor_map)
         # instruction_selection: prefetch.tensormap; extent: three descriptors
         tmem_wait_for_alloc()
         # instruction_selection: bar.sync 1,320; extent: warp 8 participation in the ten-warp MN allocator barrier
@@ -1453,7 +1453,7 @@ def _prefill_sm100(Q, K, V, Alpha, T_in, O, Cu, Fixed, InitWorkspace,
                      alias_mode="two source logical stages")
 
     if warp == 8:
-        descriptor_prefetch(Q.tensor_map, K.tensor_map, V.tensor_map,
+        descriptor_prefetch(Q.tensor_map, txl.tensor_map, V.tensor_map,
                             T_in.tensor_map, O.tensor_map)
         # instruction_selection: prefetch.tensormap; extent: five launch descriptors before pipeline initialization and TMEM allocation
 
@@ -1946,7 +1946,7 @@ def _prefill_sm100(Q, K, V, Alpha, T_in, O, Cu, Fixed, InitWorkspace,
         barrier("warp")
         # instruction_selection: bar.warp.sync -1; extent: warp 9 after Q descriptor copy
         rKMap = reg_tile("u64", [8])
-        copy_p2r(K.tensor_map, rKMap)
+        copy_p2r(txl.tensor_map, rKMap)
         # instruction_selection: ld.param.v2.b64; extent: four vector loads covering the 64-byte K descriptor template
         copy_r2g(rKMap, map_k[0:64])
         # instruction_selection: st.global.v4.b64; extent: two vector stores into the 128-byte K slot
@@ -1970,7 +1970,7 @@ def _prefill_sm100(Q, K, V, Alpha, T_in, O, Cu, Fixed, InitWorkspace,
         # instruction_selection: bar.warp.sync -1; extent: warp 9 before descriptor replacement
         tensormap_replace(map_q, address=Q, dims=(chunk_end,Q_HEADS,D), strides=Q.strides)
         # instruction_selection: tensormap.replace.tile.global_{address,dim,stride}.global.b1024.{b64,b32}; extent: Q address plus all encoded dimensions/strides
-        tensormap_replace(map_k, address=K, dims=(chunk_end,K_HEADS,D), strides=K.strides)
+        tensormap_replace(map_k, address=K, dims=(chunk_end,K_HEADS,D), strides=txl.strides)
         # instruction_selection: tensormap.replace.tile.global_{address,dim,stride}.global.b1024.{b64,b32}; extent: K address plus all encoded dimensions/strides
         tensormap_replace(map_v, address=V, dims=(D,chunk_end,V_HEADS), strides=V.strides)
         # instruction_selection: tensormap.replace.tile.global_{address,dim,stride}.global.b1024.{b64,b32}; extent: V address plus all encoded dimensions/strides
@@ -2189,22 +2189,22 @@ def _prefill_sm100(Q, K, V, Alpha, T_in, O, Cu, Fixed, InitWorkspace,
 
 | Launch | Logical result | Owner | A source | B source | Shape `(M,N,K)` | Accumulate |
 | --- | --- | --- | --- | --- | --- | --- |
-| T | `K @ K.T` | all four HMMA warps | `sK` | transposed `sK` | `64,64,128` | no |
+| T | `K @ txl.T` | all four HMMA warps | `sK` | transposed `sK` | `64,64,128` | no |
 | T inverse L2 | `-D8 @ C8`, then result `@ A8` | one warp per 16-row block | registers/shared | registers/shared | `16,8,8` twice | no |
 | T inverse L3 | `-D16 @ C16`, then result `@ A16` | warps 0..1 | registers/shared | registers/shared | `16,16,16` twice | no |
 | T inverse L4 | `-D32 @ C32`, then result `@ A32` | four warps | registers/shared | registers/shared | `16,16,32`; `16,32,16` | no |
-| MN | `Z=M @ K.T` | warp 8 | TMEM M-input | shared K transpose | `128,64,128` | no |
+| MN | `Z=M @ txl.T` | warp 8 | TMEM M-input | shared K transpose | `128,64,128` | no |
 | MN | first `M += K @ X`; later `M += M-input @ X` | warp 8 | shared K or TMEM M-input | shared X | `128,128,64` | yes |
 | MN | `X=K @ T` | warp 11 | shared K | shared T | `128,64,64` | no |
-| MN | `Y=N @ K.T` | warp 11 | TMEM N-input | shared K transpose | `128,64,128` | no |
+| MN | `Y=N @ txl.T` | warp 11 | TMEM N-input | shared K transpose | `128,64,128` | no |
 | MN | `N += N-input @ X` | warp 11 | TMEM N-input | shared X | `128,128,64` | yes |
 | UTC fixup | `state = N + state @ M` | warp 4 | TMEM TF32 state operand | shared TF32 M | `ROWS,128,128` | yes |
-| Prefill | `QK=Q @ K.T` | warp 8 | shared Q | shared K | `64,64,128` | no |
+| Prefill | `QK=Q @ txl.T` | warp 8 | shared Q | shared K | `64,64,128` | no |
 | Prefill | `KS=state @ K` | warp 10 | TMEM IO state-input | shared K | `128,64,128` | no |
 | Prefill | `QS=state @ Q` | warp 10 | TMEM IO state-input | shared Q | `128,64,128` | no |
 | Prefill | `NV=(V-KS) @ Ainv` | warp 10 | TMEM IO VKS | shared Ainv | `128,64,64` | no |
 | Prefill | `O=QS + NV @ QK` | warp 10 | TMEM IO NV | shared QK | `128,64,64` | yes, forced state |
-| Prefill | `state += decayV @ K.T` | warp 10 | TMEM IO decayV | shared K transpose | `128,128,64` | yes, forced state |
+| Prefill | `state += decayV @ txl.T` | warp 10 | TMEM IO decayV | shared K transpose | `128,128,64` | yes, forced state |
 
 All FP16 and BF16 MN/prefill rows above emit CTA-group-one `kind::f16`; BF16
 semantics are encoded by the MMA descriptors, not by a distinct opcode kind. The

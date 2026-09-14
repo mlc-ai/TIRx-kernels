@@ -2842,10 +2842,10 @@ file as 3, which is why the two order rows cite `.loc 3` explicitly.
 ## TIRx module and validation contract
 
 The implementation must import device language only as
-`import tirx_kernels.kern as K`.  Device code may not use `T`, `Tx`, `I`, any
+`import tirx_kernels.tirx_lite as txl`.  Device code may not use `T`, `Tx`, `I`, any
 `tirx.tile.*` API, a tile primitive, a first-class layout, or rank>1 SMEM.
 The one `u8[196608]` arena and the integer offsets above are part of the frozen
-translation.  `K.smem_pool(base=arena)` may allocate only the 920-byte protocol
+translation.  `txl.smem_pool(base=arena)` may allocate only the 920-byte protocol
 header; all data mappings are raw integer address arithmetic.
 
 `get_kernel` returns the prologue and main launch in order.  `prepare_data` and

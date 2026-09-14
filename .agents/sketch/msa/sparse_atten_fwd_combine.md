@@ -195,7 +195,7 @@ stays a genuine `div.s32` against a runtime parameter (`.loc 1 642 53`,
 
 `SharedStorage` (`:383-397`) reads like a static struct but
 `cutlass.utils.SmemAllocator` takes it from the dynamic pool, so the TIRx form
-is a `K.smem_pool()` allocation plus the `tirx.use_dyn_shared_memory` launch
+is a `txl.smem_pool()` allocation plus the `tirx.use_dyn_shared_memory` launch
 tag. `sLSETemperature` is a field of that struct unconditionally -- the
 temperature axis gates the *use*, not the allocation -- and the export proves
 it: with temperature off, `sMaxValidSplit` still starts at byte 8192

@@ -14,11 +14,11 @@ Use a pipeline cursor where stage and phase really are one protocol cursor, then
 verify the final lowering rather than assuming the abstraction is free.
 
 ```python
-state = K.PipelineState(NUM_STAGES, phase=0)
-with K.While(index < total):
+state = txl.PipelineState(NUM_STAGES, phase=0)
+with txl.While(index < total):
     full_barriers[state.stage].wait(state.phase)
     ...
-    K.assign(index, index + STEP)
+    txl.assign(index, index + STEP)
     state.advance()
 ```
 

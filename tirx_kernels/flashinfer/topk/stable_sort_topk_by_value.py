@@ -38,7 +38,7 @@ i.e. 8 or 4 digit passes at cub's ``RADIX_BITS = 4``.
 
 from typing import Any
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 from tirx_kernels.flashinfer.topk.filtered_topk import finalize_block_config
 from tirx_kernels.flashinfer.topk.radix_topk_single_cta import DTYPES, dtype_bytes
 from tirx_kernels.flashinfer.utils.block_radix_sort import (
@@ -140,11 +140,11 @@ def sort_key_u32(bits):
     not touch) moving in the opposite direction as an internal control.  Static
     instruction count is not the binding resource here; the form below stays.
     """
-    signed = K.reinterpret("int32", bits)
-    # K.Select, not K.if_then_else: the source's ternary is a predicated
+    signed = txl.reinterpret("int32", bits)
+    # txl.Select, not txl.if_then_else: the source's ternary is a predicated
     # `selp.b32`, and if_then_else would lower to a real branch.
-    mask = K.Select(signed < K.int32(0), K.uint32(0), K.uint32(0x7FFFFFFF))
-    return K.bitwise_xor(mask, bits)
+    mask = txl.Select(signed < txl.int32(0), txl.uint32(0), txl.uint32(0x7FFFFFFF))
+    return txl.bitwise_xor(mask, bits)
 
 
 def sort_key_u16(bits):
@@ -153,9 +153,9 @@ def sort_key_u16(bits):
     Same involution, in the dtype's own width (topk_common.cuh:61-64 forward,
     :67 for half and :93 for nv_bfloat16 on the way back).
     """
-    signed = K.reinterpret("int16", bits)
-    mask = K.Select(signed < K.int16(0), K.uint16(0), K.uint16(0x7FFF))
-    return K.bitwise_xor(mask, bits)
+    signed = txl.reinterpret("int16", bits)
+    mask = txl.Select(signed < txl.int16(0), txl.uint16(0), txl.uint16(0x7FFF))
+    return txl.bitwise_xor(mask, bits)
 
 
 def _validate(dtype: str, num_rows: int, k: int) -> dict[str, Any]:
@@ -196,12 +196,12 @@ def get_kernel(
     end_bit = plan["end_bit"]
     is32 = dtype == "float32"
 
-    @K.kernel(warps=block_threads // 32, arch="sm_100a", grid=num_rows)
+    @txl.kernel(warps=block_threads // 32, arch="sm_100a", grid=num_rows)
     def stable_sort_topk_by_value(
-        out_idx: K.gptr[K.i32, (num_rows * k,)], out_val: K.gptr[dtype, (num_rows * k,)]
+        out_idx: txl.gptr[txl.i32, (num_rows * k,)], out_val: txl.gptr[dtype, (num_rows * k,)]
     ):
-        row = K.cta_id()
-        tx = K.thread_id()
+        row = txl.cta_id()
+        tx = txl.thread_id()
 
         # --- shared layout: the cub TempStorage union only (:3097) ----------
         # Static `__shared__`, as the source declares it -- not the dynamic pool.
@@ -213,7 +213,7 @@ def get_kernel(
         )
 
         # Row bases (:3102-3103).  The kernel is entirely in place.
-        row_base = K.cast(row, "int64") * K.int64(k)
+        row_base = txl.cast(row, "int64") * txl.int64(k)
         # One base per thread, so each item's address is that base plus a
         # compile-time offset, as the source does -- it keeps two address
         # registers for the whole prologue and reaches the other items by
@@ -228,13 +228,13 @@ def get_kernel(
         # sign-extend on each access instead of reusing one 64-bit base.  That
         # costs 1.4% at k=300 -- the one rung where the `pos < k` branch does not
         # fold, so nothing else absorbs it (f32/f16/bf16 all 1.014x).
-        thread_base = K.local_scalar(
-            "int64", init=row_base + K.cast(tx * items_per_thread, "int64")
+        thread_base = txl.local_scalar(
+            "int64", init=row_base + txl.cast(tx * items_per_thread, "int64")
         )
 
-        keys = K.alloc_local([items_per_thread], "uint32")
-        values = K.alloc_local([items_per_thread], "uint32")
-        ranks = K.alloc_local([items_per_thread], "int32")
+        keys = txl.alloc_local([items_per_thread], "uint32")
+        values = txl.alloc_local([items_per_thread], "uint32")
+        ranks = txl.alloc_local([items_per_thread], "int32")
 
         # --- blocked load, descending key, ~0u padding (:3108-3119) --------
         # Item order follows the source: load the value, complement it, then load
@@ -242,33 +242,35 @@ def get_kernel(
         # a branch around each pair).  Issuing all the loads ahead of all the
         # conversions instead was measured on the shapes that reproduce to
         # +/-0.001 and is the same speed, so the source's order stands.
-        with K.unroll(items_per_thread) as i:
+        with txl.unroll(items_per_thread) as i:
             # `pos < k` stays a runtime predicate: pos depends on %tid.x, so a
             # static k only turns the operand into an immediate.  It folds away
             # only at the six rungs where k == BLOCK_THREADS * ITEMS_PER_THREAD.
             pos = tx * items_per_thread + i
-            with K.If(pos < k):
-                with K.Then():
-                    slot = thread_base + K.cast(i, "int64")
+            with txl.If(pos < k):
+                with txl.Then():
+                    slot = thread_base + txl.cast(i, "int64")
                     # Source order (:3108-3115): load the value, complement it,
                     # then load the index.
                     if is32:
-                        K.assign(keys[i], sort_key_u32(ld_global_bits(out_val, slot, is32)))
+                        txl.assign(keys[i], sort_key_u32(ld_global_bits(out_val, slot, is32)))
                     else:
-                        K.assign(
+                        txl.assign(
                             keys[i],
-                            K.cast(
-                                sort_key_u16(K.cast(ld_global_bits(out_val, slot, is32), "uint16")),
+                            txl.cast(
+                                sort_key_u16(
+                                    txl.cast(ld_global_bits(out_val, slot, is32), "uint16")
+                                ),
                                 "uint32",
                             ),
                         )
-                    K.assign(values[i], ld_global_u32(out_idx, slot))
-                with K.Else():
+                    txl.assign(values[i], ld_global_u32(out_idx, slot))
+                with txl.Else():
                     # ~0u is maximal within [0, end_bit) and every real key fits
                     # in end_bit bits, so padding sorts to the tail and is never
                     # written.
-                    K.assign(keys[i], K.uint32(0xFFFFFFFF))
-                    K.assign(values[i], K.uint32(0xFFFFFFFF))
+                    txl.assign(keys[i], txl.uint32(0xFFFFFFFF))
+                    txl.assign(values[i], txl.uint32(0xFFFFFFFF))
 
         # --- ascending, stable, blocked -> blocked (:3121-3122) -------------
         # Descending-by-value already lives in the complemented key, so this is
@@ -291,16 +293,16 @@ def get_kernel(
         )
 
         # --- blocked writeback (:3124-3132) --------------------------------
-        with K.unroll(items_per_thread) as i3:
+        with txl.unroll(items_per_thread) as i3:
             pos3 = tx * items_per_thread + i3
-            with K.If(pos3 < k), K.Then():
-                slot3 = thread_base + K.cast(i3, "int64")
+            with txl.If(pos3 < k), txl.Then():
+                slot3 = thread_base + txl.cast(i3, "int64")
                 st_global_u32(out_idx, slot3, values[i3])
                 # The same helper as the load: the map is an involution.
                 if is32:
                     st_global_u32(out_val, slot3, sort_key_u32(keys[i3]))
                 else:
-                    st_global_u16(out_val, slot3, sort_key_u16(K.cast(keys[i3], "uint16")))
+                    st_global_u16(out_val, slot3, sort_key_u16(txl.cast(keys[i3], "uint16")))
 
     return stable_sort_topk_by_value.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
 

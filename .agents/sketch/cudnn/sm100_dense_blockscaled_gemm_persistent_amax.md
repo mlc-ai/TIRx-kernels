@@ -719,9 +719,9 @@ and predicates; no branch may change this role/pipeline skeleton.
 
 - Registry name: `cudnn_sm100_dense_blockscaled_gemm_persistent_amax`, category
   `cudnn`, compute capability 10.
-- The device definition imports only `tirx_kernels.kern as K` and uses
-  `K.kernel`, `K.specialize`, `K.Pipeline`/barrier state, `K.TensorMap`, and
-  `K.ptx`. Direct `T`, `Tx`, `I`, tile primitives, and `tirx.tile.*` are absent.
+- The device definition imports only `tirx_kernels.tirx_lite as txl` and uses
+  `txl.kernel`, `txl.specialize`, `txl.Pipeline`/barrier state, `txl.TensorMap`, and
+  `txl.ptx`. Direct `T`, `Tx`, `I`, tile primitives, and `tirx.tile.*` are absent.
 - The module exports `KERNEL_META`, deterministic `CONFIGS`/`BENCH_CONFIGS`,
   `get_kernel`, `prepare_data`, `run_test`, `prepare_bench`, `run_gpu`, and
   `run_bench`. The 1,350 structural modes are a coverage universe, never 1,350

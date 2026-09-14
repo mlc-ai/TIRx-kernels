@@ -52,14 +52,14 @@ single-issuer semantics again around every uniform operation in the loop:
 
 ```python
 # before: the literal lane comparison does not carry an elected-lane proof.
-with K.If(lane == K.int32(0)), K.Then():
-    with K.While(has_work):
+with txl.If(lane == txl.int32(0)), txl.Then():
+    with txl.While(has_work):
         update_role_state()
         issue_transfers_and_collectives()
 
 # after: one hardware election owns the complete persistent role.
-with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
-    with K.While(has_work):
+with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+    with txl.While(has_work):
         update_role_state()
         issue_transfers_and_collectives()
 ```

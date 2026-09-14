@@ -24,12 +24,12 @@ ops = _arithmetic(True, packed_pair)
 
 
 def _binary(mnemonic, out, left, right):
-    K.ptx[f"{mnemonic}.rn.f32x2"](
+    txl.ptx[f"{mnemonic}.rn.f32x2"](
         packed,
-        K.cuda.make_float2(left[0], left[1]),
-        K.cuda.make_float2(right[0], right[1]),
+        txl.cuda.make_float2(left[0], left[1]),
+        txl.cuda.make_float2(right[0], right[1]),
     )
-    K.ptx["mov.b64"](out[0], out[1], packed)
+    txl.ptx["mov.b64"](out[0], out[1], packed)
 ```
 
 Keep the approximations and comparisons per-element -- `ex2`, `rcp`, `tanh`,
@@ -39,9 +39,9 @@ because the negation does not fold across the pack.
 
 ```python
 # before: two scalar negations per pair survive into SASS.
-K.ptx["add.rn.f32x2"](packed, K.cuda.make_float2(a0, a1), K.cuda.make_float2(-b0, -b1))
+txl.ptx["add.rn.f32x2"](packed, txl.cuda.make_float2(a0, a1), txl.cuda.make_float2(-b0, -b1))
 # after: the packed sub folds them.
-K.ptx["sub.rn.f32x2"](packed, K.cuda.make_float2(a0, a1), K.cuda.make_float2(b0, b1))
+txl.ptx["sub.rn.f32x2"](packed, txl.cuda.make_float2(a0, a1), txl.cuda.make_float2(b0, b1))
 ```
 
 ## Rationale

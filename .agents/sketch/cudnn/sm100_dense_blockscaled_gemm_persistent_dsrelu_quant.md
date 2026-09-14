@@ -60,10 +60,10 @@ into the same `(m,l)` element.
 
 SFD is excluded: the source branch prints `SFD not implemented` instead of
 producing an output. FP8/FP4 D and unproven public-predicate modes are also
-excluded. The target imports only `tirx_kernels.kern as K`; device code uses no
+excluded. The target imports only `tirx_kernels.tirx_lite as txl`; device code uses no
 tile primitive, first-class layout or fragment, multidimensional shared buffer,
 CUDA source/function call, or low-level-IR exemption. Low-level operations are
-spelled only through established `K.ptx[...]` forms in the target module.
+spelled only through established `txl.ptx[...]` forms in the target module.
 
 ## Pipeline at a glance
 
@@ -209,7 +209,7 @@ SFB_OFFSET = align_up(SFA_OFFSET + AB_STAGES * SFA_STAGE_BYTES, 1024)
 AMAX_OFFSET = align_up(SFB_OFFSET + AB_STAGES * SFB_STAGE_BYTES, 1024)
 SHARED_BYTES = align_up(AMAX_OFFSET + 4 * 4, 1024)
 assert SHARED_BYTES <= 232448
-smem = K.alloc_buffer((SHARED_BYTES,), K.u8, scope="shared.dyn")
+smem = txl.alloc_buffer((SHARED_BYTES,), txl.u8, scope="shared.dyn")
 
 # Anchor byte intervals, recovered from source storage order and PTX addresses:
 #   AB_FULL 0..39; AB_EMPTY 40..79
@@ -721,7 +721,7 @@ rtol=0.02`; FP32 paths use their separately recorded FP32 tolerance. Every
 declared config must pass without unexplained skips.
 
 Structural gates reject `TilePrimitiveCall`, `tirx.tile.*`, tile helpers,
-first-class layouts/fragments, non-rank-1 shared buffers, `K.cuda.func_call`,
+first-class layouts/fragments, non-rank-1 shared buffers, `txl.cuda.func_call`,
 embedded CUDA, and low-level-IR exemptions. `inspect_low_level_ir(...).ok` must
-hold with `func_calls == ()`, while `tirx_kernels/kern/` and the exception table
+hold with `func_calls == ()`, while `tirx_kernels/tirx_lite/` and the exception table
 remain unchanged.

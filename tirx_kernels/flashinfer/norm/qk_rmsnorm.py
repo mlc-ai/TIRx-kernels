@@ -13,7 +13,7 @@ public dispatch is in ``flashinfer/norm/__init__.py``.
 import os
 from typing import Any
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
 
 KERNEL_META = {
@@ -107,28 +107,28 @@ def _butterfly_sum_f32(acc, lane_xors: tuple[int, ...]) -> None:
     each round reading the value the previous round produced.  Every lane of
     the warp reaches every round, so this must be called at a convergent point.
     """
-    peer = K.local_scalar(K.u32)
+    peer = txl.local_scalar(txl.u32)
     for lane_xor in lane_xors:
-        K.ptx.shfl_sync.bfly.b32(
+        txl.ptx.shfl_sync.bfly.b32(
             peer,
-            K.reinterpret("uint32", acc),
-            K.uint32(lane_xor),
-            K.uint32(31),
-            K.uint32(0xFFFFFFFF),
+            txl.reinterpret("uint32", acc),
+            txl.uint32(lane_xor),
+            txl.uint32(31),
+            txl.uint32(0xFFFFFFFF),
         )
-        K.ptx.add.f32(acc, acc, K.reinterpret("float32", peer))
+        txl.ptx.add.f32(acc, acc, txl.reinterpret("float32", peer))
 
 
 def _load_global_element(values, value_offset: int, buffer, index, vec: int) -> None:
     """``values[value_offset : +vec]`` <- *vec* halves at ``buffer[index]``, one b16 load."""
     if vec == 1:
-        K.ptx.ld.global_.b16(values[value_offset], buffer.ptr_to([index]))
+        txl.ptx.ld.global_.b16(values[value_offset], buffer.ptr_to([index]))
     elif vec == 2:
-        K.ptx.ld.global_.v2.b16(
+        txl.ptx.ld.global_.v2.b16(
             values[value_offset], values[value_offset + 1], buffer.ptr_to([index])
         )
     else:
-        K.ptx.ld.global_.v4.b16(
+        txl.ptx.ld.global_.v4.b16(
             values[value_offset],
             values[value_offset + 1],
             values[value_offset + 2],
@@ -143,15 +143,15 @@ def _load_global_packed(values, value_offset: int, buffer, index, vec: int) -> N
     One ``ld.global`` of packed words followed by one ``mov.b32`` per word to
     split it into its two half lanes.
     """
-    words = K.alloc_local([vec // 2], K.u32)
+    words = txl.alloc_local([vec // 2], txl.u32)
     if vec == 2:
-        K.ptx.ld.global_.b32(words[0], buffer.ptr_to([index]))
+        txl.ptx.ld.global_.b32(words[0], buffer.ptr_to([index]))
     elif vec == 4:
-        K.ptx.ld.global_.v2.b32(words[0], words[1], buffer.ptr_to([index]))
+        txl.ptx.ld.global_.v2.b32(words[0], words[1], buffer.ptr_to([index]))
     else:
-        K.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
+        txl.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
     for pair in range(vec // 2):
-        K.ptx.mov.b32(
+        txl.ptx.mov.b32(
             values[value_offset + pair * 2], values[value_offset + pair * 2 + 1], words[pair]
         )
 
@@ -163,11 +163,11 @@ def _load_shared_bits(values, value_offset: int, shared_raw, byte_offset, vec: i
     shape reads four words and splits them with one ``mov.b32`` apiece.
     """
     if vec == 2:
-        K.ptx.ld.shared.v2.b16(
+        txl.ptx.ld.shared.v2.b16(
             values[value_offset], values[value_offset + 1], shared_raw.ptr_to([byte_offset])
         )
     elif vec == 4:
-        K.ptx.ld.shared.v4.b16(
+        txl.ptx.ld.shared.v4.b16(
             values[value_offset],
             values[value_offset + 1],
             values[value_offset + 2],
@@ -175,12 +175,12 @@ def _load_shared_bits(values, value_offset: int, shared_raw, byte_offset, vec: i
             shared_raw.ptr_to([byte_offset]),
         )
     else:
-        words = K.alloc_local([4], K.u32)
-        K.ptx.ld.shared.v4.b32(
+        words = txl.alloc_local([4], txl.u32)
+        txl.ptx.ld.shared.v4.b32(
             words[0], words[1], words[2], words[3], shared_raw.ptr_to([byte_offset])
         )
         for pair in range(4):
-            K.ptx.mov.b32(
+            txl.ptx.mov.b32(
                 values[value_offset + pair * 2], values[value_offset + pair * 2 + 1], words[pair]
             )
 
@@ -188,13 +188,13 @@ def _load_shared_bits(values, value_offset: int, shared_raw, byte_offset, vec: i
 def _store_global_element(buffer, index, values, value_offset: int, predicate, vec: int) -> None:
     """Write *vec* halves from ``values[value_offset:]`` to ``buffer[index]`` under *predicate*."""
     if vec == 1:
-        K.ptx.st.global_.b16(buffer.ptr_to([index]), values[value_offset], pred=predicate)
+        txl.ptx.st.global_.b16(buffer.ptr_to([index]), values[value_offset], pred=predicate)
     elif vec == 2:
-        K.ptx.st.global_.v2.b16(
+        txl.ptx.st.global_.v2.b16(
             buffer.ptr_to([index]), values[value_offset], values[value_offset + 1], pred=predicate
         )
     else:
-        K.ptx.st.global_.v4.b16(
+        txl.ptx.st.global_.v4.b16(
             buffer.ptr_to([index]),
             values[value_offset],
             values[value_offset + 1],
@@ -207,13 +207,13 @@ def _store_global_element(buffer, index, values, value_offset: int, predicate, v
 def _store_global_packed(buffer, index, words, word_offset: int, predicate, vec: int) -> None:
     """Write *vec* halves from the packed ``words[word_offset:]`` under *predicate*."""
     if vec == 2:
-        K.ptx.st.global_.b32(buffer.ptr_to([index]), words[word_offset], pred=predicate)
+        txl.ptx.st.global_.b32(buffer.ptr_to([index]), words[word_offset], pred=predicate)
     elif vec == 4:
-        K.ptx.st.global_.v2.b32(
+        txl.ptx.st.global_.v2.b32(
             buffer.ptr_to([index]), words[word_offset], words[word_offset + 1], pred=predicate
         )
     else:
-        K.ptx.st.global_.v4.b32(
+        txl.ptx.st.global_.v4.b32(
             buffer.ptr_to([index]),
             words[word_offset],
             words[word_offset + 1],
@@ -455,131 +455,133 @@ def get_kernel(
             return False
         return vb != vec_blocks - 1
 
-    @K.kernel(warps=threads // 32, arch="sm_100a", grid=False)
+    @txl.kernel(warps=threads // 32, arch="sm_100a", grid=False)
     def flashinfer_qk_rmsnorm(
-        x: K.gptr[dtype],
-        weight: K.gptr[dtype, (H,)],
-        y: K.gptr[dtype],
-        runtime_B: K.i64,
-        runtime_N: K.i64,
-        runtime_eps: K.f32,
-        x_batch_stride: K.i64,
-        x_head_stride: K.i64,
-        y_batch_stride: K.i64,
-        y_head_stride: K.i64,
+        x: txl.gptr[dtype],
+        weight: txl.gptr[dtype, (H,)],
+        y: txl.gptr[dtype],
+        runtime_B: txl.i64,
+        runtime_N: txl.i64,
+        runtime_eps: txl.f32,
+        x_batch_stride: txl.i64,
+        x_head_stride: txl.i64,
+        y_batch_stride: txl.i64,
+        y_head_stride: txl.i64,
     ):
         # QK_RMSNORM_KERNEL_START
-        block_raw = K.cta_id([K.cast(K.ceildiv(runtime_B * runtime_N, K.int64(rows)), "int32")])
-        tid = K.thread_id()
+        block_raw = txl.cta_id(
+            [txl.cast(txl.ceildiv(runtime_B * runtime_N, txl.int64(rows)), "int32")]
+        )
+        tid = txl.thread_id()
 
         if enable_pdl:
-            K.ptx.griddepcontrol.wait()
+            txl.ptx.griddepcontrol.wait()
 
-        block = K.cast(block_raw, "int32")
+        block = txl.cast(block_raw, "int32")
         row_in_cta = tid // tpr
         thread_in_row = tid % tpr
-        # The row index is 32-bit in the source. A ``K.gptr`` axis is int64 and
+        # The row index is 32-bit in the source. A ``txl.gptr`` axis is int64 and
         # the simplifier distributes a cast over a sum, so landing the finished
         # int32 value in a local gives the widening a single Var to sit on.
-        row_i32 = K.local_scalar(K.i32, init=block * rows + row_in_cta)
-        row_i64 = K.cast(row_i32, "int64")
+        row_i32 = txl.local_scalar(txl.i32, init=block * rows + row_in_cta)
+        row_i64 = txl.cast(row_i32, "int64")
         row_valid = row_i64 < runtime_B * runtime_N
         if thor_static_n:
-            batch_idx = K.local_scalar(K.i64)
-            head_idx = K.local_scalar(K.i64)
-            with K.If(runtime_N == K.int64(N)):
-                with K.Then():
-                    K.assign(batch_idx, row_i64 // K.int64(N))
-                    K.assign(head_idx, row_i64 % K.int64(N))
-                with K.Else():
-                    K.assign(batch_idx, row_i64 // runtime_N)
-                    K.assign(head_idx, row_i64 % runtime_N)
+            batch_idx = txl.local_scalar(txl.i64)
+            head_idx = txl.local_scalar(txl.i64)
+            with txl.If(runtime_N == txl.int64(N)):
+                with txl.Then():
+                    txl.assign(batch_idx, row_i64 // txl.int64(N))
+                    txl.assign(head_idx, row_i64 % txl.int64(N))
+                with txl.Else():
+                    txl.assign(batch_idx, row_i64 // runtime_N)
+                    txl.assign(head_idx, row_i64 % runtime_N)
         else:
             # One 64-bit divide and remainder per thread: must run once.
-            batch_idx = K.local_scalar(K.i64, init=row_i64 // runtime_N)
-            head_idx = K.local_scalar(K.i64, init=row_i64 % runtime_N)
+            batch_idx = txl.local_scalar(txl.i64, init=row_i64 // runtime_N)
+            head_idx = txl.local_scalar(txl.i64, init=row_i64 % runtime_N)
         warp = tid // 32
         lane = tid % 32
         row_warp = warp // warps_per_row
         warp_in_row = warp % warps_per_row
 
-        shared_raw = K.smem_pool().alloc([smem_bytes], K.u8)
+        shared_raw = txl.smem_pool().alloc([smem_bytes], txl.u8)
 
-        x_bits = K.alloc_local([pair_values], K.u16)
-        w_bits = K.alloc_local([pair_values], K.u16)
-        x_f32 = K.alloc_local([pair_values], K.f32)
-        x_f32_pairs = K.alloc_local([packed_pairs], K.u64)
-        w_f32 = K.alloc_local([pair_values], K.f32)
+        x_bits = txl.alloc_local([pair_values], txl.u16)
+        w_bits = txl.alloc_local([pair_values], txl.u16)
+        x_f32 = txl.alloc_local([pair_values], txl.f32)
+        x_f32_pairs = txl.alloc_local([packed_pairs], txl.u64)
+        w_f32 = txl.alloc_local([pair_values], txl.f32)
         # The odd upper half of the last pair is a don't-care lane the source
         # leaves uninitialized; reading it keeps the packed shape intact.
-        undefined_f32 = K.local_scalar(K.f32)
-        packed = K.local_scalar(K.u64)
+        undefined_f32 = txl.local_scalar(txl.f32)
+        packed = txl.local_scalar(txl.u64)
 
         if not use_async:
             # A masked lane must contribute exact zeros, and the source zeroes
             # whichever staging shape that specialization goes on to read.
             if packed_x_pairs:
-                zero = K.local_scalar(K.f32)
-                K.ptx.mov.b32(zero, K.float32(0))
+                zero = txl.local_scalar(txl.f32)
+                txl.ptx.mov.b32(zero, txl.float32(0))
                 for pair in range(packed_pairs):
-                    K.ptx.mov.b64(x_f32_pairs[pair], zero, zero)
+                    txl.ptx.mov.b64(x_f32_pairs[pair], zero, zero)
             elif full_tile:
                 for value in range(total_values):
-                    K.ptx.mov.b32(x_f32[value], K.float32(0))
+                    txl.ptx.mov.b32(x_f32[value], txl.float32(0))
             elif vb_pow2 and total_values > 1:
                 for pair in range(total_values // 2):
-                    K.ptx.mov.b32(x_bits[pair * 2], x_bits[pair * 2 + 1], K.uint32(0))
+                    txl.ptx.mov.b32(x_bits[pair * 2], x_bits[pair * 2 + 1], txl.uint32(0))
             else:
                 for value in range(total_values):
-                    K.ptx.mov.b16(x_bits[value], K.uint16(0))
+                    txl.ptx.mov.b16(x_bits[value], txl.uint16(0))
 
         for vb in range(vec_blocks):
             local_col = (thread_in_row + vb * tpr) * vec
             col_valid = local_col < H
             x_offset = (
-                batch_idx * x_batch_stride + head_idx * x_head_stride + K.cast(local_col, "int64")
+                batch_idx * x_batch_stride + head_idx * x_head_stride + txl.cast(local_col, "int64")
             )
             if use_async:
                 if thor_predicated_async:
-                    K.ptx[_CP_ASYNC](
+                    txl.ptx[_CP_ASYNC](
                         shared_raw.ptr_to([(row_in_cta * cols + local_col) * _ELEM_BYTES]),
                         x.ptr_to([x_offset]),
                         copy_bytes,
-                        K.cast(K.if_then_else(col_valid, copy_bytes, 0), "uint32"),
+                        txl.cast(txl.if_then_else(col_valid, copy_bytes, 0), "uint32"),
                         pred=row_valid,
                     )
                 else:
-                    with K.If(row_valid), K.Then():
+                    with txl.If(row_valid), txl.Then():
                         # Ignore-src: an out-of-range column copies nothing and the
                         # staged bytes read back as zero.
-                        K.ptx[_CP_ASYNC](
+                        txl.ptx[_CP_ASYNC](
                             shared_raw.ptr_to([(row_in_cta * cols + local_col) * _ELEM_BYTES]),
                             x.ptr_to([x_offset]),
                             copy_bytes,
-                            K.cast(K.if_then_else(col_valid, copy_bytes, 0), "uint32"),
+                            txl.cast(txl.if_then_else(col_valid, copy_bytes, 0), "uint32"),
                         )
             else:
-                with K.If(K.And(row_valid, col_valid)), K.Then():
+                with txl.If(txl.And(row_valid, col_valid)), txl.Then():
                     if sync_x_packed:
                         _load_global_packed(x_bits, vb * vec, x, x_offset, vec)
                     else:
                         if total_values == 1:
-                            K.ptx.mov.b16(x_bits[0], K.uint16(0))
+                            txl.ptx.mov.b16(x_bits[0], txl.uint16(0))
                         _load_global_element(x_bits, vb * vec, x, x_offset, vec)
 
         if use_async:
-            K.ptx.cp.async_.commit_group()
+            txl.ptx.cp.async_.commit_group()
 
         for vb in range(vec_blocks):
             local_col = (thread_in_row + vb * tpr) * vec
-            with K.If(local_col < H), K.Then():
+            with txl.If(local_col < H), txl.Then():
                 if weight_uses_packed(vb):
                     _load_global_packed(w_bits, vb * vec, weight, local_col, vec)
                 else:
                     _load_global_element(w_bits, vb * vec, weight, local_col, vec)
 
         if use_async:
-            K.ptx.cp.async_.wait_group(0)
+            txl.ptx.cp.async_.wait_group(0)
             for vb in range(vec_blocks):
                 local_col = (thread_in_row + vb * tpr) * vec
                 _load_shared_bits(
@@ -587,75 +589,75 @@ def get_kernel(
                 )
 
         if packed_x_pairs:
-            with K.If(row_valid), K.Then():
+            with txl.If(row_valid), txl.Then():
                 for pair in range(packed_pairs):
-                    x_low = K.local_scalar(K.f32)
-                    x_high = K.local_scalar(K.f32)
-                    K.ptx[cvt_to_f32](x_low, x_bits[pair * 2])
-                    K.ptx[cvt_to_f32](x_high, x_bits[pair * 2 + 1])
-                    K.ptx.mov.b64(x_f32_pairs[pair], x_low, x_high)
+                    x_low = txl.local_scalar(txl.f32)
+                    x_high = txl.local_scalar(txl.f32)
+                    txl.ptx[cvt_to_f32](x_low, x_bits[pair * 2])
+                    txl.ptx[cvt_to_f32](x_high, x_bits[pair * 2 + 1])
+                    txl.ptx.mov.b64(x_f32_pairs[pair], x_low, x_high)
         elif not use_async and full_tile:
-            with K.If(row_valid), K.Then():
+            with txl.If(row_valid), txl.Then():
                 for value in range(total_values):
-                    K.ptx[cvt_to_f32](x_f32[value], x_bits[value])
+                    txl.ptx[cvt_to_f32](x_f32[value], x_bits[value])
         else:
             for value in range(total_values):
-                K.ptx[cvt_to_f32](x_f32[value], x_bits[value])
+                txl.ptx[cvt_to_f32](x_f32[value], x_bits[value])
 
-        local_sum = K.local_scalar(K.f32)
+        local_sum = txl.local_scalar(txl.f32)
         if total_values == 1:
-            K.ptx[fma_half_to_f32](local_sum, x_bits[0], x_bits[0], K.float32(0.0))
+            txl.ptx[fma_half_to_f32](local_sum, x_bits[0], x_bits[0], txl.float32(0.0))
         else:
-            x_sq = K.alloc_local([pair_values], K.f32)
+            x_sq = txl.alloc_local([pair_values], txl.f32)
             for pair in range(packed_pairs):
                 if packed_x_pairs:
                     x_pair = x_f32_pairs[pair]
                 else:
                     # Both squaring operands are the same packed value; land it
                     # once instead of emitting the pack twice.
-                    x_pair = K.local_scalar(
-                        K.u64, init=K.cuda.make_float2(x_f32[pair * 2], x_f32[pair * 2 + 1])
+                    x_pair = txl.local_scalar(
+                        txl.u64, init=txl.cuda.make_float2(x_f32[pair * 2], x_f32[pair * 2 + 1])
                     )
-                K.ptx.mul.f32x2(packed, x_pair, x_pair)
-                K.ptx.mov.b64(x_sq[pair * 2], x_sq[pair * 2 + 1], packed)
-            K.assign(local_sum, K.float32(0.0))
+                txl.ptx.mul.f32x2(packed, x_pair, x_pair)
+                txl.ptx.mov.b64(x_sq[pair * 2], x_sq[pair * 2 + 1], packed)
+            txl.assign(local_sum, txl.float32(0.0))
             for value in range(total_values):
-                K.ptx.add.f32(local_sum, local_sum, x_sq[value])
+                txl.ptx.add.f32(local_sum, local_sum, x_sq[value])
 
         _butterfly_sum_f32(local_sum, row_lane_xors)
         warp_sum = local_sum
 
         if warps_per_row > 1:
-            with K.If(lane == 0), K.Then():
-                K.ptx.st.shared.b32(
+            with txl.If(lane == 0), txl.Then():
+                txl.ptx.st.shared.b32(
                     shared_raw.ptr_to([reduce_base + (row_warp + warp_in_row * rows) * 4]),
-                    K.reinterpret("uint32", warp_sum),
+                    txl.reinterpret("uint32", warp_sum),
                 )
-            K.ptx.bar.sync(K.uint32(0))
-            final_sum = K.local_scalar(K.f32, init=K.float32(0.0))
-            with K.If(lane < warps_per_row), K.Then():
-                reduce_word = K.local_scalar(K.u32)
-                K.ptx.ld.shared.b32(
+            txl.ptx.bar.sync(txl.uint32(0))
+            final_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
+            with txl.If(lane < warps_per_row), txl.Then():
+                reduce_word = txl.local_scalar(txl.u32)
+                txl.ptx.ld.shared.b32(
                     reduce_word, shared_raw.ptr_to([reduce_base + (row_warp + lane * rows) * 4])
                 )
-                K.assign(final_sum, K.reinterpret("float32", reduce_word))
+                txl.assign(final_sum, txl.reinterpret("float32", reduce_word))
             _butterfly_sum_f32(final_sum, full_lane_xors)
             sum_sq = final_sum
         else:
             sum_sq = warp_sum
 
-        shifted = K.local_scalar(K.f32)
+        shifted = txl.local_scalar(txl.f32)
         if H == 1:
-            K.ptx.add.f32(shifted, sum_sq, runtime_eps)
+            txl.ptx.add.f32(shifted, sum_sq, runtime_eps)
         elif H & (H - 1) == 0:
-            K.ptx.fma.rn.f32(shifted, sum_sq, K.float32(1.0 / H), runtime_eps)
+            txl.ptx.fma.rn.f32(shifted, sum_sq, txl.float32(1.0 / H), runtime_eps)
         else:
-            K.ptx.div.rn.f32(shifted, sum_sq, K.float32(H))
-            K.ptx.add.f32(shifted, shifted, runtime_eps)
-        rstd = K.local_scalar(K.f32)
-        K.ptx.rsqrt.approx.ftz.f32(rstd, shifted)
+            txl.ptx.div.rn.f32(shifted, sum_sq, txl.float32(H))
+            txl.ptx.add.f32(shifted, shifted, runtime_eps)
+        rstd = txl.local_scalar(txl.f32)
+        txl.ptx.rsqrt.approx.ftz.f32(rstd, shifted)
 
-        K.ptx.bar.sync(K.uint32(0))
+        txl.ptx.bar.sync(txl.uint32(0))
 
         if use_async:
             for vb in range(vec_blocks):
@@ -664,69 +666,71 @@ def get_kernel(
                     x_bits, vb * vec, shared_raw, (row_in_cta * cols + local_col) * _ELEM_BYTES, vec
                 )
             for value in range(total_values):
-                K.ptx[cvt_to_f32](x_f32[value], x_bits[value])
+                txl.ptx[cvt_to_f32](x_f32[value], x_bits[value])
 
         for value in range(total_values):
-            K.ptx[cvt_to_f32](w_f32[value], w_bits[value])
+            txl.ptx[cvt_to_f32](w_f32[value], w_bits[value])
 
         if total_values == 1:
-            K.ptx.mul.f32(x_f32[0], x_f32[0], rstd)
-            K.ptx.add.f32(w_f32[0], w_f32[0], K.float32(weight_bias))
-            K.ptx.mul.f32(x_f32[0], x_f32[0], w_f32[0])
+            txl.ptx.mul.f32(x_f32[0], x_f32[0], rstd)
+            txl.ptx.add.f32(w_f32[0], w_f32[0], txl.float32(weight_bias))
+            txl.ptx.mul.f32(x_f32[0], x_f32[0], w_f32[0])
         else:
             for pair in range(packed_pairs):
                 high_scale = rstd if pair * 2 + 1 < total_values else undefined_f32
                 x_pair = (
                     x_f32_pairs[pair]
                     if packed_x_pairs
-                    else K.cuda.make_float2(x_f32[pair * 2], x_f32[pair * 2 + 1])
+                    else txl.cuda.make_float2(x_f32[pair * 2], x_f32[pair * 2 + 1])
                 )
-                K.ptx.mul.f32x2(packed, x_pair, K.cuda.make_float2(rstd, high_scale))
-                K.ptx.mov.b64(x_f32[pair * 2], x_f32[pair * 2 + 1], packed)
+                txl.ptx.mul.f32x2(packed, x_pair, txl.cuda.make_float2(rstd, high_scale))
+                txl.ptx.mov.b64(x_f32[pair * 2], x_f32[pair * 2 + 1], packed)
 
             for pair in range(packed_pairs):
-                high_bias = K.float32(weight_bias) if pair * 2 + 1 < total_values else undefined_f32
-                K.ptx.add.f32x2(
-                    packed,
-                    K.cuda.make_float2(w_f32[pair * 2], w_f32[pair * 2 + 1]),
-                    K.cuda.make_float2(K.float32(weight_bias), high_bias),
+                high_bias = (
+                    txl.float32(weight_bias) if pair * 2 + 1 < total_values else undefined_f32
                 )
-                K.ptx.mov.b64(w_f32[pair * 2], w_f32[pair * 2 + 1], packed)
+                txl.ptx.add.f32x2(
+                    packed,
+                    txl.cuda.make_float2(w_f32[pair * 2], w_f32[pair * 2 + 1]),
+                    txl.cuda.make_float2(txl.float32(weight_bias), high_bias),
+                )
+                txl.ptx.mov.b64(w_f32[pair * 2], w_f32[pair * 2 + 1], packed)
 
             for pair in range(packed_pairs):
-                K.ptx.mul.f32x2(
+                txl.ptx.mul.f32x2(
                     packed,
-                    K.cuda.make_float2(x_f32[pair * 2], x_f32[pair * 2 + 1]),
-                    K.cuda.make_float2(w_f32[pair * 2], w_f32[pair * 2 + 1]),
+                    txl.cuda.make_float2(x_f32[pair * 2], x_f32[pair * 2 + 1]),
+                    txl.cuda.make_float2(w_f32[pair * 2], w_f32[pair * 2 + 1]),
                 )
-                K.ptx.mov.b64(x_f32[pair * 2], x_f32[pair * 2 + 1], packed)
+                txl.ptx.mov.b64(x_f32[pair * 2], x_f32[pair * 2 + 1], packed)
 
-        y_bits = K.alloc_local([pair_values], K.u16)
-        y_words = K.alloc_local([packed_pairs], K.u32)
+        y_bits = txl.alloc_local([pair_values], txl.u16)
+        y_words = txl.alloc_local([packed_pairs], txl.u32)
         if packed_narrow:
             for pair in range(packed_pairs):
-                K.ptx[cvt_pair_from_f32](y_words[pair], x_f32[pair * 2 + 1], x_f32[pair * 2])
+                txl.ptx[cvt_pair_from_f32](y_words[pair], x_f32[pair * 2 + 1], x_f32[pair * 2])
         else:
             for value in range(total_values):
-                K.ptx[cvt_from_f32](y_bits[value], x_f32[value])
+                txl.ptx[cvt_from_f32](y_bits[value], x_f32[value])
             if output_packed:
                 for pair in range(total_values // 2):
-                    K.ptx.mov.b32(y_words[pair], y_bits[pair * 2], y_bits[pair * 2 + 1])
+                    txl.ptx.mov.b32(y_words[pair], y_bits[pair * 2], y_bits[pair * 2 + 1])
 
         for vb in range(vec_blocks):
             local_col = (thread_in_row + vb * tpr) * vec
             col_valid = local_col < H
             y_offset = (
-                batch_idx * y_batch_stride + head_idx * y_head_stride + K.cast(local_col, "int64")
+                batch_idx * y_batch_stride + head_idx * y_head_stride + txl.cast(local_col, "int64")
             )
-            predicate = K.And(row_valid, col_valid)
+            predicate = txl.And(row_valid, col_valid)
             if output_packed:
                 _store_global_packed(y, y_offset, y_words, vb * vec // 2, predicate, vec)
             else:
                 _store_global_element(y, y_offset, y_bits, vb * vec, predicate, vec)
 
         if enable_pdl:
-            K.ptx.griddepcontrol.launch_dependents()
+            txl.ptx.griddepcontrol.launch_dependents()
 
     launch_params = ["blockIdx.x", "threadIdx.x"]
     if enable_pdl:

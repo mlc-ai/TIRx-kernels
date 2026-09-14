@@ -26,19 +26,19 @@ cells. This is distinct from substituting stale registers for a current value.
 
 ```python
 # before: the snapshot path re-reads the cells the repack just read.
-state = K.alloc_local((FRAGMENT,), "float32")
+state = txl.alloc_local((FRAGMENT,), "float32")
 _tmem_load_fragment(state, STATE_COLUMNS)
 _publish_packed(state)
-with K.If(do_snapshot), K.Then():
-    snapshot = K.alloc_local((FRAGMENT,), "float32")
+with txl.If(do_snapshot), txl.Then():
+    snapshot = txl.alloc_local((FRAGMENT,), "float32")
     _tmem_load_fragment(snapshot, STATE_COLUMNS)
     _stage_snapshot(snapshot)
 
 # after: the registers still hold the cells' current value.
-state = K.alloc_local((FRAGMENT,), "float32")
+state = txl.alloc_local((FRAGMENT,), "float32")
 _tmem_load_fragment(state, STATE_COLUMNS)
 _publish_packed(state)
-with K.If(do_snapshot), K.Then():
+with txl.If(do_snapshot), txl.Then():
     _stage_snapshot(state)
 ```
 

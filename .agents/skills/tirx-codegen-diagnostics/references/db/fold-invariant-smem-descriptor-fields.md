@@ -17,7 +17,7 @@ keep only scalar descriptors live.
 
 ```python
 # Address-free constant: LDO, SDO, and swizzle are specialization constants.
-DESC_MN = encode_smem_descriptor_base_uint64(0, 64, K.SW128B.value)
+DESC_MN = encode_smem_descriptor_base_uint64(0, 64, txl.SW128B.value)
 
 # The runtime start comes from one real K-owned shared view plus compile-time
 # view deltas, so each operand is a scalar, not an addressable temporary.

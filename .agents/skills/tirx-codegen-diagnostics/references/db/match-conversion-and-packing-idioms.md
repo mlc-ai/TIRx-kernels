@@ -106,16 +106,16 @@ instead of using packed conversion merely because two values fit in one word.
 
 ```python
 # before: packed narrowing is immediately undone for scalar stores.
-for pair in K.unroll(NUM_VALUES // 2):
+for pair in txl.unroll(NUM_VALUES // 2):
     words[pair] = _cvt_pair(values[2 * pair + 1], values[2 * pair])
-for i in K.unroll(NUM_VALUES):
-    K.ptx.st.shared.b16(dst[i], _extract_half(words[i // 2], i & 1))
+for i in txl.unroll(NUM_VALUES):
+    txl.ptx.st.shared.b16(dst[i], _extract_half(words[i // 2], i & 1))
 
 # after: scalar narrowing feeds the reference's scalar transaction directly.
-for i in K.unroll(NUM_VALUES):
+for i in txl.unroll(NUM_VALUES):
     halves[i] = _cvt_scalar(values[i])
-for i in K.unroll(NUM_VALUES):
-    K.ptx.st.shared.b16(dst[i], halves[i])
+for i in txl.unroll(NUM_VALUES):
+    txl.ptx.st.shared.b16(dst[i], halves[i])
 ```
 
 The PTX store's data carrier is independent as well. If the reference feeds the

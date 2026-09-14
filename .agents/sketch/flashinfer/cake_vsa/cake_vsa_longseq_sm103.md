@@ -473,7 +473,7 @@ be fused even though both consume the same compact list.
 
 ## TIRx module and benchmark contract
 
-- The module imports only `tirx_kernels.kern as K` as its device language and
+- The module imports only `tirx_kernels.tirx_lite as txl` as its device language and
   exposes the repository-standard metadata, config, preparation, test, and
   benchmark entry points.
 - Correctness uses the exact pinned FlashInfer cubin as the primary reference,

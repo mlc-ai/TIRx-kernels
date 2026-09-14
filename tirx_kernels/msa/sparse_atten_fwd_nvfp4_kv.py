@@ -28,7 +28,7 @@ Scale layout and the dequant oracle: python/fmha_sm100/cute/quantize.py:58,:265.
 import inspect
 from typing import Any
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 from tirx_kernels.msa.utils._scalar_ops import (
     ld_global_i32,
     ld_shared_i32,
@@ -255,10 +255,10 @@ _TMA_G2S_3D_CACHE = (
 # appearing eight times in a gather4 build and zero times otherwise. The sibling
 # port assigns policies to both tensors as a measured performance change; that
 # is not this reference.
-_TMA_CACHE_EVICT_FIRST = K.uint64(0x12F0000000000000)
-_TMA_CACHE_EVICT_LAST = K.uint64(0x14F0000000000000)
+_TMA_CACHE_EVICT_FIRST = txl.uint64(0x12F0000000000000)
+_TMA_CACHE_EVICT_LAST = txl.uint64(0x14F0000000000000)
 _GATHER4_Q_CACHE_HINT = _TMA_CACHE_EVICT_LAST
-_TMA_NO_POLICY = K.uint64(0)
+_TMA_NO_POLICY = txl.uint64(0)
 
 
 _MMA_KIND = {"bfloat16": "f16", "float16": "f16", "float8_e4m3": "f8f6f4"}
@@ -350,23 +350,23 @@ def _packed_f32x2(op, dst, di, dj, a0, a1, b0, b1, c0=None, c1=None):
     assembled with ``mov.b64`` and split again afterwards. This is one
     instruction with two ordered results, not two scalar operations.
     """
-    pa = K.alloc_local((1,), "uint64")
-    pb = K.alloc_local((1,), "uint64")
-    pd = K.alloc_local((1,), "uint64")
-    K.ptx.mov.b64(pa[0], a0, a1)
-    K.ptx.mov.b64(pb[0], b0, b1)
+    pa = txl.alloc_local((1,), "uint64")
+    pb = txl.alloc_local((1,), "uint64")
+    pd = txl.alloc_local((1,), "uint64")
+    txl.ptx.mov.b64(pa[0], a0, a1)
+    txl.ptx.mov.b64(pb[0], b0, b1)
     if c0 is None:
-        K.ptx[op](pd[0], pa[0], pb[0])
+        txl.ptx[op](pd[0], pa[0], pb[0])
     else:
-        pc = K.alloc_local((1,), "uint64")
-        K.ptx.mov.b64(pc[0], c0, c1)
-        K.ptx[op](pd[0], pa[0], pb[0], pc[0])
-    K.ptx.mov.b64(dst[di], dst[dj], pd[0])
+        pc = txl.alloc_local((1,), "uint64")
+        txl.ptx.mov.b64(pc[0], c0, c1)
+        txl.ptx[op](pd[0], pa[0], pb[0], pc[0])
+    txl.ptx.mov.b64(dst[di], dst[dj], pd[0])
 
 
 def _max3_at(dst, idx, a, b, c):
     """Three-input ``max.f32``, an SM100 form, writing into ``dst[idx]``."""
-    K.ptx.max.f32(dst[idx], a, b, c)
+    txl.ptx.max.f32(dst[idx], a, b, c)
 
 
 def _row_max_128(regs, out, out_idx):
@@ -379,18 +379,18 @@ def _row_max_128(regs, out, out_idx):
     ``local_max[0] = fmax(local_max[0], local_max[1])`` fold leaves a quarter of
     the row out of the maximum without changing the instruction shape.
     """
-    acc = K.alloc_local((4,), "float32")
-    K.ptx.max.f32(acc[0], regs[0], regs[1])
-    K.ptx.max.f32(acc[1], regs[2], regs[3])
-    K.ptx.max.f32(acc[2], regs[4], regs[5])
-    K.ptx.max.f32(acc[3], regs[6], regs[7])
-    with K.unroll(1, N_BLOCK // 8) as it:
+    acc = txl.alloc_local((4,), "float32")
+    txl.ptx.max.f32(acc[0], regs[0], regs[1])
+    txl.ptx.max.f32(acc[1], regs[2], regs[3])
+    txl.ptx.max.f32(acc[2], regs[4], regs[5])
+    txl.ptx.max.f32(acc[3], regs[6], regs[7])
+    with txl.unroll(1, N_BLOCK // 8) as it:
         i = it * 8
         _max3_at(acc, 0, acc[0], regs[i + 0], regs[i + 1])
         _max3_at(acc, 1, acc[1], regs[i + 2], regs[i + 3])
         _max3_at(acc, 2, acc[2], regs[i + 4], regs[i + 5])
         _max3_at(acc, 3, acc[3], regs[i + 6], regs[i + 7])
-    K.ptx.max.f32(acc[0], acc[0], acc[1])
+    txl.ptx.max.f32(acc[0], acc[0], acc[1])
     _max3_at(out, out_idx, acc[0], acc[2], acc[3])
 
 
@@ -403,13 +403,13 @@ def _scaled_exp2_row_sum_128(regs, scale, out):
     than 448. It reads the fragment without writing it back, so the P
     population below still sees the scale-subtracted values.
     """
-    acc = K.alloc_local((8,), "float32")
-    with K.unroll(8) as j:
-        K.assign(acc[j], K.float32(0.0))
-    tmp = K.alloc_local((8,), "float32")
-    with K.unroll(N_BLOCK // 8) as it:
+    acc = txl.alloc_local((8,), "float32")
+    with txl.unroll(8) as j:
+        txl.assign(acc[j], txl.float32(0.0))
+    tmp = txl.alloc_local((8,), "float32")
+    with txl.unroll(N_BLOCK // 8) as it:
         i = it * 8
-        with K.unroll(4) as j:
+        with txl.unroll(4) as j:
             _packed_f32x2(
                 "mul.rn.f32x2",
                 tmp,
@@ -420,9 +420,9 @@ def _scaled_exp2_row_sum_128(regs, scale, out):
                 scale,
                 scale,
             )
-        with K.unroll(8) as j:
-            K.ptx.ex2.approx.ftz.f32(tmp[j], tmp[j])
-        with K.unroll(4) as j:
+        with txl.unroll(8) as j:
+            txl.ptx.ex2.approx.ftz.f32(tmp[j], tmp[j])
+        with txl.unroll(4) as j:
             _packed_f32x2(
                 "add.rn.f32x2",
                 acc,
@@ -436,18 +436,18 @@ def _scaled_exp2_row_sum_128(regs, scale, out):
     _packed_f32x2("add.rn.f32x2", acc, 0, 1, acc[0], acc[1], acc[2], acc[3])
     _packed_f32x2("add.rn.f32x2", acc, 4, 5, acc[4], acc[5], acc[6], acc[7])
     _packed_f32x2("add.rn.f32x2", acc, 0, 1, acc[0], acc[1], acc[4], acc[5])
-    K.assign(out[0], acc[0] + acc[1])
+    txl.assign(out[0], acc[0] + acc[1])
 
 
 def _row_sum_128(regs, out):
     """`_compute_row_sum` for arch 100 (utils.py:288-304): four packed
     accumulators seeded from the first eight elements, then three folds."""
-    acc = K.alloc_local((8,), "float32")
-    with K.unroll(8) as j:
-        K.assign(acc[j], regs[j])
-    with K.unroll(1, N_BLOCK // 8) as it:
+    acc = txl.alloc_local((8,), "float32")
+    with txl.unroll(8) as j:
+        txl.assign(acc[j], regs[j])
+    with txl.unroll(1, N_BLOCK // 8) as it:
         i = it * 8
-        with K.unroll(4) as j:
+        with txl.unroll(4) as j:
             _packed_f32x2(
                 "add.rn.f32x2",
                 acc,
@@ -461,7 +461,7 @@ def _row_sum_128(regs, out):
     _packed_f32x2("add.rn.f32x2", acc, 0, 1, acc[0], acc[1], acc[2], acc[3])
     _packed_f32x2("add.rn.f32x2", acc, 4, 5, acc[4], acc[5], acc[6], acc[7])
     _packed_f32x2("add.rn.f32x2", acc, 0, 1, acc[0], acc[1], acc[4], acc[5])
-    K.assign(out[0], acc[0] + acc[1])
+    txl.assign(out[0], acc[0] + acc[1])
 
 
 def _combine_int_frac_ex2(x_rounded, frac_ex2):
@@ -472,14 +472,14 @@ def _combine_int_frac_ex2(x_rounded, frac_ex2):
     ``add.u32`` would lower to IMAD and contend with the FMA pipe the polynomial
     is already using.
     """
-    xi = K.alloc_local((1,), "int32")
-    fi = K.alloc_local((1,), "int32")
-    out = K.alloc_local((1,), "int32")
-    K.ptx.mov.b32(xi[0], x_rounded)
-    K.ptx.mov.b32(fi[0], frac_ex2)
-    K.ptx.shl.b32(xi[0], xi[0], K.uint32(23))
-    K.ptx.add.s32(out[0], xi[0], fi[0])
-    return K.reinterpret("float32", out[0])
+    xi = txl.alloc_local((1,), "int32")
+    fi = txl.alloc_local((1,), "int32")
+    out = txl.alloc_local((1,), "int32")
+    txl.ptx.mov.b32(xi[0], x_rounded)
+    txl.ptx.mov.b32(fi[0], frac_ex2)
+    txl.ptx.shl.b32(xi[0], xi[0], txl.uint32(23))
+    txl.ptx.add.s32(out[0], xi[0], fi[0])
+    return txl.reinterpret("float32", out[0])
 
 
 def _ex2_emulation_2(regs, i, j):
@@ -491,10 +491,10 @@ def _ex2_emulation_2(regs, i, j):
     two ``max.f32`` per pair, which is where 32 of the export's 164 ``max.f32``
     live -- they are not part of the row-max tree.
     """
-    cl = K.alloc_local((2,), "float32")
-    K.ptx.max.f32(cl[0], regs[i], K.float32(-127.0))
-    K.ptx.max.f32(cl[1], regs[j], K.float32(-127.0))
-    rounded = K.alloc_local((2,), "float32")
+    cl = txl.alloc_local((2,), "float32")
+    txl.ptx.max.f32(cl[0], regs[i], txl.float32(-127.0))
+    txl.ptx.max.f32(cl[1], regs[j], txl.float32(-127.0))
+    rounded = txl.alloc_local((2,), "float32")
     _packed_f32x2(
         "add.rm.f32x2",
         rounded,
@@ -502,10 +502,10 @@ def _ex2_emulation_2(regs, i, j):
         1,
         cl[0],
         cl[1],
-        K.float32(_FP32_ROUND_INT),
-        K.float32(_FP32_ROUND_INT),
+        txl.float32(_FP32_ROUND_INT),
+        txl.float32(_FP32_ROUND_INT),
     )
-    back = K.alloc_local((2,), "float32")
+    back = txl.alloc_local((2,), "float32")
     _packed_f32x2(
         "sub.rn.f32x2",
         back,
@@ -513,14 +513,14 @@ def _ex2_emulation_2(regs, i, j):
         1,
         rounded[0],
         rounded[1],
-        K.float32(_FP32_ROUND_INT),
-        K.float32(_FP32_ROUND_INT),
+        txl.float32(_FP32_ROUND_INT),
+        txl.float32(_FP32_ROUND_INT),
     )
-    frac = K.alloc_local((2,), "float32")
+    frac = txl.alloc_local((2,), "float32")
     _packed_f32x2("sub.rn.f32x2", frac, 0, 1, cl[0], cl[1], back[0], back[1])
-    poly = K.alloc_local((2,), "float32")
-    K.assign(poly[0], K.float32(_POLY_EX2_3[3]))
-    K.assign(poly[1], K.float32(_POLY_EX2_3[3]))
+    poly = txl.alloc_local((2,), "float32")
+    txl.assign(poly[0], txl.float32(_POLY_EX2_3[3]))
+    txl.assign(poly[1], txl.float32(_POLY_EX2_3[3]))
     # Horner, unrolled at trace time: the coefficients are Python floats, so a
     # traced loop over them would bind them as TIR variables.
     _packed_f32x2(
@@ -532,8 +532,8 @@ def _ex2_emulation_2(regs, i, j):
         poly[1],
         frac[0],
         frac[1],
-        K.float32(_POLY_EX2_3[2]),
-        K.float32(_POLY_EX2_3[2]),
+        txl.float32(_POLY_EX2_3[2]),
+        txl.float32(_POLY_EX2_3[2]),
     )
     _packed_f32x2(
         "fma.rn.f32x2",
@@ -544,8 +544,8 @@ def _ex2_emulation_2(regs, i, j):
         poly[1],
         frac[0],
         frac[1],
-        K.float32(_POLY_EX2_3[1]),
-        K.float32(_POLY_EX2_3[1]),
+        txl.float32(_POLY_EX2_3[1]),
+        txl.float32(_POLY_EX2_3[1]),
     )
     _packed_f32x2(
         "fma.rn.f32x2",
@@ -556,11 +556,11 @@ def _ex2_emulation_2(regs, i, j):
         poly[1],
         frac[0],
         frac[1],
-        K.float32(_POLY_EX2_3[0]),
-        K.float32(_POLY_EX2_3[0]),
+        txl.float32(_POLY_EX2_3[0]),
+        txl.float32(_POLY_EX2_3[0]),
     )
-    K.assign(regs[i], _combine_int_frac_ex2(rounded[0], poly[0]))
-    K.assign(regs[j], _combine_int_frac_ex2(rounded[1], poly[1]))
+    txl.assign(regs[i], _combine_int_frac_ex2(rounded[0], poly[0]))
+    txl.assign(regs[j], _combine_int_frac_ex2(rounded[1], poly[1]))
 
 
 # ---------------------------------------------------------------------------
@@ -614,8 +614,8 @@ def _load_scale_e4m3_u8(scale, offset):
     pointer is ``Uint8``: only the low byte survives the ``prmt`` replication
     that consumes it, so the sign extension is inert.
     """
-    out = K.alloc_local((1,), "int8")
-    K.ptx.ld.global_.s8(out[0], scale.ptr_to([offset]))
+    out = txl.alloc_local((1,), "int8")
+    txl.ptx.ld.global_.s8(out[0], scale.ptr_to([offset]))
     return out[0]
 
 
@@ -631,22 +631,22 @@ def _load_scale_bf16x2(scale, offset, out):
     ``cvt.rn.f16x2.e4m3x2`` appears zero times in any BF16-Q build; naming it
     here would name an instruction this specialization never emits.
     """
-    byte = K.alloc_local((1,), "uint8")
-    K.ptx.ld.global_.u8(byte[0], scale.ptr_to([offset]))
-    masked = K.alloc_local((1,), "uint32")
-    K.ptx.and_.b32(masked[0], K.cast(byte[0], "uint32"), K.uint32(0xFF))
-    packed_i = K.alloc_local((1,), "int32")
-    K.ptx.mul.lo.s32(packed_i[0], K.reinterpret("int32", masked[0]), K.int32(0x01010101))
-    q = K.alloc_local((1,), "uint32")
-    mant = K.alloc_local((1,), "uint32")
-    acc = K.alloc_local((1,), "uint32")
-    packed = K.local_scalar(K.u32, init=K.reinterpret("uint32", packed_i[0]), name="packed")
-    K.ptx.prmt.b32(q[0], packed, packed, K.uint32(0x1302))
-    K.ptx.and_.b32(acc[0], q[0], K.uint32(0x80008000))
-    K.ptx.and_.b32(mant[0], q[0], K.uint32(0x7F007F00))
-    K.ptx.shr.u32(mant[0], mant[0], K.uint32(4))
-    K.ptx.or_.b32(acc[0], acc[0], mant[0])
-    K.ptx.fma.rn.bf16x2(out[0], acc[0], K.uint32(0x7B807B80), K.uint32(0))
+    byte = txl.alloc_local((1,), "uint8")
+    txl.ptx.ld.global_.u8(byte[0], scale.ptr_to([offset]))
+    masked = txl.alloc_local((1,), "uint32")
+    txl.ptx.and_.b32(masked[0], txl.cast(byte[0], "uint32"), txl.uint32(0xFF))
+    packed_i = txl.alloc_local((1,), "int32")
+    txl.ptx.mul.lo.s32(packed_i[0], txl.reinterpret("int32", masked[0]), txl.int32(0x01010101))
+    q = txl.alloc_local((1,), "uint32")
+    mant = txl.alloc_local((1,), "uint32")
+    acc = txl.alloc_local((1,), "uint32")
+    packed = txl.local_scalar(txl.u32, init=txl.reinterpret("uint32", packed_i[0]), name="packed")
+    txl.ptx.prmt.b32(q[0], packed, packed, txl.uint32(0x1302))
+    txl.ptx.and_.b32(acc[0], q[0], txl.uint32(0x80008000))
+    txl.ptx.and_.b32(mant[0], q[0], txl.uint32(0x7F007F00))
+    txl.ptx.shr.u32(mant[0], mant[0], txl.uint32(4))
+    txl.ptx.or_.b32(acc[0], acc[0], mant[0])
+    txl.ptx.fma.rn.bf16x2(out[0], acc[0], txl.uint32(0x7B807B80), txl.uint32(0))
 
 
 def _fp4_byte(word, b, out):
@@ -658,8 +658,11 @@ def _fp4_byte(word, b, out):
     selected here with a shift and a mask instead of the 4-way move, which is
     the same extraction with a spelling the C boundary can carry.
     """
-    K.assign(
-        out[0], K.cast(K.bitwise_and(K.shift_right(word, K.uint32(8 * b)), K.uint32(0xFF)), "uint8")
+    txl.assign(
+        out[0],
+        txl.cast(
+            txl.bitwise_and(txl.shift_right(word, txl.uint32(8 * b)), txl.uint32(0xFF)), "uint8"
+        ),
     )
 
 
@@ -674,21 +677,21 @@ def _dequant_fp4x16_to_bf16(src_words, combined_bf16x2, out_words):
     single-instruction ``cvt.rn.bf16x2.e2m1x2`` needs 13.2 and appears zero
     times in every export taken through this pin.
     """
-    with K.unroll(2) as w:
-        with K.unroll(4) as b:
-            byte = K.alloc_local((1,), "uint8")
+    with txl.unroll(2) as w:
+        with txl.unroll(4) as b:
+            byte = txl.alloc_local((1,), "uint8")
             _fp4_byte(src_words[w], b, byte)
-            f16_pair = K.alloc_local((1,), "uint32")
-            K.ptx.cvt.rn.f16x2.e2m1x2(f16_pair[0], byte[0])
-            halves = K.alloc_local((2,), "uint16")
-            K.ptx.mov.b32(halves[0], halves[1], f16_pair[0])
-            lo = K.alloc_local((1,), "float32")
-            hi = K.alloc_local((1,), "float32")
-            K.ptx.cvt.f32.f16(lo[0], halves[0])
-            K.ptx.cvt.f32.f16(hi[0], halves[1])
-            bf16_pair = K.alloc_local((1,), "uint32")
-            K.ptx.cvt.rn.bf16x2.f32(bf16_pair[0], hi[0], lo[0])
-            K.ptx.mul.rn.bf16x2(out_words[w * 4 + b], bf16_pair[0], combined_bf16x2)
+            f16_pair = txl.alloc_local((1,), "uint32")
+            txl.ptx.cvt.rn.f16x2.e2m1x2(f16_pair[0], byte[0])
+            halves = txl.alloc_local((2,), "uint16")
+            txl.ptx.mov.b32(halves[0], halves[1], f16_pair[0])
+            lo = txl.alloc_local((1,), "float32")
+            hi = txl.alloc_local((1,), "float32")
+            txl.ptx.cvt.f32.f16(lo[0], halves[0])
+            txl.ptx.cvt.f32.f16(hi[0], halves[1])
+            bf16_pair = txl.alloc_local((1,), "uint32")
+            txl.ptx.cvt.rn.bf16x2.f32(bf16_pair[0], hi[0], lo[0])
+            txl.ptx.mul.rn.bf16x2(out_words[w * 4 + b], bf16_pair[0], combined_bf16x2)
 
 
 def _dequant_fp4x8_scaled_e4m3(src_word, scale_e4m3, out, lo_idx, hi_idx):
@@ -701,27 +704,27 @@ def _dequant_fp4x8_scaled_e4m3(src_word, scale_e4m3, out, lo_idx, hi_idx):
     f16x2, decode four fp4 byte-pairs to f16x2, multiply, convert back to E4M3
     pairs and repack.
     """
-    sf_bytes = K.alloc_local((1,), "uint32")
-    K.ptx.prmt.b32(sf_bytes[0], K.cast(scale_e4m3, "uint32"), K.uint32(0), K.uint32(0))
-    sf_pair = K.alloc_local((2,), "uint16")
-    K.ptx.mov.b32(sf_pair[0], sf_pair[1], sf_bytes[0])
-    sf_f16x2 = K.alloc_local((1,), "uint32")
-    K.ptx.cvt.rn.f16x2.e4m3x2(sf_f16x2[0], sf_pair[0])
-    e = K.alloc_local((4,), "uint16")
-    with K.unroll(4) as b:
-        byte = K.alloc_local((1,), "uint8")
+    sf_bytes = txl.alloc_local((1,), "uint32")
+    txl.ptx.prmt.b32(sf_bytes[0], txl.cast(scale_e4m3, "uint32"), txl.uint32(0), txl.uint32(0))
+    sf_pair = txl.alloc_local((2,), "uint16")
+    txl.ptx.mov.b32(sf_pair[0], sf_pair[1], sf_bytes[0])
+    sf_f16x2 = txl.alloc_local((1,), "uint32")
+    txl.ptx.cvt.rn.f16x2.e4m3x2(sf_f16x2[0], sf_pair[0])
+    e = txl.alloc_local((4,), "uint16")
+    with txl.unroll(4) as b:
+        byte = txl.alloc_local((1,), "uint8")
         _fp4_byte(src_word, b, byte)
-        h = K.alloc_local((1,), "uint32")
-        K.ptx.cvt.rn.f16x2.e2m1x2(h[0], byte[0])
-        K.ptx.mul.rn.f16x2(h[0], h[0], sf_f16x2[0])
-        K.ptx.cvt.rn.satfinite.e4m3x2.f16x2(e[b], h[0])
-    K.ptx.mov.b32(out[lo_idx], e[0], e[1])
-    K.ptx.mov.b32(out[hi_idx], e[2], e[3])
+        h = txl.alloc_local((1,), "uint32")
+        txl.ptx.cvt.rn.f16x2.e2m1x2(h[0], byte[0])
+        txl.ptx.mul.rn.f16x2(h[0], h[0], sf_f16x2[0])
+        txl.ptx.cvt.rn.satfinite.e4m3x2.f16x2(e[b], h[0])
+    txl.ptx.mov.b32(out[lo_idx], e[0], e[1])
+    txl.ptx.mov.b32(out[hi_idx], e[2], e[3])
 
 
 def bar_sync_named(bar_id, count):
     """``bar.sync <id>, <count>`` -- arrive AND wait on a named barrier."""
-    K.ptx.bar.sync(K.uint32(bar_id), K.uint32(count))
+    txl.ptx.bar.sync(txl.uint32(bar_id), txl.uint32(count))
 
 
 def bar_arrive_named(bar_id, count):
@@ -733,7 +736,7 @@ def bar_arrive_named(bar_id, count):
     exits wait parks both warpgroups behind a TMEM teardown they have no
     ordering dependence on.
     """
-    K.ptx.bar.arrive(K.uint32(bar_id), K.uint32(count))
+    txl.ptx.bar.arrive(txl.uint32(bar_id), txl.uint32(count))
 
 
 def _mbar_expect_tx(bar, stage, tx_bytes):
@@ -743,7 +746,9 @@ def _mbar_expect_tx(bar, stage, tx_bytes):
     from thread 0 (:868-873) and are arrived on later by the load warp, so this
     stays separate from the arrive -- the barrier's arrival count is 1.
     """
-    K.ptx.mbarrier.expect_tx.relaxed.cta.shared__cta.b64(bar.ptr_to([stage]), K.uint32(tx_bytes))
+    txl.ptx.mbarrier.expect_tx.relaxed.cta.shared__cta.b64(
+        bar.ptr_to([stage]), txl.uint32(tx_bytes)
+    )
 
 
 def _dequant_kv_fp4(
@@ -781,7 +786,7 @@ def _dequant_kv_fp4(
     export counts as one extra ``mul.rn.bf16x2`` (17 against 16). Under FP8 Q it
     is absent here and lands on the S accumulator instead.
     """
-    with K.If(count_raw > 0), K.Then():
+    with txl.If(count_raw > 0), txl.Then():
         bar_tma.wait(0, 0)
         if mma_dtype == "float8_e4m3":
             # Pair form: two scale columns, 32 values, one 16-byte load.
@@ -802,18 +807,18 @@ def _dequant_kv_fp4(
             # Issuing all four shared loads first means the conversion chain --
             # eight dependent ops before the first multiply -- stops sitting on
             # the critical path of the next load.
-            staged = K.alloc_local((DEQUANT_FP8_STAGED,), "uint32")
+            staged = txl.alloc_local((DEQUANT_FP8_STAGED,), "uint32")
             for pre in range(DEQUANT_FP8_BATCH):
-                task_pre = K.local_scalar(
-                    K.i32, init=pre * DEQUANT_THREADS + group_tidx, name="task_pre"
+                task_pre = txl.local_scalar(
+                    txl.i32, init=pre * DEQUANT_THREADS + group_tidx, name="task_pre"
                 )
-                row_pre = K.local_scalar(
-                    K.i32, init=udiv_i32(task_pre, pairs_per_row), name="row_pre"
+                row_pre = txl.local_scalar(
+                    txl.i32, init=udiv_i32(task_pre, pairs_per_row), name="row_pre"
                 )
-                pair_pre = K.local_scalar(
-                    K.i32, init=task_pre - row_pre * pairs_per_row, name="pair_pre"
+                pair_pre = txl.local_scalar(
+                    txl.i32, init=task_pre - row_pre * pairs_per_row, name="pair_pre"
                 )
-                K.ptx.ld.shared.v4.b32(
+                txl.ptx.ld.shared.v4.b32(
                     staged[pre * 4],
                     staged[pre * 4 + 1],
                     staged[pre * 4 + 2],
@@ -821,49 +826,53 @@ def _dequant_kv_fp4(
                     src.ptr_to([row_pre, pair_pre * 16]),
                 )
             for it in range(DEQUANT_FP8_BATCH):
-                task = K.local_scalar(K.i32, init=it * DEQUANT_THREADS + group_tidx, name="task")
-                row = K.local_scalar(K.i32, init=udiv_i32(task, pairs_per_row), name="row")
-                pair_col = K.local_scalar(K.i32, init=task - row * pairs_per_row, name="pair_col")
+                task = txl.local_scalar(
+                    txl.i32, init=it * DEQUANT_THREADS + group_tidx, name="task"
+                )
+                row = txl.local_scalar(txl.i32, init=udiv_i32(task, pairs_per_row), name="row")
+                pair_col = txl.local_scalar(
+                    txl.i32, init=task - row * pairs_per_row, name="pair_col"
+                )
                 if paged:
                     # Re-read EVERY ITERATION: the backend does not hoist this
                     # out of the rolled task loop (.loc 1 1384 K / :1558 V,
                     # inside the `.pragma "nounroll"` body), and lifting it
                     # changes the hottest loop's instruction count.
-                    page_idx_d = K.local_scalar(
-                        K.i32, init=ld_shared_i32(s_paged_kv_idx, 0), name="page_idx_d"
+                    page_idx_d = txl.local_scalar(
+                        txl.i32, init=ld_shared_i32(s_paged_kv_idx, 0), name="page_idx_d"
                     )
-                    scale_row = K.local_scalar(
-                        K.i32,
+                    scale_row = txl.local_scalar(
+                        txl.i32,
                         init=_paged_kv_scale_row(row, head_kv_idx, page_idx_d, num_heads_kv),
                         name="scale_row",
                     )
                 else:
-                    token = K.local_scalar(K.i32, init=token_base + row, name="token")
-                    scale_row = K.local_scalar(
-                        K.i32,
+                    token = txl.local_scalar(txl.i32, init=token_base + row, name="token")
+                    scale_row = txl.local_scalar(
+                        txl.i32,
                         init=_flat_kv_scale_row(token, head_kv_idx, num_heads_kv),
                         name="scale_row",
                     )
-                src_words = K.alloc_local((4,), "uint32")
+                src_words = txl.alloc_local((4,), "uint32")
                 for w in range(4):
-                    K.assign(src_words[w], staged[it * 4 + w])
+                    txl.assign(src_words[w], staged[it * 4 + w])
                 scale_lo = _load_scale_e4m3_u8(
                     scale, _scale_128x4_offset(scale_row, pair_col * 2, SCALE_COLS)
                 )
                 scale_hi = _load_scale_e4m3_u8(
                     scale, _scale_128x4_offset(scale_row, pair_col * 2 + 1, SCALE_COLS)
                 )
-                out_words = K.alloc_local((8,), "uint32")
+                out_words = txl.alloc_local((8,), "uint32")
                 # `_dequant_fp4x32_to_fp8` (:1296-1317): the first two words take
                 # the low scale column, the second two the high one.
-                with K.unroll(2) as w:
+                with txl.unroll(2) as w:
                     _dequant_fp4x8_scaled_e4m3(src_words[w], scale_lo, out_words, w * 2, w * 2 + 1)
-                with K.unroll(2) as w:
+                with txl.unroll(2) as w:
                     _dequant_fp4x8_scaled_e4m3(
                         src_words[w + 2], scale_hi, out_words, w * 2 + 4, w * 2 + 5
                     )
-                with K.unroll(2) as half:
-                    K.ptx.st.shared.v4.b32(
+                with txl.unroll(2) as half:
+                    txl.ptx.st.shared.v4.b32(
                         dst.ptr_to([row, pair_col * 32 + half * 16]),
                         out_words[half * 4],
                         out_words[half * 4 + 1],
@@ -873,31 +882,37 @@ def _dequant_kv_fp4(
         else:
             total_tasks = N_BLOCK * SCALE_COLS
             # ROLLED (`unroll=1`, :1444), for the same reason as the pair arm.
-            with K.serial(0, total_tasks // DEQUANT_THREADS, unroll=False) as it:
-                task = K.local_scalar(K.i32, init=it * DEQUANT_THREADS + group_tidx, name="task")
-                row = K.local_scalar(K.i32, init=udiv_i32(task, SCALE_COLS), name="row")
-                scale_col = K.local_scalar(K.i32, init=task - row * SCALE_COLS, name="scale_col")
+            with txl.serial(0, total_tasks // DEQUANT_THREADS, unroll=False) as it:
+                task = txl.local_scalar(
+                    txl.i32, init=it * DEQUANT_THREADS + group_tidx, name="task"
+                )
+                row = txl.local_scalar(txl.i32, init=udiv_i32(task, SCALE_COLS), name="row")
+                scale_col = txl.local_scalar(
+                    txl.i32, init=task - row * SCALE_COLS, name="scale_col"
+                )
                 if paged:
                     # Same per-iteration re-read as the pair arm (.loc 1 1450 K
                     # / :1625 V, inside $L__BB0_89 / $L__BB0_120).
-                    page_idx_s = K.local_scalar(
-                        K.i32, init=ld_shared_i32(s_paged_kv_idx, 0), name="page_idx_s"
+                    page_idx_s = txl.local_scalar(
+                        txl.i32, init=ld_shared_i32(s_paged_kv_idx, 0), name="page_idx_s"
                     )
-                    scale_row = K.local_scalar(
-                        K.i32,
+                    scale_row = txl.local_scalar(
+                        txl.i32,
                         init=_paged_kv_scale_row(row, head_kv_idx, page_idx_s, num_heads_kv),
                         name="scale_row",
                     )
                 else:
-                    token = K.local_scalar(K.i32, init=token_base + row, name="token")
-                    scale_row = K.local_scalar(
-                        K.i32,
+                    token = txl.local_scalar(txl.i32, init=token_base + row, name="token")
+                    scale_row = txl.local_scalar(
+                        txl.i32,
                         init=_flat_kv_scale_row(token, head_kv_idx, num_heads_kv),
                         name="scale_row",
                     )
-                src_words = K.alloc_local((2,), "uint32")
-                K.ptx.ld.shared.v2.b32(src_words[0], src_words[1], src.ptr_to([row, scale_col * 8]))
-                combined = K.alloc_local((1,), "uint32")
+                src_words = txl.alloc_local((2,), "uint32")
+                txl.ptx.ld.shared.v2.b32(
+                    src_words[0], src_words[1], src.ptr_to([row, scale_col * 8])
+                )
+                combined = txl.alloc_local((1,), "uint32")
                 _load_scale_bf16x2(
                     scale, _scale_128x4_offset(scale_row, scale_col, SCALE_COLS), combined
                 )
@@ -907,24 +922,24 @@ def _dequant_kv_fp4(
                     # bf16 lanes and folded into the block scale, INSIDE the task
                     # loop -- the load is not hoisted, and the export shows one
                     # ld.global.f32 per task.
-                    g = K.alloc_local((1,), "float32")
-                    K.ptx.ld.global_.f32(g[0], k_global.ptr_to([0]))
-                    g_bf16x2 = K.alloc_local((1,), "uint32")
-                    K.ptx.cvt.rn.bf16x2.f32(g_bf16x2[0], g[0], g[0])
-                    K.ptx.mul.rn.bf16x2(combined[0], combined[0], g_bf16x2[0])
-                out_words = K.alloc_local((8,), "uint32")
+                    g = txl.alloc_local((1,), "float32")
+                    txl.ptx.ld.global_.f32(g[0], k_global.ptr_to([0]))
+                    g_bf16x2 = txl.alloc_local((1,), "uint32")
+                    txl.ptx.cvt.rn.bf16x2.f32(g_bf16x2[0], g[0], g[0])
+                    txl.ptx.mul.rn.bf16x2(combined[0], combined[0], g_bf16x2[0])
+                out_words = txl.alloc_local((8,), "uint32")
                 _dequant_fp4x16_to_bf16(src_words, combined[0], out_words)
-                with K.unroll(2) as half:
-                    K.ptx.st.shared.v4.b32(
+                with txl.unroll(2) as half:
+                    txl.ptx.st.shared.v4.b32(
                         dst.ptr_to([row, scale_col * 16 + half * 8]),
                         out_words[half * 4],
                         out_words[half * 4 + 1],
                         out_words[half * 4 + 2],
                         out_words[half * 4 + 3],
                     )
-        K.ptx.fence.proxy.async_.shared__cta()
+        txl.ptx.fence.proxy.async_.shared__cta()
         bar_sync_named(bar_id, DEQUANT_THREADS)
-        with K.If(group_tidx == 0), K.Then():
+        with txl.If(group_tidx == 0), txl.Then():
             bar_ready.arrive(0)
 
 
@@ -939,21 +954,21 @@ def _issue_qk(s_slot, q_slot, q_desc, k_desc, kind, operand_dtype, s_col, stage_
     mma_k = _MMA_K[kind]
     steps = HEAD_DIM // mma_k
     per_subtile = _SWIZZLE_BYTES // (mma_k * _MMA_ELEM_BYTES[kind])
-    with K.unroll(steps) as ki:
+    with txl.unroll(steps) as ki:
         sub = ki // per_subtile
         within = ki % per_subtile
         off = sub * _SUBTILE_16B + within * _MMA_K_16B
-        with K.If(K.cuda.elect_sync()), K.Then():
-            K.ptx[_MMA_CHAIN[kind]](
-                K.cast(s_col + s_slot * stage_stride, "uint32"),
+        with txl.If(txl.cuda.elect_sync()), txl.Then():
+            txl.ptx[_MMA_CHAIN[kind]](
+                txl.cast(s_col + s_slot * stage_stride, "uint32"),
                 q_desc.add_16B_offset(q_slot * _stage_16b(operand_dtype) + off),
                 k_desc.add_16B_offset(off),
-                K.uint32(_instr_desc(operand_dtype)),
-                K.uint32(0),
-                K.uint32(0),
-                K.uint32(0),
-                K.uint32(0),
-                K.ptx.pred(K.cast(ki != 0, "uint32")),
+                txl.uint32(_instr_desc(operand_dtype)),
+                txl.uint32(0),
+                txl.uint32(0),
+                txl.uint32(0),
+                txl.uint32(0),
+                txl.ptx.pred(txl.cast(ki != 0, "uint32")),
             )
 
 
@@ -980,20 +995,20 @@ def _issue_pv(
     mma_k = _MMA_K[kind]
     steps = N_BLOCK // mma_k
     split_step = SPLIT_P_ARRIVE // mma_k
-    with K.unroll(steps) as ki:
-        with K.If(ki == split_step), K.Then():
+    with txl.unroll(steps) as ki:
+        with txl.If(ki == split_step), txl.Then():
             bar_last.wait(pv_slot, phase)
-        with K.If(K.cuda.elect_sync()), K.Then():
-            K.ptx[_MMA_CHAIN[kind]](
-                K.cast(o_col + pv_slot * o_stage_stride, "uint32"),
-                K.cast(p_col + pv_slot * p_stage_stride + ki * _PV_A_COL_STEP[kind], "uint32"),
+        with txl.If(txl.cuda.elect_sync()), txl.Then():
+            txl.ptx[_MMA_CHAIN[kind]](
+                txl.cast(o_col + pv_slot * o_stage_stride, "uint32"),
+                txl.cast(p_col + pv_slot * p_stage_stride + ki * _PV_A_COL_STEP[kind], "uint32"),
                 v_desc.add_16B_offset(ki * _PV_K_16B[kind]),
-                K.uint32(_instr_desc(operand_dtype, trans_b=True)),
-                K.uint32(0),
-                K.uint32(0),
-                K.uint32(0),
-                K.uint32(0),
-                K.ptx.pred(K.cast(ki != 0, "uint32")),
+                txl.uint32(_instr_desc(operand_dtype, trans_b=True)),
+                txl.uint32(0),
+                txl.uint32(0),
+                txl.uint32(0),
+                txl.uint32(0),
+                txl.ptx.pred(txl.cast(ki != 0, "uint32")),
             )
 
 
@@ -1005,7 +1020,7 @@ def _tcgen05_commit(bar, stage):
     ordered behind the MMA -- including the softmax-produced P pipes, whose
     consumer release the export also shows as a commit (:2129-2130).
     """
-    with K.If(K.cuda.elect_sync()), K.Then():
+    with txl.If(txl.cuda.elect_sync()), txl.Then():
         bar.arrive(stage)
 
 
@@ -1014,27 +1029,30 @@ def _pack_p_words(words, regs, j, pv_dtype):
 
     bf16 packs two values per word with ``cvt.rn.bf16x2.f32``; fp8 packs four,
     two at a time through ``cvt.rn.satfinite.e4m3x2.f32`` and then combined.
-    Element assignment needs a traced body, so this is ``@K.inline`` with
-    ``K.unroll``; every index is arithmetic, so nothing here needs a Python
+    Element assignment needs a traced body, so this is ``@txl.inline`` with
+    ``txl.unroll``; every index is arithmetic, so nothing here needs a Python
     loop variable.
     """
     if pv_dtype == "float8_e4m3":
-        with K.unroll(8) as w:
-            lo = K.alloc_local((1,), "uint16")
-            hi = K.alloc_local((1,), "uint16")
-            K.ptx.cvt.rn.satfinite.e4m3x2.f32(lo[0], regs[j * 32 + w * 4 + 1], regs[j * 32 + w * 4])
-            K.ptx.cvt.rn.satfinite.e4m3x2.f32(
+        with txl.unroll(8) as w:
+            lo = txl.alloc_local((1,), "uint16")
+            hi = txl.alloc_local((1,), "uint16")
+            txl.ptx.cvt.rn.satfinite.e4m3x2.f32(
+                lo[0], regs[j * 32 + w * 4 + 1], regs[j * 32 + w * 4]
+            )
+            txl.ptx.cvt.rn.satfinite.e4m3x2.f32(
                 hi[0], regs[j * 32 + w * 4 + 3], regs[j * 32 + w * 4 + 2]
             )
-            K.assign(
+            txl.assign(
                 words[j * 8 + w],
-                K.bitwise_or(
-                    K.cast(lo[0], "uint32"), K.shift_left(K.cast(hi[0], "uint32"), K.uint32(16))
+                txl.bitwise_or(
+                    txl.cast(lo[0], "uint32"),
+                    txl.shift_left(txl.cast(hi[0], "uint32"), txl.uint32(16)),
                 ),
             )
     else:
-        with K.unroll(16) as w:
-            K.ptx.cvt.rn.bf16x2.f32(
+        with txl.unroll(16) as w:
+            txl.ptx.cvt.rn.bf16x2.f32(
                 words[j * 16 + w], regs[j * 32 + w * 2 + 1], regs[j * 32 + w * 2]
             )
 
@@ -1103,14 +1121,14 @@ def _tmem16_store_groups(partial_dtype: str) -> list[tuple[int, int, list[int]]]
 
 def ld_shared_f32(buffer, index):
     """``ld.shared.f32``."""
-    out = K.alloc_local((1,), "float32")
-    K.ptx.ld.shared.f32(out[0], buffer.ptr_to([index]))
+    out = txl.alloc_local((1,), "float32")
+    txl.ptx.ld.shared.f32(out[0], buffer.ptr_to([index]))
     return out[0]
 
 
 def st_shared_f32(buffer, index, value):
     """``st.shared.f32``."""
-    K.ptx.st.shared.f32(buffer.ptr_to([index]), value)
+    txl.ptx.st.shared.f32(buffer.ptr_to([index]), value)
 
 
 def _store_o_partial(buf, elem_offset, vals, partial_dtype):
@@ -1120,31 +1138,32 @@ def _store_o_partial(buf, elem_offset, vals, partial_dtype):
     packs sixteen into four (:2589-2656).
     """
     if partial_dtype == "float32":
-        K.ptx.st.global_.cs.v4.f32(buf.ptr_to([elem_offset]), vals[0], vals[1], vals[2], vals[3])
+        txl.ptx.st.global_.cs.v4.f32(buf.ptr_to([elem_offset]), vals[0], vals[1], vals[2], vals[3])
     elif partial_dtype in ("bfloat16", "float16"):
-        words = K.alloc_local((4,), "uint32")
-        with K.unroll(4) as w:
+        words = txl.alloc_local((4,), "uint32")
+        with txl.unroll(4) as w:
             if partial_dtype == "bfloat16":
-                K.ptx.cvt.rn.bf16x2.f32(words[w], vals[w * 2 + 1], vals[w * 2])
+                txl.ptx.cvt.rn.bf16x2.f32(words[w], vals[w * 2 + 1], vals[w * 2])
             else:
-                K.ptx.cvt.rn.f16x2.f32(words[w], vals[w * 2 + 1], vals[w * 2])
-        K.ptx.st.global_.cs.v4.b32(
+                txl.ptx.cvt.rn.f16x2.f32(words[w], vals[w * 2 + 1], vals[w * 2])
+        txl.ptx.st.global_.cs.v4.b32(
             buf.ptr_to([elem_offset]), words[0], words[1], words[2], words[3]
         )
     else:
-        words = K.alloc_local((4,), "uint32")
-        with K.unroll(4) as w:
-            lo = K.alloc_local((1,), "uint16")
-            hi = K.alloc_local((1,), "uint16")
-            K.ptx.cvt.rn.satfinite.e4m3x2.f32(lo[0], vals[w * 4 + 1], vals[w * 4])
-            K.ptx.cvt.rn.satfinite.e4m3x2.f32(hi[0], vals[w * 4 + 3], vals[w * 4 + 2])
-            K.assign(
+        words = txl.alloc_local((4,), "uint32")
+        with txl.unroll(4) as w:
+            lo = txl.alloc_local((1,), "uint16")
+            hi = txl.alloc_local((1,), "uint16")
+            txl.ptx.cvt.rn.satfinite.e4m3x2.f32(lo[0], vals[w * 4 + 1], vals[w * 4])
+            txl.ptx.cvt.rn.satfinite.e4m3x2.f32(hi[0], vals[w * 4 + 3], vals[w * 4 + 2])
+            txl.assign(
                 words[w],
-                K.bitwise_or(
-                    K.cast(lo[0], "uint32"), K.shift_left(K.cast(hi[0], "uint32"), K.uint32(16))
+                txl.bitwise_or(
+                    txl.cast(lo[0], "uint32"),
+                    txl.shift_left(txl.cast(hi[0], "uint32"), txl.uint32(16)),
                 ),
             )
-        K.ptx.st.global_.cs.v4.b32(
+        txl.ptx.st.global_.cs.v4.b32(
             buf.ptr_to([elem_offset]), words[0], words[1], words[2], words[3]
         )
 
@@ -1174,34 +1193,34 @@ def _resolve_gather4_rows(
     if qheadperkv == 1:
         for j in range(4):
             qi = qi_base + tok_base + j
-            K.assign(rows[j], q_oob_m_idx)
-            with K.If(qi < count_raw), K.Then():
-                q_idx = K.bitwise_and(ld_shared_i32(meta, meta_slot + tok_base + j), Q_IDX_MASK)
-                K.assign(rows[j], (q_batch_off + q_idx) * num_heads_kv + head_kv_idx)
+            txl.assign(rows[j], q_oob_m_idx)
+            with txl.If(qi < count_raw), txl.Then():
+                q_idx = txl.bitwise_and(ld_shared_i32(meta, meta_slot + tok_base + j), Q_IDX_MASK)
+                txl.assign(rows[j], (q_batch_off + q_idx) * num_heads_kv + head_kv_idx)
     elif qheadperkv == 2:
         for t in range(2):
             qi = qi_base + tok_base + t
-            base = K.local_scalar("int32", init=q_oob_m_idx * qheadperkv)
-            with K.If(qi < count_raw), K.Then():
-                q_idx = K.bitwise_and(ld_shared_i32(meta, meta_slot + tok_base + t), Q_IDX_MASK)
-                K.assign(base, ((q_batch_off + q_idx) * num_heads_kv + head_kv_idx) * qheadperkv)
-            K.assign(rows[t * 2], base)
-            K.assign(rows[t * 2 + 1], base + 1)
+            base = txl.local_scalar("int32", init=q_oob_m_idx * qheadperkv)
+            with txl.If(qi < count_raw), txl.Then():
+                q_idx = txl.bitwise_and(ld_shared_i32(meta, meta_slot + tok_base + t), Q_IDX_MASK)
+                txl.assign(base, ((q_batch_off + q_idx) * num_heads_kv + head_kv_idx) * qheadperkv)
+            txl.assign(rows[t * 2], base)
+            txl.assign(rows[t * 2 + 1], base + 1)
     else:
         qi = qi_base + tok_base
-        base = K.local_scalar("int32", init=q_oob_m_idx * qheadperkv)
-        with K.If(qi < count_raw), K.Then():
-            q_idx = K.bitwise_and(ld_shared_i32(meta, meta_slot + tok_base), Q_IDX_MASK)
-            K.assign(base, ((q_batch_off + q_idx) * num_heads_kv + head_kv_idx) * qheadperkv)
+        base = txl.local_scalar("int32", init=q_oob_m_idx * qheadperkv)
+        with txl.If(qi < count_raw), txl.Then():
+            q_idx = txl.bitwise_and(ld_shared_i32(meta, meta_slot + tok_base), Q_IDX_MASK)
+            txl.assign(base, ((q_batch_off + q_idx) * num_heads_kv + head_kv_idx) * qheadperkv)
         for j in range(4):
-            K.assign(rows[j], base + j)
+            txl.assign(rows[j], base + j)
 
 
 # ---------------------------------------------------------------------------
 # Target entry.
 # ---------------------------------------------------------------------------
 def _make_kernel(**config):
-    """Trace one native Kern specialization and its exact launch ABI."""
+    """Trace one native tirx-lite specialization and its exact launch ABI."""
     qheadperkv = int(config["qhead_per_kv"])
     causal = bool(config.get("causal", True))
     dtype_mode = str(config.get("dtype", "bf16q"))
@@ -1273,12 +1292,12 @@ def _make_kernel(**config):
         # descriptor mode, which is what makes the loads
         # `cp.async.bulk.tensor.3d`. The box spans the whole 64-byte packed row, so
         # one issue covers a tile: 8192 transaction bytes, half the sibling's.
-        k_map = K.stack_alloca("tensormap", 1)
+        k_map = txl.stack_alloca("tensormap", 1)
         if paged:
             # Rank 4: the page becomes the outermost mode and the token coordinate
             # is pinned to 0. Load mode, completion, cache hint and the 8192-byte
             # transaction are unchanged from the flat form.
-            K.call_packed(
+            txl.call_packed(
                 "runtime.cuTensorMapEncodeTiled",
                 k_map,
                 "uint8",
@@ -1305,7 +1324,7 @@ def _make_kernel(**config):
                 0,
             )
         else:
-            K.call_packed(
+            txl.call_packed(
                 "runtime.cuTensorMapEncodeTiled",
                 k_map,
                 "uint8",
@@ -1327,12 +1346,12 @@ def _make_kernel(**config):
                 _L2_PROMOTION_256B,
                 0,
             )
-        v_map = K.stack_alloca("tensormap", 1)
+        v_map = txl.stack_alloca("tensormap", 1)
         if paged:
             # Rank 4: the page becomes the outermost mode and the token coordinate
             # is pinned to 0. Load mode, completion, cache hint and the 8192-byte
             # transaction are unchanged from the flat form.
-            K.call_packed(
+            txl.call_packed(
                 "runtime.cuTensorMapEncodeTiled",
                 v_map,
                 "uint8",
@@ -1359,7 +1378,7 @@ def _make_kernel(**config):
                 0,
             )
         else:
-            K.call_packed(
+            txl.call_packed(
                 "runtime.cuTensorMapEncodeTiled",
                 v_map,
                 "uint8",
@@ -1384,8 +1403,8 @@ def _make_kernel(**config):
 
         # The TMA-Q box is one token group of `qheadperkv` rows; the gather4 box is
         # a single row, because the instruction supplies four row coordinates.
-        q_map = K.stack_alloca("tensormap", 1)
-        K.call_packed(
+        q_map = txl.stack_alloca("tensormap", 1)
+        txl.call_packed(
             "runtime.cuTensorMapEncodeTiled",
             q_map,
             q_ty,
@@ -1440,41 +1459,41 @@ def _make_kernel(**config):
         k_map, v_map, q_map = host
 
         # CUDA TRANSCRIPTION START
-        block = K.cta_id()
-        tidx = K.thread_id()
+        block = txl.cta_id()
+        tidx = txl.thread_id()
         # `make_warp_uniform(warp_idx())` (:657) lowers to a lane-0 shfl broadcast.
-        # `K.warp_id` is warp-uniform by construction, so the broadcast is redundant
+        # `txl.warp_id` is warp-uniform by construction, so the broadcast is redundant
         # here rather than load-bearing.
-        warp_idx = K.warp_id()
-        lane_idx = K.lane_id()
+        warp_idx = txl.warp_id()
+        lane_idx = txl.lane_id()
 
         # Work-item decode and the CTA-level early-out (:660-688).
         # The grid is sized by the work list's CAPACITY, so the tail CTAs retire.
-        work_count_val = K.local_scalar(
-            K.i32, init=ld_global_i32(work_count, 0), name="work_count_val"
+        work_count_val = txl.local_scalar(
+            txl.i32, init=ld_global_i32(work_count, 0), name="work_count_val"
         )
-        cta_valid_work = K.local_scalar(
-            K.i32, init=K.cast(block < work_count_val, "int32"), name="cta_valid_work"
+        cta_valid_work = txl.local_scalar(
+            txl.i32, init=txl.cast(block < work_count_val, "int32"), name="cta_valid_work"
         )
-        head_kv_idx = K.alloc_local((1,), "int32")
-        row_linear = K.alloc_local((1,), "int32")
-        work_q_begin = K.alloc_local((1,), "int32")
-        work_q_count = K.alloc_local((1,), "int32")
-        batch_idx = K.alloc_local((1,), "int32")
-        kv_block_idx = K.alloc_local((1,), "int32")
-        K.assign(head_kv_idx[0], 0)
-        K.assign(row_linear[0], 0)
-        K.assign(work_q_begin[0], 0)
-        K.assign(work_q_count[0], 0)
-        K.assign(batch_idx[0], 0)
-        K.assign(kv_block_idx[0], 0)
-        with K.If(cta_valid_work != 0), K.Then():
-            K.assign(head_kv_idx[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 0))
-            K.assign(row_linear[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 1))
-            K.assign(work_q_begin[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 2))
-            K.assign(work_q_count[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 3))
-            K.assign(batch_idx[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 4))
-            K.assign(kv_block_idx[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 5))
+        head_kv_idx = txl.alloc_local((1,), "int32")
+        row_linear = txl.alloc_local((1,), "int32")
+        work_q_begin = txl.alloc_local((1,), "int32")
+        work_q_count = txl.alloc_local((1,), "int32")
+        batch_idx = txl.alloc_local((1,), "int32")
+        kv_block_idx = txl.alloc_local((1,), "int32")
+        txl.assign(head_kv_idx[0], 0)
+        txl.assign(row_linear[0], 0)
+        txl.assign(work_q_begin[0], 0)
+        txl.assign(work_q_count[0], 0)
+        txl.assign(batch_idx[0], 0)
+        txl.assign(kv_block_idx[0], 0)
+        with txl.If(cta_valid_work != 0), txl.Then():
+            txl.assign(head_kv_idx[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 0))
+            txl.assign(row_linear[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 1))
+            txl.assign(work_q_begin[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 2))
+            txl.assign(work_q_count[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 3))
+            txl.assign(batch_idx[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 4))
+            txl.assign(kv_block_idx[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 5))
 
         # -----------------------------------------------------------------------
         # Shared memory. The source's `@cute.struct SharedStorage` reads static but
@@ -1482,15 +1501,15 @@ def _make_kernel(**config):
         # `.extern .shared .align 1024 .b8 __dynamic_shmem__0[]`, so the matching
         # TIRx form is a pool allocation under `tirx.use_dyn_shared_memory`.
         # -----------------------------------------------------------------------
-        smem = K.smem_pool()
+        smem = txl.smem_pool()
         pool = smem.pool
-        s_k = smem.alloc((N_BLOCK, HEAD_DIM), qk_ty, swizzle=K.SW128B).buf
+        s_k = smem.alloc((N_BLOCK, HEAD_DIM), qk_ty, swizzle=txl.SW128B).buf
         # Same shape as sK: the TMA box's fastest dim is head_dim, so the tile
         # lands (kv rows, head_dim cols) with head_dim contiguous. For the PV
         # B operand that means N = head_dim is the contiguous axis, which is what
         # "MN-major" names (:386-387).
-        s_v = smem.alloc((N_BLOCK, HEAD_DIM), pv_ty, swizzle=K.SW128B).buf
-        s_q = smem.alloc((Q_STAGE * M_BLOCK, HEAD_DIM), q_ty, swizzle=K.SW128B).buf
+        s_v = smem.alloc((N_BLOCK, HEAD_DIM), pv_ty, swizzle=txl.SW128B).buf
+        s_q = smem.alloc((Q_STAGE * M_BLOCK, HEAD_DIM), q_ty, swizzle=txl.SW128B).buf
         # The packed FP4 staging tiles, UNCONDITIONAL here -- every specialization of
         # this kernel dequantizes (:511-512), where the sibling gates its equivalents
         # on an fp8-staging predicate. Plain buffers, matching their unswizzled
@@ -1521,29 +1540,29 @@ def _make_kernel(**config):
         s_q_load_m_idx = pool.alloc((Q_STAGE * q_tokens_per_group,), "int32", align=16)
         s_qidx_meta = pool.alloc((QIDX_META_STAGES * q_tokens_per_group,), "int32", align=16)
 
-        bar_k = K.MBarrier(pool, 1)
-        bar_v = K.MBarrier(pool, 1)
+        bar_k = txl.MBarrier(pool, 1)
+        bar_v = txl.MBarrier(pool, 1)
         # Unconditional, for the same reason the staging tiles are.
-        bar_k_tma = K.MBarrier(pool, 1)
-        bar_v_tma = K.MBarrier(pool, 1)
-        bar_q_full = K.TMABar(pool, Q_STAGE)
-        bar_q_empty = K.TCGen05Bar(pool, Q_STAGE)
-        bar_s_full = K.TCGen05Bar(pool, S_STAGE)
-        bar_s_empty = K.MBarrier(pool, S_STAGE)
-        bar_p_full = K.MBarrier(pool, S_STAGE)
-        bar_p_empty = K.TCGen05Bar(pool, S_STAGE)
-        bar_p_last_full = K.MBarrier(pool, S_STAGE)
-        bar_p_last_empty = K.TCGen05Bar(pool, S_STAGE)
-        bar_o_full = K.TCGen05Bar(pool, O_STAGE)
-        bar_o_empty = K.MBarrier(pool, O_STAGE)
+        bar_k_tma = txl.MBarrier(pool, 1)
+        bar_v_tma = txl.MBarrier(pool, 1)
+        bar_q_full = txl.TMABar(pool, Q_STAGE)
+        bar_q_empty = txl.TCGen05Bar(pool, Q_STAGE)
+        bar_s_full = txl.TCGen05Bar(pool, S_STAGE)
+        bar_s_empty = txl.MBarrier(pool, S_STAGE)
+        bar_p_full = txl.MBarrier(pool, S_STAGE)
+        bar_p_empty = txl.TCGen05Bar(pool, S_STAGE)
+        bar_p_last_full = txl.MBarrier(pool, S_STAGE)
+        bar_p_last_empty = txl.TCGen05Bar(pool, S_STAGE)
+        bar_o_full = txl.TCGen05Bar(pool, O_STAGE)
+        bar_o_empty = txl.MBarrier(pool, O_STAGE)
         # Only the empty half of the stats pipe is live upstream: it is a credit on
         # `s_scale`, and nothing ever commits or waits on its full half (:2331,
         # :3019). The full half is still allocated so the word layout matches.
-        bar_stats_full = K.MBarrier(pool, O_STAGE)
-        bar_stats_empty = K.MBarrier(pool, O_STAGE)
+        bar_stats_full = txl.MBarrier(pool, O_STAGE)
+        bar_stats_empty = txl.MBarrier(pool, O_STAGE)
         tmem_start_addr = pool.alloc((1,), "uint32", align=4)
 
-        # TMEM is represented by raw tcgen05 column operands in Kern. The source
+        # TMEM is represented by raw tcgen05 column operands in tirx-lite. The source
         # allocator's map is S0/S1 [0, 2*N_BLOCK), then O0/O1.
         tmem_s_col = 0
         tmem_o_col = 2 * N_BLOCK
@@ -1559,73 +1578,73 @@ def _make_kernel(**config):
         # -----------------------------------------------------------------------
         # Prologue: descriptor prefetch, thread-0 metadata publish, barrier init.
         # -----------------------------------------------------------------------
-        with K.If(warp_idx == 0), K.Then():
+        with txl.If(warp_idx == 0), txl.Then():
             # ONLY the Q descriptor (:690-696). K and V are never prefetched -- the
             # export carries exactly one `prefetch.tensormap`. The two Q programs
             # also differ in election: the CUTE-atom (TMA-Q) arm issues it
             # unelected, the raw-descriptor gather4 arm elects one lane.
             if USE_GATHER4(qheadperkv):
-                with K.If(K.cuda.elect_sync()), K.Then():
-                    K.ptx.prefetch.tensormap(K.address_of(q_map))
+                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    txl.ptx.prefetch.tensormap(txl.address_of(q_map))
             else:
-                K.ptx.prefetch.tensormap(K.address_of(q_map))
+                txl.ptx.prefetch.tensormap(txl.address_of(q_map))
 
         # WARP 0, every lane, NO elect, and BEFORE the thread-0 metadata block
         # (:751-806). `mbarrier.init` is idempotent across the warp's 32 lanes, so
         # the reference does not elect, and the export shows the 24 inits inside a
         # plain `@%p bra` on the warp index with no `elect.sync`.
-        with K.If(warp_idx == 0), K.Then():
-            with K.unroll(Q_STAGE) as stage:
-                K.ptx.mbarrier.init.shared.b64(bar_q_full.ptr_to([stage]), K.uint32(1))
-                K.ptx.mbarrier.init.shared.b64(bar_q_empty.ptr_to([stage]), K.uint32(1))
-            with K.unroll(S_STAGE) as stage:
-                K.ptx.mbarrier.init.shared.b64(bar_s_full.ptr_to([stage]), K.uint32(1))
-                K.ptx.mbarrier.init.shared.b64(
-                    bar_s_empty.ptr_to([stage]), K.uint32(SOFTMAX_THREADS)
+        with txl.If(warp_idx == 0), txl.Then():
+            with txl.unroll(Q_STAGE) as stage:
+                txl.ptx.mbarrier.init.shared.b64(bar_q_full.ptr_to([stage]), txl.uint32(1))
+                txl.ptx.mbarrier.init.shared.b64(bar_q_empty.ptr_to([stage]), txl.uint32(1))
+            with txl.unroll(S_STAGE) as stage:
+                txl.ptx.mbarrier.init.shared.b64(bar_s_full.ptr_to([stage]), txl.uint32(1))
+                txl.ptx.mbarrier.init.shared.b64(
+                    bar_s_empty.ptr_to([stage]), txl.uint32(SOFTMAX_THREADS)
                 )
-                K.ptx.mbarrier.init.shared.b64(
-                    bar_p_full.ptr_to([stage]), K.uint32(SOFTMAX_THREADS)
+                txl.ptx.mbarrier.init.shared.b64(
+                    bar_p_full.ptr_to([stage]), txl.uint32(SOFTMAX_THREADS)
                 )
-                K.ptx.mbarrier.init.shared.b64(bar_p_empty.ptr_to([stage]), K.uint32(1))
-                K.ptx.mbarrier.init.shared.b64(
-                    bar_p_last_full.ptr_to([stage]), K.uint32(SOFTMAX_THREADS)
+                txl.ptx.mbarrier.init.shared.b64(bar_p_empty.ptr_to([stage]), txl.uint32(1))
+                txl.ptx.mbarrier.init.shared.b64(
+                    bar_p_last_full.ptr_to([stage]), txl.uint32(SOFTMAX_THREADS)
                 )
-                K.ptx.mbarrier.init.shared.b64(bar_p_last_empty.ptr_to([stage]), K.uint32(1))
-            with K.unroll(O_STAGE) as stage:
-                K.ptx.mbarrier.init.shared.b64(bar_o_full.ptr_to([stage]), K.uint32(1))
-                K.ptx.mbarrier.init.shared.b64(
-                    bar_o_empty.ptr_to([stage]), K.uint32(SOFTMAX_THREADS)
+                txl.ptx.mbarrier.init.shared.b64(bar_p_last_empty.ptr_to([stage]), txl.uint32(1))
+            with txl.unroll(O_STAGE) as stage:
+                txl.ptx.mbarrier.init.shared.b64(bar_o_full.ptr_to([stage]), txl.uint32(1))
+                txl.ptx.mbarrier.init.shared.b64(
+                    bar_o_empty.ptr_to([stage]), txl.uint32(SOFTMAX_THREADS)
                 )
-                K.ptx.mbarrier.init.shared.b64(
-                    bar_stats_full.ptr_to([stage]), K.uint32(SOFTMAX_THREADS)
+                txl.ptx.mbarrier.init.shared.b64(
+                    bar_stats_full.ptr_to([stage]), txl.uint32(SOFTMAX_THREADS)
                 )
-                K.ptx.mbarrier.init.shared.b64(
-                    bar_stats_empty.ptr_to([stage]), K.uint32(SOFTMAX_THREADS)
+                txl.ptx.mbarrier.init.shared.b64(
+                    bar_stats_empty.ptr_to([stage]), txl.uint32(SOFTMAX_THREADS)
                 )
 
         # The pipeline init has its OWN fence and CTA barrier (:808-809); the
         # thread-0 metadata block below closes with a second pair (:891-892). Two
         # pairs, not one: the export carries `fence.mbarrier_init` twice.
-        K.ptx.fence.mbarrier_init.release.cluster()
-        K.cuda.cta_sync()
+        txl.ptx.fence.mbarrier_init.release.cluster()
+        txl.cuda.cta_sync()
 
-        with K.If(tidx == 0), K.Then():
-            base_row_start = K.local_scalar(
-                K.i32,
+        with txl.If(tidx == 0), txl.Then():
+            base_row_start = txl.local_scalar(
+                txl.i32,
                 init=ld_global_i32(k2q_row_ptr, head_kv_idx[0] * (total_rows + 1) + row_linear[0]),
                 name="base_row_start",
             )
-            row_start = K.local_scalar(
-                K.i32, init=base_row_start + work_q_begin[0], name="row_start"
+            row_start = txl.local_scalar(
+                txl.i32, init=base_row_start + work_q_begin[0], name="row_start"
             )
-            count_raw = K.local_scalar(K.i32, init=work_q_count[0], name="count_raw")
+            count_raw = txl.local_scalar(txl.i32, init=work_q_count[0], name="count_raw")
             # Upstream reads this as `mPageTable.shape[1]` (:211). The table is
             # rectangular because `page_size == blk_kv`, so `num_batches *
             # pages_per_seq == num_pages == total_k / page_size`, and the quotient
             # of two ABI scalars recovers it without a new argument.
             if paged:
-                pages_per_seq = K.local_scalar(
-                    K.i32,
+                pages_per_seq = txl.local_scalar(
+                    txl.i32,
                     init=udiv_i32(udiv_i32(total_k, N_BLOCK), num_batches),
                     name="pages_per_seq",
                 )
@@ -1634,29 +1653,29 @@ def _make_kernel(**config):
             # difference. Testing paged first would substitute the zero-padded
             # capacity for a shorter supplied length.
             if seqused:
-                seqlen_k = K.local_scalar(
-                    K.i32, init=ld_global_i32(seqused_k, batch_idx[0]), name="seqlen_k"
+                seqlen_k = txl.local_scalar(
+                    txl.i32, init=ld_global_i32(seqused_k, batch_idx[0]), name="seqlen_k"
                 )
             elif paged:
-                seqlen_k = K.local_scalar(K.i32, init=pages_per_seq * N_BLOCK, name="seqlen_k")
+                seqlen_k = txl.local_scalar(txl.i32, init=pages_per_seq * N_BLOCK, name="seqlen_k")
             else:
-                seqlen_k = K.local_scalar(
-                    K.i32,
+                seqlen_k = txl.local_scalar(
+                    txl.i32,
                     init=ld_global_i32(cu_seqlens_k, batch_idx[0] + 1)
                     - ld_global_i32(cu_seqlens_k, batch_idx[0]),
                     name="seqlen_k",
                 )
-            kv_valid_cols = K.local_scalar(
-                K.i32,
-                init=K.min(K.max(seqlen_k - kv_block_idx[0] * N_BLOCK, 0), N_BLOCK),
+            kv_valid_cols = txl.local_scalar(
+                txl.i32,
+                init=txl.min(txl.max(seqlen_k - kv_block_idx[0] * N_BLOCK, 0), N_BLOCK),
                 name="kv_valid_cols",
             )
-            q_batch_offset = K.local_scalar(
-                K.i32, init=ld_global_i32(cu_seqlens_q, batch_idx[0]), name="q_batch_offset"
+            q_batch_offset = txl.local_scalar(
+                txl.i32, init=ld_global_i32(cu_seqlens_q, batch_idx[0]), name="q_batch_offset"
             )
-            k_batch_offset = K.local_scalar(K.i32, init=K.int32(0), name="k_batch_offset")
+            k_batch_offset = txl.local_scalar(txl.i32, init=txl.int32(0), name="k_batch_offset")
             if not paged:
-                K.assign(k_batch_offset, ld_global_i32(cu_seqlens_k, batch_idx[0]))
+                txl.assign(k_batch_offset, ld_global_i32(cu_seqlens_k, batch_idx[0]))
             # `seqlen_q` and therefore `causal_q_offset` are needed BEFORE the
             # second store, because the eight words go out as TWO four-word vector
             # stores (:849, :863), not eight scalars.
@@ -1664,31 +1683,31 @@ def _make_kernel(**config):
             # unclamped: with `seqused_k` shorter than the Q length the offset goes
             # negative and the leading queries store the neutral partial, O = 0 with
             # LSE = -inf. Clamping would diverge from the source.
-            causal_q_offset_l = K.alloc_local((1,), "int32")
-            K.assign(causal_q_offset_l[0], 0)
+            causal_q_offset_l = txl.alloc_local((1,), "int32")
+            txl.assign(causal_q_offset_l[0], 0)
             if causal:
-                seqlen_q = K.local_scalar(
-                    K.i32,
+                seqlen_q = txl.local_scalar(
+                    txl.i32,
                     init=ld_global_i32(cu_seqlens_q, batch_idx[0] + 1) - q_batch_offset,
                     name="seqlen_q",
                 )
-                K.assign(causal_q_offset_l[0], seqlen_k - seqlen_q)
-            causal_q_offset = K.local_scalar(
-                K.i32, init=causal_q_offset_l[0], name="causal_q_offset"
+                txl.assign(causal_q_offset_l[0], seqlen_k - seqlen_q)
+            causal_q_offset = txl.local_scalar(
+                txl.i32, init=causal_q_offset_l[0], name="causal_q_offset"
             )
-            K.ptx.st.shared.v4.b32(
+            txl.ptx.st.shared.v4.b32(
                 s_row_meta.ptr_to([0]),
-                K.reinterpret("uint32", batch_idx[0]),
-                K.reinterpret("uint32", kv_block_idx[0]),
-                K.reinterpret("uint32", row_start),
-                K.reinterpret("uint32", count_raw),
+                txl.reinterpret("uint32", batch_idx[0]),
+                txl.reinterpret("uint32", kv_block_idx[0]),
+                txl.reinterpret("uint32", row_start),
+                txl.reinterpret("uint32", count_raw),
             )
-            K.ptx.st.shared.v4.b32(
+            txl.ptx.st.shared.v4.b32(
                 s_row_meta.ptr_to([4]),
-                K.reinterpret("uint32", kv_valid_cols),
-                K.reinterpret("uint32", q_batch_offset),
-                K.reinterpret("uint32", k_batch_offset),
-                K.reinterpret("uint32", causal_q_offset),
+                txl.reinterpret("uint32", kv_valid_cols),
+                txl.reinterpret("uint32", q_batch_offset),
+                txl.reinterpret("uint32", k_batch_offset),
+                txl.reinterpret("uint32", causal_q_offset),
             )
 
             # The causal diagonal split point: a 32-step binary search over the CSR
@@ -1698,39 +1717,39 @@ def _make_kernel(**config):
             # build emits no search at all and leaves the count at zero, which is
             # also the only value its consumer would accept -- a search result there
             # would drive the diagonal mask over rows that have no diagonal.
-            diag_q_count = K.alloc_local((1,), "int32")
-            K.assign(diag_q_count[0], 0)
-            with K.If(K.And(K.And(causal, count_raw > 0), kv_valid_cols > 0)), K.Then():
-                q_threshold = K.local_scalar(
-                    K.i32,
+            diag_q_count = txl.alloc_local((1,), "int32")
+            txl.assign(diag_q_count[0], 0)
+            with txl.If(txl.And(txl.And(causal, count_raw > 0), kv_valid_cols > 0)), txl.Then():
+                q_threshold = txl.local_scalar(
+                    txl.i32,
                     init=(kv_block_idx[0] * N_BLOCK + kv_valid_cols) - causal_q_offset,
                     name="q_threshold",
                 )
-                lo = K.alloc_local((1,), "int32")
-                hi = K.alloc_local((1,), "int32")
-                K.assign(lo[0], 0)
-                K.assign(hi[0], count_raw)
+                lo = txl.alloc_local((1,), "int32")
+                hi = txl.alloc_local((1,), "int32")
+                txl.assign(lo[0], 0)
+                txl.assign(hi[0], count_raw)
                 # `_lower_bound_q_idx` (:264-286): a FIXED 32-trip loop with
                 # `unroll=1` and a predicated body, not a data-dependent `while`.
                 # 32 is an upper bound on any int32-sized row rather than a trip
                 # count the search runs to convergence, and the export keeps it
                 # rolled with exactly one probe load in the body.
-                with K.serial(0, 32, unroll=False) as _:
-                    with K.If(lo[0] < hi[0]), K.Then():
-                        mid = K.local_scalar(K.i32, init=udiv_i32(lo[0] + hi[0], 2), name="mid")
-                        probe = K.local_scalar(
-                            K.i32,
+                with txl.serial(0, 32, unroll=False) as _:
+                    with txl.If(lo[0] < hi[0]), txl.Then():
+                        mid = txl.local_scalar(txl.i32, init=udiv_i32(lo[0] + hi[0], 2), name="mid")
+                        probe = txl.local_scalar(
+                            txl.i32,
                             init=ld_global_i32(
                                 k2q_q_indices, head_kv_idx[0] * nnz + row_start + mid
                             ),
                             name="probe",
                         )
-                        with K.If(probe < q_threshold):
-                            with K.Then():
-                                K.assign(lo[0], mid + 1)
-                            with K.Else():
-                                K.assign(hi[0], mid)
-                K.assign(diag_q_count[0], lo[0])
+                        with txl.If(probe < q_threshold):
+                            with txl.Then():
+                                txl.assign(lo[0], mid + 1)
+                            with txl.Else():
+                                txl.assign(hi[0], mid)
+                txl.assign(diag_q_count[0], lo[0])
             st_shared_i32(s_diag_q_count, 0, diag_q_count[0])
 
             bar_k.init(1)
@@ -1752,10 +1771,10 @@ def _make_kernel(**config):
         # same fence and CTA barrier below, so visibility is unchanged and paging
         # still adds no barrier of its own.
         if paged:
-            with K.If(K.And(warp_idx == 1, cta_valid_work != 0)), K.Then():
-                with K.If(K.cuda.elect_sync()), K.Then():
-                    pages_per_seq_w1 = K.local_scalar(
-                        K.i32,
+            with txl.If(txl.And(warp_idx == 1, cta_valid_work != 0)), txl.Then():
+                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    pages_per_seq_w1 = txl.local_scalar(
+                        txl.i32,
                         init=udiv_i32(udiv_i32(total_k, N_BLOCK), num_batches),
                         name="pages_per_seq_w1",
                     )
@@ -1770,75 +1789,75 @@ def _make_kernel(**config):
         # The metadata block's own fence and CTA barrier (:891-892) -- the second
         # of the two pairs. It orders the sRowMeta / sDiagQCount publish and the
         # K/V transaction counts against every consumer.
-        K.ptx.fence.mbarrier_init.release.cluster()
-        K.cuda.cta_sync()
+        txl.ptx.fence.mbarrier_init.release.cluster()
+        txl.cuda.cta_sync()
 
         # -----------------------------------------------------------------------
         # Role dispatch. A flat sequence of independent `if` blocks, each ANDed
         # with `cta_valid_work` -- not an if/elif chain (:943-1191).
         # -----------------------------------------------------------------------
-        with K.If(warp_idx == TOTAL_WARPS - 1), K.Then():
+        with txl.If(warp_idx == TOTAL_WARPS - 1), txl.Then():
             # Warp 15 is idle and is NOT gated on cta_valid_work (:991-992).
-            K.ptx.setmaxnreg.dec.sync.aligned.u32(K.uint32(NUM_REGS_OTHER))
+            txl.ptx.setmaxnreg.dec.sync.aligned.u32(txl.uint32(NUM_REGS_OTHER))
 
         # -----------------------------------------------------------------------
         # ROLE: Q-load warpgroup, warps 8..11 (:1014-1047).
         # -----------------------------------------------------------------------
         with (
-            K.If(K.And(tidx >= Q_LOAD_WARP_BASE * WARP_SIZE, tidx < MMA_WARP_ID * WARP_SIZE)),
-            K.Then(),
+            txl.If(txl.And(tidx >= Q_LOAD_WARP_BASE * WARP_SIZE, tidx < MMA_WARP_ID * WARP_SIZE)),
+            txl.Then(),
         ):
-            with K.If(cta_valid_work != 0), K.Then():
-                K.ptx.setmaxnreg.dec.sync.aligned.u32(K.uint32(num_regs_store))
-                q_row_start = K.local_scalar(
-                    K.i32, init=ld_shared_i32(s_row_meta, 2), name="q_row_start"
+            with txl.If(cta_valid_work != 0), txl.Then():
+                txl.ptx.setmaxnreg.dec.sync.aligned.u32(txl.uint32(num_regs_store))
+                q_row_start = txl.local_scalar(
+                    txl.i32, init=ld_shared_i32(s_row_meta, 2), name="q_row_start"
                 )
-                q_count_raw = K.local_scalar(
-                    K.i32, init=ld_shared_i32(s_row_meta, 3), name="q_count_raw"
+                q_count_raw = txl.local_scalar(
+                    txl.i32, init=ld_shared_i32(s_row_meta, 3), name="q_count_raw"
                 )
-                q_batch_off = K.local_scalar(
-                    K.i32, init=ld_shared_i32(s_row_meta, 5), name="q_batch_off"
+                q_batch_off = txl.local_scalar(
+                    txl.i32, init=ld_shared_i32(s_row_meta, 5), name="q_batch_off"
                 )
                 # Deliberately NOT gated on KV validity: a sparse entry past the
                 # sequence still runs the all-masked path so its partial is neutral
                 # (:1007-1009).
-                with K.If(q_count_raw > 0), K.Then():
-                    num_q_groups_load = K.local_scalar(
-                        K.i32,
+                with txl.If(q_count_raw > 0), txl.Then():
+                    num_q_groups_load = txl.local_scalar(
+                        txl.i32,
                         init=uceil_div_i32(q_count_raw, q_tokens_per_group),
                         name="num_q_groups_load",
                     )
-                    warp_in_wg = K.local_scalar(
-                        K.i32, init=warp_idx - Q_LOAD_WARP_BASE, name="warp_in_wg"
+                    warp_in_wg = txl.local_scalar(
+                        txl.i32, init=warp_idx - Q_LOAD_WARP_BASE, name="warp_in_wg"
                     )
                     # `q_oob_m_idx = mQ_2d.shape[0] // qheadperkv` (:1855) -- one
                     # past the last Q *tile*, so an absent token gathers out of
                     # bounds and takes the descriptor's OOB fill. `total_q` alone
                     # would be an in-range row whenever num_heads_kv > 1.
-                    q_oob_m_idx = K.local_scalar(
-                        K.i32, init=total_q * num_heads_kv, name="q_oob_m_idx"
+                    q_oob_m_idx = txl.local_scalar(
+                        txl.i32, init=total_q * num_heads_kv, name="q_oob_m_idx"
                     )
 
                     if not USE_GATHER4(qheadperkv):
-                        with K.serial(0, num_q_groups_load, unroll=False) as qi_group:
-                            slot = K.local_scalar(K.i32, init=qi_group % Q_STAGE, name="slot")
-                            phase = K.local_scalar(
-                                K.i32, init=udiv_i32(qi_group, Q_STAGE) & 1, name="phase"
+                        with txl.serial(0, num_q_groups_load, unroll=False) as qi_group:
+                            slot = txl.local_scalar(txl.i32, init=qi_group % Q_STAGE, name="slot")
+                            phase = txl.local_scalar(
+                                txl.i32, init=udiv_i32(qi_group, Q_STAGE) & 1, name="phase"
                             )
-                            with K.If(warp_in_wg == 0), K.Then():
+                            with txl.If(warp_in_wg == 0), txl.Then():
                                 bar_q_empty.wait(slot, phase ^ 1)
-                                with K.If(K.cuda.elect_sync()), K.Then():
-                                    K.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                                         bar_q_full.ptr_to([slot]),
-                                        K.uint32(M_BLOCK * HEAD_DIM * q_bytes),
+                                        txl.uint32(M_BLOCK * HEAD_DIM * q_bytes),
                                     )
                             bar_sync_named(BAR_LOAD_WG, SOFTMAX_THREADS)
 
-                            load_meta_slot = K.local_scalar(
-                                K.i32, init=slot * q_tokens_per_group, name="load_meta_slot"
+                            load_meta_slot = txl.local_scalar(
+                                txl.i32, init=slot * q_tokens_per_group, name="load_meta_slot"
                             )
-                            qidx_meta_slot = K.local_scalar(
-                                K.i32,
+                            qidx_meta_slot = txl.local_scalar(
+                                txl.i32,
                                 init=(qi_group & (QIDX_META_STAGES - 1)) * q_tokens_per_group,
                                 name="qidx_meta_slot",
                             )
@@ -1846,16 +1865,18 @@ def _make_kernel(**config):
                             # qheadperkv >= 8 a group is at most 16 tokens
                             # (:1883-1898).
                             with (
-                                K.If(K.And(warp_in_wg == 0, lane_idx < q_tokens_per_group)),
-                                K.Then(),
+                                txl.If(txl.And(warp_in_wg == 0, lane_idx < q_tokens_per_group)),
+                                txl.Then(),
                             ):
-                                qi = K.local_scalar(
-                                    K.i32, init=qi_group * q_tokens_per_group + lane_idx, name="qi"
+                                qi = txl.local_scalar(
+                                    txl.i32,
+                                    init=qi_group * q_tokens_per_group + lane_idx,
+                                    name="qi",
                                 )
-                                with K.If(qi < q_count_raw):
-                                    with K.Then():
-                                        word = K.local_scalar(
-                                            K.i32,
+                                with txl.If(qi < q_count_raw):
+                                    with txl.Then():
+                                        word = txl.local_scalar(
+                                            txl.i32,
                                             init=ld_global_i32(
                                                 k2q_qsplit_indices,
                                                 head_kv_idx[0] * nnz + q_row_start + qi,
@@ -1866,59 +1887,59 @@ def _make_kernel(**config):
                                         st_shared_i32(
                                             s_q_load_m_idx,
                                             load_meta_slot + lane_idx,
-                                            (q_batch_off + K.bitwise_and(word, Q_IDX_MASK))
+                                            (q_batch_off + txl.bitwise_and(word, Q_IDX_MASK))
                                             * num_heads_kv
                                             + head_kv_idx[0],
                                         )
-                                    with K.Else():
+                                    with txl.Else():
                                         st_shared_i32(s_qidx_meta, qidx_meta_slot + lane_idx, 0)
                                         st_shared_i32(
                                             s_q_load_m_idx, load_meta_slot + lane_idx, q_oob_m_idx
                                         )
                             bar_sync_named(BAR_LOAD_WG, SOFTMAX_THREADS)
 
-                            with K.unroll(TOKENS_PER_WARP(qheadperkv)) as qi_slot:
-                                tok = K.local_scalar(
-                                    K.i32,
+                            with txl.unroll(TOKENS_PER_WARP(qheadperkv)) as qi_slot:
+                                tok = txl.local_scalar(
+                                    txl.i32,
                                     init=warp_in_wg * TOKENS_PER_WARP(qheadperkv) + qi_slot,
                                     name="tok",
                                 )
-                                with K.If(tok < q_tokens_per_group), K.Then():
-                                    m_tile = K.local_scalar(
-                                        K.i32,
+                                with txl.If(tok < q_tokens_per_group), txl.Then():
+                                    m_tile = txl.local_scalar(
+                                        txl.i32,
                                         init=ld_shared_i32(s_q_load_m_idx, load_meta_slot + tok),
                                         name="m_tile",
                                     )
-                                    with K.If(K.cuda.elect_sync()), K.Then():
-                                        with K.unroll(Q_SUBTILES(q_bytes)) as ks:
-                                            K.ptx[_TMA_G2S_2D_CACHE](
-                                                K.ptr_byte_offset(
+                                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                                        with txl.unroll(Q_SUBTILES(q_bytes)) as ks:
+                                            txl.ptx[_TMA_G2S_2D_CACHE](
+                                                txl.ptr_byte_offset(
                                                     s_q.ptr_to([0, 0]),
                                                     slot * M_BLOCK * HEAD_DIM * q_bytes
                                                     + ks * M_BLOCK * q_load_tile * q_bytes
                                                     + tok * qheadperkv * q_load_tile * q_bytes,
                                                     q_ty,
                                                 ),
-                                                K.address_of(q_map),
-                                                K.int32(ks * q_load_tile),
+                                                txl.address_of(q_map),
+                                                txl.int32(ks * q_load_tile),
                                                 m_tile * qheadperkv,
-                                                K.cuda.cvta_generic_to_shared(
+                                                txl.cuda.cvta_generic_to_shared(
                                                     bar_q_full.ptr_to([slot])
                                                 ),
                                                 _TMA_NO_POLICY,
                                             )
 
-                        with K.If(warp_in_wg == 0), K.Then():
+                        with txl.If(warp_in_wg == 0), txl.Then():
                             # One acquire past the end leaves the ring's empty half
                             # in the state the next work item expects (:1930-1935).
                             bar_q_empty.wait(
                                 num_q_groups_load % Q_STAGE,
                                 (udiv_i32(num_q_groups_load, Q_STAGE) & 1) ^ 1,
                             )
-                            with K.If(K.cuda.elect_sync()), K.Then():
-                                K.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                                txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                                     bar_q_full.ptr_to([num_q_groups_load % Q_STAGE]),
-                                    K.uint32(M_BLOCK * HEAD_DIM * q_bytes),
+                                    txl.uint32(M_BLOCK * HEAD_DIM * q_bytes),
                                 )
                     else:
                         # ---- gather4 Q path, qheadperkv in {1, 2, 4} (:1624-1817) ----
@@ -1929,17 +1950,17 @@ def _make_kernel(**config):
                         meta_iters = (q_tokens_per_group + NUM_Q_LOAD_WARPS * WARP_SIZE - 1) // (
                             NUM_Q_LOAD_WARPS * WARP_SIZE
                         )
-                        with K.serial(0, num_q_groups_load, unroll=False) as qi_group:
-                            slot = K.local_scalar(K.i32, init=qi_group % Q_STAGE, name="slot")
-                            phase = K.local_scalar(
-                                K.i32, init=udiv_i32(qi_group, Q_STAGE) & 1, name="phase"
+                        with txl.serial(0, num_q_groups_load, unroll=False) as qi_group:
+                            slot = txl.local_scalar(txl.i32, init=qi_group % Q_STAGE, name="slot")
+                            phase = txl.local_scalar(
+                                txl.i32, init=udiv_i32(qi_group, Q_STAGE) & 1, name="phase"
                             )
-                            with K.If(warp_in_wg == 0), K.Then():
+                            with txl.If(warp_in_wg == 0), txl.Then():
                                 bar_q_empty.wait(slot, phase ^ 1)
-                                with K.If(K.cuda.elect_sync()), K.Then():
-                                    K.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                                         bar_q_full.ptr_to([slot]),
-                                        K.uint32(M_BLOCK * HEAD_DIM * q_bytes),
+                                        txl.uint32(M_BLOCK * HEAD_DIM * q_bytes),
                                     )
                             # Issue the qsplit reads BEFORE the barrier and store
                             # them after it. The barrier only orders the shared
@@ -1951,23 +1972,23 @@ def _make_kernel(**config):
                             # dependent global load three instructions ahead of the
                             # store, and that store carries 517 stall samples -- the
                             # heaviest single STS site in this kernel.
-                            qsplit_word = K.alloc_local((meta_iters,), "int32")
-                            with K.unroll(meta_iters) as meta_iter:
-                                tok_pre = K.local_scalar(
-                                    K.i32,
+                            qsplit_word = txl.alloc_local((meta_iters,), "int32")
+                            with txl.unroll(meta_iters) as meta_iter:
+                                tok_pre = txl.local_scalar(
+                                    txl.i32,
                                     init=(meta_iter * NUM_Q_LOAD_WARPS + warp_in_wg) * WARP_SIZE
                                     + lane_idx,
                                     name="tok_pre",
                                 )
-                                K.assign(qsplit_word[meta_iter], 0)
-                                with K.If(tok_pre < q_tokens_per_group), K.Then():
-                                    qi_pre = K.local_scalar(
-                                        K.i32,
+                                txl.assign(qsplit_word[meta_iter], 0)
+                                with txl.If(tok_pre < q_tokens_per_group), txl.Then():
+                                    qi_pre = txl.local_scalar(
+                                        txl.i32,
                                         init=qi_group * q_tokens_per_group + tok_pre,
                                         name="qi_pre",
                                     )
-                                    with K.If(qi_pre < q_count_raw), K.Then():
-                                        K.assign(
+                                    with txl.If(qi_pre < q_count_raw), txl.Then():
+                                        txl.assign(
                                             qsplit_word[meta_iter],
                                             ld_global_i32(
                                                 k2q_qsplit_indices,
@@ -1976,39 +1997,41 @@ def _make_kernel(**config):
                                         )
                             bar_sync_named(BAR_LOAD_WG, SOFTMAX_THREADS)
 
-                            qidx_meta_slot = K.local_scalar(
-                                K.i32,
-                                init=K.bitwise_and(qi_group, QIDX_META_STAGES - 1)
+                            qidx_meta_slot = txl.local_scalar(
+                                txl.i32,
+                                init=txl.bitwise_and(qi_group, QIDX_META_STAGES - 1)
                                 * q_tokens_per_group,
                                 name="qidx_meta_slot",
                             )
                             # This path's groups hold 32, 64 or 128 tokens, so the
                             # publish takes several sweeps of the whole warpgroup
                             # (:1671-1690).
-                            with K.unroll(meta_iters) as meta_iter:
-                                tok_g4 = K.local_scalar(
-                                    K.i32,
+                            with txl.unroll(meta_iters) as meta_iter:
+                                tok_g4 = txl.local_scalar(
+                                    txl.i32,
                                     init=(meta_iter * NUM_Q_LOAD_WARPS + warp_in_wg) * WARP_SIZE
                                     + lane_idx,
                                     name="tok_g4",
                                 )
-                                with K.If(tok_g4 < q_tokens_per_group), K.Then():
+                                with txl.If(tok_g4 < q_tokens_per_group), txl.Then():
                                     st_shared_i32(
                                         s_qidx_meta, qidx_meta_slot + tok_g4, qsplit_word[meta_iter]
                                     )
                             bar_sync_named(BAR_LOAD_WG, SOFTMAX_THREADS)
 
-                            with K.If(K.cuda.elect_sync()), K.Then():
-                                with K.unroll(gathers_per_warp) as gather_slot:
-                                    gather_idx = K.local_scalar(
-                                        K.i32,
+                            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                                with txl.unroll(gathers_per_warp) as gather_slot:
+                                    gather_idx = txl.local_scalar(
+                                        txl.i32,
                                         init=gather_slot * NUM_Q_LOAD_WARPS + warp_in_wg,
                                         name="gather_idx",
                                     )
-                                    tok_base = K.local_scalar(
-                                        K.i32, init=gather_idx * tokens_per_gather4, name="tok_base"
+                                    tok_base = txl.local_scalar(
+                                        txl.i32,
+                                        init=gather_idx * tokens_per_gather4,
+                                        name="tok_base",
                                     )
-                                    rows = K.alloc_local((4,), "int32")
+                                    rows = txl.alloc_local((4,), "int32")
                                     _resolve_gather4_rows(
                                         rows,
                                         s_qidx_meta,
@@ -2022,47 +2045,47 @@ def _make_kernel(**config):
                                         q_oob_m_idx=q_oob_m_idx,
                                         qheadperkv=qheadperkv,
                                     )
-                                    with K.unroll(Q_SUBTILES(q_bytes)) as ks:
-                                        with K.If(ks + 1 < Q_SUBTILES(q_bytes)), K.Then():
-                                            K.ptx[_TMA_GATHER4_PREFETCH](
-                                                K.address_of(q_map),
-                                                K.int32((ks + 1) * q_load_tile),
+                                    with txl.unroll(Q_SUBTILES(q_bytes)) as ks:
+                                        with txl.If(ks + 1 < Q_SUBTILES(q_bytes)), txl.Then():
+                                            txl.ptx[_TMA_GATHER4_PREFETCH](
+                                                txl.address_of(q_map),
+                                                txl.int32((ks + 1) * q_load_tile),
                                                 rows[0],
                                                 rows[1],
                                                 rows[2],
                                                 rows[3],
                                                 _GATHER4_Q_CACHE_HINT,
                                             )
-                                        K.ptx[_TMA_GATHER4_2D_CACHE](
-                                            K.ptr_byte_offset(
+                                        txl.ptx[_TMA_GATHER4_2D_CACHE](
+                                            txl.ptr_byte_offset(
                                                 s_q.ptr_to([0, 0]),
                                                 slot * M_BLOCK * HEAD_DIM * q_bytes
                                                 + ks * M_BLOCK * q_load_tile * q_bytes
                                                 + gather_idx * 4 * q_load_tile * q_bytes,
                                                 q_ty,
                                             ),
-                                            K.address_of(q_map),
-                                            K.int32(ks * q_load_tile),
+                                            txl.address_of(q_map),
+                                            txl.int32(ks * q_load_tile),
                                             rows[0],
                                             rows[1],
                                             rows[2],
                                             rows[3],
-                                            K.cuda.cvta_generic_to_shared(
+                                            txl.cuda.cvta_generic_to_shared(
                                                 bar_q_full.ptr_to([slot])
                                             ),
                                             _GATHER4_Q_CACHE_HINT,
                                         )
                             bar_sync_named(BAR_LOAD_WG, SOFTMAX_THREADS)
 
-                        with K.If(warp_in_wg == 0), K.Then():
+                        with txl.If(warp_in_wg == 0), txl.Then():
                             bar_q_empty.wait(
                                 num_q_groups_load % Q_STAGE,
                                 (udiv_i32(num_q_groups_load, Q_STAGE) & 1) ^ 1,
                             )
-                            with K.If(K.cuda.elect_sync()), K.Then():
-                                K.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                                txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                                     bar_q_full.ptr_to([num_q_groups_load % Q_STAGE]),
-                                    K.uint32(M_BLOCK * HEAD_DIM * q_bytes),
+                                    txl.uint32(M_BLOCK * HEAD_DIM * q_bytes),
                                 )
 
         # -----------------------------------------------------------------------
@@ -2070,31 +2093,31 @@ def _make_kernel(**config):
         # (:1064-1086, :1676-1777).
         # -----------------------------------------------------------------------
         with (
-            K.If(
-                K.And(
+            txl.If(
+                txl.And(
                     warp_idx >= KV_LOAD_WARP_BASE, warp_idx < KV_LOAD_WARP_BASE + NUM_KV_LOAD_WARPS
                 )
             ),
-            K.Then(),
+            txl.Then(),
         ):
-            with K.If(cta_valid_work != 0), K.Then():
-                K.ptx.setmaxnreg.dec.sync.aligned.u32(K.uint32(NUM_REGS_OTHER))
-                kv_block_load = K.local_scalar(
-                    K.i32, init=ld_shared_i32(s_row_meta, 1), name="kv_block_load"
+            with txl.If(cta_valid_work != 0), txl.Then():
+                txl.ptx.setmaxnreg.dec.sync.aligned.u32(txl.uint32(NUM_REGS_OTHER))
+                kv_block_load = txl.local_scalar(
+                    txl.i32, init=ld_shared_i32(s_row_meta, 1), name="kv_block_load"
                 )
-                k_batch_off = K.local_scalar(
-                    K.i32, init=ld_shared_i32(s_row_meta, 6), name="k_batch_off"
+                k_batch_off = txl.local_scalar(
+                    txl.i32, init=ld_shared_i32(s_row_meta, 6), name="k_batch_off"
                 )
-                kv_has_work = K.local_scalar(
-                    K.i32,
-                    init=K.cast(ld_shared_i32(s_row_meta, 3) > 0, "int32"),
+                kv_has_work = txl.local_scalar(
+                    txl.i32,
+                    init=txl.cast(ld_shared_i32(s_row_meta, 3) > 0, "int32"),
                     name="kv_has_work",
                 )
-                with K.If(kv_has_work != 0), K.Then():
-                    kv_row_start = K.local_scalar(
-                        K.i32, init=k_batch_off + kv_block_load * N_BLOCK, name="kv_row_start"
+                with txl.If(kv_has_work != 0), txl.Then():
+                    kv_row_start = txl.local_scalar(
+                        txl.i32, init=k_batch_off + kv_block_load * N_BLOCK, name="kv_row_start"
                     )
-                    with K.If(warp_idx == KV_LOAD_WARP_BASE), K.Then():
+                    with txl.If(warp_idx == KV_LOAD_WARP_BASE), txl.Then():
                         # ONE issue per tile, not two: the packed row is 64 bytes,
                         # inside a single 128-byte box. The copy and the arrive sit
                         # in two separate `elect.sync` regions, as the export shows
@@ -2102,67 +2125,67 @@ def _make_kernel(**config):
                         # Read warp-wide in this warp's own arm, before the
                         # copy's elect.sync -- the export shows all 32 lanes
                         # executing it (:1709 for K, :1744 for V).
-                        page_idx_k = K.alloc_local((1,), "int32")
+                        page_idx_k = txl.alloc_local((1,), "int32")
                         if paged:
-                            K.assign(page_idx_k[0], ld_shared_i32(s_paged_kv_idx, 0))
-                        with K.If(K.cuda.elect_sync()), K.Then():
+                            txl.assign(page_idx_k[0], ld_shared_i32(s_paged_kv_idx, 0))
+                        with txl.If(txl.cuda.elect_sync()), txl.Then():
                             if paged:
-                                K.ptx[_TMA_G2S_4D_CACHE](
+                                txl.ptx[_TMA_G2S_4D_CACHE](
                                     s_k_fp4.ptr_to([0, 0]),
-                                    K.address_of(k_map),
-                                    K.int32(0),
-                                    K.int32(0),
+                                    txl.address_of(k_map),
+                                    txl.int32(0),
+                                    txl.int32(0),
                                     head_kv_idx[0],
                                     page_idx_k[0],
-                                    K.cuda.cvta_generic_to_shared(bar_k_tma.ptr_to([0])),
+                                    txl.cuda.cvta_generic_to_shared(bar_k_tma.ptr_to([0])),
                                     _TMA_NO_POLICY,
                                 )
                             else:
-                                K.ptx[_TMA_G2S_3D_CACHE](
+                                txl.ptx[_TMA_G2S_3D_CACHE](
                                     s_k_fp4.ptr_to([0, 0]),
-                                    K.address_of(k_map),
-                                    K.int32(0),
+                                    txl.address_of(k_map),
+                                    txl.int32(0),
                                     head_kv_idx[0],
                                     kv_row_start,
-                                    K.cuda.cvta_generic_to_shared(bar_k_tma.ptr_to([0])),
+                                    txl.cuda.cvta_generic_to_shared(bar_k_tma.ptr_to([0])),
                                     _TMA_NO_POLICY,
                                 )
-                        with K.If(K.cuda.elect_sync()), K.Then():
-                            K.ptx.mbarrier.arrive.release.cta.shared__cta.b64(
-                                bar_k_tma.ptr_to([0]), K.uint32(1)
+                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                            txl.ptx.mbarrier.arrive.release.cta.shared__cta.b64(
+                                bar_k_tma.ptr_to([0]), txl.uint32(1)
                             )
-                    with K.If(warp_idx == KV_LOAD_WARP_BASE + 1), K.Then():
+                    with txl.If(warp_idx == KV_LOAD_WARP_BASE + 1), txl.Then():
                         # Read warp-wide in this warp's own arm, before the
                         # copy's elect.sync -- the export shows all 32 lanes
                         # executing it (:1709 for K, :1744 for V).
-                        page_idx_v = K.alloc_local((1,), "int32")
+                        page_idx_v = txl.alloc_local((1,), "int32")
                         if paged:
-                            K.assign(page_idx_v[0], ld_shared_i32(s_paged_kv_idx, 0))
-                        with K.If(K.cuda.elect_sync()), K.Then():
+                            txl.assign(page_idx_v[0], ld_shared_i32(s_paged_kv_idx, 0))
+                        with txl.If(txl.cuda.elect_sync()), txl.Then():
                             if paged:
-                                K.ptx[_TMA_G2S_4D_CACHE](
+                                txl.ptx[_TMA_G2S_4D_CACHE](
                                     s_v_fp4.ptr_to([0, 0]),
-                                    K.address_of(v_map),
-                                    K.int32(0),
-                                    K.int32(0),
+                                    txl.address_of(v_map),
+                                    txl.int32(0),
+                                    txl.int32(0),
                                     head_kv_idx[0],
                                     page_idx_v[0],
-                                    K.cuda.cvta_generic_to_shared(bar_v_tma.ptr_to([0])),
+                                    txl.cuda.cvta_generic_to_shared(bar_v_tma.ptr_to([0])),
                                     _TMA_NO_POLICY,
                                 )
                             else:
-                                K.ptx[_TMA_G2S_3D_CACHE](
+                                txl.ptx[_TMA_G2S_3D_CACHE](
                                     s_v_fp4.ptr_to([0, 0]),
-                                    K.address_of(v_map),
-                                    K.int32(0),
+                                    txl.address_of(v_map),
+                                    txl.int32(0),
                                     head_kv_idx[0],
                                     kv_row_start,
-                                    K.cuda.cvta_generic_to_shared(bar_v_tma.ptr_to([0])),
+                                    txl.cuda.cvta_generic_to_shared(bar_v_tma.ptr_to([0])),
                                     _TMA_NO_POLICY,
                                 )
-                        with K.If(K.cuda.elect_sync()), K.Then():
-                            K.ptx.mbarrier.arrive.release.cta.shared__cta.b64(
-                                bar_v_tma.ptr_to([0]), K.uint32(1)
+                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                            txl.ptx.mbarrier.arrive.release.cta.shared__cta.b64(
+                                bar_v_tma.ptr_to([0]), txl.uint32(1)
                             )
                     # Unconditional here: both tiles always need dequantizing, so
                     # the two load warps always close on this barrier (:1777).
@@ -2172,23 +2195,23 @@ def _make_kernel(**config):
         # ROLE: the single MMA-issue warp, warp 12; also the TMEM allocator warp
         # (:1035-1057, :2189-2436).
         # -----------------------------------------------------------------------
-        with K.If(warp_idx == MMA_WARP_ID), K.Then():
-            with K.If(cta_valid_work != 0), K.Then():
-                K.ptx.setmaxnreg.dec.sync.aligned.u32(K.uint32(NUM_REGS_OTHER))
-                K.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
-                    K.address_of(tmem_start_addr[0]), K.uint32(TMEM_TOTAL)
+        with txl.If(warp_idx == MMA_WARP_ID), txl.Then():
+            with txl.If(cta_valid_work != 0), txl.Then():
+                txl.ptx.setmaxnreg.dec.sync.aligned.u32(txl.uint32(NUM_REGS_OTHER))
+                txl.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
+                    txl.address_of(tmem_start_addr[0]), txl.uint32(TMEM_TOTAL)
                 )
                 # The retrieve barrier spans both softmax warpgroups plus this warp
                 # (:1041-1042). On the fp8 paths that also makes the first QK wait for
                 # the shared-memory dequantization, without a separate edge.
                 bar_sync_named(BAR_TMEM_ALLOC, WARP_SIZE * (WARPS_PER_GROUP * 2 + 1))
 
-                mma_count_raw = K.local_scalar(
-                    K.i32, init=ld_shared_i32(s_row_meta, 3), name="mma_count_raw"
+                mma_count_raw = txl.local_scalar(
+                    txl.i32, init=ld_shared_i32(s_row_meta, 3), name="mma_count_raw"
                 )
-                with K.If(mma_count_raw > 0), K.Then():
-                    num_q_groups_mma = K.local_scalar(
-                        K.i32,
+                with txl.If(mma_count_raw > 0), txl.Then():
+                    num_q_groups_mma = txl.local_scalar(
+                        txl.i32,
                         init=uceil_div_i32(mma_count_raw, q_tokens_per_group),
                         name="num_q_groups_mma",
                     )
@@ -2197,13 +2220,13 @@ def _make_kernel(**config):
                     # compile-time 16-byte offset to the A descriptor rather than
                     # rebuilding it, which is what the source's `wrap`/`advance`
                     # pre-bound partials do in PTX registers (:1990-1995).
-                    q_desc = K.SmemDescriptor()
+                    q_desc = txl.SmemDescriptor()
                     q_desc.init(s_q.ptr_to([0, 0]), ldo=1024, sdo=64, swizzle=3)
                     q_desc.make_lo_uniform()
-                    k_desc = K.SmemDescriptor()
+                    k_desc = txl.SmemDescriptor()
                     k_desc.init(s_k.ptr_to([0, 0]), ldo=1024, sdo=64, swizzle=3)
                     k_desc.make_lo_uniform()
-                    v_desc = K.SmemDescriptor()
+                    v_desc = txl.SmemDescriptor()
                     v_desc.init(s_v.ptr_to([0, 0]), ldo=1024, sdo=64, swizzle=3)
                     v_desc.make_lo_uniform()
 
@@ -2222,7 +2245,7 @@ def _make_kernel(**config):
                     _tcgen05_commit(bar_s_full, 0)
                     _tcgen05_commit(bar_q_empty, 0)
 
-                    with K.If(num_q_groups_mma > 1), K.Then():
+                    with txl.If(num_q_groups_mma > 1), txl.Then():
                         bar_q_full.wait(1, 0)
                         bar_s_empty.wait(1, 1)
                         _issue_qk(
@@ -2242,13 +2265,13 @@ def _make_kernel(**config):
                     # overlaps them (:2094).
                     bar_v.wait(0, 0)
 
-                    with K.serial(2, num_q_groups_mma, unroll=False) as qi:
-                        pv_qi = K.local_scalar(K.i32, init=qi - 2, name="pv_qi")
-                        pv_slot = K.local_scalar(
-                            K.i32, init=K.bitwise_and(pv_qi, 1), name="pv_slot"
+                    with txl.serial(2, num_q_groups_mma, unroll=False) as qi:
+                        pv_qi = txl.local_scalar(txl.i32, init=qi - 2, name="pv_qi")
+                        pv_slot = txl.local_scalar(
+                            txl.i32, init=txl.bitwise_and(pv_qi, 1), name="pv_slot"
                         )
-                        pv_phase = K.local_scalar(
-                            K.i32, init=udiv_i32(pv_qi, 2) & 1, name="pv_phase"
+                        pv_phase = txl.local_scalar(
+                            txl.i32, init=udiv_i32(pv_qi, 2) & 1, name="pv_phase"
                         )
                         bar_p_full.wait(pv_slot, pv_phase)
                         bar_o_empty.wait(pv_slot, pv_phase ^ 1)
@@ -2268,20 +2291,24 @@ def _make_kernel(**config):
                         _tcgen05_commit(bar_p_last_empty, pv_slot)
                         _tcgen05_commit(bar_p_empty, pv_slot)
 
-                        q_slot = K.local_scalar(K.i32, init=qi % Q_STAGE, name="q_slot")
-                        q_phase = K.local_scalar(
-                            K.i32, init=udiv_i32(qi, Q_STAGE) & 1, name="q_phase"
+                        q_slot = txl.local_scalar(txl.i32, init=qi % Q_STAGE, name="q_slot")
+                        q_phase = txl.local_scalar(
+                            txl.i32, init=udiv_i32(qi, Q_STAGE) & 1, name="q_phase"
                         )
-                        s_slot = K.local_scalar(K.i32, init=K.bitwise_and(qi, 1), name="s_slot")
-                        s_phase = K.local_scalar(K.i32, init=udiv_i32(qi, 2) & 1, name="s_phase")
+                        s_slot = txl.local_scalar(
+                            txl.i32, init=txl.bitwise_and(qi, 1), name="s_slot"
+                        )
+                        s_phase = txl.local_scalar(
+                            txl.i32, init=udiv_i32(qi, 2) & 1, name="s_phase"
+                        )
                         bar_q_full.wait(q_slot, q_phase)
                         bar_s_empty.wait(s_slot, s_phase ^ 1)
                         # The S-slot test is a runtime branch that duplicates the
                         # whole 8-instruction chain in the emitted code; the Q-slot
                         # choice collapses into an address select (export: two
                         # chains behind `@%p bra`, one PV chain).
-                        with K.If(s_slot == 0):
-                            with K.Then():
+                        with txl.If(s_slot == 0):
+                            with txl.Then():
                                 _issue_qk(
                                     0,
                                     q_slot,
@@ -2292,7 +2319,7 @@ def _make_kernel(**config):
                                     tmem_s_col,
                                     tmem_stage_stride,
                                 )
-                            with K.Else():
+                            with txl.Else():
                                 _issue_qk(
                                     1,
                                     q_slot,
@@ -2307,17 +2334,17 @@ def _make_kernel(**config):
                         _tcgen05_commit(bar_q_empty, q_slot)
 
                     # Drain the last one or two PV tiles (:2152-2183).
-                    drain_begin = K.local_scalar(
-                        K.i32,
-                        init=K.if_then_else(num_q_groups_mma == 1, 0, num_q_groups_mma - 2),
+                    drain_begin = txl.local_scalar(
+                        txl.i32,
+                        init=txl.if_then_else(num_q_groups_mma == 1, 0, num_q_groups_mma - 2),
                         name="drain_begin",
                     )
-                    with K.serial(drain_begin, num_q_groups_mma, unroll=False) as pv_qi2:
-                        pv_slot2 = K.local_scalar(
-                            K.i32, init=K.bitwise_and(pv_qi2, 1), name="pv_slot2"
+                    with txl.serial(drain_begin, num_q_groups_mma, unroll=False) as pv_qi2:
+                        pv_slot2 = txl.local_scalar(
+                            txl.i32, init=txl.bitwise_and(pv_qi2, 1), name="pv_slot2"
                         )
-                        pv_phase2 = K.local_scalar(
-                            K.i32, init=udiv_i32(pv_qi2, 2) & 1, name="pv_phase2"
+                        pv_phase2 = txl.local_scalar(
+                            txl.i32, init=udiv_i32(pv_qi2, 2) & 1, name="pv_phase2"
                         )
                         bar_p_full.wait(pv_slot2, pv_phase2)
                         bar_o_empty.wait(pv_slot2, pv_phase2 ^ 1)
@@ -2337,18 +2364,18 @@ def _make_kernel(**config):
                         _tcgen05_commit(bar_p_last_empty, pv_slot2)
                         _tcgen05_commit(bar_p_empty, pv_slot2)
 
-                K.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
+                txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                 bar_sync_named(BAR_TMEM_ALLOC, WARP_SIZE * (WARPS_PER_GROUP * 2 + 1))
                 # The contract forbids a native load on a shared buffer, so the
                 # allocated base comes back through an explicit ld.shared.
-                tmem_base = K.alloc_local((1,), "uint32")
-                K.ptx.ld.shared.u32(tmem_base[0], tmem_start_addr.ptr_to([0]))
-                K.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                    tmem_base[0], K.uint32(TMEM_TOTAL)
+                tmem_base = txl.alloc_local((1,), "uint32")
+                txl.ptx.ld.shared.u32(tmem_base[0], tmem_start_addr.ptr_to([0]))
+                txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
+                    tmem_base[0], txl.uint32(TMEM_TOTAL)
                 )
                 # No matching griddepcontrol.wait anywhere in this kernel, so no
                 # launch attribute is needed -- only a waiting kernel needs one.
-                K.ptx.griddepcontrol.launch_dependents()
+                txl.ptx.griddepcontrol.launch_dependents()
 
         # -----------------------------------------------------------------------
         # ROLE: softmax warpgroups 0 and 1, with the epilogue fused in
@@ -2371,23 +2398,27 @@ def _make_kernel(**config):
             fake-column order, the combine kernel reads it back that way, and the
             permutation undoes the one the fragment already carries.
             """
-            slot = K.local_scalar(K.i32, init=K.bitwise_and(qi_group, 1), name="slot")
-            phase = K.local_scalar(K.i32, init=udiv_i32(qi_group, 2) & 1, name="phase")
+            slot = txl.local_scalar(txl.i32, init=txl.bitwise_and(qi_group, 1), name="slot")
+            phase = txl.local_scalar(txl.i32, init=udiv_i32(qi_group, 2) & 1, name="phase")
             bar_o_full.wait(slot, phase)
 
             # Decode the packed qsplit once per group into the 2-deep caches; every
             # per-store read below comes out of these, never out of s_qidx_meta.
-            with K.If(group_tidx < q_tokens_per_group), K.Then():
-                word = K.local_scalar(
-                    K.i32, init=ld_shared_i32(s_qidx_meta, qidx_meta_slot + group_tidx), name="word"
+            with txl.If(group_tidx < q_tokens_per_group), txl.Then():
+                word = txl.local_scalar(
+                    txl.i32,
+                    init=ld_shared_i32(s_qidx_meta, qidx_meta_slot + group_tidx),
+                    name="word",
                 )
                 st_shared_i32(
-                    s_q_idx, slot * q_tokens_per_group + group_tidx, K.bitwise_and(word, Q_IDX_MASK)
+                    s_q_idx,
+                    slot * q_tokens_per_group + group_tidx,
+                    txl.bitwise_and(word, Q_IDX_MASK),
                 )
                 st_shared_i32(
                     s_split_idx,
                     slot * q_tokens_per_group + group_tidx,
-                    K.bitwise_and(K.shift_right(word, SLOT_SHIFT), SLOT_MASK),
+                    txl.bitwise_and(txl.shift_right(word, SLOT_SHIFT), SLOT_MASK),
                 )
             bar_sync_named(BAR_EPILOGUE + stage, SOFTMAX_THREADS)
 
@@ -2401,45 +2432,47 @@ def _make_kernel(**config):
             # sectors for 512 bytes, the minimum. Under `32x32b` the thread IS the
             # row, so every lane of a store lands on a different row 512 bytes
             # away: the same bytes at twice the sectors.
-            warp_in_wg = K.local_scalar(K.i32, init=group_tidx // WARP_SIZE, name="warp_in_wg")
-            lane_in_warp = K.local_scalar(
-                K.i32, init=group_tidx - warp_in_wg * WARP_SIZE, name="lane_in_warp"
+            warp_in_wg = txl.local_scalar(txl.i32, init=group_tidx // WARP_SIZE, name="warp_in_wg")
+            lane_in_warp = txl.local_scalar(
+                txl.i32, init=group_tidx - warp_in_wg * WARP_SIZE, name="lane_in_warp"
             )
-            row_of_lane = K.local_scalar(
-                K.i32, init=warp_in_wg * 32 + lane_in_warp // 4, name="row_of_lane"
+            row_of_lane = txl.local_scalar(
+                txl.i32, init=warp_in_wg * 32 + lane_in_warp // 4, name="row_of_lane"
             )
-            col_of_lane = K.local_scalar(K.i32, init=(lane_in_warp % 4) * 2, name="col_of_lane")
+            col_of_lane = txl.local_scalar(txl.i32, init=(lane_in_warp % 4) * 2, name="col_of_lane")
 
             # One reciprocal per (lane_base, parity) for the whole epilogue -- four
             # per thread -- instead of one per 128-bit store.
-            row_scale_cache = K.alloc_local((4,), "float32")
+            row_scale_cache = txl.alloc_local((4,), "float32")
             for lb in range(2):
                 for par in range(2):
-                    rs_row = K.local_scalar(
-                        K.i32, init=row_of_lane + lb * 16 + 8 * par, name="rs_row"
+                    rs_row = txl.local_scalar(
+                        txl.i32, init=row_of_lane + lb * 16 + 8 * par, name="rs_row"
                     )
-                    rs_sum = K.local_scalar(
-                        K.f32,
+                    rs_sum = txl.local_scalar(
+                        txl.f32,
                         init=ld_shared_f32(s_scale, slot * M_BLOCK * 2 + rs_row),
                         name="rs_sum",
                     )
-                    rs_safe = K.local_scalar(
-                        K.f32,
-                        init=K.if_then_else(
-                            K.Or(rs_sum == K.float32(0.0), rs_sum != rs_sum), K.float32(1.0), rs_sum
+                    rs_safe = txl.local_scalar(
+                        txl.f32,
+                        init=txl.if_then_else(
+                            txl.Or(rs_sum == txl.float32(0.0), rs_sum != rs_sum),
+                            txl.float32(1.0),
+                            rs_sum,
                         ),
                         name="rs_safe",
                     )
-                    K.ptx.rcp.approx.ftz.f32(row_scale_cache[lb * 2 + par], rs_safe)
+                    txl.ptx.rcp.approx.ftz.f32(row_scale_cache[lb * 2 + par], rs_safe)
 
             # `lane_base` stays a Python int through the inline call, keeping the
             # TMEM address's lane field constant; `col_base` is the rolled pass's
             # runtime column half.
             def load_o_pass(o_regs, lane_base, col_base):
-                K.ptx[_TMEM_LD_16](
+                txl.ptx[_TMEM_LD_16](
                     *[o_regs[i] for i in range(32)],
-                    K.cast(tmem_o_col + slot * tmem_o_stage_stride + col_base, "uint32")
-                    + K.uint32(lane_base << 16),
+                    txl.cast(tmem_o_col + slot * tmem_o_stage_stride + col_base, "uint32")
+                    + txl.uint32(lane_base << 16),
                 )
 
             def store_o_pass(o_regs, lane_base, col_base):
@@ -2455,25 +2488,27 @@ def _make_kernel(**config):
                     ]
                     # `tok` is the token within the group, `row_in_tok` the head
                     # inside that token.
-                    row = K.local_scalar(
-                        K.i32, init=row_of_lane + lane_base + 8 * parity, name="row"
+                    row = txl.local_scalar(
+                        txl.i32, init=row_of_lane + lane_base + 8 * parity, name="row"
                     )
-                    tok = K.local_scalar(K.i32, init=udiv_i32(row, qheadperkv), name="tok")
-                    row_in_tok = K.local_scalar(
-                        K.i32, init=row - tok * qheadperkv, name="row_in_tok"
+                    tok = txl.local_scalar(txl.i32, init=udiv_i32(row, qheadperkv), name="tok")
+                    row_in_tok = txl.local_scalar(
+                        txl.i32, init=row - tok * qheadperkv, name="row_in_tok"
                     )
-                    qi = K.local_scalar(K.i32, init=qi_group * q_tokens_per_group + tok, name="qi")
-                    with K.If(qi < count_raw), K.Then():
+                    qi = txl.local_scalar(
+                        txl.i32, init=qi_group * q_tokens_per_group + tok, name="qi"
+                    )
+                    with txl.If(qi < count_raw), txl.Then():
                         # Re-read per store, as the reference does: nothing here is
                         # hoisted out of the column loop, the reciprocal included
                         # (:2785-2800, measured one of each per 128-bit store).
-                        q_idx_e = K.local_scalar(
-                            K.i32,
+                        q_idx_e = txl.local_scalar(
+                            txl.i32,
                             init=ld_shared_i32(s_q_idx, slot * q_tokens_per_group + tok),
                             name="q_idx_e",
                         )
-                        split_e = K.local_scalar(
-                            K.i32,
+                        split_e = txl.local_scalar(
+                            txl.i32,
                             init=ld_shared_i32(s_split_idx, slot * q_tokens_per_group + tok),
                             name="split_e",
                         )
@@ -2488,33 +2523,35 @@ def _make_kernel(**config):
                         # apiece, against a total excess over the source of 763,220.
                         # Hoisting inside a pass does not help; nvcc already CSEs
                         # that far. They have to be lifted clear of all four passes.
-                        row_scale = K.alloc_local((1,), "float32")
-                        K.assign(row_scale[0], row_scale_cache[(lane_base // 16) * 2 + parity])
-                        q_abs_e = K.local_scalar(K.i32, init=q_batch_off + q_idx_e, name="q_abs_e")
-                        flat_row = K.local_scalar(
-                            K.i64,
+                        row_scale = txl.alloc_local((1,), "float32")
+                        txl.assign(row_scale[0], row_scale_cache[(lane_base // 16) * 2 + parity])
+                        q_abs_e = txl.local_scalar(
+                            txl.i32, init=q_batch_off + q_idx_e, name="q_abs_e"
+                        )
+                        flat_row = txl.local_scalar(
+                            txl.i64,
                             init=(
-                                K.cast(split_e, "int64")
-                                * K.cast(total_q, "int64")
-                                * K.cast(head_q, "int64")
-                                + K.cast(q_abs_e, "int64") * K.cast(head_q, "int64")
-                                + K.cast(head_kv_idx[0] * qheadperkv + row_in_tok, "int64")
+                                txl.cast(split_e, "int64")
+                                * txl.cast(total_q, "int64")
+                                * txl.cast(head_q, "int64")
+                                + txl.cast(q_abs_e, "int64") * txl.cast(head_q, "int64")
+                                + txl.cast(head_kv_idx[0] * qheadperkv + row_in_tok, "int64")
                             ),
                             name="flat_row",
                         )
                         # The group's first register sits at column
                         # `col_base + (lane%4)*2 + 8*kb`; the fake-column map turns
                         # that into the contiguous output address.
-                        store_col = K.local_scalar(
-                            K.i32,
+                        store_col = txl.local_scalar(
+                            txl.i32,
                             init=_fake_col(partial_dtype, col_base + col_of_lane + 8 * kb),
                             name="store_col",
                         )
-                        scaled = K.alloc_local((_STORE_LANES[partial_dtype],), "float32")
+                        scaled = txl.alloc_local((_STORE_LANES[partial_dtype],), "float32")
                         _scale_gather(scaled, o_regs, regs, row_scale[0])
                         _store_o_partial(
                             o_partial,
-                            flat_row * K.int64(HEAD_DIM) + K.cast(store_col, "int64"),
+                            flat_row * txl.int64(HEAD_DIM) + txl.cast(store_col, "int64"),
                             scaled,
                             partial_dtype,
                         )
@@ -2548,138 +2585,140 @@ def _make_kernel(**config):
             # required matrix is what separates the two groups.
             overlap_o = USE_GATHER4(qheadperkv) or q_dtype != "float8_e4m3"
             if overlap_o:
-                o_regs_0 = K.alloc_local((32,), "float32")
-                o_regs_1 = K.alloc_local((32,), "float32")
-                o_regs_2 = K.alloc_local((32,), "float32")
-                o_regs_3 = K.alloc_local((32,), "float32")
+                o_regs_0 = txl.alloc_local((32,), "float32")
+                o_regs_1 = txl.alloc_local((32,), "float32")
+                o_regs_2 = txl.alloc_local((32,), "float32")
+                o_regs_3 = txl.alloc_local((32,), "float32")
                 load_o_pass(o_regs_0, 0, 0)
                 load_o_pass(o_regs_1, 0, 64)
                 load_o_pass(o_regs_2, 16, 0)
                 load_o_pass(o_regs_3, 16, 64)
-                K.ptx.tcgen05.wait__ld.sync.aligned()
+                txl.ptx.tcgen05.wait__ld.sync.aligned()
                 store_o_pass(o_regs_0, 0, 0)
                 store_o_pass(o_regs_1, 0, 64)
                 store_o_pass(o_regs_2, 16, 0)
                 store_o_pass(o_regs_3, 16, 64)
             else:
-                o_regs_a = K.alloc_local((32,), "float32")
-                o_regs_b = K.alloc_local((32,), "float32")
-                with K.serial(0, 2, unroll=False) as col_pass:
-                    col_base_rt = K.local_scalar(K.i32, init=col_pass * 64, name="col_base_rt")
+                o_regs_a = txl.alloc_local((32,), "float32")
+                o_regs_b = txl.alloc_local((32,), "float32")
+                with txl.serial(0, 2, unroll=False) as col_pass:
+                    col_base_rt = txl.local_scalar(txl.i32, init=col_pass * 64, name="col_base_rt")
                     load_o_pass(o_regs_a, 0, col_base_rt)
                     load_o_pass(o_regs_b, 16, col_base_rt)
                     store_o_pass(o_regs_a, 0, col_base_rt)
                     store_o_pass(o_regs_b, 16, col_base_rt)
-                K.ptx.tcgen05.wait__ld.sync.aligned()
+                txl.ptx.tcgen05.wait__ld.sync.aligned()
 
             # LSE: one row per thread (:2987-3016).
-            tok_l = K.local_scalar(K.i32, init=udiv_i32(group_tidx, qheadperkv), name="tok_l")
-            h_local = K.local_scalar(K.i32, init=group_tidx - tok_l * qheadperkv, name="h_local")
-            with K.If(qi_group * q_tokens_per_group + tok_l < count_raw), K.Then():
-                row_sum_l = K.local_scalar(
-                    K.f32,
+            tok_l = txl.local_scalar(txl.i32, init=udiv_i32(group_tidx, qheadperkv), name="tok_l")
+            h_local = txl.local_scalar(
+                txl.i32, init=group_tidx - tok_l * qheadperkv, name="h_local"
+            )
+            with txl.If(qi_group * q_tokens_per_group + tok_l < count_raw), txl.Then():
+                row_sum_l = txl.local_scalar(
+                    txl.f32,
                     init=ld_shared_f32(s_scale, slot * M_BLOCK * 2 + group_tidx),
                     name="row_sum_l",
                 )
-                row_max_l = K.local_scalar(
-                    K.f32,
+                row_max_l = txl.local_scalar(
+                    txl.f32,
                     init=ld_shared_f32(s_scale, slot * M_BLOCK * 2 + M_BLOCK + group_tidx),
                     name="row_max_l",
                 )
-                lg = K.alloc_local((1,), "float32")
-                K.ptx.lg2.approx.ftz.f32(lg[0], row_sum_l)
-                lse_val = K.local_scalar(
-                    K.f32,
-                    init=K.if_then_else(
-                        K.Or(row_sum_l == K.float32(0.0), row_sum_l != row_sum_l),
-                        -K.infinity("float32"),
-                        (row_max_l * scale_log2 + lg[0]) * K.float32(LN_2),
+                lg = txl.alloc_local((1,), "float32")
+                txl.ptx.lg2.approx.ftz.f32(lg[0], row_sum_l)
+                lse_val = txl.local_scalar(
+                    txl.f32,
+                    init=txl.if_then_else(
+                        txl.Or(row_sum_l == txl.float32(0.0), row_sum_l != row_sum_l),
+                        -txl.infinity("float32"),
+                        (row_max_l * scale_log2 + lg[0]) * txl.float32(LN_2),
                     ),
                     name="lse_val",
                 )
-                q_idx_l = K.local_scalar(
-                    K.i32,
+                q_idx_l = txl.local_scalar(
+                    txl.i32,
                     init=ld_shared_i32(s_q_idx, slot * q_tokens_per_group + tok_l),
                     name="q_idx_l",
                 )
-                split_l = K.local_scalar(
-                    K.i32,
+                split_l = txl.local_scalar(
+                    txl.i32,
                     init=ld_shared_i32(s_split_idx, slot * q_tokens_per_group + tok_l),
                     name="split_l",
                 )
-                h_abs = K.local_scalar(
-                    K.i32, init=head_kv_idx[0] * qheadperkv + h_local, name="h_abs"
+                h_abs = txl.local_scalar(
+                    txl.i32, init=head_kv_idx[0] * qheadperkv + h_local, name="h_abs"
                 )
-                lse_flat = K.local_scalar(
-                    K.i64,
+                lse_flat = txl.local_scalar(
+                    txl.i64,
                     init=(
-                        K.cast(split_l, "int64")
-                        * K.cast(total_q, "int64")
-                        * K.cast(head_q, "int64")
-                        + K.cast(q_batch_off + q_idx_l, "int64") * K.cast(head_q, "int64")
-                        + K.cast(h_abs, "int64")
+                        txl.cast(split_l, "int64")
+                        * txl.cast(total_q, "int64")
+                        * txl.cast(head_q, "int64")
+                        + txl.cast(q_batch_off + q_idx_l, "int64") * txl.cast(head_q, "int64")
+                        + txl.cast(h_abs, "int64")
                     ),
                     name="lse_flat",
                 )
-                K.ptx.st.global_.f32(lse_partial.ptr_to([lse_flat]), lse_val)
+                txl.ptx.st.global_.f32(lse_partial.ptr_to([lse_flat]), lse_val)
                 if temperature:
-                    temp_sum = K.local_scalar(
-                        K.f32,
+                    temp_sum = txl.local_scalar(
+                        txl.f32,
                         init=ld_shared_f32(s_scale_temp, slot * M_BLOCK + group_tidx),
                         name="temp_sum",
                     )
-                    lgt = K.alloc_local((1,), "float32")
-                    K.ptx.lg2.approx.ftz.f32(lgt[0], temp_sum)
-                    lse_t = K.local_scalar(
-                        K.f32,
-                        init=K.if_then_else(
-                            K.Or(temp_sum == K.float32(0.0), temp_sum != temp_sum),
+                    lgt = txl.alloc_local((1,), "float32")
+                    txl.ptx.lg2.approx.ftz.f32(lgt[0], temp_sum)
+                    lse_t = txl.local_scalar(
+                        txl.f32,
+                        init=txl.if_then_else(
+                            txl.Or(temp_sum == txl.float32(0.0), temp_sum != temp_sum),
                             NEG_INF,
-                            (row_max_l * lse_temperature_scale_log2 + lgt[0]) * K.float32(LN_2),
+                            (row_max_l * lse_temperature_scale_log2 + lgt[0]) * txl.float32(LN_2),
                         ),
                         name="lse_t",
                     )
-                    K.ptx.st.global_.f32(lse_temperature_partial.ptr_to([lse_flat]), lse_t)
+                    txl.ptx.st.global_.f32(lse_temperature_partial.ptr_to([lse_flat]), lse_t)
 
             bar_sync_named(BAR_EPILOGUE + stage, SOFTMAX_THREADS)
             bar_stats_empty.arrive(slot)
             bar_o_empty.arrive(slot)
 
         def softmax_warpgroup(stage):
-            group_tidx = K.local_scalar(
-                K.i32, init=tidx - stage * SOFTMAX_THREADS, name="group_tidx"
+            group_tidx = txl.local_scalar(
+                txl.i32, init=tidx - stage * SOFTMAX_THREADS, name="group_tidx"
             )
-            kv_block_sm = K.local_scalar(
-                K.i32, init=ld_shared_i32(s_row_meta, 1), name="kv_block_sm"
+            kv_block_sm = txl.local_scalar(
+                txl.i32, init=ld_shared_i32(s_row_meta, 1), name="kv_block_sm"
             )
-            count_raw_sm = K.local_scalar(
-                K.i32, init=ld_shared_i32(s_row_meta, 3), name="count_raw_sm"
+            count_raw_sm = txl.local_scalar(
+                txl.i32, init=ld_shared_i32(s_row_meta, 3), name="count_raw_sm"
             )
-            kv_valid_cols = K.local_scalar(
-                K.i32, init=ld_shared_i32(s_row_meta, 4), name="kv_valid_cols"
+            kv_valid_cols = txl.local_scalar(
+                txl.i32, init=ld_shared_i32(s_row_meta, 4), name="kv_valid_cols"
             )
-            q_batch_off_sm = K.local_scalar(
-                K.i32, init=ld_shared_i32(s_row_meta, 5), name="q_batch_off_sm"
+            q_batch_off_sm = txl.local_scalar(
+                txl.i32, init=ld_shared_i32(s_row_meta, 5), name="q_batch_off_sm"
             )
             # Read unconditionally, as the source does (:1119-1127): both cells only
             # ever feed the diagonal mask, so a non-causal build leaves two dead
             # scalar loads behind rather than gating them away.
-            causal_q_off = K.local_scalar(
-                K.i32, init=ld_shared_i32(s_row_meta, 7), name="causal_q_off"
+            causal_q_off = txl.local_scalar(
+                txl.i32, init=ld_shared_i32(s_row_meta, 7), name="causal_q_off"
             )
-            diag_q_count_sm = K.local_scalar(
-                K.i32, init=ld_shared_i32(s_diag_q_count, 0), name="diag_q_count_sm"
+            diag_q_count_sm = txl.local_scalar(
+                txl.i32, init=ld_shared_i32(s_diag_q_count, 0), name="diag_q_count_sm"
             )
 
             # NVFP4 dequantization (:1779-1865). Unconditional and not in the load
             # warps: the TMA lands packed FP4 in the staging tile and a whole
             # softmax warpgroup converts it into the tile the MMA reads, before
             # entering its own loop. WG0 takes K, WG1 takes V.
-            k_batch_off_sm = K.local_scalar(
-                K.i32, init=ld_shared_i32(s_row_meta, 6), name="k_batch_off_sm"
+            k_batch_off_sm = txl.local_scalar(
+                txl.i32, init=ld_shared_i32(s_row_meta, 6), name="k_batch_off_sm"
             )
-            token_base_sm = K.local_scalar(
-                K.i32, init=k_batch_off_sm + kv_block_sm * N_BLOCK, name="token_base_sm"
+            token_base_sm = txl.local_scalar(
+                txl.i32, init=k_batch_off_sm + kv_block_sm * N_BLOCK, name="token_base_sm"
             )
             if stage == 0:
                 _dequant_kv_fp4(
@@ -2725,44 +2764,50 @@ def _make_kernel(**config):
 
             bar_sync_named(BAR_TMEM_ALLOC, WARP_SIZE * (WARPS_PER_GROUP * 2 + 1))
 
-            with K.If(count_raw_sm > 0), K.Then():
-                num_q_groups_sm = K.local_scalar(
-                    K.i32,
+            with txl.If(count_raw_sm > 0), txl.Then():
+                num_q_groups_sm = txl.local_scalar(
+                    txl.i32,
                     init=uceil_div_i32(count_raw_sm, q_tokens_per_group),
                     name="num_q_groups_sm",
                 )
                 # Zero unless causal (:2461-2463); it only ever offsets the
                 # diagonal column limit, which a non-causal build never computes.
                 if causal:
-                    kv_block_col_start = K.local_scalar(
-                        K.i32, init=kv_block_sm * N_BLOCK, name="kv_block_col_start"
+                    kv_block_col_start = txl.local_scalar(
+                        txl.i32, init=kv_block_sm * N_BLOCK, name="kv_block_col_start"
                     )
                 else:
-                    kv_block_col_start = K.local_scalar(
-                        K.i32, init=K.int32(0), name="kv_block_col_start"
+                    kv_block_col_start = txl.local_scalar(
+                        txl.i32, init=txl.int32(0), name="kv_block_col_start"
                     )
                 # WG0 takes the even Q groups, WG1 the odd ones (:2465-2468).
-                num_stage_groups = K.local_scalar(
-                    K.i32, init=udiv_i32(num_q_groups_sm + (1 - stage), 2), name="num_stage_groups"
+                num_stage_groups = txl.local_scalar(
+                    txl.i32,
+                    init=udiv_i32(num_q_groups_sm + (1 - stage), 2),
+                    name="num_stage_groups",
                 )
 
-                with K.serial(0, num_stage_groups, unroll=False) as qi_iter:
-                    qi_group = K.local_scalar(K.i32, init=qi_iter * 2 + stage, name="qi_group")
-                    phase = K.local_scalar(K.i32, init=K.bitwise_and(qi_iter, 1), name="phase")
-                    producer_phase = K.local_scalar(K.i32, init=phase ^ 1, name="producer_phase")
-                    qidx_meta_slot = K.local_scalar(
-                        K.i32,
-                        init=K.bitwise_and(qi_group, QIDX_META_STAGES - 1) * q_tokens_per_group,
+                with txl.serial(0, num_stage_groups, unroll=False) as qi_iter:
+                    qi_group = txl.local_scalar(txl.i32, init=qi_iter * 2 + stage, name="qi_group")
+                    phase = txl.local_scalar(
+                        txl.i32, init=txl.bitwise_and(qi_iter, 1), name="phase"
+                    )
+                    producer_phase = txl.local_scalar(
+                        txl.i32, init=phase ^ 1, name="producer_phase"
+                    )
+                    qidx_meta_slot = txl.local_scalar(
+                        txl.i32,
+                        init=txl.bitwise_and(qi_group, QIDX_META_STAGES - 1) * q_tokens_per_group,
                         name="qidx_meta_slot",
                     )
 
                     # ---------------- softmax step (:2437-2616) ----------------
                     bar_s_full.wait(stage, phase)
-                    s_regs = K.alloc_local((128,), "float32")
-                    with K.unroll(4) as chunk:
-                        K.ptx[_TMEM_LD_32](
+                    s_regs = txl.alloc_local((128,), "float32")
+                    with txl.unroll(4) as chunk:
+                        txl.ptx[_TMEM_LD_32](
                             *[s_regs[chunk * 32 + i] for i in range(32)],
-                            K.cuda.get_tmem_addr(
+                            txl.cuda.get_tmem_addr(
                                 tmem_s_col + stage * tmem_stage_stride + chunk * 32, 0, 0
                             ),
                         )
@@ -2778,9 +2823,9 @@ def _make_kernel(**config):
                         # exp2. Its placement is bitwise-load-bearing, not a rescale
                         # that commutes. On the BF16 path this multiply does not
                         # exist and the fold happens in the dequantization.
-                        kg = K.alloc_local((1,), "float32")
-                        K.ptx.ld.global_.f32(kg[0], k_global_scale.ptr_to([0]))
-                        with K.unroll(N_BLOCK // 2) as ii:
+                        kg = txl.alloc_local((1,), "float32")
+                        txl.ptx.ld.global_.f32(kg[0], k_global_scale.ptr_to([0]))
+                        with txl.unroll(N_BLOCK // 2) as ii:
                             i = ii * 2
                             _packed_f32x2(
                                 "mul.rn.f32x2",
@@ -2796,47 +2841,47 @@ def _make_kernel(**config):
                     # Column-limit masking, and causal masking for the tokens on
                     # the diagonal. Both arms feed one r2p bit-test body, which is
                     # how the reference emits it too (mask.py:36-46, :71-121).
-                    col_limit = K.alloc_local((1,), "int32")
-                    K.assign(col_limit[0], kv_valid_cols)
+                    col_limit = txl.alloc_local((1,), "int32")
+                    txl.assign(col_limit[0], kv_valid_cols)
                     if causal:
                         # How many of this group's tokens still sit on the causal
                         # diagonal and therefore need per-column masking
                         # (:2478-2486). A non-causal build passes a literal zero
                         # here and takes the column-limit-only arm (:2544-2548), so
                         # none of this is emitted.
-                        qi_group_start = K.local_scalar(
-                            K.i32, init=qi_group * q_tokens_per_group, name="qi_group_start"
+                        qi_group_start = txl.local_scalar(
+                            txl.i32, init=qi_group * q_tokens_per_group, name="qi_group_start"
                         )
-                        masked_tok_count = K.local_scalar(
-                            K.i32,
-                            init=K.max(
-                                0, K.min(q_tokens_per_group, diag_q_count_sm - qi_group_start)
+                        masked_tok_count = txl.local_scalar(
+                            txl.i32,
+                            init=txl.max(
+                                0, txl.min(q_tokens_per_group, diag_q_count_sm - qi_group_start)
                             ),
                             name="masked_tok_count",
                         )
-                        with K.If(masked_tok_count > 0), K.Then():
-                            tok_of_row = K.local_scalar(
-                                K.i32, init=udiv_i32(group_tidx, qheadperkv), name="tok_of_row"
+                        with txl.If(masked_tok_count > 0), txl.Then():
+                            tok_of_row = txl.local_scalar(
+                                txl.i32, init=udiv_i32(group_tidx, qheadperkv), name="tok_of_row"
                             )
-                            q_idx_mask = K.local_scalar(
-                                K.i32,
-                                init=K.bitwise_and(
+                            q_idx_mask = txl.local_scalar(
+                                txl.i32,
+                                init=txl.bitwise_and(
                                     ld_shared_i32(s_qidx_meta, qidx_meta_slot + tok_of_row),
                                     Q_IDX_MASK,
                                 ),
                                 name="q_idx_mask",
                             )
-                            causal_col_limit = K.local_scalar(
-                                K.i32,
+                            causal_col_limit = txl.local_scalar(
+                                txl.i32,
                                 init=q_idx_mask + causal_q_off - kv_block_col_start + 1,
                                 name="causal_col_limit",
                             )
-                            K.assign(col_limit[0], K.min(kv_valid_cols, causal_col_limit))
-                    with K.If(col_limit[0] < N_BLOCK), K.Then():
-                        with K.unroll(N_BLOCK // MASK_R2P_CHUNK) as chunk:
-                            shift = K.local_scalar(
-                                K.i32,
-                                init=K.max((chunk + 1) * MASK_R2P_CHUNK - col_limit[0], 0),
+                            txl.assign(col_limit[0], txl.min(kv_valid_cols, causal_col_limit))
+                    with txl.If(col_limit[0] < N_BLOCK), txl.Then():
+                        with txl.unroll(N_BLOCK // MASK_R2P_CHUNK) as chunk:
+                            shift = txl.local_scalar(
+                                txl.i32,
+                                init=txl.max((chunk + 1) * MASK_R2P_CHUNK - col_limit[0], 0),
                                 name="shift",
                             )
                             # `shr.u32` clamps a shift of 32 or more to zero, which
@@ -2845,12 +2890,12 @@ def _make_kernel(**config):
                             # shift is undefined there and leaves the chunk
                             # unmasked, which shows up as too-large row sums on the
                             # early query rows.
-                            bits_reg = K.alloc_local((1,), "uint32")
-                            K.ptx.shr.u32(
-                                bits_reg[0], K.uint32(0xFFFFFFFF), K.cast(shift, "uint32")
+                            bits_reg = txl.alloc_local((1,), "uint32")
+                            txl.ptx.shr.u32(
+                                bits_reg[0], txl.uint32(0xFFFFFFFF), txl.cast(shift, "uint32")
                             )
-                            bits = K.local_scalar(K.u32, init=bits_reg[0], name="bits")
-                            # `K.unroll`, not `range`: a `range` here lowers to a
+                            bits = txl.local_scalar(txl.u32, init=bits_reg[0], name="bits")
+                            # `txl.unroll`, not `range`: a `range` here lowers to a
                             # runtime 32-trip loop, and this body runs once per
                             # element, per softmax step, per Q group, in both
                             # warpgroups. Unrolled, `1 << i` and the element index
@@ -2862,41 +2907,44 @@ def _make_kernel(**config):
                             # special case at i == 31, where `1 << 31` overflows an
                             # int32 literal, and that special case is what forced a
                             # per-element select.
-                            with K.unroll(MASK_R2P_CHUNK) as i:
+                            with txl.unroll(MASK_R2P_CHUNK) as i:
                                 with (
-                                    K.If(
-                                        K.bitwise_and(
-                                            bits, K.shift_left(K.uint32(1), K.cast(i, "uint32"))
+                                    txl.If(
+                                        txl.bitwise_and(
+                                            bits,
+                                            txl.shift_left(txl.uint32(1), txl.cast(i, "uint32")),
                                         )
-                                        == K.uint32(0)
+                                        == txl.uint32(0)
                                     ),
-                                    K.Then(),
+                                    txl.Then(),
                                 ):
-                                    K.assign(s_regs[chunk * MASK_R2P_CHUNK + i], NEG_INF)
+                                    txl.assign(s_regs[chunk * MASK_R2P_CHUNK + i], NEG_INF)
 
                     # One KV block per Q group, so this is always the first and
                     # only online-softmax step: no rescale of a running accumulator
                     # (:2284-2287).
-                    row_max = K.alloc_local((1,), "float32")
+                    row_max = txl.alloc_local((1,), "float32")
                     _row_max_128(s_regs, row_max, 0)
                     # `row_max_safe` (:246-247): a fully masked row has row_max
                     # -inf, and subtracting it would make every element NaN. The
                     # reference substitutes 0.0 before the scale-subtract; the
                     # row's sum then comes out 0 and the epilogue's zero guard
                     # turns it into a neutral partial.
-                    K.assign(
+                    txl.assign(
                         row_max[0],
-                        K.if_then_else(row_max[0] != NEG_INF, row_max[0], K.float32(0.0)),
+                        txl.if_then_else(row_max[0] != NEG_INF, row_max[0], txl.float32(0.0)),
                     )
                     # Taken as a scalar, not recomputed: the reference folds
                     # `softmax_scale * log2(e)` on the host in double precision
                     # (:514), and redoing it in f32 here differs by one ULP, which
                     # propagates straight into every LSE.
-                    scale_log2 = K.local_scalar(K.f32, init=softmax_scale_log2, name="scale_log2")
-                    neg_max_scaled = K.local_scalar(
-                        K.f32, init=-(row_max[0] * scale_log2), name="neg_max_scaled"
+                    scale_log2 = txl.local_scalar(
+                        txl.f32, init=softmax_scale_log2, name="scale_log2"
                     )
-                    with K.unroll(N_BLOCK // 2) as ii:
+                    neg_max_scaled = txl.local_scalar(
+                        txl.f32, init=-(row_max[0] * scale_log2), name="neg_max_scaled"
+                    )
+                    with txl.unroll(N_BLOCK // 2) as ii:
                         i = ii * 2
                         _packed_f32x2(
                             "fma.rn.f32x2",
@@ -2912,7 +2960,7 @@ def _make_kernel(**config):
                         )
 
                     if temperature:
-                        temp_row_sum = K.alloc_local((1,), "float32")
+                        temp_row_sum = txl.alloc_local((1,), "float32")
                         _scaled_exp2_row_sum_128(s_regs, lse_temperature_inv_scale, temp_row_sum)
 
                     bar_p_last_empty.wait(stage, producer_phase)
@@ -2922,31 +2970,33 @@ def _make_kernel(**config):
                     # packed conversion into the P operand dtype (:2307-2312).
                     # 128 P values pack into 64 words as bf16, 32 as fp8; the
                     # store repetition follows (:2429-2439).
-                    p_words = K.alloc_local((N_BLOCK * _DTYPE_BYTES[pv_dtype] * 8 // 32,), "uint32")
+                    p_words = txl.alloc_local(
+                        (N_BLOCK * _DTYPE_BYTES[pv_dtype] * 8 // 32,), "uint32"
+                    )
                     # Preserve the parser kernel's trace-time expansion. The
                     # zero-frequency specialization is also decided while tracing,
                     # so the modulo-by-zero expression is never constructed.
                     for j in range(EX2_FRG_CNT):
                         for k in range(0, EX2_FRG_TILE, 2):
                             if ex2_emu_freq == 0:
-                                K.ptx.ex2.approx.ftz.f32(s_regs[j * 32 + k], s_regs[j * 32 + k])
-                                K.ptx.ex2.approx.ftz.f32(
+                                txl.ptx.ex2.approx.ftz.f32(s_regs[j * 32 + k], s_regs[j * 32 + k])
+                                txl.ptx.ex2.approx.ftz.f32(
                                     s_regs[j * 32 + k + 1], s_regs[j * 32 + k + 1]
                                 )
                             else:
-                                use_mufu = K.Or(
+                                use_mufu = txl.Or(
                                     (k % ex2_emu_freq) < (ex2_emu_freq - EX2_EMU_RES),
-                                    K.Or(j >= EX2_FRG_CNT - 1, j < EX2_EMU_START_FRG),
+                                    txl.Or(j >= EX2_FRG_CNT - 1, j < EX2_EMU_START_FRG),
                                 )
-                                with K.If(use_mufu):
-                                    with K.Then():
-                                        K.ptx.ex2.approx.ftz.f32(
+                                with txl.If(use_mufu):
+                                    with txl.Then():
+                                        txl.ptx.ex2.approx.ftz.f32(
                                             s_regs[j * 32 + k], s_regs[j * 32 + k]
                                         )
-                                        K.ptx.ex2.approx.ftz.f32(
+                                        txl.ptx.ex2.approx.ftz.f32(
                                             s_regs[j * 32 + k + 1], s_regs[j * 32 + k + 1]
                                         )
-                                    with K.Else():
+                                    with txl.Else():
                                         _ex2_emulation_2(s_regs, j * 32 + k, j * 32 + k + 1)
                         _pack_p_words(p_words, s_regs, j, pv_dtype)
 
@@ -2957,29 +3007,29 @@ def _make_kernel(**config):
                     rep = _P_STORE_REP[pv_dtype]
                     st_chain = _TMEM_ST[rep]
                     for k in range(4):
-                        K.ptx[st_chain](
-                            K.cuda.get_tmem_addr(
+                        txl.ptx[st_chain](
+                            txl.cuda.get_tmem_addr(
                                 tmem_p_col + stage * tmem_stage_stride + k * rep, 0, 0
                             ),
                             *[p_words[k * rep + i] for i in range(rep)],
                         )
-                        with K.If(k + 1 == split_idx), K.Then():
-                            K.ptx.tcgen05.wait__st.sync.aligned()
+                        with txl.If(k + 1 == split_idx), txl.Then():
+                            txl.ptx.tcgen05.wait__st.sync.aligned()
                             bar_p_full.arrive(stage)
-                    K.ptx.tcgen05.wait__st.sync.aligned()
+                    txl.ptx.tcgen05.wait__st.sync.aligned()
                     bar_p_last_full.arrive(stage)
 
                     # The stats pipe's empty half is a credit on s_scale: it stops
                     # this group from overwriting the slot the epilogue two groups
                     # back has not drained (:2331).
                     bar_stats_empty.wait(stage, producer_phase)
-                    row_sum = K.alloc_local((1,), "float32")
+                    row_sum = txl.alloc_local((1,), "float32")
                     _row_sum_128(s_regs, row_sum)
                     st_shared_f32(s_scale, stage * M_BLOCK * 2 + group_tidx, row_sum[0])
                     st_shared_f32(s_scale, stage * M_BLOCK * 2 + M_BLOCK + group_tidx, row_max[0])
                     if temperature:
                         st_shared_f32(s_scale_temp, stage * M_BLOCK + group_tidx, temp_row_sum[0])
-                    K.ptx.fence.proxy.async_.shared__cta()
+                    txl.ptx.fence.proxy.async_.shared__cta()
                     bar_s_empty.arrive(stage)
 
                     # ---------------- epilogue (:2927-3305) ----------------
@@ -2996,49 +3046,55 @@ def _make_kernel(**config):
 
             bar_arrive_named(BAR_TMEM_ALLOC, WARP_SIZE * (WARPS_PER_GROUP * 2 + 1))
 
-        with K.If(warp_idx < SOFTMAX1_WARP_BASE), K.Then():
-            with K.If(cta_valid_work != 0), K.Then():
-                K.ptx.setmaxnreg.inc.sync.aligned.u32(K.uint32(num_regs_softmax))
+        with txl.If(warp_idx < SOFTMAX1_WARP_BASE), txl.Then():
+            with txl.If(cta_valid_work != 0), txl.Then():
+                txl.ptx.setmaxnreg.inc.sync.aligned.u32(txl.uint32(num_regs_softmax))
                 softmax_warpgroup(0)
 
-        with K.If(K.And(warp_idx >= SOFTMAX1_WARP_BASE, warp_idx < Q_LOAD_WARP_BASE)), K.Then():
-            with K.If(cta_valid_work != 0), K.Then():
-                K.ptx.setmaxnreg.inc.sync.aligned.u32(K.uint32(num_regs_softmax))
+        with (
+            txl.If(txl.And(warp_idx >= SOFTMAX1_WARP_BASE, warp_idx < Q_LOAD_WARP_BASE)),
+            txl.Then(),
+        ):
+            with txl.If(cta_valid_work != 0), txl.Then():
+                txl.ptx.setmaxnreg.inc.sync.aligned.u32(txl.uint32(num_regs_softmax))
                 softmax_warpgroup(1)
 
     parameters = [
         # K/V keep their three logical axes because the host-side TensorMap
         # encoding consumes that tensor ABI.  Paged storage is reshaped to the
         # same contiguous rank-3 view by tirx_args; no match_buffer is needed.
-        ("k", K.gptr(K.u8, shape=lambda p: (p["total_k"], p["num_heads_kv"], PACKED_HEAD_DIM))),
-        ("v", K.gptr(K.u8, shape=lambda p: (p["total_k"], p["num_heads_kv"], PACKED_HEAD_DIM))),
-        ("k_scale", K.gptr(K.u8, shape=lambda p: (p["scale_numel"],))),
-        ("v_scale", K.gptr(K.u8, shape=lambda p: (p["scale_numel"],))),
+        ("k", txl.gptr(txl.u8, shape=lambda p: (p["total_k"], p["num_heads_kv"], PACKED_HEAD_DIM))),
+        ("v", txl.gptr(txl.u8, shape=lambda p: (p["total_k"], p["num_heads_kv"], PACKED_HEAD_DIM))),
+        ("k_scale", txl.gptr(txl.u8, shape=lambda p: (p["scale_numel"],))),
+        ("v_scale", txl.gptr(txl.u8, shape=lambda p: (p["scale_numel"],))),
     ]
     if k_global:
-        parameters.append(("k_global_scale", K.gptr[K.f32, (1,)]))
+        parameters.append(("k_global_scale", txl.gptr[txl.f32, (1,)]))
     parameters.extend(
         [
-            ("k2q_q_indices", K.gptr(K.i32, shape=lambda p: (p["num_heads_kv"] * p["nnz"],))),
-            ("k2q_qsplit_indices", K.gptr(K.i32, shape=lambda p: (p["num_heads_kv"] * p["nnz"],))),
+            ("k2q_q_indices", txl.gptr(txl.i32, shape=lambda p: (p["num_heads_kv"] * p["nnz"],))),
+            (
+                "k2q_qsplit_indices",
+                txl.gptr(txl.i32, shape=lambda p: (p["num_heads_kv"] * p["nnz"],)),
+            ),
             (
                 "k2q_row_ptr",
-                K.gptr(K.i32, shape=lambda p: (p["num_heads_kv"] * (p["total_rows"] + 1),)),
+                txl.gptr(txl.i32, shape=lambda p: (p["num_heads_kv"] * (p["total_rows"] + 1),)),
             ),
             (
                 "scheduler_metadata",
-                K.gptr(K.i32, shape=lambda p: (p["work_capacity"] * WORK_FIELDS,)),
+                txl.gptr(txl.i32, shape=lambda p: (p["work_capacity"] * WORK_FIELDS,)),
             ),
-            ("work_count", K.gptr[K.i32, (1,)]),
+            ("work_count", txl.gptr[txl.i32, (1,)]),
             (
                 "o_partial",
-                K.gptr(
+                txl.gptr(
                     partial_ty, shape=lambda p: (p["topk"] * p["total_q"] * p["head_q"] * HEAD_DIM,)
                 ),
             ),
             (
                 "lse_partial",
-                K.gptr(K.f32, shape=lambda p: (p["topk"] * p["total_q"] * p["head_q"],)),
+                txl.gptr(txl.f32, shape=lambda p: (p["topk"] * p["total_q"] * p["head_q"],)),
             ),
         ]
     )
@@ -3046,37 +3102,39 @@ def _make_kernel(**config):
         parameters.append(
             (
                 "lse_temperature_partial",
-                K.gptr(K.f32, shape=lambda p: (p["topk"] * p["total_q"] * p["head_q"],)),
+                txl.gptr(txl.f32, shape=lambda p: (p["topk"] * p["total_q"] * p["head_q"],)),
             )
         )
     # Q is flattened only across token/head; HEAD_DIM remains the descriptor's
     # contiguous axis, so the launch argument is a rank-2 tensor.
     parameters.append(
-        ("q_flat", K.gptr(q_ty, shape=lambda p: (p["total_q"] * p["head_q"], HEAD_DIM)))
+        ("q_flat", txl.gptr(q_ty, shape=lambda p: (p["total_q"] * p["head_q"], HEAD_DIM)))
     )
     if paged:
-        parameters.append(("page_table", K.gptr(K.i32, shape=lambda p: (p["total_k"] // N_BLOCK,))))
+        parameters.append(
+            ("page_table", txl.gptr(txl.i32, shape=lambda p: (p["total_k"] // N_BLOCK,)))
+        )
     if seqused:
-        parameters.append(("seqused_k", K.gptr(K.i32, shape=lambda p: (p["num_batches"],))))
+        parameters.append(("seqused_k", txl.gptr(txl.i32, shape=lambda p: (p["num_batches"],))))
     parameters.extend(
         [
-            ("cu_seqlens_q", K.gptr(K.i32, shape=lambda p: (p["num_batches"] + 1,))),
-            ("cu_seqlens_k", K.gptr(K.i32, shape=lambda p: (p["num_batches"] + 1,))),
-            ("softmax_scale_log2", K.f32),
-            ("lse_temperature_scale_log2", K.f32),
-            ("lse_temperature_inv_scale", K.f32),
-            ("num_kv_blocks", K.i32),
-            ("num_heads_kv", K.i32),
-            ("seq_len_q", K.i32),
-            ("work_capacity", K.i32),
-            ("total_k", K.i32),
-            ("total_q", K.i32),
-            ("head_q", K.i32),
-            ("nnz", K.i32),
-            ("total_rows", K.i32),
-            ("num_batches", K.i32),
-            ("topk", K.i32),
-            ("scale_numel", K.i32),
+            ("cu_seqlens_q", txl.gptr(txl.i32, shape=lambda p: (p["num_batches"] + 1,))),
+            ("cu_seqlens_k", txl.gptr(txl.i32, shape=lambda p: (p["num_batches"] + 1,))),
+            ("softmax_scale_log2", txl.f32),
+            ("lse_temperature_scale_log2", txl.f32),
+            ("lse_temperature_inv_scale", txl.f32),
+            ("num_kv_blocks", txl.i32),
+            ("num_heads_kv", txl.i32),
+            ("seq_len_q", txl.i32),
+            ("work_capacity", txl.i32),
+            ("total_k", txl.i32),
+            ("total_q", txl.i32),
+            ("head_q", txl.i32),
+            ("nnz", txl.i32),
+            ("total_rows", txl.i32),
+            ("num_batches", txl.i32),
+            ("topk", txl.i32),
+            ("scale_numel", txl.i32),
         ]
     )
     names = tuple(name for name, _ in parameters)
@@ -3096,7 +3154,7 @@ def _make_kernel(**config):
             inspect.Parameter("host", inspect.Parameter.KEYWORD_ONLY),
         ]
     )
-    kernel = K.kernel(
+    kernel = txl.kernel(
         warps=TOTAL_WARPS,
         arch="sm_100a",
         min_blocks_per_sm=1,
@@ -3107,7 +3165,7 @@ def _make_kernel(**config):
 
 
 def get_kernel(**config):
-    """Return the native Kern specialization for one compile key."""
+    """Return the native tirx-lite specialization for one compile key."""
     config.pop("label", None)
     return _make_kernel(**config)
 

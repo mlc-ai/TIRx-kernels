@@ -16,7 +16,7 @@ kernel expands the body while tracing; a DSL serial loop emits a device `For`.
 
 ```python
 # Wrong when STATIC_TRIPS belongs to the traced program's static structure.
-with K.serial(STATIC_TRIPS, unroll=False) as i:
+with txl.serial(STATIC_TRIPS, unroll=False) as i:
     consume(registers[i])
 
 # Keep the index a Python integer and emit each operation while tracing.
@@ -32,11 +32,11 @@ that contract explicit instead of relying on a serial loop with a constant bound
 
 ```python
 # before: fixed bound, but the fragment still has a runtime index.
-with K.serial(1, GROUPS, unroll=False) as group:
+with txl.serial(1, GROUPS, unroll=False) as group:
     score = combine(score, registers[group])
 
 # after: preserve the source's explicitly unrolled device loop.
-with K.unroll(1, GROUPS) as group:
+with txl.unroll(1, GROUPS) as group:
     score = combine(score, registers[group])
 ```
 

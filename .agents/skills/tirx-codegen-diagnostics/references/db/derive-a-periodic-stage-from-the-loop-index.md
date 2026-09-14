@@ -17,17 +17,17 @@ cursor. Use a mask for a power-of-two depth.
 
 ```python
 # before: the next work item depends on the previous cursor update.
-stage = K.local_scalar("int32", init=0)
-with K.While(subtile < SUBTILES):
+stage = txl.local_scalar("int32", init=0)
+with txl.While(subtile < SUBTILES):
     _store(fragment, stage)
-    K.assign(stage, K.bitwise_and(stage + 1, K.int32(STAGES - 1)))
-    K.assign(subtile, subtile + 1)
+    txl.assign(stage, txl.bitwise_and(stage + 1, txl.int32(STAGES - 1)))
+    txl.assign(subtile, subtile + 1)
 
 # after: no mutable stage survives the iteration.
-with K.While(subtile < SUBTILES):
-    stage_index = K.bitwise_and(subtile, K.int32(STAGES - 1))
+with txl.While(subtile < SUBTILES):
+    stage_index = txl.bitwise_and(subtile, txl.int32(STAGES - 1))
     _store(fragment, stage_index)
-    K.assign(subtile, subtile + 1)
+    txl.assign(subtile, subtile + 1)
 ```
 
 ## Rationale

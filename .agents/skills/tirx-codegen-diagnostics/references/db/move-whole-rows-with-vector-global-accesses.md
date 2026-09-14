@@ -21,11 +21,11 @@ fuse.
 ```python
 # before: one access per element, 128 per row.
 for key in range(ROW):
-    K.assign(values[key], _load_scalar(src, base + key))
+    txl.assign(values[key], _load_scalar(src, base + key))
 
 # after: 16 bytes per access.
 for group in range(ROW // 4):          # f32 rows
-    K.ptx["ld.global.v4.f32"](
+    txl.ptx["ld.global.v4.f32"](
         values[group * 4], values[group * 4 + 1],
         values[group * 4 + 2], values[group * 4 + 3],
         src.ptr_to([base + group * 4]),

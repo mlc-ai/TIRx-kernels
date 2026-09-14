@@ -16,9 +16,9 @@ the usual X-minor rank, derive X with a mask and Y with a shift, then reuse the
 two local scalars everywhere.
 
 ```python
-rank = K.local_scalar("int32", init=K.cuda.mov_sreg(32, "cluster_ctarank"))
-cluster_x = K.local_scalar("int32", init=rank & (CLUSTER_M - 1))
-cluster_y = K.local_scalar("int32", init=rank >> (CLUSTER_M.bit_length() - 1))
+rank = txl.local_scalar("int32", init=txl.cuda.mov_sreg(32, "cluster_ctarank"))
+cluster_x = txl.local_scalar("int32", init=rank & (CLUSTER_M - 1))
+cluster_y = txl.local_scalar("int32", init=rank >> (CLUSTER_M.bit_length() - 1))
 ```
 
 Keep the declared cluster scope that carries launch metadata even when its

@@ -15,16 +15,16 @@ selects zero at the point of use instead of a mask that is built and multiplied.
 
 ```python
 # before: two instructions per bound, and a materialised mask per element.
-K.ptx["setp.le.f32"](p, value, K.float32(hi))
-K.ptx["selp.f32"](clamped, value, K.float32(hi), p)
+txl.ptx["setp.le.f32"](p, value, txl.float32(hi))
+txl.ptx["selp.f32"](clamped, value, txl.float32(hi), p)
 mask = _one_or_zero(in_range)
 ops["product"](grad, grad, mask)
 
 # after: one instruction per bound, and a select at the consumer.
-K.ptx["min.f32"](clamped, value, K.float32(hi))
-keep = K.local_scalar("bool")
-K.assign(keep, K.cast(in_range, "bool"))
-K.ptx["selp.f32"](grad, grad, K.float32(0.0), keep)
+txl.ptx["min.f32"](clamped, value, txl.float32(hi))
+keep = txl.local_scalar("bool")
+txl.assign(keep, txl.cast(in_range, "bool"))
+txl.ptx["selp.f32"](grad, grad, txl.float32(0.0), keep)
 ```
 
 ## Rationale

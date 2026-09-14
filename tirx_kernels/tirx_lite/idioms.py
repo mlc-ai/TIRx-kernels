@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
-"""The ``K.idioms`` multi-instruction shapes a PTX-level kernel keeps
+"""The ``txl.idioms`` multi-instruction shapes a PTX-level kernel keeps
 re-deriving, written once.
 
-These are **not** wrappers that rename instructions. ``K.ptx`` already spells
+These are **not** wrappers that rename instructions. ``txl.ptx`` already spells
 every instruction the way the ISA does, and nothing here hides that: each
-function below expands to a sequence of bare ``K.ptx`` / ``K.cuda`` calls that
+function below expands to a sequence of bare ``txl.ptx`` / ``txl.cuda`` calls that
 its docstring writes out in full, so a reader can predict the emitted
 instructions 1:1 without opening this file.
 
@@ -29,7 +29,7 @@ the sigmoid and silently select a different instruction schedule.
 
 The one shape that turned out to need neither a wrapper nor a doc note is
 ``cp.async``: its three spellings differ in what a *skipped* lane's destination
-holds, so instead of a wrapper the ``K.ptx`` proxy makes the distinguishing
+holds, so instead of a wrapper the ``txl.ptx`` proxy makes the distinguishing
 operand mandatory and explains the choice when it is missing. See
 ``_CP_ASYNC_HELP`` in this package's ``__init__``.
 
@@ -40,7 +40,7 @@ instrument, including the f16x2 widening case corrected by
 
 Style note: like ``entry.py`` and ``smem.py`` this module talks to ``tirx``
 directly (``from tvm.script import tirx as T``) and wraps void instruction
-calls in ``T.evaluate`` by hand. The ``K.ptx`` / ``K.cuda`` statement proxies
+calls in ``T.evaluate`` by hand. The ``txl.ptx`` / ``txl.cuda`` statement proxies
 live in the package ``__init__``, which imports *this* module; going through
 them here would be a cycle, and ``T.evaluate(T.ptx...)`` is exactly what the
 proxy does anyway.
@@ -309,7 +309,7 @@ _BLOCK_SCALED_KINDS = frozenset(
 
 
 def mma_chain(mma, d, *, a, b, idesc, pred, accumulate, guard, dol=None, k_range=None):
-    """One tcgen05 MMA k-loop: exactly ``n_k`` ``K.ptx[mma](...)`` calls.
+    """One tcgen05 MMA k-loop: exactly ``n_k`` ``txl.ptx[mma](...)`` calls.
 
     Expansion. Each operand's descriptor is encoded **once**, at the start of
     ``k_range``; every k-phase is then that descriptor plus a trace-time
@@ -321,13 +321,13 @@ def mma_chain(mma, d, *, a, b, idesc, pred, accumulate, guard, dol=None, k_range
         # guard="branch": ONE `If(pred != 0)` opens HERE -- between the
         # encodes above and the MMAs below -- and no per-MMA predicate exists
         for kp in range(n_k):
-            K.ptx[mma](
-                K.Cast("uint32", d),           # accumulator, tmem
+            txl.ptx[mma](
+                txl.Cast("uint32", d),           # accumulator, tmem
                 a_desc + off16_a(kp),          # or Cast(u32, a + kp*a_step) for tmem A
                 b_desc + off16_b(kp),
-                K.uint32(idesc),
+                txl.uint32(idesc),
                 *dol,                          # 4 masks, or 8 under cta_group::2
-                K.ptx.pred(accumulate if kp == 0 else 1),   # phase 0: the flag
+                txl.ptx.pred(accumulate if kp == 0 else 1),   # phase 0: the flag
                 pred=pred,   # guard="pred" only; omitted entirely when pred=None
             )
 
@@ -725,10 +725,10 @@ def sigmoid_tanh_approx_f32(value=None, *, tanh_input=None):
     Expansion -- two explicit DPS PTX calls and two local f32 values; the
     input half-scale remains an ordinary f32 expression::
 
-        tanh_value = K.local_scalar("float32")
-        result = K.local_scalar("float32")
-        K.ptx.tanh.approx.f32(tanh_value, value * 0.5)
-        K.ptx.fma.rn.f32(result, tanh_value, 0.5, 0.5)
+        tanh_value = txl.local_scalar("float32")
+        result = txl.local_scalar("float32")
+        txl.ptx.tanh.approx.f32(tanh_value, value * 0.5)
+        txl.ptx.fma.rn.f32(result, tanh_value, 0.5, 0.5)
 
     Pass ``tanh_input=`` instead of ``value`` when the caller already has the
     ``value * 0.5`` operand consumed by ``tanh.approx``. This preserves
@@ -770,10 +770,10 @@ def cast_f16x2_to_f32x2(dst, i, word):
     Expansion — three instructions, which is what ``__half22float2`` compiles
     to::
 
-        u = K.alloc_local([2], "uint16")
-        K.ptx.mov.b32(u[0], u[1], word)    # mov.b32 {lo, hi}, word
-        K.ptx.cvt.f32.f16(dst[2 * i], u[0])
-        K.ptx.cvt.f32.f16(dst[2 * i + 1], u[1])
+        u = txl.alloc_local([2], "uint16")
+        txl.ptx.mov.b32(u[0], u[1], word)    # mov.b32 {lo, hi}, word
+        txl.ptx.cvt.f32.f16(dst[2 * i], u[0])
+        txl.ptx.cvt.f32.f16(dst[2 * i + 1], u[1])
 
     Why this form
     -------------
@@ -818,11 +818,11 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
 
         for step in range(log2(width)):
             delta = 1 << step
-            prior = K.alloc_local([n], <dtype>)
+            prior = txl.alloc_local([n], <dtype>)
             for i in range(n):                                  # ALL shuffles first
-                prior[i] = K.tvm_warp_shuffle_up(
-                    K.uint32(0xFFFFFFFF), vals[i], delta, width, width)
-            with K.If(lane >= delta), K.Then():                 # then the guarded adds
+                prior[i] = txl.tvm_warp_shuffle_up(
+                    txl.uint32(0xFFFFFFFF), vals[i], delta, width, width)
+            with txl.If(lane >= delta), txl.Then():                 # then the guarded adds
                 for i in range(n):
                     vals[i] = vals[i] + prior[i]
 
@@ -830,8 +830,8 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
     carrying each sub-array's warp total into the next::
 
         for i in range(1, n):
-            carry = K.alloc_local([1], <dtype>)
-            carry[0] = K.cuda._shfl_sync(K.uint32(0xFFFFFFFF), vals[i-1], width-1, width)
+            carry = txl.alloc_local([1], <dtype>)
+            carry[0] = txl.cuda._shfl_sync(txl.uint32(0xFFFFFFFF), vals[i-1], width-1, width)
             vals[i] = vals[i] + carry[0]
 
     Why this form

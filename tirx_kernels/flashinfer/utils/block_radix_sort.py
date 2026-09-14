@@ -63,7 +63,7 @@ whose ``NV_PROVIDES_SM_70`` dispatch arm is empty (``cuda/__bit/bitfield.h:107``
 so control falls through to the shift-and-mask return at ``:114``.
 """
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 from tirx_kernels.flashinfer.utils.topk_radix import (
     bar_sync,
     ld_shared_pair_u32,
@@ -77,7 +77,7 @@ from tirx_kernels.flashinfer.utils.topk_radix import (
 
 # Every loop in this module that walks a *trace-time* count -- the digit-pass
 # walk, the warp-fold chain -- is a Python loop, and every loop that must survive
-# into the TIR as a real ``For`` node is a ``K.unroll`` context.  A Python loop
+# into the TIR as a real ``For`` node is a ``txl.unroll`` context.  A Python loop
 # emits the same straight-line TIR that cub's ``_CCCL_PRAGMA_UNROLL_FULL``
 # produces, and the digit-pass loop is unrolled because ``end_bit`` is static per
 # config.
@@ -171,7 +171,7 @@ def alloc_sort_smem_static(block_threads, items_per_thread):
     assert exchange_elements(block_threads, items_per_thread) <= words, (
         "exchange must fit inside the rank grid for the union to hold"
     )
-    counters32 = K.alloc_buffer((words,), "uint32", scope="shared")
+    counters32 = txl.alloc_buffer((words,), "uint32", scope="shared")
     counters16 = counters32.view("uint16")
     # Both exchange buffers alias the rank grid, exactly as cub's inner union
     # does: a barrier separates the rank phase from each scatter, and the ranks
@@ -181,7 +181,7 @@ def alloc_sort_smem_static(block_threads, items_per_thread):
     # The block-scan scratch sits outside that union, as in cub -- a separate
     # `__shared__` array rather than an offset view, so its indices stay
     # zero-based for the emitters.
-    scan = K.alloc_buffer((scan_words(block_threads),), "uint32", scope="shared")
+    scan = txl.alloc_buffer((scan_words(block_threads),), "uint32", scope="shared")
     return counters32, counters16, xchg_keys, xchg_values, scan
 
 
@@ -218,15 +218,15 @@ def emit_digit(key, begin_bit, num_bits: int):
     ``begin_bit`` may be a Python int (unrolled pass loop) or a TIR value (rolled
     pass loop, which is the shape the source compiles to).
     """
-    shift = K.uint32(begin_bit) if isinstance(begin_bit, int) else K.cast(begin_bit, "uint32")
-    return K.bitwise_and(K.shift_right(key, shift), K.uint32((1 << num_bits) - 1))
+    shift = txl.uint32(begin_bit) if isinstance(begin_bit, int) else txl.cast(begin_bit, "uint32")
+    return txl.bitwise_and(txl.shift_right(key, shift), txl.uint32((1 << num_bits) - 1))
 
 
 def padded_offset(off, items_per_thread: int):
     """``BlockExchange``'s bank-conflict padding: ``x + (x >> 5)`` when enabled."""
     if not insert_padding(items_per_thread):
         return off
-    return off + K.shift_right(off, K.int32(LOG_SMEM_BANKS))
+    return off + txl.shift_right(off, txl.int32(LOG_SMEM_BANKS))
 
 
 def _scan_warp_inclusive(out, incl, tx, value):
@@ -237,39 +237,43 @@ def _scan_warp_inclusive(out, incl, tx, value):
     (``warp_scan_shfl.cuh:700-706``) instead of a sixth shuffle, which is why the
     export shows exactly five shuffles per instantiation.
     """
-    lane = K.local_scalar("int32", init=tx % WARP_THREADS)
-    K.assign(incl[0], value)
-    with K.unroll(5) as step:
-        peer = K.local_scalar("uint32", init=shfl_up_u32(incl[0], K.shift_left(K.int32(1), step)))
-        K.assign(incl[0], K.Select(lane >= K.shift_left(K.int32(1), step), incl[0] + peer, incl[0]))
-    K.assign(out[0], incl[0] - value)
+    lane = txl.local_scalar("int32", init=tx % WARP_THREADS)
+    txl.assign(incl[0], value)
+    with txl.unroll(5) as step:
+        peer = txl.local_scalar(
+            "uint32", init=shfl_up_u32(incl[0], txl.shift_left(txl.int32(1), step))
+        )
+        txl.assign(
+            incl[0], txl.Select(lane >= txl.shift_left(txl.int32(1), step), incl[0] + peer, incl[0])
+        )
+    txl.assign(out[0], incl[0] - value)
 
 
 def _scan_publish_warp_aggregate(scan, incl, tx):
     """Last lane of each warp shares its warp aggregate (``:169-172``)."""
-    with K.If(tx % WARP_THREADS == WARP_THREADS - 1), K.Then():
+    with txl.If(tx % WARP_THREADS == WARP_THREADS - 1), txl.Then():
         st_shared_u32(scan, tx // WARP_THREADS, incl[0])
     bar_sync()
 
 
 def _scan_seed_aggregate(scan, agg, wpre):
     """``block_aggregate = warp_aggregates[0]`` (``:179``)."""
-    K.assign(agg[0], ld_shared_u32(scan, 0))
-    K.assign(wpre[0], K.uint32(0))
+    txl.assign(agg[0], ld_shared_u32(scan, 0))
+    txl.assign(wpre[0], txl.uint32(0))
 
 
 def _scan_fold_warp(scan, agg, wpre, tx, w):
     """One step of ``ApplyWarpAggregates`` (``:129-134``)."""
-    with K.If(tx // WARP_THREADS == w), K.Then():
-        K.assign(wpre[0], agg[0])
-    K.assign(agg[0], agg[0] + ld_shared_u32(scan, w))
+    with txl.If(tx // WARP_THREADS == w), txl.Then():
+        txl.assign(wpre[0], agg[0])
+    txl.assign(agg[0], agg[0] + ld_shared_u32(scan, w))
 
 
 def _scan_fold_warp_value(agg, wpre, tx, w, value):
     """``ApplyWarpAggregates`` over an aggregate already held in a register."""
-    with K.If(tx // WARP_THREADS == w), K.Then():
-        K.assign(wpre[0], agg[0])
-    K.assign(agg[0], agg[0] + value)
+    with txl.If(tx // WARP_THREADS == w), txl.Then():
+        txl.assign(wpre[0], agg[0])
+    txl.assign(agg[0], agg[0] + value)
 
 
 def _scan_seed_and_fold_pair(scan, agg, wpre, tx):
@@ -280,27 +284,27 @@ def _scan_seed_and_fold_pair(scan, agg, wpre, tx):
     128 and 256 (``.loc 13 178``) -- rather than one scalar load per warp.
     """
     pair = ld_shared_pair_u32(scan, 0)
-    K.assign(agg[0], pair[0])
-    K.assign(wpre[0], K.uint32(0))
-    with K.If(tx // WARP_THREADS == 1), K.Then():
-        K.assign(wpre[0], agg[0])
-    K.assign(agg[0], agg[0] + pair[1])
+    txl.assign(agg[0], pair[0])
+    txl.assign(wpre[0], txl.uint32(0))
+    with txl.If(tx // WARP_THREADS == 1), txl.Then():
+        txl.assign(wpre[0], agg[0])
+    txl.assign(agg[0], agg[0] + pair[1])
 
 
 def _scan_seed_and_fold_quad(scan, agg, wpre, tx):
     """The same fold at four warps, over one ``ld.shared.v4.b32``."""
     quad = ld_shared_quad_u32(scan, 0)
-    K.assign(agg[0], quad[0])
-    K.assign(wpre[0], K.uint32(0))
-    with K.If(tx // WARP_THREADS == 1), K.Then():
-        K.assign(wpre[0], agg[0])
-    K.assign(agg[0], agg[0] + quad[1])
-    with K.If(tx // WARP_THREADS == 2), K.Then():
-        K.assign(wpre[0], agg[0])
-    K.assign(agg[0], agg[0] + quad[2])
-    with K.If(tx // WARP_THREADS == 3), K.Then():
-        K.assign(wpre[0], agg[0])
-    K.assign(agg[0], agg[0] + quad[3])
+    txl.assign(agg[0], quad[0])
+    txl.assign(wpre[0], txl.uint32(0))
+    with txl.If(tx // WARP_THREADS == 1), txl.Then():
+        txl.assign(wpre[0], agg[0])
+    txl.assign(agg[0], agg[0] + quad[1])
+    with txl.If(tx // WARP_THREADS == 2), txl.Then():
+        txl.assign(wpre[0], agg[0])
+    txl.assign(agg[0], agg[0] + quad[2])
+    with txl.If(tx // WARP_THREADS == 3), txl.Then():
+        txl.assign(wpre[0], agg[0])
+    txl.assign(agg[0], agg[0] + quad[3])
 
 
 def _scan_seed_and_fold_octet(scan, agg, wpre, tx):
@@ -311,8 +315,8 @@ def _scan_seed_and_fold_octet(scan, agg, wpre, tx):
     """
     lo = ld_shared_quad_u32(scan, 0)
     hi = ld_shared_quad_u32(scan, 4)
-    K.assign(agg[0], lo[0])
-    K.assign(wpre[0], K.uint32(0))
+    txl.assign(agg[0], lo[0])
+    txl.assign(wpre[0], txl.uint32(0))
     _scan_fold_warp_value(agg, wpre, tx, 1, lo[1])
     _scan_fold_warp_value(agg, wpre, tx, 2, lo[2])
     _scan_fold_warp_value(agg, wpre, tx, 3, lo[3])
@@ -329,22 +333,22 @@ def _scan_apply_prefix(scan, out, agg, wpre, tx, n_warps):
     (``block_radix_rank.cuh:359-374``); the packing loop runs only for
     ``PACKED == 1`` because ``PACKING_RATIO == 2``.
     """
-    warp_id = K.local_scalar("int32", init=tx // WARP_THREADS)
-    lane = K.local_scalar("int32", init=tx % WARP_THREADS)
+    warp_id = txl.local_scalar("int32", init=tx // WARP_THREADS)
+    lane = txl.local_scalar("int32", init=tx % WARP_THREADS)
     # Apply the warp prefix; lane0 of a non-zero warp takes it outright (:308-317).
-    with K.If(warp_id != 0), K.Then():
-        K.assign(out[0], wpre[0] + out[0])
-        with K.If(lane == 0), K.Then():
-            K.assign(out[0], wpre[0])
+    with txl.If(warp_id != 0), txl.Then():
+        txl.assign(out[0], wpre[0] + out[0])
+        with txl.If(lane == 0), txl.Then():
+            txl.assign(out[0], wpre[0])
     # Warp 0 evaluates the prefix callback and shares it (:387-398).
-    with K.If(warp_id == 0), K.Then():
-        with K.If(lane == 0), K.Then():
-            st_shared_u32(scan, n_warps, K.shift_left(agg[0], K.uint32(16)))
-            K.assign(out[0], K.shift_left(agg[0], K.uint32(16)))
+    with txl.If(warp_id == 0), txl.Then():
+        with txl.If(lane == 0), txl.Then():
+            st_shared_u32(scan, n_warps, txl.shift_left(agg[0], txl.uint32(16)))
+            txl.assign(out[0], txl.shift_left(agg[0], txl.uint32(16)))
     bar_sync()
-    bp = K.local_scalar("uint32", init=ld_shared_u32(scan, n_warps))
-    with K.If(tx > 0), K.Then():
-        K.assign(out[0], bp + out[0])
+    bp = txl.local_scalar("uint32", init=ld_shared_u32(scan, n_warps))
+    with txl.If(tx > 0), txl.Then():
+        txl.assign(out[0], bp + out[0])
 
 
 def emit_block_exclusive_sum_packed(scan, out, incl, agg, wpre, tx, block_threads, value):
@@ -397,26 +401,26 @@ def emit_rank_keys(
     ``ld.shared.b16`` plus one ``st.shared.b16`` per item, which is exactly what
     the export shows at every ``ITEMS_PER_THREAD``.
     """
-    prefixes = K.alloc_local((items_per_thread,), "uint32")
-    slots = K.alloc_local((items_per_thread,), "int32")
+    prefixes = txl.alloc_local((items_per_thread,), "uint32")
+    slots = txl.alloc_local((items_per_thread,), "int32")
 
     # ResetCounters: one packed zero per padded lane (:346-355).
-    with K.unroll(PADDED_COUNTER_LANES) as lane:
-        st_shared_u32(counters32, lane * block_threads + tx, K.uint32(0))
+    with txl.unroll(PADDED_COUNTER_LANES) as lane:
+        st_shared_u32(counters32, lane * block_threads + tx, txl.uint32(0))
         # counter view: &digit_counters[LANE][tid][0] as one packed word.
 
-    with K.unroll(items_per_thread) as i:
-        digit = K.local_scalar("uint32", init=emit_digit(keys[i], begin_bit, num_bits))
-        sub_counter = K.local_scalar(
-            "int32", init=K.cast(K.shift_right(digit, K.uint32(LOG_COUNTER_LANES)), "int32")
+    with txl.unroll(items_per_thread) as i:
+        digit = txl.local_scalar("uint32", init=emit_digit(keys[i], begin_bit, num_bits))
+        sub_counter = txl.local_scalar(
+            "int32", init=txl.cast(txl.shift_right(digit, txl.uint32(LOG_COUNTER_LANES)), "int32")
         )
-        counter_lane = K.local_scalar(
-            "int32", init=K.cast(K.bitwise_and(digit, K.uint32(COUNTER_LANES - 1)), "int32")
+        counter_lane = txl.local_scalar(
+            "int32", init=txl.cast(txl.bitwise_and(digit, txl.uint32(COUNTER_LANES - 1)), "int32")
         )
         # &digit_counters[counter_lane][tid][sub_counter] over the uint16 view.
-        K.assign(slots[i], (counter_lane * block_threads + tx) * PACKING_RATIO + sub_counter)
-        K.assign(prefixes[i], K.cast(ld_shared_u16(counters16, slots[i]), "uint32"))
-        st_shared_u16(counters16, slots[i], K.cast(prefixes[i] + K.uint32(1), "uint16"))
+        txl.assign(slots[i], (counter_lane * block_threads + tx) * PACKING_RATIO + sub_counter)
+        txl.assign(prefixes[i], txl.cast(ld_shared_u16(counters16, slots[i]), "uint32"))
+        st_shared_u16(counters16, slots[i], txl.cast(prefixes[i] + txl.uint32(1), "uint16"))
 
     bar_sync()
 
@@ -427,28 +431,30 @@ def emit_rank_keys(
     # order.  In the counter view that same flat index is `lane * BT + tid`, i.e.
     # digit-major and thread-minor, which is what makes the ranks group by digit.
     # Striding the segment instead would order the prefix by thread first.
-    cached = K.alloc_local((RAKING_SEGMENT,), "uint32")
-    partial = K.local_scalar("uint32", init=K.uint32(0))
-    with K.unroll(RAKING_SEGMENT) as j:
-        K.assign(cached[j], ld_shared_u32(counters32, tx * RAKING_SEGMENT + j))
-        K.assign(partial, partial + cached[j])
+    cached = txl.alloc_local((RAKING_SEGMENT,), "uint32")
+    partial = txl.local_scalar("uint32", init=txl.uint32(0))
+    with txl.unroll(RAKING_SEGMENT) as j:
+        txl.assign(cached[j], ld_shared_u32(counters32, tx * RAKING_SEGMENT + j))
+        txl.assign(partial, partial + cached[j])
 
-    exclusive = K.alloc_local((1,), "uint32")
-    incl = K.alloc_local((1,), "uint32")
-    agg = K.alloc_local((1,), "uint32")
-    wpre = K.alloc_local((1,), "uint32")
+    exclusive = txl.alloc_local((1,), "uint32")
+    incl = txl.alloc_local((1,), "uint32")
+    agg = txl.alloc_local((1,), "uint32")
+    wpre = txl.alloc_local((1,), "uint32")
     emit_block_exclusive_sum_packed(scan, exclusive, incl, agg, wpre, tx, block_threads, partial)
 
-    with K.unroll(RAKING_SEGMENT) as j:
+    with txl.unroll(RAKING_SEGMENT) as j:
         st_shared_u32(counters32, tx * RAKING_SEGMENT + j, exclusive[0])
-        K.assign(exclusive[0], exclusive[0] + cached[j])
+        txl.assign(exclusive[0], exclusive[0] + cached[j])
 
     bar_sync()
 
-    with K.unroll(items_per_thread) as i:
-        K.assign(
+    with txl.unroll(items_per_thread) as i:
+        txl.assign(
             ranks[i],
-            K.cast(prefixes[i] + K.cast(ld_shared_u16(counters16, slots[i]), "uint32"), "int32"),
+            txl.cast(
+                prefixes[i] + txl.cast(ld_shared_u16(counters16, slots[i]), "uint32"), "int32"
+            ),
         )
 
 
@@ -464,18 +470,18 @@ def emit_scatter_to_blocked_u32(buf, items_reg, ranks, tx, items_per_thread):
     kernel that runs one warp per CTA, which is where the ``(32, 4)`` rung loses
     its time.
     """
-    with K.unroll(items_per_thread) as i:
+    with txl.unroll(items_per_thread) as i:
         st_shared_u32(buf, padded_offset(ranks[i], items_per_thread), items_reg[i])
     bar_sync()
     if items_per_thread == 4 and not insert_padding(items_per_thread):
         quad = ld_shared_quad_u32(buf, tx * items_per_thread)
-        K.assign(items_reg[0], quad[0])
-        K.assign(items_reg[1], quad[1])
-        K.assign(items_reg[2], quad[2])
-        K.assign(items_reg[3], quad[3])
+        txl.assign(items_reg[0], quad[0])
+        txl.assign(items_reg[1], quad[1])
+        txl.assign(items_reg[2], quad[2])
+        txl.assign(items_reg[3], quad[3])
     else:
-        with K.unroll(items_per_thread) as i:
-            K.assign(
+        with txl.unroll(items_per_thread) as i:
+            txl.assign(
                 items_reg[i],
                 ld_shared_u32(buf, padded_offset(tx * items_per_thread + i, items_per_thread)),
             )
@@ -483,15 +489,15 @@ def emit_scatter_to_blocked_u32(buf, items_reg, ranks, tx, items_per_thread):
 
 def emit_scatter_to_blocked_u16(buf, items_reg, ranks, tx, items_per_thread):
     """The same exchange for 16-bit paired values."""
-    with K.unroll(items_per_thread) as i:
+    with txl.unroll(items_per_thread) as i:
         st_shared_u16(
-            buf, padded_offset(ranks[i], items_per_thread), K.cast(items_reg[i], "uint16")
+            buf, padded_offset(ranks[i], items_per_thread), txl.cast(items_reg[i], "uint16")
         )
     bar_sync()
-    with K.unroll(items_per_thread) as i:
-        K.assign(
+    with txl.unroll(items_per_thread) as i:
+        txl.assign(
             items_reg[i],
-            K.cast(
+            txl.cast(
                 ld_shared_u16(buf, padded_offset(tx * items_per_thread + i, items_per_thread)),
                 "uint32",
             ),
@@ -570,7 +576,7 @@ def emit_block_radix_sort_rolled(
     last one, and nvcc leaves it rolled: the export carries 9 static ``bar.sync``
     and 258 instructions for ``<32, 4, int, __half>``, whatever the pass count.
 
-    A counted ``K.serial`` loop does **not** reproduce that.  Its trip count is a
+    A counted ``txl.serial`` loop does **not** reproduce that.  Its trip count is a
     compile-time constant, so nvcc fully unrolls it and the same entry grows to
     35 ``bar.sync`` and 837 instructions -- 3.2x the source's code for identical
     work.  TVM emits ``#pragma unroll 1`` ahead of a ``While`` node
@@ -579,8 +585,8 @@ def emit_block_radix_sort_rolled(
     take the trailing barrier only when another pass follows, which also gives
     the ``9P - 1`` barrier count directly.
     """
-    begin = K.local_scalar("int32", init=0)
-    with K.While(begin < num_passes * RADIX_BITS):
+    begin = txl.local_scalar("int32", init=0)
+    with txl.While(begin < num_passes * RADIX_BITS):
         emit_rank_keys(
             counters32,
             counters16,
@@ -601,8 +607,8 @@ def emit_block_radix_sort_rolled(
                 emit_scatter_to_blocked_u32(xchg_values, values, ranks, tx, items_per_thread)
             else:
                 emit_scatter_to_blocked_u16(xchg_values, values, ranks, tx, items_per_thread)
-        K.assign(begin, begin + RADIX_BITS)
+        txl.assign(begin, begin + RADIX_BITS)
         # The source breaks out before this barrier on the final pass
         # (block_radix_sort.cuh:415-421), giving 9P - 1 rather than 9P.
-        with K.If(begin < num_passes * RADIX_BITS), K.Then():
+        with txl.If(begin < num_passes * RADIX_BITS), txl.Then():
             bar_sync()

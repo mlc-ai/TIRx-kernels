@@ -18,16 +18,16 @@ barrier arrive that publishes it.
 
 ```python
 # before: the scale word is published to the matrix warp without a proxy fence.
-K.ptx.st.shared.b32(sSFP.ptr_to([offset]), sf_word)
-K.ptx[TMEM_ST](tmem_col, *p_words)
-K.ptx.tcgen05.wait__st.sync.aligned()
+txl.ptx.st.shared.b32(sSFP.ptr_to([offset]), sf_word)
+txl.ptx[TMEM_ST](tmem_col, *p_words)
+txl.ptx.tcgen05.wait__st.sync.aligned()
 P_full.arrive(stage)            # matrix warp then issues tcgen05.cp from sSFP
 
 # after: order the generic stores before the async-proxy read.
-K.ptx.st.shared.b32(sSFP.ptr_to([offset]), sf_word)
-K.ptx.fence.proxy.async_.shared__cta()
-K.ptx[TMEM_ST](tmem_col, *p_words)
-K.ptx.tcgen05.wait__st.sync.aligned()
+txl.ptx.st.shared.b32(sSFP.ptr_to([offset]), sf_word)
+txl.ptx.fence.proxy.async_.shared__cta()
+txl.ptx[TMEM_ST](tmem_col, *p_words)
+txl.ptx.tcgen05.wait__st.sync.aligned()
 P_full.arrive(stage)
 ```
 

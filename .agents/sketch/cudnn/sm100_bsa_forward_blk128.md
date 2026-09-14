@@ -910,8 +910,8 @@ occurrence above. Address arithmetic maps to integer functions, never a layout.
 
 The public module exports `KERNEL_META`, `CONFIGS`, `BENCH_CONFIGS`,
 `get_kernel`, `prepare_data`, `run_test`, `prepare_bench`, `run_gpu`, and
-`run_bench`. Device code imports only `tirx_kernels.kern as K`; low-level
-instruction families use `K.ptx[...]`. There is no inline CUDA function call,
+`run_bench`. Device code imports only `tirx_kernels.tirx_lite as txl`; low-level
+instruction families use `txl.ptx[...]`. There is no inline CUDA function call,
 tile primitive, first-class layout or multidimensional SMEM allocation.
 
 The frozen correctness matrix has 32 rows spanning dtype/D/family plus minimal

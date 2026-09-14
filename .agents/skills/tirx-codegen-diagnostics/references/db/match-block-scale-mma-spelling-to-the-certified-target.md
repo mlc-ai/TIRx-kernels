@@ -21,7 +21,7 @@ and the compile target on it. The typed PTX table exposes
 `sm_100a`.
 
 ```python
-@K.kernel(warps=..., arch="sm_100a")  # matches the table's cert_arch
+@txl.kernel(warps=..., arch="sm_100a")  # matches the table's cert_arch
 ```
 
 Do not restore a source-string `.block32` wrapper to escape the table.
@@ -32,10 +32,10 @@ B is independently optional. Do not synthesize a collector-B action when the
 source uses collector A alone.
 
 ```python
-K.ptx[
+txl.ptx[
     "tcgen05.mma.cta_group::1.kind::mxf8f6f4"
     ".block_scale.collector::a::discard"
-](d, a, b, idesc, sfa, sfb, K.ptx.pred(enable_d))
+](d, a, b, idesc, sfa, sfb, txl.ptx.pred(enable_d))
 ```
 
 ## Rationale

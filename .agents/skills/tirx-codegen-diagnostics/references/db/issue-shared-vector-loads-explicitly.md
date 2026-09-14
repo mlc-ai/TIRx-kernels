@@ -16,10 +16,10 @@ aligned, instead of leaving the fusion to ptxas.
 ```python
 # before: four scalar loads per chunk, fused only sometimes.
 for j in range(4):
-    K.ptx.ld.shared.b32(quad[j], smem.ptr_to([base + j * 4]))
+    txl.ptx.ld.shared.b32(quad[j], smem.ptr_to([base + j * 4]))
 
 # after: the width is structural.
-K.ptx["ld.shared.v4.b32"](quad[0], quad[1], quad[2], quad[3], smem.ptr_to([base]))
+txl.ptx["ld.shared.v4.b32"](quad[0], quad[1], quad[2], quad[3], smem.ptr_to([base]))
 ```
 
 Apply it to the narrow cases too: two adjacent 8-byte-aligned values are one

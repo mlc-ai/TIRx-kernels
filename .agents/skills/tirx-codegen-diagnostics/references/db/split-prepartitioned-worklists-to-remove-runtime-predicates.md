@@ -17,17 +17,17 @@ prefetches, and producer/consumer protocol.
 
 ```python
 # before: `exceptional` is a runtime value inside every consumer instance.
-with K.While(i < exceptional_count + uniform_count):
+with txl.While(i < exceptional_count + uniform_count):
     consume(item_id(i), exceptional=i < exceptional_count)
-    K.assign(i, i + 1)
+    txl.assign(i, i + 1)
 
 # after: the helper emits two code shapes from Python Boolean arguments.
-with K.While(i < exceptional_count):
+with txl.While(i < exceptional_count):
     consume(exceptional_id(i), exceptional=True)
-    K.assign(i, i + 1)
-with K.While(j < uniform_count):
+    txl.assign(i, i + 1)
+with txl.While(j < uniform_count):
     consume(uniform_id(j), exceptional=False)
-    K.assign(j, j + 1)
+    txl.assign(j, j + 1)
 ```
 
 ## Rationale

@@ -16,11 +16,11 @@ Let the role guards stay sibling `if`s, matching the reference, when the kernel
 has no register pressure for the chain to relieve.
 
 ```python
-# before: chained dispatch, the K.specialize default.
-roles = K.specialize()
+# before: chained dispatch, the txl.specialize default.
+roles = txl.specialize()
 
 # after: sibling guards, the reference's structure.
-roles = K.specialize(chain_dispatch=False)
+roles = txl.specialize(chain_dispatch=False)
 ```
 
 ## Rationale
@@ -40,7 +40,7 @@ not measured because the small shapes already decided the direction.
 Applies when the reference's dispatch is sibling `if`s and the port assembles
 without spills at its register targets. When a role sits at the 255-register
 cliff or ptxas reports spills, the chain is still the documented remedy
-(`K.specialize` docstring) and its cost here is the price of assembling.
+(`txl.specialize` docstring) and its cost here is the price of assembling.
 
 ## Verification
 

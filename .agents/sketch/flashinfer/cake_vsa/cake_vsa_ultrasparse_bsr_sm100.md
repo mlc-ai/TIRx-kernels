@@ -645,10 +645,10 @@ layout.
 
 The public module exports `KERNEL_META`, `CONFIGS`, `BENCH_CONFIGS`,
 `get_kernel`, `prepare_data`, `run_test`, `prepare_bench`, `run_gpu`, and
-`run_bench`. Device code imports only `tirx_kernels.kern as K`; low-level
-instruction families use `K.ptx[...]` / `K.ptx.*`, the grid stride reads
-`%nctaid.x` through `K.cuda.mov_sreg`, and the grid extent is
-`K.min(total_tiles, sm_count)` with the SM count read once at kernel build. There
+`run_bench`. Device code imports only `tirx_kernels.tirx_lite as txl`; low-level
+instruction families use `txl.ptx[...]` / `txl.ptx.*`, the grid stride reads
+`%nctaid.x` through `txl.cuda.mov_sreg`, and the grid extent is
+`txl.min(total_tiles, sm_count)` with the SM count read once at kernel build. There
 is no inline CUDA function call, tile primitive, first-class layout or
 multidimensional SMEM allocation. The kernel is compiled once, shape-generic,
 through nvcc 13.2 (`compile_kernel(..., cuda_compile_mode="nvcc")`) so TIRx and

@@ -13,11 +13,11 @@ Keep the grid-stride form: materialize the work index once per role and
 increment it by the grid size.
 
 ```python
-work = K.alloc_local([1], "int32")
-K.assign(work[0], K.cta_id())
-with K.While(work[0] < total_work):
+work = txl.alloc_local([1], "int32")
+txl.assign(work[0], txl.cta_id())
+with txl.While(work[0] < total_work):
     ...
-    K.assign(work[0], work[0] + grid_x)
+    txl.assign(work[0], work[0] + grid_x)
 ```
 
 Do not replace it with a precomputed per-CTA trip count such as

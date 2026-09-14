@@ -20,7 +20,7 @@ Structurally this is the T=5 body at TOKENS=6 with four deltas:
 
 * **The arena is dynamic shared memory.** split1 needs 50560 B, past the
   49152 B static ceiling every earlier cake port used, so all four splits
-  allocate through Kern's shared-memory pool -- which is also what the source does
+  allocate through tirx-lite's shared-memory pool -- which is also what the source does
   (``extern __shared__ __align__(1024)`` plus ``cudaFuncSetAttribute``).
 * **Token 5's quad broadcast is elided.** The ``(quad_base + t//2, acc[t%2])``
   map holds for all six tokens, but token 5's source lane is ``quad_base + 2``
@@ -41,7 +41,7 @@ from unittest import SkipTest
 
 import torch
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 
 from . import flashkda_decode_t2_precomputed as _t2
 
@@ -102,21 +102,21 @@ def _make_warp_uniform(value):
     most of the kernel: 14 WARPSYNC, 10 ENDCOLLECTIVE and 10 duplicate
     register-operand ``SHFL.BFLY`` against the export's zero.
     """
-    out = K.local_scalar("uint32")
-    K.ptx.shfl_sync.idx.b32(
-        out, K.reinterpret("uint32", value), K.uint32(0), K.uint32(31), K.uint32(0xFFFFFFFF)
+    out = txl.local_scalar("uint32")
+    txl.ptx.shfl_sync.idx.b32(
+        out, txl.reinterpret("uint32", value), txl.uint32(0), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
-    return K.reinterpret("int32", out)
+    return txl.reinterpret("int32", out)
 
 
 def _named_bar_sync(bar_id: int, threads: int):
     """``barrier.sync <id>, <count>`` -- blocks until `count` threads arrive."""
-    K.ptx["barrier.sync"](bar_id, threads)
+    txl.ptx["barrier.sync"](bar_id, threads)
 
 
 def _named_bar_arrive(bar_id: int, threads: int):
     """``barrier.arrive <id>, <count>`` -- releases, does NOT block or acquire."""
-    K.ptx["barrier.arrive"](bar_id, threads)
+    txl.ptx["barrier.arrive"](bar_id, threads)
 
 
 def _mma_zero_b(acc, a, b, b0: int):
@@ -125,7 +125,7 @@ def _mma_zero_b(acc, a, b, b0: int):
     The gram block issues two products from one pair of ``ldmatrix`` results, so
     unlike the shared helper this one has to select the B half.
     """
-    K.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
+    txl.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
             acc[0], acc[1], acc[2], acc[3],
             a[0], a[1], a[2], a[3],
             b[b0], b[b0 + 1],
@@ -135,7 +135,7 @@ def _mma_zero_b(acc, a, b, b0: int):
 
 def _mma_acc_b(acc, a, b, b0: int):
     """Same, accumulating: C aliases D, matching the source's `+f` tied registers."""
-    K.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
+    txl.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
             acc[0], acc[1], acc[2], acc[3],
             a[0], a[1], a[2], a[3],
             b[b0], b[b0 + 1],
@@ -471,138 +471,138 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
     OFF_SGRAMA0 = spec["OFF_SGRAMA0"]
     OFF_SGRAMA1 = spec["OFF_SGRAMA1"]
 
-    @K.kernel(warps=THREADS // 32, arch="sm_100a", grid=False)
+    @txl.kernel(warps=THREADS // 32, arch="sm_100a", grid=False)
     def _flashkda_decode_t6_gram(
-        q: K.gptr[K.bf16, (Q_ELEMENTS,)],
-        k: K.gptr[K.bf16, (Q_ELEMENTS,)],
-        v: K.gptr[K.bf16, (V_ELEMENTS,)],
-        g: K.gptr[K.bf16, (GATE_ELEMENTS,)],
-        beta: K.gptr[K.bf16, (BETA_ELEMENTS,)],
-        state: K.gptr[K.bf16, (STATE_ELEMENTS,)],
-        out: K.gptr[K.bf16, (V_ELEMENTS,)],
-        cu: K.gptr[K.i32, (CU_SEQLENS_ELEMENTS,)],
-        ssm_idx: K.gptr[K.i32, (STATE_INDEX_ELEMENTS,)],
-        nat: K.gptr[K.i32, (NAT_ELEMENTS,)],
-        scale: K.f32,
+        q: txl.gptr[txl.bf16, (Q_ELEMENTS,)],
+        k: txl.gptr[txl.bf16, (Q_ELEMENTS,)],
+        v: txl.gptr[txl.bf16, (V_ELEMENTS,)],
+        g: txl.gptr[txl.bf16, (GATE_ELEMENTS,)],
+        beta: txl.gptr[txl.bf16, (BETA_ELEMENTS,)],
+        state: txl.gptr[txl.bf16, (STATE_ELEMENTS,)],
+        out: txl.gptr[txl.bf16, (V_ELEMENTS,)],
+        cu: txl.gptr[txl.i32, (CU_SEQLENS_ELEMENTS,)],
+        ssm_idx: txl.gptr[txl.i32, (STATE_INDEX_ELEMENTS,)],
+        nat: txl.gptr[txl.i32, (NAT_ELEMENTS,)],
+        scale: txl.f32,
     ):
-        smem = K.smem_pool()
-        arena = smem.alloc((SMEM_TOTAL,), K.u8, align=1024)
+        smem = txl.smem_pool()
+        arena = smem.alloc((SMEM_TOTAL,), txl.u8, align=1024)
         smem.commit(SMEM_TOTAL)
 
         # --- work decomposition and lane roles (:142-178) ----------------------
-        work, n = K.cta_id([NUM_VALUE_HEADS * VALUE_SPLIT, NUM_SEQS])
-        tid = K.thread_id()
+        work, n = txl.cta_id([NUM_VALUE_HEADS * VALUE_SPLIT, NUM_SEQS])
+        tid = txl.thread_id()
         warp = _make_warp_uniform(tid // 32)  # == token index in A and C'
         lane = tid % 32
-        value_tile = K.local_scalar(K.i32)
-        hv = K.local_scalar(K.i32)
-        query_head = K.local_scalar(K.i32)
-        lane_quad = K.local_scalar(K.i32)
-        frag_row = K.local_scalar(K.i32)
-        quad_base = K.local_scalar(K.i32)
-        group = K.local_scalar(K.i32)
-        lane_group = K.local_scalar(K.i32)
-        k_start = K.local_scalar(K.i32)
-        elem_start = K.local_scalar(K.i32)
-        tile_row_base = K.local_scalar(K.i32)
-        owned_row_base = K.local_scalar(K.i32)
-        token_base = K.local_scalar(K.i32)
-        seq_len = K.local_scalar(K.i32)
-        K.assign(value_tile, work % VALUE_SPLIT)
-        K.assign(hv, work // VALUE_SPLIT)
-        K.assign(query_head, hv // HEAD_RATIO)
-        K.assign(lane_quad, lane % 4)
-        K.assign(frag_row, lane // 4)
-        K.assign(quad_base, lane - lane_quad)
-        K.assign(group, tid // 16)
-        K.assign(lane_group, tid % 16)
-        K.assign(k_start, lane_group * 8)
-        K.assign(elem_start, lane * 4)
-        K.assign(tile_row_base, value_tile * ROWS_PER_CTA)
-        K.assign(owned_row_base, group * ROWS_PER_GROUP)
-        K.assign(token_base, _load_i32(cu, n))
-        K.assign(seq_len, _load_i32(cu, n + 1) - token_base)
+        value_tile = txl.local_scalar(txl.i32)
+        hv = txl.local_scalar(txl.i32)
+        query_head = txl.local_scalar(txl.i32)
+        lane_quad = txl.local_scalar(txl.i32)
+        frag_row = txl.local_scalar(txl.i32)
+        quad_base = txl.local_scalar(txl.i32)
+        group = txl.local_scalar(txl.i32)
+        lane_group = txl.local_scalar(txl.i32)
+        k_start = txl.local_scalar(txl.i32)
+        elem_start = txl.local_scalar(txl.i32)
+        tile_row_base = txl.local_scalar(txl.i32)
+        owned_row_base = txl.local_scalar(txl.i32)
+        token_base = txl.local_scalar(txl.i32)
+        seq_len = txl.local_scalar(txl.i32)
+        txl.assign(value_tile, work % VALUE_SPLIT)
+        txl.assign(hv, work // VALUE_SPLIT)
+        txl.assign(query_head, hv // HEAD_RATIO)
+        txl.assign(lane_quad, lane % 4)
+        txl.assign(frag_row, lane // 4)
+        txl.assign(quad_base, lane - lane_quad)
+        txl.assign(group, tid // 16)
+        txl.assign(lane_group, tid % 16)
+        txl.assign(k_start, lane_group * 8)
+        txl.assign(elem_start, lane * 4)
+        txl.assign(tile_row_base, value_tile * ROWS_PER_CTA)
+        txl.assign(owned_row_base, group * ROWS_PER_GROUP)
+        txl.assign(token_base, _load_i32(cu, n))
+        txl.assign(seq_len, _load_i32(cu, n + 1) - token_base)
 
-        r_q = K.alloc_local((4,), "float32")
-        r_k = K.alloc_local((4,), "float32")
-        r_d = K.alloc_local((4,), "float32")
+        r_q = txl.alloc_local((4,), "float32")
+        r_k = txl.alloc_local((4,), "float32")
+        r_d = txl.alloc_local((4,), "float32")
 
         # =======================================================================
         # Phase A: token preprocess, warp <-> token  (:180-290)
         # =======================================================================
         # Identical to the ported T=4 phase A apart from the token count, the
         # ssm_state_indices stride and the nat clamp ceiling.
-        with K.If(warp < NUM_TOKENS), K.Then():
+        with txl.If(warp < NUM_TOKENS), txl.Then():
             token = warp
             active_token = token < seq_len
-            token_pos = K.local_scalar(K.i32)
-            qk_base = K.local_scalar(K.i32)
-            gate_base = K.local_scalar(K.i32)
-            K.assign(token_pos, K.if_then_else(active_token, token_base + token, 0))
-            K.assign(qk_base, (token_pos * NUM_HEADS + query_head) * HEAD_DIM + elem_start)
-            K.assign(gate_base, token_pos * GATE_TOKEN_STRIDE + hv * HEAD_DIM + elem_start)
+            token_pos = txl.local_scalar(txl.i32)
+            qk_base = txl.local_scalar(txl.i32)
+            gate_base = txl.local_scalar(txl.i32)
+            txl.assign(token_pos, txl.if_then_else(active_token, token_base + token, 0))
+            txl.assign(qk_base, (token_pos * NUM_HEADS + query_head) * HEAD_DIM + elem_start)
+            txl.assign(gate_base, token_pos * GATE_TOKEN_STRIDE + hv * HEAD_DIM + elem_start)
 
             q_words = _load_u32x2(q, qk_base)
             k_words = _load_u32x2(k, qk_base)
             g_words = _load_u32x2(g, gate_base)
             for pair in range(2):
-                K.ptx.mov.b32(r_q[2 * pair], _widen_lo(q_words[pair]))
-                K.ptx.mov.b32(r_q[2 * pair + 1], _widen_hi(q_words[pair]))
-                K.ptx.mov.b32(r_k[2 * pair], _widen_lo(k_words[pair]))
-                K.ptx.mov.b32(r_k[2 * pair + 1], _widen_hi(k_words[pair]))
-                K.ptx.mov.b32(r_d[2 * pair], _widen_lo(g_words[pair]))
-                K.ptx.mov.b32(r_d[2 * pair + 1], _widen_hi(g_words[pair]))
+                txl.ptx.mov.b32(r_q[2 * pair], _widen_lo(q_words[pair]))
+                txl.ptx.mov.b32(r_q[2 * pair + 1], _widen_hi(q_words[pair]))
+                txl.ptx.mov.b32(r_k[2 * pair], _widen_lo(k_words[pair]))
+                txl.ptx.mov.b32(r_k[2 * pair + 1], _widen_hi(k_words[pair]))
+                txl.ptx.mov.b32(r_d[2 * pair], _widen_lo(g_words[pair]))
+                txl.ptx.mov.b32(r_d[2 * pair + 1], _widen_hi(g_words[pair]))
 
             # Index-ordered accumulation (:241-244); the first term has a zero addend
             # and the two chains interleave, because the source fuses them in one loop.
-            q_sq = K.local_scalar(K.f32)
-            k_sq = K.local_scalar(K.f32)
-            K.assign(
+            q_sq = txl.local_scalar(txl.f32)
+            k_sq = txl.local_scalar(txl.f32)
+            txl.assign(
                 q_sq,
                 _fma(
                     r_q[3],
                     r_q[3],
                     _fma(
-                        r_q[2], r_q[2], _fma(r_q[1], r_q[1], _fma(r_q[0], r_q[0], K.float32(0.0)))
+                        r_q[2], r_q[2], _fma(r_q[1], r_q[1], _fma(r_q[0], r_q[0], txl.float32(0.0)))
                     ),
                 ),
             )
-            K.assign(
+            txl.assign(
                 k_sq,
                 _fma(
                     r_k[3],
                     r_k[3],
                     _fma(
-                        r_k[2], r_k[2], _fma(r_k[1], r_k[1], _fma(r_k[0], r_k[0], K.float32(0.0)))
+                        r_k[2], r_k[2], _fma(r_k[1], r_k[1], _fma(r_k[0], r_k[0], txl.float32(0.0)))
                     ),
                 ),
             )
             # Two sequential full-warp butterflies, not interleaved (:245-254).
             for off in range(5):
-                K.assign(q_sq, _add(q_sq, _shfl_bfly(q_sq, 16 >> off)))
+                txl.assign(q_sq, _add(q_sq, _shfl_bfly(q_sq, 16 >> off)))
             for off in range(5):
-                K.assign(k_sq, _add(k_sq, _shfl_bfly(k_sq, 16 >> off)))
-            q_norm = _mul(_rsqrt(_add(q_sq, K.float32(L2_EPS))), scale)
-            k_norm = _rsqrt(_add(k_sq, K.float32(L2_EPS)))
+                txl.assign(k_sq, _add(k_sq, _shfl_bfly(k_sq, 16 >> off)))
+            q_norm = _mul(_rsqrt(_add(q_sq, txl.float32(L2_EPS))), scale)
+            k_norm = _rsqrt(_add(k_sq, txl.float32(L2_EPS)))
 
             # GATE_KIND == 0: `g` already holds log(gamma), so one exp per element.
-            k_pub = K.alloc_local((4,), "uint32")
-            d_pub = K.alloc_local((4,), "uint32")
+            k_pub = txl.alloc_local((4,), "uint32")
+            d_pub = txl.alloc_local((4,), "uint32")
             for i in range(4):
-                K.ptx.mov.b32(r_q[i], _mul(r_q[i], q_norm))
-                K.ptx.mov.b32(r_k[i], _mul(r_k[i], k_norm))
-                K.ptx.mov.b32(r_d[i], _expf(r_d[i]))
-                K.ptx.mov.b32(k_pub[i], K.reinterpret("uint32", r_k[i]))
-                K.ptx.mov.b32(d_pub[i], K.reinterpret("uint32", r_d[i]))
+                txl.ptx.mov.b32(r_q[i], _mul(r_q[i], q_norm))
+                txl.ptx.mov.b32(r_k[i], _mul(r_k[i], k_norm))
+                txl.ptx.mov.b32(r_d[i], _expf(r_d[i]))
+                txl.ptx.mov.b32(k_pub[i], txl.reinterpret("uint32", r_k[i]))
+                txl.ptx.mov.b32(d_pub[i], txl.reinterpret("uint32", r_d[i]))
             # Four contiguous f32 per lane: one 16-byte shared store each, not four
             # scalar ones (:269-270 lower to 2 st.shared.v4.b32).
             _st_shared_u32x4(arena, OFF_SK + (token * HEAD_DIM + elem_start) * 4, k_pub)
             _st_shared_u32x4(arena, OFF_SD + (token * HEAD_DIM + elem_start) * 4, d_pub)
 
-            with K.If(lane == 0), K.Then():
+            with txl.If(lane == 0), txl.Then():
                 raw_slot = _load_i32(ssm_idx, n * NUM_TOKENS + token)
                 _st_shared_i32(
-                    arena, OFF_SSLOT + token * 4, K.if_then_else(active_token, raw_slot, -1)
+                    arena, OFF_SSLOT + token * 4, txl.if_then_else(active_token, raw_slot, -1)
                 )
                 _st_shared_i32(arena, OFF_STOKEN + token * 4, token_pos)
                 _st_shared_f32(
@@ -610,29 +610,29 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
                     OFF_SBETA + token * 4,
                     _load_bf16_f32(beta, token_pos * NUM_VALUE_HEADS + hv),
                 )
-                with K.If(token == 0), K.Then():
+                with txl.If(token == 0), txl.Then():
                     # nat picks the initial checkpoint slot; at T=5 the clamp ceiling
                     # is 4 and both edges are reachable (:279-287).
-                    accepted = K.min(K.max(_load_i32(nat, n) - 1, 0), NUM_TOKENS - 1)
+                    accepted = txl.min(txl.max(_load_i32(nat, n) - 1, 0), NUM_TOKENS - 1)
                     initial_slot = _load_i32(ssm_idx, n * NUM_TOKENS + accepted)
-                    _st_shared_i32(arena, OFF_SINIT, K.max(initial_slot, 0))
+                    _st_shared_i32(arena, OFF_SINIT, txl.max(initial_slot, 0))
 
-        K.cuda.cta_sync()
+        txl.cuda.cta_sync()
 
         # =======================================================================
         # Phase C': sVec columns and the gram operand  (:293-339)
         # =======================================================================
         # Runs BEFORE the state gather at T=5 -- the reverse of the T=4 order.
-        with K.If(warp < NUM_TOKENS), K.Then():
+        with txl.If(warp < NUM_TOKENS), txl.Then():
             token_c = warp
             for i in range(4):
                 k_idx = elem_start + i
-                prefix = K.local_scalar(K.f32, init=K.float32(1.0))
+                prefix = txl.local_scalar(txl.f32, init=txl.float32(1.0))
                 # Scalar loads: the walk is across tokens at a fixed key, so
                 # consecutive iterations are 512 B apart (:296-302).
                 for j in range(NUM_TOKENS):
-                    with K.If(token_c >= j), K.Then():
-                        K.assign(
+                    with txl.If(token_c >= j), txl.Then():
+                        txl.assign(
                             prefix,
                             _mul(
                                 prefix, _ld_shared_f32(arena, OFF_SD + (j * HEAD_DIM + k_idx) * 4)
@@ -653,12 +653,12 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
                 # The gate-DEFLATED key, the operand that makes the Gram product come
                 # out as T<=4's ratio_scan factor. div.approx.ftz.f32 per the PTX.
                 deflated = _ptx_un("cvt.rn.bf16.f32", _div(r_k[i], prefix), dtype="uint16")
-                with K.If(k_idx < 64):
-                    with K.Then():
+                with txl.If(k_idx < 64):
+                    with txl.Then():
                         _st_shared_b16(
                             arena, OFF_SGRAMA0 + _swz(token_c * 128 + k_idx * 2), deflated
                         )
-                    with K.Else():
+                    with txl.Else():
                         _st_shared_b16(
                             arena, OFF_SGRAMA1 + _swz(token_c * 128 + (k_idx - 64) * 2), deflated
                         )
@@ -670,19 +670,19 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
         # T<=4's inter-token butterfly path entirely. The barrier is partial: only
         # the five token warps take part, which is why its count is 160 in every
         # split, including split1's 256-thread launch.
-        with K.If(warp < NUM_TOKENS), K.Then():
+        with txl.If(warp < NUM_TOKENS), txl.Then():
             if GRAM_SYNC_ALL == 1:
                 # split4 hoists the wait out of the branch: all five token warps
                 # block, and the arrive arm below is `else if (0)` -- dead (S4:340-344).
                 _named_bar_sync(1, NUM_TOKENS * 32)
-            with K.If(warp == GRAM_WARP):
-                with K.Then():
+            with txl.If(warp == GRAM_WARP):
+                with txl.Then():
                     if GRAM_SYNC_ALL == 0:
                         _named_bar_sync(1, NUM_TOKENS * 32)
-                    gram_a = K.alloc_local((4,), "uint32", align=4)
-                    gram_b = K.alloc_local((4,), "uint32", align=4)
-                    gram_k_acc = K.alloc_local((4,), "float32", align=4)
-                    gram_q_acc = K.alloc_local((4,), "float32", align=4)
+                    gram_a = txl.alloc_local((4,), "uint32", align=4)
+                    gram_b = txl.alloc_local((4,), "uint32", align=4)
+                    gram_k_acc = txl.alloc_local((4,), "float32", align=4)
+                    gram_q_acc = txl.alloc_local((4,), "float32", align=4)
                     for gram_half in range(2):
                         for gram_step in range(4):
                             gram_k = gram_step * 16
@@ -714,67 +714,80 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
                     source_token = frag_row
                     target0 = lane_quad * 2
                     target1 = target0 + 1
-                    with K.If(source_token < NUM_TOKENS), K.Then():
+                    with txl.If(source_token < NUM_TOKENS), txl.Then():
                         beta_source = _ld_shared_f32(arena, OFF_SBETA + source_token * 4)
-                        with K.If(K.And(source_token < target0, target0 < NUM_TOKENS)), K.Then():
+                        with (
+                            txl.If(txl.And(source_token < target0, target0 < NUM_TOKENS)),
+                            txl.Then(),
+                        ):
                             _st_shared_f32(
                                 arena,
                                 OFF_SL + (target0 * NUM_TOKENS + source_token) * 4,
                                 _mul(beta_source, gram_k_acc[0]),
                             )
-                        with K.If(K.And(source_token < target1, target1 < NUM_TOKENS)), K.Then():
+                        with (
+                            txl.If(txl.And(source_token < target1, target1 < NUM_TOKENS)),
+                            txl.Then(),
+                        ):
                             _st_shared_f32(
                                 arena,
                                 OFF_SL + (target1 * NUM_TOKENS + source_token) * 4,
                                 _mul(beta_source, gram_k_acc[1]),
                             )
-                        with K.If(K.And(source_token <= target0, target0 < NUM_TOKENS)), K.Then():
+                        with (
+                            txl.If(txl.And(source_token <= target0, target0 < NUM_TOKENS)),
+                            txl.Then(),
+                        ):
                             _st_shared_f32(
                                 arena,
                                 OFF_SR + (target0 * NUM_TOKENS + source_token) * 4,
                                 _mul(beta_source, gram_q_acc[0]),
                             )
-                        with K.If(K.And(source_token <= target1, target1 < NUM_TOKENS)), K.Then():
+                        with (
+                            txl.If(txl.And(source_token <= target1, target1 < NUM_TOKENS)),
+                            txl.Then(),
+                        ):
                             _st_shared_f32(
                                 arena,
                                 OFF_SR + (target1 * NUM_TOKENS + source_token) * 4,
                                 _mul(beta_source, gram_q_acc[1]),
                             )
                 if GRAM_SYNC_ALL == 0:
-                    with K.Else():
+                    with txl.Else():
                         _named_bar_arrive(1, NUM_TOKENS * 32)
 
         # =======================================================================
         # Phase B: state gather and sState stage  (:410-446)
         # =======================================================================
         init_slot = _ld_shared_i32(arena, OFF_SINIT)
-        head_base = K.cast(init_slot, "int64") * K.cast(STATE_SLOT_STRIDE, "int64") + K.cast(
+        head_base = txl.cast(init_slot, "int64") * txl.cast(STATE_SLOT_STRIDE, "int64") + txl.cast(
             hv * HEAD_DIM * HEAD_DIM, "int64"
         )
-        hist = K.alloc_local((ROWS_PER_GROUP * 8,), "float32")
-        with K.If(group < ROW_GROUPS), K.Then():
+        hist = txl.alloc_local((ROWS_PER_GROUP * 8,), "float32")
+        with txl.If(group < ROW_GROUPS), txl.Then():
             for row_local in range(ROWS_PER_GROUP):
                 # Two distinct indices: row_l is CTA-local and addresses sState;
                 # tile_row_base + row_l is the global row of `state` (:414-415).
                 row_l = owned_row_base + row_local
                 pack = _load_u32x4(
-                    state, head_base + K.cast((tile_row_base + row_l) * HEAD_DIM + k_start, "int64")
+                    state,
+                    head_base + txl.cast((tile_row_base + row_l) * HEAD_DIM + k_start, "int64"),
                 )
                 for pr in range(4):
-                    K.ptx.mov.b32(hist[row_local * 8 + 2 * pr], _widen_lo(pack[pr]))
-                    K.ptx.mov.b32(hist[row_local * 8 + 2 * pr + 1], _widen_hi(pack[pr]))
+                    txl.ptx.mov.b32(hist[row_local * 8 + 2 * pr], _widen_lo(pack[pr]))
+                    txl.ptx.mov.b32(hist[row_local * 8 + 2 * pr + 1], _widen_hi(pack[pr]))
                 # An if/ELSE selecting the destination half, not a guard: lanes 8..15
                 # stage keys 64..127 into sState1 (:438-442). The bf16 bits go to
                 # shared unmodified; the swizzle is on the byte offset.
-                with K.If(lane_group < 8):
-                    with K.Then():
+                with txl.If(lane_group < 8):
+                    with txl.Then():
                         _st_shared_u32x4(arena, OFF_SSTATE0 + _swz(row_l * 128 + k_start * 2), pack)
-                    with K.Else():
+                    with txl.Else():
                         _st_shared_u32x4(
                             arena, OFF_SSTATE1 + _swz(row_l * 128 + (k_start - 64) * 2), pack
                         )
 
-        K.cuda.cta_sync()
+        txl.cuda.cta_sync()
         # Besides sState and sL/sR, this is the sVec publish edge for every MMA warp
         # except the gram warp: `barrier.arrive` releases but does not acquire, so an
         # arriving token warp has synchronized with the others only here.
@@ -785,11 +798,11 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
         # Two issues per step at T=5: the k side needs sVec columns 0..4 and the q
         # side 8..12, which no single n=8 tile covers. `mma_acc_c` and
         # `vec_frag[2],[3]` were dead at every T <= 4.
-        acc = K.alloc_local((4,), "float32", align=4)
-        acc_c = K.alloc_local((4,), "float32", align=4)
-        with K.If(warp < MMA_WARPS), K.Then():
-            vec_frag = K.alloc_local((4,), "uint32", align=4)
-            state_frag = K.alloc_local((4,), "uint32", align=4)
+        acc = txl.alloc_local((4,), "float32", align=4)
+        acc_c = txl.alloc_local((4,), "float32", align=4)
+        with txl.If(warp < MMA_WARPS), txl.Then():
+            vec_frag = txl.alloc_local((4,), "uint32", align=4)
+            state_frag = txl.alloc_local((4,), "uint32", align=4)
             for state_half in range(2):
                 for mma_step in range(4):
                     mma_k = mma_step * 16
@@ -818,29 +831,29 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
         # =======================================================================
         # Phase E: quad broadcast and the WY forward substitution  (:491-566)
         # =======================================================================
-        u_lo = K.alloc_local((NUM_TOKENS,), "float32")
-        u_hi = K.alloc_local((NUM_TOKENS,), "float32")
+        u_lo = txl.alloc_local((NUM_TOKENS,), "float32")
+        u_hi = txl.alloc_local((NUM_TOKENS,), "float32")
         # hc_* is declared out here because phase F consumes it from its own block;
         # ha_* never leaves phase E.
-        hc_lo = K.alloc_local((NUM_TOKENS,), "float32")
-        hc_hi = K.alloc_local((NUM_TOKENS,), "float32")
-        with K.If(warp < MMA_WARPS), K.Then():
+        hc_lo = txl.alloc_local((NUM_TOKENS,), "float32")
+        hc_hi = txl.alloc_local((NUM_TOKENS,), "float32")
+        with txl.If(warp < MMA_WARPS), txl.Then():
             # 20 broadcasts in the source's emission order (:491-531). m16n8k16 puts
             # columns 2q, 2q+1 of row frag_row in lane quad_base+q's acc[0],[1] and
             # rows +8 in acc[2],[3], so token t lives at (quad_base + t//2, t%2).
             # ha_* is the k side (the solve), hc_* the q side (the outputs).
-            ha_lo = K.alloc_local((NUM_TOKENS,), "float32")
-            ha_hi = K.alloc_local((NUM_TOKENS,), "float32")
+            ha_lo = txl.alloc_local((NUM_TOKENS,), "float32")
+            ha_hi = txl.alloc_local((NUM_TOKENS,), "float32")
             for t in range(4):
-                K.ptx.mov.b32(ha_lo[t], _shfl_idx(acc[t % 2], quad_base + t // 2))
+                txl.ptx.mov.b32(ha_lo[t], _shfl_idx(acc[t % 2], quad_base + t // 2))
             for t in range(4):
-                K.ptx.mov.b32(ha_hi[t], _shfl_idx(acc[2 + t % 2], quad_base + t // 2))
-            K.ptx.mov.b32(ha_lo[4], _shfl_idx(acc[0], quad_base + 2))
-            K.ptx.mov.b32(ha_hi[4], _shfl_idx(acc[2], quad_base + 2))
+                txl.ptx.mov.b32(ha_hi[t], _shfl_idx(acc[2 + t % 2], quad_base + t // 2))
+            txl.ptx.mov.b32(ha_lo[4], _shfl_idx(acc[0], quad_base + 2))
+            txl.ptx.mov.b32(ha_hi[4], _shfl_idx(acc[2], quad_base + 2))
             for t in range(NUM_TOKENS - 1):
-                K.ptx.mov.b32(hc_lo[t], _shfl_idx(acc_c[t % 2], quad_base + t // 2))
+                txl.ptx.mov.b32(hc_lo[t], _shfl_idx(acc_c[t % 2], quad_base + t // 2))
             for t in range(NUM_TOKENS - 1):
-                K.ptx.mov.b32(hc_hi[t], _shfl_idx(acc_c[2 + t % 2], quad_base + t // 2))
+                txl.ptx.mov.b32(hc_hi[t], _shfl_idx(acc_c[2 + t % 2], quad_base + t // 2))
 
             # Token 5 needs NO shuffle (:532-537). The (quad_base + t//2, acc[t%2])
             # map puts it on lane quad_base + 2 -- which is the only lane that
@@ -849,40 +862,40 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
             # the broadcast count stays at 20 rather than 24. These four assignments
             # sit OUTSIDE the `lane_quad == 2` guard: every lane executes them, only
             # lane_quad 2's values are meaningful.
-            K.ptx.mov.b32(ha_lo[NUM_TOKENS - 1], acc[1])
-            K.ptx.mov.b32(ha_hi[NUM_TOKENS - 1], acc[3])
-            K.ptx.mov.b32(hc_lo[NUM_TOKENS - 1], acc_c[1])
-            K.ptx.mov.b32(hc_hi[NUM_TOKENS - 1], acc_c[3])
+            txl.ptx.mov.b32(ha_lo[NUM_TOKENS - 1], acc[1])
+            txl.ptx.mov.b32(ha_hi[NUM_TOKENS - 1], acc[3])
+            txl.ptx.mov.b32(hc_lo[NUM_TOKENS - 1], acc_c[1])
+            txl.ptx.mov.b32(hc_hi[NUM_TOKENS - 1], acc_c[3])
 
-            with K.If(lane_quad == 2), K.Then():
+            with txl.If(lane_quad == 2), txl.Then():
                 row_lo = warp * 16 + frag_row
                 row_hi = row_lo + 8
                 for t in range(NUM_TOKENS):
                     base_t = (
                         _ld_shared_i32(arena, OFF_STOKEN + t * 4) * NUM_VALUE_HEADS + hv
                     ) * HEAD_DIM
-                    solved_lo = K.local_scalar(K.f32)
-                    solved_hi = K.local_scalar(K.f32)
-                    K.assign(
+                    solved_lo = txl.local_scalar(txl.f32)
+                    solved_hi = txl.local_scalar(txl.f32)
+                    txl.assign(
                         solved_lo,
                         _sub(_load_bf16_f32(v, base_t + tile_row_base + row_lo), ha_lo[t]),
                     )
-                    K.assign(
+                    txl.assign(
                         solved_hi,
                         _sub(_load_bf16_f32(v, base_t + tile_row_base + row_hi), ha_hi[t]),
                     )
                     for prev in range(t):
                         lts = _ld_shared_f32(arena, OFF_SL + (t * NUM_TOKENS + prev) * 4)
-                        K.assign(solved_lo, _sub(solved_lo, _mul(lts, u_lo[prev])))
-                        K.assign(solved_hi, _sub(solved_hi, _mul(lts, u_hi[prev])))
-                    K.ptx.mov.b32(u_lo[t], solved_lo)
-                    K.ptx.mov.b32(u_hi[t], solved_hi)
+                        txl.assign(solved_lo, _sub(solved_lo, _mul(lts, u_lo[prev])))
+                        txl.assign(solved_hi, _sub(solved_hi, _mul(lts, u_hi[prev])))
+                    txl.ptx.mov.b32(u_lo[t], solved_lo)
+                    txl.ptx.mov.b32(u_hi[t], solved_hi)
 
             # The solve runs on lane_quad == 2 but lane_quad == 3 also writes output,
             # so the residuals cross the quad (:554-560).
             for t in range(NUM_TOKENS):
-                K.ptx.mov.b32(u_lo[t], _shfl_idx(u_lo[t], quad_base + 2))
-                K.ptx.mov.b32(u_hi[t], _shfl_idx(u_hi[t], quad_base + 2))
+                txl.ptx.mov.b32(u_lo[t], _shfl_idx(u_lo[t], quad_base + 2))
+                txl.ptx.mov.b32(u_hi[t], _shfl_idx(u_hi[t], quad_base + 2))
 
         # =======================================================================
         # Phase F: the outputs  (:568-670)
@@ -891,41 +904,45 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
         # assigns acc[0..3] and then unconditionally overwrites (:567-582). The
         # lane_quad == 3 remap uses STATIC indices, as the source does -- indexing
         # hc_* by a runtime token would spill the register array to local memory.
-        with K.If(K.And(warp < MMA_WARPS, lane_quad >= 2)), K.Then():
+        with txl.If(txl.And(warp < MMA_WARPS, lane_quad >= 2)), txl.Then():
             token0 = (lane_quad - 2) * 2
             token1 = token0 + 1
             row_lo_f = warp * 16 + frag_row
             row_hi_f = row_lo_f + 8
-            out0_lo = K.local_scalar(K.f32)
-            out1_lo = K.local_scalar(K.f32)
-            out0_hi = K.local_scalar(K.f32)
-            out1_hi = K.local_scalar(K.f32)
-            K.assign(out0_lo, hc_lo[0])
-            K.assign(out1_lo, hc_lo[1])
-            K.assign(out0_hi, hc_hi[0])
-            K.assign(out1_hi, hc_hi[1])
-            with K.If(lane_quad == 3), K.Then():
-                K.assign(out0_lo, hc_lo[2])
-                K.assign(out1_lo, hc_lo[3])
-                K.assign(out0_hi, hc_hi[2])
-                K.assign(out1_hi, hc_hi[3])
+            out0_lo = txl.local_scalar(txl.f32)
+            out1_lo = txl.local_scalar(txl.f32)
+            out0_hi = txl.local_scalar(txl.f32)
+            out1_hi = txl.local_scalar(txl.f32)
+            txl.assign(out0_lo, hc_lo[0])
+            txl.assign(out1_lo, hc_lo[1])
+            txl.assign(out0_hi, hc_hi[0])
+            txl.assign(out1_hi, hc_hi[1])
+            with txl.If(lane_quad == 3), txl.Then():
+                txl.assign(out0_lo, hc_lo[2])
+                txl.assign(out1_lo, hc_lo[3])
+                txl.assign(out0_hi, hc_hi[2])
+                txl.assign(out1_hi, hc_hi[3])
             for src in range(NUM_TOKENS):
                 residual_lo = u_lo[src]
                 residual_hi = u_hi[src]
-                coef0 = K.local_scalar(K.f32)
-                coef1 = K.local_scalar(K.f32)
-                K.assign(coef0, K.float32(0.0))
-                K.assign(coef1, K.float32(0.0))
+                coef0 = txl.local_scalar(txl.f32)
+                coef1 = txl.local_scalar(txl.f32)
+                txl.assign(coef0, txl.float32(0.0))
+                txl.assign(coef1, txl.float32(0.0))
                 # The masked-out coefficient is a real zero-operand fma, not a
                 # skipped iteration (:585-594).
-                with K.If(token0 >= src), K.Then():
-                    K.assign(coef0, _ld_shared_f32(arena, OFF_SR + (token0 * NUM_TOKENS + src) * 4))
-                with K.If(token1 >= src), K.Then():
-                    K.assign(coef1, _ld_shared_f32(arena, OFF_SR + (token1 * NUM_TOKENS + src) * 4))
-                K.assign(out0_lo, _fma(coef0, residual_lo, out0_lo))
-                K.assign(out1_lo, _fma(coef1, residual_lo, out1_lo))
-                K.assign(out0_hi, _fma(coef0, residual_hi, out0_hi))
-                K.assign(out1_hi, _fma(coef1, residual_hi, out1_hi))
+                with txl.If(token0 >= src), txl.Then():
+                    txl.assign(
+                        coef0, _ld_shared_f32(arena, OFF_SR + (token0 * NUM_TOKENS + src) * 4)
+                    )
+                with txl.If(token1 >= src), txl.Then():
+                    txl.assign(
+                        coef1, _ld_shared_f32(arena, OFF_SR + (token1 * NUM_TOKENS + src) * 4)
+                    )
+                txl.assign(out0_lo, _fma(coef0, residual_lo, out0_lo))
+                txl.assign(out1_lo, _fma(coef1, residual_lo, out1_lo))
+                txl.assign(out0_hi, _fma(coef0, residual_hi, out0_hi))
+                txl.assign(out1_hi, _fma(coef1, residual_hi, out1_hi))
 
             for half in range(2):
                 token_o = token0 if half == 0 else token1
@@ -939,64 +956,64 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
                 # bit-exactly, so this is not an "unwritten" path.
                 _store_f32_as_bf16(out, base_o + row_lo_f, o_lo, active_o)
                 _store_f32_as_bf16(out, base_o + row_hi_f, o_hi, active_o)
-                _store_f32_as_bf16(out, base_o + row_lo_f, K.float32(0.0), K.Not(active_o))
-                _store_f32_as_bf16(out, base_o + row_hi_f, K.float32(0.0), K.Not(active_o))
+                _store_f32_as_bf16(out, base_o + row_lo_f, txl.float32(0.0), txl.Not(active_o))
+                _store_f32_as_bf16(out, base_o + row_hi_f, txl.float32(0.0), txl.Not(active_o))
 
             # Tokens 4 and 5 have no partner lane, so lane_quad == 2 writes BOTH
             # tails at T=6 (:628-668) -- eight output stores against quad 3's four.
-            with K.If(lane_quad == 2), K.Then():
+            with txl.If(lane_quad == 2), txl.Then():
                 # Token 4 (:629-650). Its coefficient row is CLAMPED: sR[29] is
                 # (target 4, source 5), which the gram block never writes -- its
                 # predicate is `source <= target` -- so it is in-region but
                 # uninitialized, and only the `src <= 4` mask keeps it out of the
                 # result. The source's unconditional read at :633 is dead.
-                out4_lo = K.local_scalar(K.f32)
-                out4_hi = K.local_scalar(K.f32)
-                K.assign(out4_lo, hc_lo[NUM_TOKENS - 2])
-                K.assign(out4_hi, hc_hi[NUM_TOKENS - 2])
+                out4_lo = txl.local_scalar(txl.f32)
+                out4_hi = txl.local_scalar(txl.f32)
+                txl.assign(out4_lo, hc_lo[NUM_TOKENS - 2])
+                txl.assign(out4_hi, hc_hi[NUM_TOKENS - 2])
                 for src4 in range(NUM_TOKENS):
-                    coef4 = K.float32(0.0)
+                    coef4 = txl.float32(0.0)
                     if src4 <= NUM_TOKENS - 2:
                         coef4 = _ld_shared_f32(
                             arena, OFF_SR + ((NUM_TOKENS - 2) * NUM_TOKENS + src4) * 4
                         )
-                    K.assign(out4_lo, _fma(coef4, u_lo[src4], out4_lo))
-                    K.assign(out4_hi, _fma(coef4, u_hi[src4], out4_hi))
+                    txl.assign(out4_lo, _fma(coef4, u_lo[src4], out4_lo))
+                    txl.assign(out4_hi, _fma(coef4, u_hi[src4], out4_hi))
                 active4 = _ld_shared_i32(arena, OFF_SSLOT + (NUM_TOKENS - 2) * 4) >= 0
                 base4 = (
                     _ld_shared_i32(arena, OFF_STOKEN + (NUM_TOKENS - 2) * 4) * NUM_VALUE_HEADS + hv
                 ) * HEAD_DIM + tile_row_base
                 _store_f32_as_bf16(out, base4 + row_lo_f, out4_lo, active4)
                 _store_f32_as_bf16(out, base4 + row_hi_f, out4_hi, active4)
-                _store_f32_as_bf16(out, base4 + row_lo_f, K.float32(0.0), K.Not(active4))
-                _store_f32_as_bf16(out, base4 + row_hi_f, K.float32(0.0), K.Not(active4))
+                _store_f32_as_bf16(out, base4 + row_lo_f, txl.float32(0.0), txl.Not(active4))
+                _store_f32_as_bf16(out, base4 + row_hi_f, txl.float32(0.0), txl.Not(active4))
 
                 # Token 5 (:651-667). No clamp: the last target accepts every
                 # source, so sR[30..35] are all live.
-                out5_lo = K.local_scalar(K.f32)
-                out5_hi = K.local_scalar(K.f32)
-                K.assign(out5_lo, hc_lo[NUM_TOKENS - 1])
-                K.assign(out5_hi, hc_hi[NUM_TOKENS - 1])
+                out5_lo = txl.local_scalar(txl.f32)
+                out5_hi = txl.local_scalar(txl.f32)
+                txl.assign(out5_lo, hc_lo[NUM_TOKENS - 1])
+                txl.assign(out5_hi, hc_hi[NUM_TOKENS - 1])
                 for src5 in range(NUM_TOKENS):
                     coef5 = _ld_shared_f32(
                         arena, OFF_SR + ((NUM_TOKENS - 1) * NUM_TOKENS + src5) * 4
                     )
-                    K.assign(out5_lo, _fma(coef5, u_lo[src5], out5_lo))
-                    K.assign(out5_hi, _fma(coef5, u_hi[src5], out5_hi))
+                    txl.assign(out5_lo, _fma(coef5, u_lo[src5], out5_lo))
+                    txl.assign(out5_hi, _fma(coef5, u_hi[src5], out5_hi))
                 active5 = _ld_shared_i32(arena, OFF_SSLOT + (NUM_TOKENS - 1) * 4) >= 0
                 base5 = (
                     _ld_shared_i32(arena, OFF_STOKEN + (NUM_TOKENS - 1) * 4) * NUM_VALUE_HEADS + hv
                 ) * HEAD_DIM + tile_row_base
                 _store_f32_as_bf16(out, base5 + row_lo_f, out5_lo, active5)
                 _store_f32_as_bf16(out, base5 + row_hi_f, out5_hi, active5)
-                _store_f32_as_bf16(out, base5 + row_lo_f, K.float32(0.0), K.Not(active5))
-                _store_f32_as_bf16(out, base5 + row_hi_f, K.float32(0.0), K.Not(active5))
+                _store_f32_as_bf16(out, base5 + row_lo_f, txl.float32(0.0), txl.Not(active5))
+                _store_f32_as_bf16(out, base5 + row_hi_f, txl.float32(0.0), txl.Not(active5))
 
         # =======================================================================
         # Phase G: publish sU  (:671-684)
         # =======================================================================
-        with K.If(warp < MMA_WARPS), K.Then():
-            with K.If(lane_quad == 2), K.Then():
+        with txl.If(warp < MMA_WARPS), txl.Then():
+            with txl.If(lane_quad == 2), txl.Then():
                 row_lo_g = warp * 16 + frag_row
                 for t in range(NUM_TOKENS):
                     _st_shared_f32(arena, OFF_SU + (t * ROWS_PER_CTA + row_lo_g) * 4, u_lo[t])
@@ -1004,21 +1021,21 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
             if SU_SYNC_CTA == 0:
                 # Warp w produces rows [16w, 16w+16), exactly the rows its own groups
                 # consume in phase H, so a warp barrier suffices (:651-653).
-                K.cuda.warp_sync()
+                txl.cuda.warp_sync()
         if SU_SYNC_CTA == 1:
             # split8 has ONE MMA warp producing sU for eight consuming groups, so the
             # generator emits a CTA barrier -- and it sits OUTSIDE the warp guard
             # (S8:651 closes it, S8:652-654 follows). Keeping it inside would have
             # one warp of five arrive at a CTA barrier and the kernel would hang.
-            K.cuda.cta_sync()
+            txl.cuda.cta_sync()
 
         # =======================================================================
         # Phase H: recurrence and checkpoints  (:798-834)
         # =======================================================================
-        words_w = K.alloc_local((4,), "uint32")
-        sd_t = K.alloc_local((8,), "float32")
-        sk_t = K.alloc_local((8,), "float32")
-        with K.If(group < ROW_GROUPS), K.Then():
+        words_w = txl.alloc_local((4,), "uint32")
+        sd_t = txl.alloc_local((8,), "float32")
+        sk_t = txl.alloc_local((8,), "float32")
+        with txl.If(group < ROW_GROUPS), txl.Then():
             for t in range(NUM_TOKENS):
                 slot_t = _ld_shared_i32(arena, OFF_SSLOT + t * 4)
                 beta_t = _ld_shared_f32(arena, OFF_SBETA + t * 4)
@@ -1038,8 +1055,8 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
                 # The recurrence itself is identical in both arms: it advances
                 # unconditionally, in FP32, so token t+1 consumes the un-rounded
                 # token-t state rather than the bf16 checkpoint.
-                with K.If(slot_t >= 0):
-                    with K.Then():
+                with txl.If(slot_t >= 0):
+                    with txl.Then():
                         for row_local in range(ROWS_PER_GROUP):
                             row_h = owned_row_base + row_local
                             update = _mul(
@@ -1049,12 +1066,12 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
                             for i in range(8):
                                 # `hist*sD + update*sK` (:782): the compiler contracts the
                                 # FIRST product and rounds update*sK.
-                                K.ptx.mov.b32(
+                                txl.ptx.mov.b32(
                                     hist[row_local * 8 + i],
                                     _fma(hist[row_local * 8 + i], sd_t[i], _mul(update, sk_t[i])),
                                 )
                             for pr in range(4):
-                                K.ptx.mov.b32(
+                                txl.ptx.mov.b32(
                                     words_w[pr],
                                     _pack_bf16x2(
                                         hist[row_local * 8 + 2 * pr + 1],
@@ -1063,8 +1080,8 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
                                 )
                             _store_u32x4(
                                 state,
-                                K.cast(slot_t, "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
-                                + K.cast(
+                                txl.cast(slot_t, "int64") * txl.cast(STATE_SLOT_STRIDE, "int64")
+                                + txl.cast(
                                     hv * HEAD_DIM * HEAD_DIM
                                     + (tile_row_base + row_h) * HEAD_DIM
                                     + k_start,
@@ -1072,7 +1089,7 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
                                 ),
                                 words_w,
                             )
-                    with K.Else():
+                    with txl.Else():
                         for row_local_p in range(ROWS_PER_GROUP):
                             row_p = owned_row_base + row_local_p
                             update_p = _mul(
@@ -1080,7 +1097,7 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
                                 beta_t,
                             )
                             for i in range(8):
-                                K.ptx.mov.b32(
+                                txl.ptx.mov.b32(
                                     hist[row_local_p * 8 + i],
                                     _fma(
                                         hist[row_local_p * 8 + i], sd_t[i], _mul(update_p, sk_t[i])

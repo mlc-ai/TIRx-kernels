@@ -16,13 +16,13 @@ changes, tracing can reproduce the expression with the new value. Take the
 snapshot into a scalar local.
 
 ```python
-# Scalar computation or predicate: K.assign fixes the value at this point.
-needs_rescale = K.local_scalar("bool")
-K.assign(needs_rescale, m_new > m_prev)
+# Scalar computation or predicate: txl.assign fixes the value at this point.
+needs_rescale = txl.local_scalar("bool")
+txl.assign(needs_rescale, m_new > m_prev)
 
 # Bit-preserving register copy of a word that a later prefetch will overwrite.
-saved = K.local_scalar("uint64")
-K.ptx.mov.b64(saved, words[0], words[1])
+saved = txl.local_scalar("uint64")
+txl.ptx.mov.b64(saved, words[0], words[1])
 ```
 
 ## Rationale

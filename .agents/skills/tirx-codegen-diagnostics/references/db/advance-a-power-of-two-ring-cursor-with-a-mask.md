@@ -16,10 +16,10 @@ construction, advance it with a mask.
 
 ```python
 # before: signed modulo, so the lowering adds the sign-correction fixup.
-K.assign(stage, K.truncmod(stage + 1, STAGES))
+txl.assign(stage, txl.truncmod(stage + 1, STAGES))
 
 # after: one instruction, no fixup and no control flow.
-K.assign(stage, K.bitwise_and(stage + 1, K.int32(STAGES - 1)))
+txl.assign(stage, txl.bitwise_and(stage + 1, txl.int32(STAGES - 1)))
 ```
 
 A reference that spells the same advance as a conditional reset is describing
@@ -27,7 +27,7 @@ the wrap, not prescribing a branch; do not transcribe it as one.
 
 ```python
 # rejected: matches the reference's spelling and emits a real branch.
-K.assign(stage, K.if_then_else(stage == STAGES - 1, 0, stage + 1))
+txl.assign(stage, txl.if_then_else(stage == STAGES - 1, 0, stage + 1))
 ```
 
 ## Rationale

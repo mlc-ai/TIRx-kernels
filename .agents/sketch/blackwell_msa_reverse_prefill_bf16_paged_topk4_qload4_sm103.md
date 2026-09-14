@@ -670,9 +670,9 @@ The live producer/reducer handshake is:
 ## TIRx and verification contract
 
 - The executable module imports the device language only as
-  `import tirx_kernels.kern as K`; it uses no tile primitive, first-class
-  layout, direct TVM script namespace, `K.cuda.func_call`, inline-CUDA escape,
-  or modification beneath `tirx_kernels/kern/`.
+  `import tirx_kernels.tirx_lite as txl`; it uses no tile primitive, first-class
+  layout, direct TVM script namespace, `txl.cuda.func_call`, inline-CUDA escape,
+  or modification beneath `tirx_kernels/tirx_lite/`.
 - `get_kernel()` returns producer and reducer PrimFuncs in source launch order.
   Planning, TensorMap encoding, allocation, and JIT compilation occur before
   timing. The measured closure launches exactly this producer followed by this

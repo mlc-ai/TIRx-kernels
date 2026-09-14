@@ -11,7 +11,7 @@ from unittest import SkipTest
 
 import torch
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 import tvm
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
@@ -371,9 +371,9 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
     tma_s2g_2d = "cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group.L2::cache_hint"
     tma_s2g_3d = "cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group.L2::cache_hint"
     tcgen05_mma_tf32 = "tcgen05.mma.cta_group::1.kind::tf32"
-    cache_policy_evict_first = K.uint64(0x12F0000000000000)
-    cache_policy_evict_last = K.uint64(0x14F0000000000000)
-    tf32_instr_desc = K.uint32(67635472)
+    cache_policy_evict_first = txl.uint64(0x12F0000000000000)
+    cache_policy_evict_last = txl.uint64(0x14F0000000000000)
+    tf32_instr_desc = txl.uint32(67635472)
 
     def local(dtype, value=None):
         """One declared local, the way the original declares one.
@@ -384,63 +384,63 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
         holding an Expr re-emits the WHOLE expression at every use site. Where
         the original declares a local, so does this port.
         """
-        buf = K.alloc_local((1,), dtype)
+        buf = txl.alloc_local((1,), dtype)
         if value is not None:
-            K.assign(buf[0], value)
+            txl.assign(buf[0], value)
         return buf
 
     def add_smem_desc_offset(desc, offset):
         # orig:L404-413. Descriptor offsets wrap in the low 32 bits without
         # carrying into the encoded layout fields in the high half.
-        desc_lo = K.local_scalar("uint32")
-        desc_hi = K.local_scalar("uint32")
-        result = K.local_scalar("uint64")
-        K.ptx.mov.b64(desc_lo, desc_hi, desc)
-        K.ptx.add.u32(desc_lo, desc_lo, K.cast(offset, "uint32"))
-        K.ptx.mov.b64(result, desc_lo, desc_hi)
+        desc_lo = txl.local_scalar("uint32")
+        desc_hi = txl.local_scalar("uint32")
+        result = txl.local_scalar("uint64")
+        txl.ptx.mov.b64(desc_lo, desc_hi, desc)
+        txl.ptx.add.u32(desc_lo, desc_lo, txl.cast(offset, "uint32"))
+        txl.ptx.mov.b64(result, desc_lo, desc_hi)
         return result
 
     def cuda_grid_dependency_synchronize():
-        K.ptx.griddepcontrol.wait()
+        txl.ptx.griddepcontrol.wait()
 
-    @K.kernel(
+    @txl.kernel(
         warps=num_warps,
         arch="sm_100a",
         min_blocks_per_sm=1,  # orig:L511 -- pinned by the original, not a default
         grid=config.grid_blocks,  # orig:L601
     )
     def sm100_tf32_hc_prenorm_gemm(
-        shape_m: K.u32,
+        shape_m: txl.u32,
         # A/B/D are never dereferenced by the device code -- every access goes
         # through a tensor map. They stay in the signature because the launch is
         # what keeps the tensors the maps point at alive.
-        a: K.gptr[K.bf16],
-        b: K.gptr[K.f32],
-        d: K.gptr[K.f32],
-        sqr_sum: K.gptr[K.f32],
-        a_map: K.TensorMap,
-        b_map: K.TensorMap,
-        d_map: K.TensorMap,
+        a: txl.gptr[txl.bf16],
+        b: txl.gptr[txl.f32],
+        d: txl.gptr[txl.f32],
+        sqr_sum: txl.gptr[txl.f32],
+        a_map: txl.TensorMap,
+        b_map: txl.TensorMap,
+        d_map: txl.TensorMap,
     ):
-        warp_idx = K.warp_id()
-        lane_idx = K.lane_id()
+        warp_idx = txl.warp_id()
+        lane_idx = txl.lane_id()
 
         # orig:L517-525 -- three separate guarded prefetches, kept separate.
-        with K.If(warp_idx == 0), K.Then():
-            with K.If(K.cuda.elect_sync()), K.Then():
-                K.ptx.prefetch.tensormap(K.address_of(a_map))
-        with K.If(warp_idx == 0), K.Then():
-            with K.If(K.cuda.elect_sync()), K.Then():
-                K.ptx.prefetch.tensormap(K.address_of(b_map))
-        with K.If(warp_idx == 0), K.Then():
-            with K.If(K.cuda.elect_sync()), K.Then():
-                K.ptx.prefetch.tensormap(K.address_of(d_map))
-        lane_u32 = local("uint32", K.cast(lane_idx, "uint32"))
+        with txl.If(warp_idx == 0), txl.Then():
+            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                txl.ptx.prefetch.tensormap(txl.address_of(a_map))
+        with txl.If(warp_idx == 0), txl.Then():
+            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                txl.ptx.prefetch.tensormap(txl.address_of(b_map))
+        with txl.If(warp_idx == 0), txl.Then():
+            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                txl.ptx.prefetch.tensormap(txl.address_of(d_map))
+        lane_u32 = local("uint32", txl.cast(lane_idx, "uint32"))
 
         # ---------------- smem plan -- orig:L528-594 ------------------------
         # Declaration order reproduces the original's byte layout
         # (cd | a | b | barriers | tmem_ptr).
-        smem = K.smem_pool()
+        smem = txl.smem_pool()
         # The original pins the arena at ``config.smem_size``, which is 160
         # bytes MORE than the pool's true high-water mark: its barrier term
         # ``(num_stages*4+1)*8`` budgets 49 barriers where the body allocates
@@ -449,65 +449,65 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
         smem.commit(config.smem_size)
         # D-epilogue staging buffer: reg tile staged in, then stored via TMA as a
         # 128B-swizzled mma_shared_layout atom.
-        smem_cd_mma = smem.alloc((block_m, block_n), "float32", swizzle=K.SW128B, align=1024)
+        smem_cd_mma = smem.alloc((block_m, block_n), "float32", swizzle=txl.SW128B, align=1024)
         # A stages: TMA writes; cast warps read via ldmatrix.x4 into the .16x256b atom.
         smem_a_mma = smem.alloc(
-            (num_stages, block_m, block_k), "bfloat16", swizzle=K.SW128B, align=1024
+            (num_stages, block_m, block_k), "bfloat16", swizzle=txl.SW128B, align=1024
         )
         # B stages: TMA writes (spanning 2 x 128B atoms); the MMA reads tf32.
         smem_b_mma = smem.alloc(
-            (num_stages, block_n, block_k), "float32", swizzle=K.SW128B, align=1024
+            (num_stages, block_n, block_k), "float32", swizzle=txl.SW128B, align=1024
         )
         # Pipes: smem (TMA full / MMA-commit empty), cast (128-thread deposit
         # full / MMA-commit empty), tmem (MMA signals D ready). Inits on warp 1.
-        smem_pipe = K.Pipeline(
+        smem_pipe = txl.Pipeline(
             smem.pool,
             num_stages,
             full="tma",
             empty="tcgen05",
             init_full=1,
             init_empty=1,
-            leader=(K.cuda.thread_rank() == 32),
+            leader=(txl.cuda.thread_rank() == 32),
         )
-        cast_pipe = K.Pipeline(
+        cast_pipe = txl.Pipeline(
             smem.pool,
             num_cast_stages,
             full="mbar",
             empty="tcgen05",
             init_full=num_cast_and_reduce_threads,
             init_empty=1,
-            leader=(K.cuda.thread_rank() == 32),
+            leader=(txl.cuda.thread_rank() == 32),
         )
         # One-way "tmem freed" signal, so a bare TCGen05Bar.
-        tmem_pipe = K.TCGen05Bar(smem.pool, 1, leader=(K.cuda.thread_rank() == 32))
+        tmem_pipe = txl.TCGen05Bar(smem.pool, 1, leader=(txl.cuda.thread_rank() == 32))
         tmem_pipe.init(1)
         tmem_ptr_in_smem = smem.alloc((1,), "uint32", align=4)
         # Single full-256-col tcgen05.alloc (warp-2) + relinquish/dealloc (warp-1);
         # the TMEM base stays compile-time 0 so the MMA never reloads it from SMEM.
         # Make the inited barriers visible before the cta_sync.
-        K.ptx.fence.mbarrier_init.release.cluster()
-        with K.If(warp_idx == 2), K.Then():
-            K.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
-                K.address_of(tmem_ptr_in_smem[0]), K.uint32(num_tmem_cols)
+        txl.ptx.fence.mbarrier_init.release.cluster()
+        with txl.If(warp_idx == 2), txl.Then():
+            txl.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
+                txl.address_of(tmem_ptr_in_smem[0]), txl.uint32(num_tmem_cols)
             )
-        K.cuda.cta_sync()
+        txl.cuda.cta_sync()
 
-        block_idx = local("uint32", K.cast(K.cta_id(), "uint32"))
-        m_block_idx = local("uint32", block_idx[0] // K.uint32(num_splits))
-        k_split_idx = local("uint32", block_idx[0] % K.uint32(num_splits))
+        block_idx = local("uint32", txl.cast(txl.cta_id(), "uint32"))
+        m_block_idx = local("uint32", block_idx[0] // txl.uint32(num_splits))
+        k_split_idx = local("uint32", block_idx[0] % txl.uint32(num_splits))
         k_offset = local(
             "uint32",
             (
-                k_split_idx[0] * K.uint32(num_k_blocks_per_split)
-                + K.min(k_split_idx[0], K.uint32(remain_k_blocks))
+                k_split_idx[0] * txl.uint32(num_k_blocks_per_split)
+                + txl.min(k_split_idx[0], txl.uint32(remain_k_blocks))
             )
-            * K.uint32(block_k),
+            * txl.uint32(block_k),
         )
         m_offset = local("uint32", shape_m * k_split_idx[0])
         num_total_stages = local(
             "uint32",
-            K.uint32(num_k_blocks_per_split)
-            + K.cast(k_split_idx[0] < K.uint32(remain_k_blocks), "uint32"),
+            txl.uint32(num_k_blocks_per_split)
+            + txl.cast(k_split_idx[0] < txl.uint32(remain_k_blocks), "uint32"),
         )
 
         cuda_grid_dependency_synchronize()
@@ -515,305 +515,319 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
         # ---------------- roles -- orig:L615/L783 ---------------------------
         # The original dispatches on ``warp_idx < num_mma_warps``; K partitions
         # by warp. The two role blocks are deliberately ADJACENT and unwrapped
-        # so K.specialize's chain_dispatch can fold them.
-        sp = K.specialize(chain_dispatch=True)
+        # so txl.specialize's chain_dispatch can fold them.
+        sp = txl.specialize(chain_dispatch=True)
         mma_side = sp.role("mma", warps=list(range(num_mma_warps)))
         cast_side = sp.role("cast", warps=list(range(num_mma_warps, num_warps)))
 
         with mma_side:
             # ==================== TMA / MMA / D epilogue ====================
-            mw = K.warp_id_in_role()  # == warp_idx; this role starts at warp 0
+            mw = txl.warp_id_in_role()  # == warp_idx; this role starts at warp 0
 
-            with K.If(mw == 0), K.Then():
-                with K.If(K.cuda.elect_sync()), K.Then():
+            with txl.If(mw == 0), txl.Then():
+                with txl.If(txl.cuda.elect_sync()), txl.Then():
                     # -------- LOADER (TMA) -------- orig:L616-662
-                    tma_state = K.PipelineState(num_stages, phase=1)
-                    with K.serial(K.uint32(0), num_total_stages[0]) as s:
-                        stage_idx = local("uint32", K.cast(tma_state.stage, "uint32"))
-                        smem_pipe.empty.wait(stage_idx[0], K.cast(tma_state.phase, "uint32"))
-                        m_idx0 = local("uint32", m_block_idx[0] * K.uint32(block_m))
-                        k_idx0 = local("uint32", k_offset[0] + s * K.uint32(block_k))
+                    tma_state = txl.PipelineState(num_stages, phase=1)
+                    with txl.serial(txl.uint32(0), num_total_stages[0]) as s:
+                        stage_idx = local("uint32", txl.cast(tma_state.stage, "uint32"))
+                        smem_pipe.empty.wait(stage_idx[0], txl.cast(tma_state.phase, "uint32"))
+                        m_idx0 = local("uint32", m_block_idx[0] * txl.uint32(block_m))
+                        k_idx0 = local("uint32", k_offset[0] + s * txl.uint32(block_k))
                         # A remains bf16 (exact in tf32); B's tensor map uses
                         # TFLOAT32 OOB-fill mode 11 so the load RN-truncates as
                         # before. Coordinates are tensor-map order: K, then M/N.
-                        K.ptx[tma_g2s_2d](
-                            K.ptr_byte_offset(
+                        txl.ptx[tma_g2s_2d](
+                            txl.ptr_byte_offset(
                                 smem_a_mma[0].ptr_to(0, 0),
-                                stage_idx[0] * K.uint32(block_m * block_k * 2),
+                                stage_idx[0] * txl.uint32(block_m * block_k * 2),
                                 "bfloat16",
                             ),
-                            K.address_of(a_map),
-                            K.cast(k_idx0[0], "int32"),
-                            K.cast(m_idx0[0], "int32"),
+                            txl.address_of(a_map),
+                            txl.cast(k_idx0[0], "int32"),
+                            txl.cast(m_idx0[0], "int32"),
                             smem_pipe.full.ptr_to([stage_idx[0]]),
                             cache_policy_evict_first,
                         )
-                        with K.unroll(num_b_tma_atoms) as b_atom:
-                            K.ptx[tma_g2s_2d](
-                                K.ptr_byte_offset(
+                        with txl.unroll(num_b_tma_atoms) as b_atom:
+                            txl.ptx[tma_g2s_2d](
+                                txl.ptr_byte_offset(
                                     smem_b_mma[0].ptr_to(0, 0),
-                                    stage_idx[0] * K.uint32(block_n * block_k * 4)
-                                    + K.cast(b_atom * (block_n * block_swizzled_bk * 4), "uint32"),
+                                    stage_idx[0] * txl.uint32(block_n * block_k * 4)
+                                    + txl.cast(
+                                        b_atom * (block_n * block_swizzled_bk * 4), "uint32"
+                                    ),
                                     "float32",
                                 ),
-                                K.address_of(b_map),
-                                K.cast(
-                                    k_idx0[0] + K.cast(b_atom * block_swizzled_bk, "uint32"),
+                                txl.address_of(b_map),
+                                txl.cast(
+                                    k_idx0[0] + txl.cast(b_atom * block_swizzled_bk, "uint32"),
                                     "int32",
                                 ),
-                                K.int32(0),
+                                txl.int32(0),
                                 smem_pipe.full.ptr_to([stage_idx[0]]),
                                 cache_policy_evict_last,
                             )
                         smem_pipe.full.arrive(
                             stage_idx[0],
-                            tx_count=K.uint32(smem_a_size_per_stage + smem_b_size_per_stage),
+                            tx_count=txl.uint32(smem_a_size_per_stage + smem_b_size_per_stage),
                         )
                         tma_state.advance()
 
-            with K.If(mw == 1), K.Then():
+            with txl.If(mw == 1), txl.Then():
                 # -------- MMA (tcgen05) -------- orig:L664-713
-                mma_smem_state = K.PipelineState(num_stages, phase=0)
-                mma_cast_state = K.PipelineState(num_cast_stages, phase=0)
-                with K.serial(K.uint32(0), num_total_stages[0]) as s:
-                    stage_idx = local("uint32", K.cast(mma_smem_state.stage, "uint32"))
-                    cast_stage_idx = local("uint32", K.cast(mma_cast_state.stage, "uint32"))
-                    cast_pipe.full.wait(cast_stage_idx[0], K.cast(mma_cast_state.phase, "uint32"))
+                mma_smem_state = txl.PipelineState(num_stages, phase=0)
+                mma_cast_state = txl.PipelineState(num_cast_stages, phase=0)
+                with txl.serial(txl.uint32(0), num_total_stages[0]) as s:
+                    stage_idx = local("uint32", txl.cast(mma_smem_state.stage, "uint32"))
+                    cast_stage_idx = local("uint32", txl.cast(mma_cast_state.stage, "uint32"))
+                    cast_pipe.full.wait(cast_stage_idx[0], txl.cast(mma_cast_state.phase, "uint32"))
                     # TMEM A columns and the swizzled B matrix descriptor match
                     # the former tcgen05 tile dispatch exactly.
-                    a_col = local("int32", K.cast(cast_stage_idx[0] * K.uint32(block_k), "int32"))
-                    desc_b = K.local_scalar("uint64")
-                    K.cuda.tcgen05.encode_matrix_descriptor(
-                        K.address_of(desc_b), smem_b_mma[0].ptr_to(0, 0), ldo=256, sdo=64, swizzle=3
+                    a_col = local(
+                        "int32", txl.cast(cast_stage_idx[0] * txl.uint32(block_k), "int32")
                     )
-                    with K.unroll(block_k // umma_k) as ki:
-                        with K.If(K.cuda.elect_sync()), K.Then():
-                            K.ptx[tcgen05_mma_tf32](
-                                K.uint32(d_tmem_start_col),
-                                K.cast(a_col[0] + ki * umma_k, "uint32"),
+                    desc_b = txl.local_scalar("uint64")
+                    txl.cuda.tcgen05.encode_matrix_descriptor(
+                        txl.address_of(desc_b),
+                        smem_b_mma[0].ptr_to(0, 0),
+                        ldo=256,
+                        sdo=64,
+                        swizzle=3,
+                    )
+                    with txl.unroll(block_k // umma_k) as ki:
+                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                            txl.ptx[tcgen05_mma_tf32](
+                                txl.uint32(d_tmem_start_col),
+                                txl.cast(a_col[0] + ki * umma_k, "uint32"),
                                 add_smem_desc_offset(
                                     desc_b,
                                     (
-                                        K.cast((ki // 4) * 1024 + (ki % 4) * 8, "uint32")
-                                        + stage_idx[0] * K.uint32(block_n * block_k)
+                                        txl.cast((ki // 4) * 1024 + (ki % 4) * 8, "uint32")
+                                        + stage_idx[0] * txl.uint32(block_n * block_k)
                                     )
-                                    // K.uint32(4),
+                                    // txl.uint32(4),
                                 ),
                                 tf32_instr_desc,
-                                K.uint32(0),
-                                K.uint32(0),
-                                K.uint32(0),
-                                K.uint32(0),
+                                txl.uint32(0),
+                                txl.uint32(0),
+                                txl.uint32(0),
+                                txl.uint32(0),
                                 # NOT a Python conditional: ``ki`` is a symbolic
                                 # unroll var, so ``bool(ki == 0)`` is False for
                                 # every ki and all eight MMAs would accumulate
                                 # unconditionally. The original's Python
                                 # conditional expression is what the TVMScript
                                 # parser rewrites into exactly this select.
-                                K.ptx.pred(K.if_then_else(ki == 0, s != K.uint32(0), K.bool(True))),
+                                txl.ptx.pred(
+                                    txl.if_then_else(ki == 0, s != txl.uint32(0), txl.bool(True))
+                                ),
                             )
-                    with K.If(K.cuda.elect_sync()), K.Then():
+                    with txl.If(txl.cuda.elect_sync()), txl.Then():
                         cast_pipe.empty.arrive(cast_stage_idx[0])
                         smem_pipe.empty.arrive(stage_idx[0])
                     mma_smem_state.advance()
                     mma_cast_state.advance()
-                with K.If(K.cuda.elect_sync()), K.Then():
+                with txl.If(txl.cuda.elect_sync()), txl.Then():
                     tmem_pipe.arrive(0)
 
             tmem_pipe.wait(0, 0)
             # D epilogue, hand-aligned: 8 x [tcgen05.ld.32x32b.x4 + wait.ld +
             # st.shared.v4 (lane<16) + syncwarp] into the 128B-swizzled smem_cd.
-            d_frag = K.alloc_local((4,), "float32")
+            d_frag = txl.alloc_local((4,), "float32")
             d_words = d_frag.view("uint32")
-            with K.unroll(block_n // 4) as i:
-                taddr_d = local("uint32", K.uint32(d_tmem_start_col + i * 4))
-                K.ptx["tcgen05.ld.sync.aligned.32x32b.x4.b32"](
-                    d_frag[0], d_frag[1], d_frag[2], d_frag[3], K.uint32(taddr_d[0])
+            with txl.unroll(block_n // 4) as i:
+                taddr_d = local("uint32", txl.uint32(d_tmem_start_col + i * 4))
+                txl.ptx["tcgen05.ld.sync.aligned.32x32b.x4.b32"](
+                    d_frag[0], d_frag[1], d_frag[2], d_frag[3], txl.uint32(taddr_d[0])
                 )
-                K.ptx.tcgen05.wait__ld.sync.aligned()
-                with K.If(lane_u32[0] < K.uint32(16)), K.Then():
+                txl.ptx.tcgen05.wait__ld.sync.aligned()
+                with txl.If(lane_u32[0] < txl.uint32(16)), txl.Then():
                     # Per-thread 4-col slice store; the offset reproduces the
                     # 128B-swizzled layout the former tile copy selected.
-                    m_row = local("uint32", K.cast(mw, "uint32") * K.uint32(16) + lane_u32[0])
-                    compose_m = local("uint32", m_row[0] * K.uint32(block_n) + K.uint32(i * 4))
-                    compose_q = local("uint32", compose_m[0] // K.uint32(4))
+                    m_row = local("uint32", txl.cast(mw, "uint32") * txl.uint32(16) + lane_u32[0])
+                    compose_m = local("uint32", m_row[0] * txl.uint32(block_n) + txl.uint32(i * 4))
+                    compose_q = local("uint32", compose_m[0] // txl.uint32(4))
                     smem_cd_offset = local(
                         "uint32",
                         (
-                            (compose_q[0] ^ ((compose_q[0] & K.uint32(56)) >> K.uint32(3)))
-                            << K.uint32(2)
+                            (compose_q[0] ^ ((compose_q[0] & txl.uint32(56)) >> txl.uint32(3)))
+                            << txl.uint32(2)
                         )
-                        + compose_m[0] % K.uint32(4),
+                        + compose_m[0] % txl.uint32(4),
                     )
-                    K.ptx.st.shared.v4.u32(
-                        K.ptr_byte_offset(
-                            smem_cd_mma.ptr_to(0, 0), smem_cd_offset[0] * K.uint32(4), "float32"
+                    txl.ptx.st.shared.v4.u32(
+                        txl.ptr_byte_offset(
+                            smem_cd_mma.ptr_to(0, 0), smem_cd_offset[0] * txl.uint32(4), "float32"
                         ),
                         d_words[0],
                         d_words[1],
                         d_words[2],
                         d_words[3],
                     )
-                K.cuda.warp_sync()
+                txl.cuda.warp_sync()
 
-            K.ptx.fence.proxy.async_.shared__cta()
-            K.ptx.bar.sync(0, K.uint32(num_mma_threads))
-            with K.If(mw == 0), K.Then():
-                with K.If(K.cuda.elect_sync()), K.Then():
+            txl.ptx.fence.proxy.async_.shared__cta()
+            txl.ptx.bar.sync(0, txl.uint32(num_mma_threads))
+            with txl.If(mw == 0), txl.Then():
+                with txl.If(txl.cuda.elect_sync()), txl.Then():
                     # D store via TMA (writes only the valid region of boundary tiles).
-                    m0 = local("uint32", m_block_idx[0] * K.uint32(block_m))
+                    m0 = local("uint32", m_block_idx[0] * txl.uint32(block_m))
                     if num_splits == 1:
-                        K.ptx[tma_s2g_2d](
-                            K.address_of(d_map),
-                            K.int32(0),
-                            K.cast(m0[0], "int32"),
+                        txl.ptx[tma_s2g_2d](
+                            txl.address_of(d_map),
+                            txl.int32(0),
+                            txl.cast(m0[0], "int32"),
                             smem_cd_mma.ptr_to(0, 0),
                             cache_policy_evict_first,
                         )
                     else:
                         ks = local("uint32", k_split_idx[0])
-                        K.ptx[tma_s2g_3d](
-                            K.address_of(d_map),
-                            K.int32(0),
-                            K.cast(m0[0], "int32"),
-                            K.cast(ks[0], "int32"),
+                        txl.ptx[tma_s2g_3d](
+                            txl.address_of(d_map),
+                            txl.int32(0),
+                            txl.cast(m0[0], "int32"),
+                            txl.cast(ks[0], "int32"),
                             smem_cd_mma.ptr_to(0, 0),
                             cache_policy_evict_first,
                         )
-                    K.ptx.cp.async_.bulk.commit_group()
+                    txl.ptx.cp.async_.bulk.commit_group()
             # Keep the TMEM teardown on warp 1, and spell the allocator-slot read
             # explicitly so the low-level IR contains a real PTX shared load.
-            with K.If(mw == 1), K.Then():
-                K.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
-                tmem_dealloc_addr = K.local_scalar("uint32")
-                K.ptx.ld.shared.u32(tmem_dealloc_addr, tmem_ptr_in_smem.ptr_to([0]))
-                K.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
-                    tmem_dealloc_addr, K.uint32(num_tmem_cols)
+            with txl.If(mw == 1), txl.Then():
+                txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
+                tmem_dealloc_addr = txl.local_scalar("uint32")
+                txl.ptx.ld.shared.u32(tmem_dealloc_addr, tmem_ptr_in_smem.ptr_to([0]))
+                txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
+                    tmem_dealloc_addr, txl.uint32(num_tmem_cols)
                 )
 
         with cast_side:
             # ============== CAST / SUM-OF-SQUARES warps ==============
             # ``warp_id_in_role`` is the original's ``sub_warp_idx``:
             # ``warp_idx - num_mma_warps``.
-            sub_warp_idx = local("uint32", K.cast(K.warp_id_in_role(), "uint32"))
+            sub_warp_idx = local("uint32", txl.cast(txl.warp_id_in_role(), "uint32"))
             # A cast/deposit register tiles -- orig:L784-822. Each participating
             # thread owns 32 bf16 inputs and 32 fp32 outputs in physical register
             # order; raw ldmatrix and tcgen05.st consume those arrays directly.
-            a_bf16_flat = K.alloc_local((cast_per_thread,), "bfloat16")
-            a_flat = K.alloc_local((cast_per_thread,), "float32")
+            a_bf16_flat = txl.alloc_local((cast_per_thread,), "bfloat16")
+            a_flat = txl.alloc_local((cast_per_thread,), "float32")
             # Dual packed fma.f32x2 sum-of-squares accumulators (the hand kernel's
             # sum0/sum1); the fused form is the only no-regression reduce shape.
-            sqr0 = K.alloc_local((2,), "float32")
-            sqr1 = K.alloc_local((2,), "float32")
+            sqr0 = txl.alloc_local((2,), "float32")
+            sqr1 = txl.alloc_local((2,), "float32")
             a_words = a_flat.view("uint32")
             a_bf16_u16 = a_bf16_flat.view("uint16")
             a_bf16_words = a_bf16_flat.view("uint32")
-            K.ptx.mov.b32(sqr0[0], K.float32(0))
-            K.ptx.mov.b32(sqr0[1], K.float32(0))
-            K.ptx.mov.b32(sqr1[0], K.float32(0))
-            K.ptx.mov.b32(sqr1[1], K.float32(0))
-            cast_smem_state = K.PipelineState(num_stages, phase=0)
-            cast_tmem_state = K.PipelineState(num_cast_stages, phase=1)
+            txl.ptx.mov.b32(sqr0[0], txl.float32(0))
+            txl.ptx.mov.b32(sqr0[1], txl.float32(0))
+            txl.ptx.mov.b32(sqr1[0], txl.float32(0))
+            txl.ptx.mov.b32(sqr1[1], txl.float32(0))
+            cast_smem_state = txl.PipelineState(num_stages, phase=0)
+            cast_tmem_state = txl.PipelineState(num_cast_stages, phase=1)
             # ``unroll=True`` emits the bare ``#pragma unroll`` the original
             # emits, which the postproc then binds. Under the "native"
             # disposition the bound is spelled here instead (NOTES §4); the
             # generated text is the same either way.
             cast_unroll = 12
-            with K.serial(K.uint32(0), num_total_stages[0], unroll=cast_unroll) as s:
-                stage_idx = local("uint32", K.cast(cast_smem_state.stage, "uint32"))
-                cast_stage_idx = local("uint32", K.cast(cast_tmem_state.stage, "uint32"))
-                a_col = local("int32", K.cast(cast_stage_idx[0] * K.uint32(block_k), "int32"))
-                smem_pipe.full.wait(stage_idx[0], K.cast(cast_smem_state.phase, "uint32"))
+            with txl.serial(txl.uint32(0), num_total_stages[0], unroll=cast_unroll) as s:
+                stage_idx = local("uint32", txl.cast(cast_smem_state.stage, "uint32"))
+                cast_stage_idx = local("uint32", txl.cast(cast_tmem_state.stage, "uint32"))
+                a_col = local("int32", txl.cast(cast_stage_idx[0] * txl.uint32(block_k), "int32"))
+                smem_pipe.full.wait(stage_idx[0], txl.cast(cast_smem_state.phase, "uint32"))
                 # Four x4 ldmatrix instructions reproduce the warpgroup copy's
                 # physical register order. Keep the dispatcher's explicit
                 # swizzled element offset so ptxas sees the same address DAG.
-                with K.unroll(4) as mm:
+                with txl.unroll(4) as mm:
                     smem_off = local(
                         "uint32",
-                        K.cast(
-                            K.cast(sub_warp_idx[0], "int32") * K.int32(1024)
-                            + (mm // 2) * K.int32(512),
+                        txl.cast(
+                            txl.cast(sub_warp_idx[0], "int32") * txl.int32(1024)
+                            + (mm // 2) * txl.int32(512),
                             "uint32",
                         )
-                        + stage_idx[0] * K.uint32(block_m * block_k)
-                        + K.cast(lane_idx % K.int32(8) * K.int32(block_k), "uint32")
+                        + stage_idx[0] * txl.uint32(block_m * block_k)
+                        + txl.cast(lane_idx % txl.int32(8) * txl.int32(block_k), "uint32")
                         + (
-                            K.cast(
-                                (mm % 2) * K.int32(32) + lane_idx // K.int32(8) * K.int32(8),
+                            txl.cast(
+                                (mm % 2) * txl.int32(32) + lane_idx // txl.int32(8) * txl.int32(8),
                                 "uint32",
                             )
                             ^ (
                                 (
-                                    K.cast(
-                                        K.cast(sub_warp_idx[0], "int32") * K.int32(16)
-                                        + (mm // 2) * K.int32(8),
+                                    txl.cast(
+                                        txl.cast(sub_warp_idx[0], "int32") * txl.int32(16)
+                                        + (mm // 2) * txl.int32(8),
                                         "uint32",
                                     )
-                                    + stage_idx[0] * K.uint32(block_k)
-                                    + K.cast(lane_idx % K.int32(8) * K.int32(block_k), "uint32")
-                                    // K.uint32(block_k)
+                                    + stage_idx[0] * txl.uint32(block_k)
+                                    + txl.cast(
+                                        lane_idx % txl.int32(8) * txl.int32(block_k), "uint32"
+                                    )
+                                    // txl.uint32(block_k)
                                 )
-                                & K.uint32(7)
+                                & txl.uint32(7)
                             )
-                            << K.uint32(3)
+                            << txl.uint32(3)
                         ),
                     )
                     # Unannotated in the original -- and TVMScript binds an
                     # unannotated Expr assignment as a declared local all the
                     # same, so this is a local here too.
-                    reg_base = local("int32", (mm % 2) * K.int32(8) + mm // 2)
-                    K.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
+                    reg_base = local("int32", (mm % 2) * txl.int32(8) + mm // 2)
+                    txl.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
                         a_bf16_words[reg_base[0]],
                         a_bf16_words[reg_base[0] + 2],
                         a_bf16_words[reg_base[0] + 4],
                         a_bf16_words[reg_base[0] + 6],
-                        K.ptr_byte_offset(smem_a_mma[0].ptr_to(0, 0), smem_off[0] * 2, "bfloat16"),
+                        txl.ptr_byte_offset(
+                            smem_a_mma[0].ptr_to(0, 0), smem_off[0] * 2, "bfloat16"
+                        ),
                     )
-                cast_pipe.empty.wait(cast_stage_idx[0], K.cast(cast_tmem_state.phase, "uint32"))
+                cast_pipe.empty.wait(cast_stage_idx[0], txl.cast(cast_tmem_state.phase, "uint32"))
 
                 def sqr_fma(lo, hi, acc):
                     """One packed fma.f32x2 sum-of-squares accumulation."""
-                    lhs = K.local_scalar("uint64")
-                    rhs = K.local_scalar("uint64")
-                    accu = K.local_scalar("uint64")
-                    K.ptx.mov.b64(lhs, lo, hi)
-                    K.ptx.mov.b64(rhs, lo, hi)
-                    K.ptx.mov.b64(accu, acc[0], acc[1])
-                    K.ptx.fma.rz.ftz.f32x2(lhs, lhs, rhs, accu)
-                    K.ptx.mov.b64(acc[0], acc[1], lhs)
+                    lhs = txl.local_scalar("uint64")
+                    rhs = txl.local_scalar("uint64")
+                    accu = txl.local_scalar("uint64")
+                    txl.ptx.mov.b64(lhs, lo, hi)
+                    txl.ptx.mov.b64(rhs, lo, hi)
+                    txl.ptx.mov.b64(accu, acc[0], acc[1])
+                    txl.ptx.fma.rz.ftz.f32x2(lhs, lhs, rhs, accu)
+                    txl.ptx.mov.b64(acc[0], acc[1], lhs)
 
                 # bf16->tf32 + sqr-fma + TMEM deposit: interleaved per 8-col atom on
                 # short mainloops (hand structure); single wide STTM.x8 on deep
                 # pipelines. orig:L882-939.
                 if num_k_blocks_per_split <= 16:
-                    with K.serial(block_k // 8) as p:
-                        with K.serial(2) as f:
-                            K.ptx.cvt.f32.bf16(a_flat[p * 4 + f * 2], a_bf16_u16[p * 4 + f * 2])
-                            K.ptx.cvt.f32.bf16(
+                    with txl.serial(block_k // 8) as p:
+                        with txl.serial(2) as f:
+                            txl.ptx.cvt.f32.bf16(a_flat[p * 4 + f * 2], a_bf16_u16[p * 4 + f * 2])
+                            txl.ptx.cvt.f32.bf16(
                                 a_flat[p * 4 + f * 2 + 1], a_bf16_u16[p * 4 + f * 2 + 1]
                             )
                         # sqr{0,1} += a*a for this atom's packed pair per row.
                         sqr_fma(a_flat[p * 4], a_flat[p * 4 + 1], sqr0)
                         sqr_fma(a_flat[p * 4 + 2], a_flat[p * 4 + 3], sqr1)
-                        K.ptx["tcgen05.st.sync.aligned.16x256b.x1.b32"](
-                            K.cuda.get_tmem_addr(K.uint32(0), 0, a_col[0] + p * 8),
+                        txl.ptx["tcgen05.st.sync.aligned.16x256b.x1.b32"](
+                            txl.cuda.get_tmem_addr(txl.uint32(0), 0, a_col[0] + p * 8),
                             a_words[p * 4],
                             a_words[p * 4 + 1],
                             a_words[p * 4 + 2],
                             a_words[p * 4 + 3],
                         )
                 else:
-                    with K.serial(cast_per_thread // 2) as f:
-                        K.ptx.cvt.f32.bf16(a_flat[f * 2], a_bf16_u16[f * 2])
-                        K.ptx.cvt.f32.bf16(a_flat[f * 2 + 1], a_bf16_u16[f * 2 + 1])
-                    with K.unroll(cast_pairs) as p:
+                    with txl.serial(cast_per_thread // 2) as f:
+                        txl.ptx.cvt.f32.bf16(a_flat[f * 2], a_bf16_u16[f * 2])
+                        txl.ptx.cvt.f32.bf16(a_flat[f * 2 + 1], a_bf16_u16[f * 2 + 1])
+                    with txl.unroll(cast_pairs) as p:
                         sqr_fma(a_flat[p * 4], a_flat[p * 4 + 1], sqr0)
                         sqr_fma(a_flat[p * 4 + 2], a_flat[p * 4 + 3], sqr1)
-                    K.ptx["tcgen05.st.sync.aligned.16x256b.x8.b32"](
-                        K.cuda.get_tmem_addr(K.uint32(0), 0, a_col[0]),
+                    txl.ptx["tcgen05.st.sync.aligned.16x256b.x8.b32"](
+                        txl.cuda.get_tmem_addr(txl.uint32(0), 0, a_col[0]),
                         *[a_words[i] for i in range(cast_per_thread)],
                     )
-                K.ptx.tcgen05.wait__st.sync.aligned()
+                txl.ptx.tcgen05.wait__st.sync.aligned()
                 cast_pipe.full.arrive(cast_stage_idx[0])
                 cast_smem_state.advance()
                 cast_tmem_state.advance()
@@ -822,41 +836,41 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
             # kernel's shfl_xor 2,1), then store the two per-row results.
             # G3: the activemask/shuffle collectives keep the original's loop
             # placement exactly -- inside the ``spa`` loop, not hoisted.
-            sqr_part = K.alloc_local((2,), "float32")
-            K.ptx.mov.b32(sqr_part[0], sqr0[0] + sqr0[1])
-            K.ptx.mov.b32(sqr_part[1], sqr1[0] + sqr1[1])
-            with K.serial(2) as spa:
-                reduce_mask = local("uint32", K.tvm_warp_activemask())
-                K.ptx.mov.b32(
+            sqr_part = txl.alloc_local((2,), "float32")
+            txl.ptx.mov.b32(sqr_part[0], sqr0[0] + sqr0[1])
+            txl.ptx.mov.b32(sqr_part[1], sqr1[0] + sqr1[1])
+            with txl.serial(2) as spa:
+                reduce_mask = local("uint32", txl.tvm_warp_activemask())
+                txl.ptx.mov.b32(
                     sqr_part[spa],
                     sqr_part[spa]
-                    + K.tvm_warp_shuffle_xor(reduce_mask[0], sqr_part[spa], 1, 32, 32),
+                    + txl.tvm_warp_shuffle_xor(reduce_mask[0], sqr_part[spa], 1, 32, 32),
                 )
-                K.ptx.mov.b32(
+                txl.ptx.mov.b32(
                     sqr_part[spa],
                     sqr_part[spa]
-                    + K.tvm_warp_shuffle_xor(reduce_mask[0], sqr_part[spa], 2, 32, 32),
+                    + txl.tvm_warp_shuffle_xor(reduce_mask[0], sqr_part[spa], 2, 32, 32),
                 )
             reduced0 = local("float32", sqr_part[0])
             reduced1 = local("float32", sqr_part[1])
             m_idx0 = local(
                 "uint32",
-                m_block_idx[0] * K.uint32(block_m)
-                + sub_warp_idx[0] * K.uint32(block_m // 4)
-                + lane_u32[0] // K.uint32(4),
+                m_block_idx[0] * txl.uint32(block_m)
+                + sub_warp_idx[0] * txl.uint32(block_m // 4)
+                + lane_u32[0] // txl.uint32(4),
             )
-            m_idx1 = local("uint32", m_idx0[0] + K.uint32(8))
-            with K.If((lane_u32[0] % K.uint32(4)) == K.uint32(0)), K.Then():
-                with K.If(m_idx0[0] < shape_m), K.Then():
-                    K.ptx.st.global_.f32(
-                        sqr_sum.ptr_to([K.cast(m_offset[0] + m_idx0[0], "int32")]), reduced0[0]
+            m_idx1 = local("uint32", m_idx0[0] + txl.uint32(8))
+            with txl.If((lane_u32[0] % txl.uint32(4)) == txl.uint32(0)), txl.Then():
+                with txl.If(m_idx0[0] < shape_m), txl.Then():
+                    txl.ptx.st.global_.f32(
+                        sqr_sum.ptr_to([txl.cast(m_offset[0] + m_idx0[0], "int32")]), reduced0[0]
                     )
-                with K.If(m_idx1[0] < shape_m), K.Then():
-                    K.ptx.st.global_.f32(
-                        sqr_sum.ptr_to([K.cast(m_offset[0] + m_idx1[0], "int32")]), reduced1[0]
+                with txl.If(m_idx1[0] < shape_m), txl.Then():
+                    txl.ptx.st.global_.f32(
+                        sqr_sum.ptr_to([txl.cast(m_offset[0] + m_idx1[0], "int32")]), reduced1[0]
                     )
 
-    # orig:L981-989 -- @K.kernel has no attrs= parameter, so the launch-param
+    # orig:L981-989 -- @txl.kernel has no attrs= parameter, so the launch-param
     # attribute is attached to the PrimFunc afterwards (entry.py documents
     # ``func`` as a plain attribute and ``Kernel.mod`` reads it).
     sm100_tf32_hc_prenorm_gemm.func = sm100_tf32_hc_prenorm_gemm.func.with_attr(

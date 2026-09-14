@@ -99,10 +99,10 @@ advancement, register-budget changes, TensorMap replacement, and TMEM lifetime
 operations are scheduling actions rather than computation primitives.
 
 The implementation may import device language only as
-`import tirx_kernels.kern as K`.  It may not use `T`, `Tx`, `I`,
+`import tirx_kernels.tirx_lite as txl`.  It may not use `T`, `Tx`, `I`,
 `tirx.tile.*`, a categorized tile primitive, `TilePrimitiveCall`, any
 first-class layout, or rank>1 SMEM.  The single rank-1 `u8` arena is the only
-shared-memory declaration.  `K.smem_pool(base=arena)` allocates only the
+shared-memory declaration.  `txl.smem_pool(base=arena)` allocates only the
 protocol/header prefix; all payload mappings use integer byte arithmetic and
 raw SMEM/TMEM descriptors.
 

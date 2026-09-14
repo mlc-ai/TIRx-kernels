@@ -48,7 +48,7 @@ In scope:
 | input presentation | BHSD / BSHD | BSHD is made contiguous as BHSD by the wrapper before either timed launch; producer addressing is the same |
 | sparse count | fixed / per-Q-block variable | fixed reads one scalar; variable loads `block_nums[b,h,qb]`; the latter may specialize an empty-tile branch |
 | block tail mask | present / absent | present loads physical `block_sizes[block_id]`; absent substitutes 64 without a GMEM access |
-| scheduling | static / CLC | static uses ordinary `K.cta_id()`; CLC explicitly calls `K.cta_id_in_cluster([1,1,1])` and dedicates warp 15 to cluster launch control |
+| scheduling | static / CLC | static uses ordinary `txl.cta_id()`; CLC explicitly calls `txl.cta_id_in_cluster([1,1,1])` and dedicates warp 15 to cluster launch control |
 | split-KV | 1..256, including wrapper `auto` | values greater than one produce FP32 partial O/LSE, disable CLC, and launch the independent 128-thread combine |
 | K/V stride width | normal i32 / active i64 | only the K/V global address and TensorMap stride path widens; normal metadata and loop counters stay i32 |
 | output dtype | BF16 final / FP32 producer partial | FP32 only when split-KV is active; final combine converts to BF16 |
@@ -1348,7 +1348,7 @@ The public module exports `KERNEL_META`, `CONFIGS`, `BENCH_CONFIGS`,
 `get_kernel`, `prepare_data`, `prepare_bench`, `run_test`, `run_gpu`, and
 `run_bench` following repository conventions. `get_kernel` returns one PrimFunc
 for `kv_splits=1` and producer plus combine for `kv_splits>1`. Device code uses
-`import tirx_kernels.kern as K` exclusively.
+`import tirx_kernels.tirx_lite as txl` exclusively.
 
 Correctness is the module's fixed 35-row matrix: BHSD/BSHD, Q tails 1/63/65,
 masked/unmasked, custom scale, fixed/variable/empty counts, static/CLC,

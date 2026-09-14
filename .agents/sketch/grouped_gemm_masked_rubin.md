@@ -257,9 +257,9 @@ contained within the corresponding semantic copy/compute row.
 
 ## Non-negotiable implementation constraints
 
-- Implement only with `import tirx_kernels.kern as K`; no handwritten PrimFunc
-  body, first-class layout API, `K.cuda.func_call`, inline CUDA function call,
-  or change under `tirx_kernels/kern/`.
+- Implement only with `import tirx_kernels.tirx_lite as txl`; no handwritten PrimFunc
+  body, first-class layout API, `txl.cuda.func_call`, inline CUDA function call,
+  or change under `tirx_kernels/tirx_lite/`.
 - Preserve the strict masked-row guard, persistent advance, exact pipeline
   stages/phases, warp roles, TMA/TMEM operations, optional alpha and signal
   branches, and source output bytes.

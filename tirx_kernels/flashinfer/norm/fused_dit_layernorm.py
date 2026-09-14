@@ -14,7 +14,7 @@ public interfaces are in ``csrc/norm.cu``, ``csrc/flashinfer_norm_binding.cu``,
 import functools
 from typing import Any
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 from tirx_kernels.flashinfer.utils.fp_quant import cvt_e2m1x8
 from tirx_kernels.runner import bench
 
@@ -48,53 +48,53 @@ _BF16_GUARD = 7.25
 
 
 def _load_global_bf16x8(buffer, index):
-    words = K.alloc_local((4,), "uint32")
-    values = K.alloc_local((8,), "float32")
-    bits = K.alloc_local((8,), "uint16")
-    K.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
+    words = txl.alloc_local((4,), "uint32")
+    values = txl.alloc_local((8,), "float32")
+    bits = txl.alloc_local((8,), "uint16")
+    txl.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
     for pair in range(4):
-        K.ptx.mov.b32(bits[pair * 2], bits[pair * 2 + 1], words[pair])
-        K.ptx.cvt.f32.bf16(values[pair * 2], bits[pair * 2])
-        K.ptx.cvt.f32.bf16(values[pair * 2 + 1], bits[pair * 2 + 1])
+        txl.ptx.mov.b32(bits[pair * 2], bits[pair * 2 + 1], words[pair])
+        txl.ptx.cvt.f32.bf16(values[pair * 2], bits[pair * 2])
+        txl.ptx.cvt.f32.bf16(values[pair * 2 + 1], bits[pair * 2 + 1])
     return values
 
 
 def _load_global_f32x8(buffer, index):
-    words = K.alloc_local((4,), "uint64")
-    values = K.alloc_local((8,), "float32")
-    K.ptx.ld.global_.v4.b64(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
+    words = txl.alloc_local((4,), "uint64")
+    values = txl.alloc_local((8,), "float32")
+    txl.ptx.ld.global_.v4.b64(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
     for pair in range(4):
-        K.ptx.mov.b64(values[pair * 2], values[pair * 2 + 1], words[pair])
+        txl.ptx.mov.b64(values[pair * 2], values[pair * 2 + 1], words[pair])
     return values
 
 
 def _load_global_f32(buffer, index):
-    value = K.alloc_local((1,), "float32")
-    K.ptx.ld.global_.b32(value[0], buffer.ptr_to([index]))
+    value = txl.alloc_local((1,), "float32")
+    txl.ptx.ld.global_.b32(value[0], buffer.ptr_to([index]))
     return value[0]
 
 
 def _pack_f32x2(low, high):
-    packed = K.alloc_local((1,), "uint64")
-    K.ptx.mov.b64(packed[0], low, high)
+    packed = txl.alloc_local((1,), "uint64")
+    txl.ptx.mov.b64(packed[0], low, high)
     return packed[0]
 
 
 def _unpack_f32x2(packed):
-    values = K.alloc_local((2,), "float32")
-    K.ptx.mov.b64(values[0], values[1], packed)
+    values = txl.alloc_local((2,), "float32")
+    txl.ptx.mov.b64(values[0], values[1], packed)
     return values
 
 
 def _f32x2_binary(chain: str, lhs_low, lhs_high, rhs_low, rhs_high):
-    out = K.alloc_local((1,), "uint64")
-    K.ptx[chain](out[0], _pack_f32x2(lhs_low, lhs_high), _pack_f32x2(rhs_low, rhs_high))
+    out = txl.alloc_local((1,), "uint64")
+    txl.ptx[chain](out[0], _pack_f32x2(lhs_low, lhs_high), _pack_f32x2(rhs_low, rhs_high))
     return _unpack_f32x2(out[0])
 
 
 def _f32x2_fma(lhs_low, lhs_high, rhs_low, rhs_high, acc_low, acc_high):
-    out = K.alloc_local((1,), "uint64")
-    K.ptx.fma.rn.ftz.f32x2(
+    out = txl.alloc_local((1,), "uint64")
+    txl.ptx.fma.rn.ftz.f32x2(
         out[0],
         _pack_f32x2(lhs_low, lhs_high),
         _pack_f32x2(rhs_low, rhs_high),
@@ -104,126 +104,130 @@ def _f32x2_fma(lhs_low, lhs_high, rhs_low, rhs_high, acc_low, acc_high):
 
 
 def _add_f32(lhs, rhs):
-    out = K.alloc_local((1,), "float32")
-    K.ptx.add.rn.ftz.f32(out[0], lhs, rhs)
+    out = txl.alloc_local((1,), "float32")
+    txl.ptx.add.rn.ftz.f32(out[0], lhs, rhs)
     return out[0]
 
 
 def _mul_f32(lhs, rhs):
-    out = K.alloc_local((1,), "float32")
-    K.ptx.mul.ftz.f32(out[0], lhs, rhs)
+    out = txl.alloc_local((1,), "float32")
+    txl.ptx.mul.ftz.f32(out[0], lhs, rhs)
     return out[0]
 
 
 def _fma_f32(lhs, rhs, acc):
-    out = K.alloc_local((1,), "float32")
-    K.ptx.fma.rn.ftz.f32(out[0], lhs, rhs, acc)
+    out = txl.alloc_local((1,), "float32")
+    txl.ptx.fma.rn.ftz.f32(out[0], lhs, rhs, acc)
     return out[0]
 
 
 def _neg_f32(value):
-    out = K.alloc_local((1,), "float32")
-    K.ptx.neg.ftz.f32(out[0], value)
+    out = txl.alloc_local((1,), "float32")
+    txl.ptx.neg.ftz.f32(out[0], value)
     return out[0]
 
 
 def _max_f32(lhs, rhs):
-    out = K.alloc_local((1,), "float32")
-    K.ptx.max.ftz.f32(out[0], lhs, rhs)
+    out = txl.alloc_local((1,), "float32")
+    txl.ptx.max.ftz.f32(out[0], lhs, rhs)
     return out[0]
 
 
 def _rcp_f32(value):
-    out = K.alloc_local((1,), "float32")
-    K.ptx.rcp.approx.ftz.f32(out[0], value)
+    out = txl.alloc_local((1,), "float32")
+    txl.ptx.rcp.approx.ftz.f32(out[0], value)
     return out[0]
 
 
 def _rsqrt_accurate(value, result):
     """Transcribe the SM100 ``__frsqrt_rn`` expansion from fresh source PTX."""
-    bits: K.int32 = K.reinterpret("int32", value)
-    adjusted = K.alloc_local((1,), "int32")
-    K.ptx.add.s32(adjusted[0], bits, K.int32(-0x00800000))
-    with K.If(K.reinterpret("uint32", adjusted[0]) <= K.uint32(0x7EFFFFFF)):
-        with K.Then():
-            mantissa = K.alloc_local((1,), "uint32")
-            normalized_bits = K.alloc_local((1,), "uint32")
-            exponent_adjust = K.alloc_local((1,), "int32")
-            K.ptx.and_.b32(mantissa[0], K.reinterpret("uint32", bits), 0x00FFFFFF)
-            K.ptx.or_.b32(normalized_bits[0], mantissa[0], K.uint32(0x3F000000))
-            K.ptx.sub.s32(exponent_adjust[0], K.reinterpret("int32", normalized_bits[0]), bits)
-            normalized: K.float32 = K.reinterpret("float32", normalized_bits[0])
-            seed = K.alloc_local((1,), "float32")
-            K.ptx.rsqrt.approx.ftz.f32(seed[0], normalized)
-            seed_sq: K.float32 = _mul_f32(seed[0], seed[0])
-            correction0: K.float32 = _fma_f32(seed[0], seed[0], _neg_f32(seed_sq))
-            neg_normalized: K.float32 = _neg_f32(normalized)
-            correction1: K.float32 = _fma_f32(seed_sq, neg_normalized, K.float32(1.0))
-            correction2: K.float32 = _fma_f32(correction0, neg_normalized, correction1)
-            correction3: K.float32 = _fma_f32(correction2, K.float32(0.375), K.float32(0.5))
-            correction4: K.float32 = _mul_f32(seed[0], correction2)
-            refined: K.float32 = _fma_f32(correction3, correction4, seed[0])
-            half_adjust = K.alloc_local((1,), "int32")
-            result_bits = K.alloc_local((1,), "int32")
-            K.ptx.shr.s32(half_adjust[0], exponent_adjust[0], K.uint32(1))
-            K.ptx.add.s32(result_bits[0], half_adjust[0], K.reinterpret("int32", refined))
-            K.assign(result[0], K.reinterpret("float32", K.reinterpret("uint32", result_bits[0])))
-        with K.Else():
-            K.ptx.rsqrt.approx.ftz.f32(result[0], value)
+    bits: txl.int32 = txl.reinterpret("int32", value)
+    adjusted = txl.alloc_local((1,), "int32")
+    txl.ptx.add.s32(adjusted[0], bits, txl.int32(-0x00800000))
+    with txl.If(txl.reinterpret("uint32", adjusted[0]) <= txl.uint32(0x7EFFFFFF)):
+        with txl.Then():
+            mantissa = txl.alloc_local((1,), "uint32")
+            normalized_bits = txl.alloc_local((1,), "uint32")
+            exponent_adjust = txl.alloc_local((1,), "int32")
+            txl.ptx.and_.b32(mantissa[0], txl.reinterpret("uint32", bits), 0x00FFFFFF)
+            txl.ptx.or_.b32(normalized_bits[0], mantissa[0], txl.uint32(0x3F000000))
+            txl.ptx.sub.s32(exponent_adjust[0], txl.reinterpret("int32", normalized_bits[0]), bits)
+            normalized: txl.float32 = txl.reinterpret("float32", normalized_bits[0])
+            seed = txl.alloc_local((1,), "float32")
+            txl.ptx.rsqrt.approx.ftz.f32(seed[0], normalized)
+            seed_sq: txl.float32 = _mul_f32(seed[0], seed[0])
+            correction0: txl.float32 = _fma_f32(seed[0], seed[0], _neg_f32(seed_sq))
+            neg_normalized: txl.float32 = _neg_f32(normalized)
+            correction1: txl.float32 = _fma_f32(seed_sq, neg_normalized, txl.float32(1.0))
+            correction2: txl.float32 = _fma_f32(correction0, neg_normalized, correction1)
+            correction3: txl.float32 = _fma_f32(correction2, txl.float32(0.375), txl.float32(0.5))
+            correction4: txl.float32 = _mul_f32(seed[0], correction2)
+            refined: txl.float32 = _fma_f32(correction3, correction4, seed[0])
+            half_adjust = txl.alloc_local((1,), "int32")
+            result_bits = txl.alloc_local((1,), "int32")
+            txl.ptx.shr.s32(half_adjust[0], exponent_adjust[0], txl.uint32(1))
+            txl.ptx.add.s32(result_bits[0], half_adjust[0], txl.reinterpret("int32", refined))
+            txl.assign(
+                result[0], txl.reinterpret("float32", txl.reinterpret("uint32", result_bits[0]))
+            )
+        with txl.Else():
+            txl.ptx.rsqrt.approx.ftz.f32(result[0], value)
 
 
 def _pack_bf16x8(values):
-    words = K.alloc_local((4,), "uint32")
+    words = txl.alloc_local((4,), "uint32")
     for pair in range(4):
-        K.ptx.cvt.rn.bf16x2.f32(words[pair], values[pair * 2 + 1], values[pair * 2])
+        txl.ptx.cvt.rn.bf16x2.f32(words[pair], values[pair * 2 + 1], values[pair * 2])
     return words
 
 
 def _store_global_v4_b32(buffer, index, words):
-    K.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
+    txl.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
 
 
 def _store_generic_v4_b32(buffer, index, words):
-    K.ptx.st.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
+    txl.ptx.st.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
 
 
 def _abs_bf16x2(value):
-    out = K.alloc_local((1,), "uint32")
-    K.ptx.abs.bf16x2(out[0], value)
+    out = txl.alloc_local((1,), "uint32")
+    txl.ptx.abs.bf16x2(out[0], value)
     return out[0]
 
 
 def _max_bf16x2(lhs, rhs):
-    out = K.alloc_local((1,), "uint32")
-    K.ptx.max.bf16x2(out[0], lhs, rhs)
+    out = txl.alloc_local((1,), "uint32")
+    txl.ptx.max.bf16x2(out[0], lhs, rhs)
     return out[0]
 
 
 def _shfl_xor_u32(value, lane_xor: int):
-    out = K.alloc_local((1,), "uint32")
-    K.ptx.shfl_sync.bfly.b32(out[0], value, K.uint32(lane_xor), K.uint32(31), K.uint32(_FULL_MASK))
+    out = txl.alloc_local((1,), "uint32")
+    txl.ptx.shfl_sync.bfly.b32(
+        out[0], value, txl.uint32(lane_xor), txl.uint32(31), txl.uint32(_FULL_MASK)
+    )
     return out[0]
 
 
 def _bf16x2_horizontal_max_to_f32(value):
-    bits = K.alloc_local((2,), "uint16")
-    maximum = K.alloc_local((1,), "uint16")
-    out = K.alloc_local((1,), "float32")
-    K.ptx.mov.b32(bits[0], bits[1], value)
-    K.ptx.max.bf16(maximum[0], bits[0], bits[1])
-    K.ptx.cvt.f32.bf16(out[0], maximum[0])
+    bits = txl.alloc_local((2,), "uint16")
+    maximum = txl.alloc_local((1,), "uint16")
+    out = txl.alloc_local((1,), "float32")
+    txl.ptx.mov.b32(bits[0], bits[1], value)
+    txl.ptx.max.bf16(maximum[0], bits[0], bits[1])
+    txl.ptx.cvt.f32.bf16(out[0], maximum[0])
     return out[0]
 
 
 def _quant_group_max(words, output_format: str):
-    maximum: K.uint32 = _abs_bf16x2(words[0])
-    next_value: K.uint32 = _abs_bf16x2(words[1])
+    maximum: txl.uint32 = _abs_bf16x2(words[0])
+    next_value: txl.uint32 = _abs_bf16x2(words[1])
     maximum = _max_bf16x2(maximum, next_value)
     next_value = _abs_bf16x2(words[2])
     maximum = _max_bf16x2(maximum, next_value)
     next_value = _abs_bf16x2(words[3])
     maximum = _max_bf16x2(maximum, next_value)
-    peer: K.uint32 = _shfl_xor_u32(maximum, 1)
+    peer: txl.uint32 = _shfl_xor_u32(maximum, 1)
     maximum = _max_bf16x2(peer, maximum)
     if output_format == "mxfp8":
         peer = _shfl_xor_u32(maximum, 2)
@@ -232,103 +236,104 @@ def _quant_group_max(words, output_format: str):
 
 
 def _widen_and_scale_bf16x8(words, scale):
-    bits = K.alloc_local((8,), "uint16")
-    widened = K.alloc_local((8,), "float32")
-    values = K.alloc_local((8,), "float32")
+    bits = txl.alloc_local((8,), "uint16")
+    widened = txl.alloc_local((8,), "float32")
+    values = txl.alloc_local((8,), "float32")
     for pair in range(4):
-        K.ptx.mov.b32(bits[pair * 2], bits[pair * 2 + 1], words[pair])
-        K.ptx.cvt.f32.bf16(widened[pair * 2], bits[pair * 2])
-        K.ptx.cvt.f32.bf16(widened[pair * 2 + 1], bits[pair * 2 + 1])
-        K.ptx.mul.ftz.f32(values[pair * 2], widened[pair * 2], scale)
-        K.ptx.mul.ftz.f32(values[pair * 2 + 1], widened[pair * 2 + 1], scale)
+        txl.ptx.mov.b32(bits[pair * 2], bits[pair * 2 + 1], words[pair])
+        txl.ptx.cvt.f32.bf16(widened[pair * 2], bits[pair * 2])
+        txl.ptx.cvt.f32.bf16(widened[pair * 2 + 1], bits[pair * 2 + 1])
+        txl.ptx.mul.ftz.f32(values[pair * 2], widened[pair * 2], scale)
+        txl.ptx.mul.ftz.f32(values[pair * 2 + 1], widened[pair * 2 + 1], scale)
     return values
 
 
 def _sf_offset(batch, row, col, runtime_num_rows, num_k_tiles: int):
     return (
-        K.cast(batch, "int64")
-        * K.ceildiv(K.cast(runtime_num_rows, "int64"), K.int64(128))
-        * K.int64(num_k_tiles * 512)
-        + K.truncdiv(K.cast(row, "int64"), K.int64(128)) * K.int64(num_k_tiles * 512)
-        + K.truncdiv(K.cast(col, "int64"), K.int64(4)) * K.int64(512)
-        + K.truncmod(K.cast(row, "int64"), K.int64(32)) * K.int64(16)
-        + K.truncdiv(K.truncmod(K.cast(row, "int64"), K.int64(128)), K.int64(32)) * K.int64(4)
-        + K.truncmod(K.cast(col, "int64"), K.int64(4))
+        txl.cast(batch, "int64")
+        * txl.ceildiv(txl.cast(runtime_num_rows, "int64"), txl.int64(128))
+        * txl.int64(num_k_tiles * 512)
+        + txl.truncdiv(txl.cast(row, "int64"), txl.int64(128)) * txl.int64(num_k_tiles * 512)
+        + txl.truncdiv(txl.cast(col, "int64"), txl.int64(4)) * txl.int64(512)
+        + txl.truncmod(txl.cast(row, "int64"), txl.int64(32)) * txl.int64(16)
+        + txl.truncdiv(txl.truncmod(txl.cast(row, "int64"), txl.int64(128)), txl.int64(32))
+        * txl.int64(4)
+        + txl.truncmod(txl.cast(col, "int64"), txl.int64(4))
     )
 
 
 def _store_nvfp4(
     output_words, norm_output, sf_output, output_sf_scale, batch, row, tid, runtime_num_rows
 ):
-    global_scale: K.float32 = _load_global_f32(output_sf_scale, K.int64(0))
-    vec_max: K.float32 = _quant_group_max(output_words, "nvfp4")
-    sf_value: K.float32 = _mul_f32(global_scale, _mul_f32(vec_max, _rcp_f32(K.float32(6.0))))
-    sf_pair = K.alloc_local((1,), "uint16")
-    K.ptx.cvt.rn.satfinite.e4m3x2.f32(sf_pair[0], K.float32(0.0), sf_value)
-    sf_col: K.int32 = tid // 2
-    sf_offset: K.int64 = _sf_offset(batch, row, sf_col, runtime_num_rows, 48)
-    K.ptx.st.global_.b8(sf_output.ptr_to([sf_offset]), K.cast(sf_pair[0], "uint8"))
+    global_scale: txl.float32 = _load_global_f32(output_sf_scale, txl.int64(0))
+    vec_max: txl.float32 = _quant_group_max(output_words, "nvfp4")
+    sf_value: txl.float32 = _mul_f32(global_scale, _mul_f32(vec_max, _rcp_f32(txl.float32(6.0))))
+    sf_pair = txl.alloc_local((1,), "uint16")
+    txl.ptx.cvt.rn.satfinite.e4m3x2.f32(sf_pair[0], txl.float32(0.0), sf_value)
+    sf_col: txl.int32 = tid // 2
+    sf_offset: txl.int64 = _sf_offset(batch, row, sf_col, runtime_num_rows, 48)
+    txl.ptx.st.global_.b8(sf_output.ptr_to([sf_offset]), txl.cast(sf_pair[0], "uint8"))
 
-    output_scale = K.local_scalar(K.f32, init=K.float32(0.0))
-    with K.If(vec_max != K.float32(0.0)), K.Then():
-        sf_low = K.alloc_local((1,), "uint16")
-        decoded_pair = K.alloc_local((1,), "uint32")
-        decoded_low = K.alloc_local((1,), "uint16")
-        decoded = K.alloc_local((1,), "float32")
-        K.ptx.and_.b16(sf_low[0], sf_pair[0], K.uint16(0x00FF))
-        K.ptx.cvt.rn.f16x2.e4m3x2(decoded_pair[0], sf_low[0])
-        K.ptx.cvt.u16.u32(decoded_low[0], decoded_pair[0])
-        K.ptx.cvt.f32.f16(decoded[0], decoded_low[0])
-        decoded_over_global: K.float32 = _mul_f32(decoded[0], _rcp_f32(global_scale))
-        K.ptx.rcp.approx.ftz.f32(output_scale, decoded_over_global)
+    output_scale = txl.local_scalar(txl.f32, init=txl.float32(0.0))
+    with txl.If(vec_max != txl.float32(0.0)), txl.Then():
+        sf_low = txl.alloc_local((1,), "uint16")
+        decoded_pair = txl.alloc_local((1,), "uint32")
+        decoded_low = txl.alloc_local((1,), "uint16")
+        decoded = txl.alloc_local((1,), "float32")
+        txl.ptx.and_.b16(sf_low[0], sf_pair[0], txl.uint16(0x00FF))
+        txl.ptx.cvt.rn.f16x2.e4m3x2(decoded_pair[0], sf_low[0])
+        txl.ptx.cvt.u16.u32(decoded_low[0], decoded_pair[0])
+        txl.ptx.cvt.f32.f16(decoded[0], decoded_low[0])
+        decoded_over_global: txl.float32 = _mul_f32(decoded[0], _rcp_f32(global_scale))
+        txl.ptx.rcp.approx.ftz.f32(output_scale, decoded_over_global)
 
     scaled = _widen_and_scale_bf16x8(output_words, output_scale)
-    packed: K.uint32 = cvt_e2m1x8([scaled[value] for value in range(8)])
-    global_row: K.int64 = K.cast(batch, "int64") * K.cast(runtime_num_rows, "int64") + K.cast(
-        row, "int64"
-    )
-    K.ptx.st.b32(norm_output.ptr_to([global_row * K.int64(384) + tid]), packed)
+    packed: txl.uint32 = cvt_e2m1x8([scaled[value] for value in range(8)])
+    global_row: txl.int64 = txl.cast(batch, "int64") * txl.cast(
+        runtime_num_rows, "int64"
+    ) + txl.cast(row, "int64")
+    txl.ptx.st.b32(norm_output.ptr_to([global_row * txl.int64(384) + tid]), packed)
 
 
 def _store_mxfp8(output_words, norm_output, sf_output, batch, row, tid, runtime_num_rows):
-    vec_max: K.float32 = _quant_group_max(output_words, "mxfp8")
-    sf_value: K.float32 = _mul_f32(vec_max, _rcp_f32(K.float32(448.0)))
-    sf_pair = K.alloc_local((1,), "uint16")
-    K.ptx.cvt.rp.satfinite.ue8m0x2.f32(sf_pair[0], K.float32(0.0), sf_value)
+    vec_max: txl.float32 = _quant_group_max(output_words, "mxfp8")
+    sf_value: txl.float32 = _mul_f32(vec_max, _rcp_f32(txl.float32(448.0)))
+    sf_pair = txl.alloc_local((1,), "uint16")
+    txl.ptx.cvt.rp.satfinite.ue8m0x2.f32(sf_pair[0], txl.float32(0.0), sf_value)
 
-    output_scale = K.local_scalar(K.f32, init=K.float32(0.0))
-    with K.If(vec_max != K.float32(0.0)), K.Then():
-        sf_low = K.alloc_local((1,), "uint16")
-        decoded_pair = K.alloc_local((1,), "uint32")
-        decoded_bits = K.alloc_local((1,), "uint32")
-        K.ptx.and_.b16(sf_low[0], sf_pair[0], K.uint16(0x00FF))
-        K.ptx.cvt.rn.bf16x2.ue8m0x2(decoded_pair[0], sf_low[0])
-        K.ptx.shl.b32(decoded_bits[0], decoded_pair[0], K.uint32(16))
-        K.ptx.rcp.approx.ftz.f32(output_scale, K.reinterpret("float32", decoded_bits[0]))
+    output_scale = txl.local_scalar(txl.f32, init=txl.float32(0.0))
+    with txl.If(vec_max != txl.float32(0.0)), txl.Then():
+        sf_low = txl.alloc_local((1,), "uint16")
+        decoded_pair = txl.alloc_local((1,), "uint32")
+        decoded_bits = txl.alloc_local((1,), "uint32")
+        txl.ptx.and_.b16(sf_low[0], sf_pair[0], txl.uint16(0x00FF))
+        txl.ptx.cvt.rn.bf16x2.ue8m0x2(decoded_pair[0], sf_low[0])
+        txl.ptx.shl.b32(decoded_bits[0], decoded_pair[0], txl.uint32(16))
+        txl.ptx.rcp.approx.ftz.f32(output_scale, txl.reinterpret("float32", decoded_bits[0]))
 
-    sf_col: K.int32 = tid // 4
-    sf_offset: K.int64 = _sf_offset(batch, row, sf_col, runtime_num_rows, 24)
-    K.ptx.st.global_.b8(sf_output.ptr_to([sf_offset]), K.cast(sf_pair[0], "uint8"))
+    sf_col: txl.int32 = tid // 4
+    sf_offset: txl.int64 = _sf_offset(batch, row, sf_col, runtime_num_rows, 24)
+    txl.ptx.st.global_.b8(sf_output.ptr_to([sf_offset]), txl.cast(sf_pair[0], "uint8"))
 
     scaled = _widen_and_scale_bf16x8(output_words, output_scale)
-    pairs = K.alloc_local((4,), "uint16")
-    wide = K.alloc_local((4,), "uint64")
+    pairs = txl.alloc_local((4,), "uint16")
+    wide = txl.alloc_local((4,), "uint64")
     for pair in range(4):
-        K.ptx.cvt.rn.satfinite.e4m3x2.f32(pairs[pair], scaled[pair * 2 + 1], scaled[pair * 2])
-        K.ptx.cvt.u64.u16(wide[pair], pairs[pair])
-    shifted = K.alloc_local((3,), "uint64")
-    packed = K.alloc_local((1,), "uint64")
-    K.ptx.shl.b64(shifted[0], wide[1], K.uint32(16))
-    K.ptx.or_.b64(packed[0], wide[0], shifted[0])
-    K.ptx.shl.b64(shifted[1], wide[2], K.uint32(32))
-    K.ptx.or_.b64(packed[0], packed[0], shifted[1])
-    K.ptx.shl.b64(shifted[2], wide[3], K.uint32(48))
-    K.ptx.or_.b64(packed[0], packed[0], shifted[2])
-    global_row: K.int64 = K.cast(batch, "int64") * K.cast(runtime_num_rows, "int64") + K.cast(
-        row, "int64"
-    )
-    K.ptx.st.b64(
-        norm_output.ptr_to([global_row * K.int64(768) + K.cast(tid * 2, "int64")]), packed[0]
+        txl.ptx.cvt.rn.satfinite.e4m3x2.f32(pairs[pair], scaled[pair * 2 + 1], scaled[pair * 2])
+        txl.ptx.cvt.u64.u16(wide[pair], pairs[pair])
+    shifted = txl.alloc_local((3,), "uint64")
+    packed = txl.alloc_local((1,), "uint64")
+    txl.ptx.shl.b64(shifted[0], wide[1], txl.uint32(16))
+    txl.ptx.or_.b64(packed[0], wide[0], shifted[0])
+    txl.ptx.shl.b64(shifted[1], wide[2], txl.uint32(32))
+    txl.ptx.or_.b64(packed[0], packed[0], shifted[1])
+    txl.ptx.shl.b64(shifted[2], wide[3], txl.uint32(48))
+    txl.ptx.or_.b64(packed[0], packed[0], shifted[2])
+    global_row: txl.int64 = txl.cast(batch, "int64") * txl.cast(
+        runtime_num_rows, "int64"
+    ) + txl.cast(row, "int64")
+    txl.ptx.st.b64(
+        norm_output.ptr_to([global_row * txl.int64(768) + txl.cast(tid * 2, "int64")]), packed[0]
     )
 
 
@@ -508,76 +513,78 @@ def get_kernel(
     elif output_format == "mxfp8":
         sf_k_tiles = (_HIDDEN_SIZE + 127) // 128
 
-    @K.kernel(warps=_BLOCK_SIZE // 32, arch="sm_100a", grid="runtime_num_rows")
+    @txl.kernel(warps=_BLOCK_SIZE // 32, arch="sm_100a", grid="runtime_num_rows")
     def flashinfer_fused_dit_layernorm(
-        input_buffer: K.gptr[K.bf16],
-        residual_buffer: K.gptr[K.bf16],
-        gate_buffer: K.gptr[K.bf16],
-        gate_bias_buffer: K.gptr[K.f32],
-        gamma_buffer: K.gptr[K.f32],
-        beta_buffer: K.gptr[K.f32],
-        scale_buffer: K.gptr[K.bf16],
-        scale_bias_buffer: K.gptr[K.f32],
-        shift_buffer: K.gptr[K.bf16],
-        shift_bias_buffer: K.gptr[K.f32],
-        residual_output_buffer: K.gptr[K.bf16],
-        norm_output_buffer: K.gptr[norm_dtype],
-        sf_output_buffer: K.gptr[K.u8],
-        output_sf_scale_buffer: K.gptr[K.f32],
-        input_sf_scale_buffer: K.gptr[K.f32],
-        runtime_batch_size: K.i32,
-        runtime_num_rows: K.i32,
-        runtime_epsilon: K.f32,
-        runtime_has_residual: K.i32,
+        input_buffer: txl.gptr[txl.bf16],
+        residual_buffer: txl.gptr[txl.bf16],
+        gate_buffer: txl.gptr[txl.bf16],
+        gate_bias_buffer: txl.gptr[txl.f32],
+        gamma_buffer: txl.gptr[txl.f32],
+        beta_buffer: txl.gptr[txl.f32],
+        scale_buffer: txl.gptr[txl.bf16],
+        scale_bias_buffer: txl.gptr[txl.f32],
+        shift_buffer: txl.gptr[txl.bf16],
+        shift_bias_buffer: txl.gptr[txl.f32],
+        residual_output_buffer: txl.gptr[txl.bf16],
+        norm_output_buffer: txl.gptr[norm_dtype],
+        sf_output_buffer: txl.gptr[txl.u8],
+        output_sf_scale_buffer: txl.gptr[txl.f32],
+        input_sf_scale_buffer: txl.gptr[txl.f32],
+        runtime_batch_size: txl.i32,
+        runtime_num_rows: txl.i32,
+        runtime_epsilon: txl.f32,
+        runtime_has_residual: txl.i32,
     ):
         # TIRX_TRANSCRIBE_START flashinfer_fused_dit_layernorm
-        row = K.cta_id()
-        tid = K.thread_id()
-        lane: K.int32 = tid % 32
-        warp: K.int32 = tid // 32
+        row = txl.cta_id()
+        tid = txl.thread_id()
+        lane: txl.int32 = tid % 32
+        warp: txl.int32 = tid // 32
 
-        reduce_store = K.alloc_buffer((120,), "uint8", scope="shared", align=8)
-        shared_mean = K.alloc_buffer((8,), "uint8", scope="shared", align=8)
-        shared_inv_std = K.alloc_buffer((8,), "uint8", scope="shared", align=8)
+        reduce_store = txl.alloc_buffer((120,), "uint8", scope="shared", align=8)
+        shared_mean = txl.alloc_buffer((8,), "uint8", scope="shared", align=8)
+        shared_inv_std = txl.alloc_buffer((8,), "uint8", scope="shared", align=8)
 
         if use_input_sf_scale:
-            input_scale: K.float32 = _load_global_f32(input_sf_scale_buffer, K.int64(0))
+            input_scale: txl.float32 = _load_global_f32(input_sf_scale_buffer, txl.int64(0))
         else:
-            input_scale: K.float32 = K.float32(1.0)
+            input_scale: txl.float32 = txl.float32(1.0)
 
         if mode == "grgb":
-            gamma_values = _load_global_f32x8(gamma_buffer, K.cast(tid * 8, "int64"))
-            beta_values = _load_global_f32x8(beta_buffer, K.cast(tid * 8, "int64"))
+            gamma_values = _load_global_f32x8(gamma_buffer, txl.cast(tid * 8, "int64"))
+            beta_values = _load_global_f32x8(beta_buffer, txl.cast(tid * 8, "int64"))
         if mode in ("grgb", "grss"):
-            gate_bias_values = _load_global_f32x8(gate_bias_buffer, K.cast(tid * 8, "int64"))
+            gate_bias_values = _load_global_f32x8(gate_bias_buffer, txl.cast(tid * 8, "int64"))
         if mode in ("rss", "grss"):
-            scale_bias_values = _load_global_f32x8(scale_bias_buffer, K.cast(tid * 8, "int64"))
-            shift_bias_values = _load_global_f32x8(shift_bias_buffer, K.cast(tid * 8, "int64"))
+            scale_bias_values = _load_global_f32x8(scale_bias_buffer, txl.cast(tid * 8, "int64"))
+            shift_bias_values = _load_global_f32x8(shift_bias_buffer, txl.cast(tid * 8, "int64"))
 
-        with K.serial(runtime_batch_size, unroll=False) as batch_id:
-            global_row: K.int64 = K.cast(batch_id, "int64") * K.cast(
+        with txl.serial(runtime_batch_size, unroll=False) as batch_id:
+            global_row: txl.int64 = txl.cast(batch_id, "int64") * txl.cast(
                 runtime_num_rows, "int64"
-            ) + K.cast(row, "int64")
-            dense_index: K.int64 = global_row * K.int64(_HIDDEN_SIZE) + K.cast(tid * 8, "int64")
-            auxiliary_index: K.int64 = global_row * K.int64(_AUXILIARY_STRIDE) + K.cast(
+            ) + txl.cast(row, "int64")
+            dense_index: txl.int64 = global_row * txl.int64(_HIDDEN_SIZE) + txl.cast(
+                tid * 8, "int64"
+            )
+            auxiliary_index: txl.int64 = global_row * txl.int64(_AUXILIARY_STRIDE) + txl.cast(
                 tid * 8, "int64"
             )
 
             input_values = _load_global_bf16x8(input_buffer, dense_index)
-            residual_values = K.alloc_local((8,), "float32")
-            with K.If(runtime_has_residual != 0):
-                with K.Then():
+            residual_values = txl.alloc_local((8,), "float32")
+            with txl.If(runtime_has_residual != 0):
+                with txl.Then():
                     loaded_residual = _load_global_bf16x8(residual_buffer, dense_index)
                     for value in range(8):
-                        K.assign(residual_values[value], loaded_residual[value])
-                with K.Else():
+                        txl.assign(residual_values[value], loaded_residual[value])
+                with txl.Else():
                     for value in range(8):
-                        K.assign(residual_values[value], K.float32(0.0))
+                        txl.assign(residual_values[value], txl.float32(0.0))
 
             if mode in ("grgb", "grss"):
                 gate_values = _load_global_bf16x8(gate_buffer, auxiliary_index)
                 if use_input_sf_scale:
-                    biased_gate_values = K.alloc_local((8,), "float32")
+                    biased_gate_values = txl.alloc_local((8,), "float32")
                     for pair in range(4):
                         biased_gate = _f32x2_binary(
                             "add.rn.ftz.f32x2",
@@ -586,9 +593,9 @@ def get_kernel(
                             gate_bias_values[pair * 2],
                             gate_bias_values[pair * 2 + 1],
                         )
-                        K.assign(biased_gate_values[pair * 2], biased_gate[0])
-                        K.assign(biased_gate_values[pair * 2 + 1], biased_gate[1])
-                    scaled_gate_values = K.alloc_local((8,), "float32")
+                        txl.assign(biased_gate_values[pair * 2], biased_gate[0])
+                        txl.assign(biased_gate_values[pair * 2 + 1], biased_gate[1])
+                    scaled_gate_values = txl.alloc_local((8,), "float32")
                     for pair in range(4):
                         scaled_gate = _f32x2_binary(
                             "mul.rn.ftz.f32x2",
@@ -597,8 +604,8 @@ def get_kernel(
                             input_scale,
                             input_scale,
                         )
-                        K.assign(scaled_gate_values[pair * 2], scaled_gate[0])
-                        K.assign(scaled_gate_values[pair * 2 + 1], scaled_gate[1])
+                        txl.assign(scaled_gate_values[pair * 2], scaled_gate[0])
+                        txl.assign(scaled_gate_values[pair * 2 + 1], scaled_gate[1])
                     for pair in range(4):
                         updated = _f32x2_fma(
                             input_values[pair * 2],
@@ -608,8 +615,8 @@ def get_kernel(
                             residual_values[pair * 2],
                             residual_values[pair * 2 + 1],
                         )
-                        K.assign(input_values[pair * 2], updated[0])
-                        K.assign(input_values[pair * 2 + 1], updated[1])
+                        txl.assign(input_values[pair * 2], updated[0])
+                        txl.assign(input_values[pair * 2 + 1], updated[1])
                 else:
                     for pair in range(4):
                         biased_gate = _f32x2_binary(
@@ -627,8 +634,8 @@ def get_kernel(
                             residual_values[pair * 2],
                             residual_values[pair * 2 + 1],
                         )
-                        K.assign(input_values[pair * 2], updated[0])
-                        K.assign(input_values[pair * 2 + 1], updated[1])
+                        txl.assign(input_values[pair * 2], updated[0])
+                        txl.assign(input_values[pair * 2 + 1], updated[1])
             else:
                 if use_input_sf_scale:
                     for pair in range(4):
@@ -640,8 +647,8 @@ def get_kernel(
                             residual_values[pair * 2],
                             residual_values[pair * 2 + 1],
                         )
-                        K.assign(input_values[pair * 2], updated[0])
-                        K.assign(input_values[pair * 2 + 1], updated[1])
+                        txl.assign(input_values[pair * 2], updated[0])
+                        txl.assign(input_values[pair * 2 + 1], updated[1])
                 else:
                     for pair in range(4):
                         updated = _f32x2_binary(
@@ -651,22 +658,22 @@ def get_kernel(
                             residual_values[pair * 2],
                             residual_values[pair * 2 + 1],
                         )
-                        K.assign(input_values[pair * 2], updated[0])
-                        K.assign(input_values[pair * 2 + 1], updated[1])
+                        txl.assign(input_values[pair * 2], updated[0])
+                        txl.assign(input_values[pair * 2 + 1], updated[1])
 
             residual_words = _pack_bf16x8(input_values)
             _store_global_v4_b32(residual_output_buffer, dense_index, residual_words)
 
-            thread_sum = K.local_scalar(K.f32, init=K.float32(0.0))
-            thread_sum_sq = K.local_scalar(K.f32, init=K.float32(0.0))
+            thread_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
+            thread_sum_sq = txl.local_scalar(txl.f32, init=txl.float32(0.0))
             for pair in range(4):
-                K.assign(
+                txl.assign(
                     thread_sum,
                     _add_f32(
                         _add_f32(thread_sum, input_values[pair * 2]), input_values[pair * 2 + 1]
                     ),
                 )
-                K.assign(
+                txl.assign(
                     thread_sum_sq,
                     _fma_f32(
                         input_values[pair * 2 + 1],
@@ -676,91 +683,91 @@ def get_kernel(
                 )
 
             for stage in range(5):
-                delta: K.int32 = 1 << stage
-                peer_sum_word = K.alloc_local((1,), "uint32")
-                peer_sq_word = K.alloc_local((1,), "uint32")
-                K.ptx.shfl_sync.down.b32(
+                delta: txl.int32 = 1 << stage
+                peer_sum_word = txl.alloc_local((1,), "uint32")
+                peer_sq_word = txl.alloc_local((1,), "uint32")
+                txl.ptx.shfl_sync.down.b32(
                     peer_sum_word[0],
-                    K.reinterpret("uint32", thread_sum),
-                    K.cast(delta, "uint32"),
-                    K.uint32(31),
-                    K.uint32(_FULL_MASK),
+                    txl.reinterpret("uint32", thread_sum),
+                    txl.cast(delta, "uint32"),
+                    txl.uint32(31),
+                    txl.uint32(_FULL_MASK),
                 )
-                K.ptx.shfl_sync.down.b32(
+                txl.ptx.shfl_sync.down.b32(
                     peer_sq_word[0],
-                    K.reinterpret("uint32", thread_sum_sq),
-                    K.cast(delta, "uint32"),
-                    K.uint32(31),
-                    K.uint32(_FULL_MASK),
+                    txl.reinterpret("uint32", thread_sum_sq),
+                    txl.cast(delta, "uint32"),
+                    txl.uint32(31),
+                    txl.uint32(_FULL_MASK),
                 )
-                with K.If(lane <= 31 - delta), K.Then():
+                with txl.If(lane <= 31 - delta), txl.Then():
                     reduced = _f32x2_binary(
                         "add.rn.ftz.f32x2",
                         thread_sum,
                         thread_sum_sq,
-                        K.reinterpret("float32", peer_sum_word[0]),
-                        K.reinterpret("float32", peer_sq_word[0]),
+                        txl.reinterpret("float32", peer_sum_word[0]),
+                        txl.reinterpret("float32", peer_sq_word[0]),
                     )
-                    K.assign(thread_sum, reduced[0])
-                    K.assign(thread_sum_sq, reduced[1])
+                    txl.assign(thread_sum, reduced[0])
+                    txl.assign(thread_sum_sq, reduced[1])
 
-            with K.If(lane == 0), K.Then():
-                K.ptx.st.shared.v2.b32(
+            with txl.If(lane == 0), txl.Then():
+                txl.ptx.st.shared.v2.b32(
                     reduce_store.ptr_to([16 + warp * 8]),
-                    K.reinterpret("uint32", thread_sum),
-                    K.reinterpret("uint32", thread_sum_sq),
+                    txl.reinterpret("uint32", thread_sum),
+                    txl.reinterpret("uint32", thread_sum_sq),
                 )
-            K.ptx.bar.sync(K.uint32(0))
+            txl.ptx.bar.sync(txl.uint32(0))
 
-            with K.If(tid == 0), K.Then():
+            with txl.If(tid == 0), txl.Then():
                 for partial_index in range(11):
-                    partial_word = K.alloc_local((1,), "uint64")
-                    K.ptx.ld.shared.b64(
+                    partial_word = txl.alloc_local((1,), "uint64")
+                    txl.ptx.ld.shared.b64(
                         partial_word[0], reduce_store.ptr_to([24 + partial_index * 8])
                     )
                     partial = _unpack_f32x2(partial_word[0])
                     reduced = _f32x2_binary(
                         "add.rn.ftz.f32x2", thread_sum, thread_sum_sq, partial[0], partial[1]
                     )
-                    K.assign(thread_sum, reduced[0])
-                    K.assign(thread_sum_sq, reduced[1])
+                    txl.assign(thread_sum, reduced[0])
+                    txl.assign(thread_sum_sq, reduced[1])
 
-                mean: K.float32 = _mul_f32(thread_sum, K.float32(1.0 / _HIDDEN_SIZE))
-                mean_sq: K.float32 = _mul_f32(thread_sum_sq, K.float32(1.0 / _HIDDEN_SIZE))
-                variance: K.float32 = _fma_f32(_neg_f32(mean), mean, mean_sq)
-                variance = _max_f32(variance, K.float32(0.0))
-                inv_std = K.alloc_local((1,), "float32")
+                mean: txl.float32 = _mul_f32(thread_sum, txl.float32(1.0 / _HIDDEN_SIZE))
+                mean_sq: txl.float32 = _mul_f32(thread_sum_sq, txl.float32(1.0 / _HIDDEN_SIZE))
+                variance: txl.float32 = _fma_f32(_neg_f32(mean), mean, mean_sq)
+                variance = _max_f32(variance, txl.float32(0.0))
+                inv_std = txl.alloc_local((1,), "float32")
                 _rsqrt_accurate(_add_f32(variance, runtime_epsilon), inv_std)
-                K.ptx.st.shared.v2.b32(
+                txl.ptx.st.shared.v2.b32(
                     shared_mean.ptr_to([0]),
-                    K.reinterpret("uint32", mean),
-                    K.reinterpret("uint32", mean),
+                    txl.reinterpret("uint32", mean),
+                    txl.reinterpret("uint32", mean),
                 )
-                K.ptx.st.shared.v2.b32(
+                txl.ptx.st.shared.v2.b32(
                     shared_inv_std.ptr_to([0]),
-                    K.reinterpret("uint32", inv_std[0]),
-                    K.reinterpret("uint32", inv_std[0]),
+                    txl.reinterpret("uint32", inv_std[0]),
+                    txl.reinterpret("uint32", inv_std[0]),
                 )
-            K.ptx.bar.sync(K.uint32(0))
+            txl.ptx.bar.sync(txl.uint32(0))
 
-            mean_word = K.alloc_local((1,), "uint64")
-            inv_std_word = K.alloc_local((1,), "uint64")
-            K.ptx.ld.shared.b64(mean_word[0], shared_mean.ptr_to([0]))
-            K.ptx.ld.shared.b64(inv_std_word[0], shared_inv_std.ptr_to([0]))
+            mean_word = txl.alloc_local((1,), "uint64")
+            inv_std_word = txl.alloc_local((1,), "uint64")
+            txl.ptx.ld.shared.b64(mean_word[0], shared_mean.ptr_to([0]))
+            txl.ptx.ld.shared.b64(inv_std_word[0], shared_inv_std.ptr_to([0]))
             mean_pair = _unpack_f32x2(mean_word[0])
             inv_std_pair = _unpack_f32x2(inv_std_word[0])
 
             for pair in range(4):
                 centered = _f32x2_fma(
-                    K.float32(-1.0),
-                    K.float32(-1.0),
+                    txl.float32(-1.0),
+                    txl.float32(-1.0),
                     mean_pair[0],
                     mean_pair[1],
                     input_values[pair * 2],
                     input_values[pair * 2 + 1],
                 )
-                K.assign(input_values[pair * 2], centered[0])
-                K.assign(input_values[pair * 2 + 1], centered[1])
+                txl.assign(input_values[pair * 2], centered[0])
+                txl.assign(input_values[pair * 2 + 1], centered[1])
 
             if mode == "grgb":
                 for pair in range(4):
@@ -779,8 +786,8 @@ def get_kernel(
                         beta_values[pair * 2],
                         beta_values[pair * 2 + 1],
                     )
-                    K.assign(input_values[pair * 2], normalized[0])
-                    K.assign(input_values[pair * 2 + 1], normalized[1])
+                    txl.assign(input_values[pair * 2], normalized[0])
+                    txl.assign(input_values[pair * 2 + 1], normalized[1])
             else:
                 for pair in range(4):
                     normalized = _f32x2_binary(
@@ -790,8 +797,8 @@ def get_kernel(
                         inv_std_pair[0],
                         inv_std_pair[1],
                     )
-                    K.assign(input_values[pair * 2], normalized[0])
-                    K.assign(input_values[pair * 2 + 1], normalized[1])
+                    txl.assign(input_values[pair * 2], normalized[0])
+                    txl.assign(input_values[pair * 2 + 1], normalized[1])
 
             if mode in ("rss", "grss"):
                 scale_values = _load_global_bf16x8(scale_buffer, auxiliary_index)
@@ -806,8 +813,8 @@ def get_kernel(
                     )
                     affine_scale = _f32x2_binary(
                         "add.rn.ftz.f32x2",
-                        K.float32(1.0),
-                        K.float32(1.0),
+                        txl.float32(1.0),
+                        txl.float32(1.0),
                         biased_scale[0],
                         biased_scale[1],
                     )
@@ -826,8 +833,8 @@ def get_kernel(
                         affine_shift[0],
                         affine_shift[1],
                     )
-                    K.assign(input_values[pair * 2], output_pair[0])
-                    K.assign(input_values[pair * 2 + 1], output_pair[1])
+                    txl.assign(input_values[pair * 2], output_pair[0])
+                    txl.assign(input_values[pair * 2 + 1], output_pair[1])
 
             output_words = _pack_bf16x8(input_values)
             if output_format == "bf16":

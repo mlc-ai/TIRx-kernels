@@ -17,7 +17,7 @@ from unittest import SkipTest
 
 import torch
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 
 KERNEL_META = {
     "name": "tinygemm2_sm100",
@@ -87,11 +87,11 @@ def _require_supported_arch() -> None:
 
 
 def _tma_2d_g2s(dst, tensor_map, x, y, barrier):
-    K.ptx[_TMA_G2S_2D](dst, K.address_of(tensor_map), x, y, barrier)
+    txl.ptx[_TMA_G2S_2D](dst, txl.address_of(tensor_map), x, y, barrier)
 
 
 def _mma_bf16(accum, a_frag, b_frag):
-    K.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
+    txl.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
         accum[0],
         accum[1],
         accum[2],
@@ -110,44 +110,44 @@ def _mma_bf16(accum, a_frag, b_frag):
 
 
 def _materialize(value):
-    local = K.local_scalar(str(value.ty.dtype), init=value)
+    local = txl.local_scalar(str(value.ty.dtype), init=value)
     return local
 
 
 def _make_tinygemm2_kernel(stages: int, use_pdl: bool, grid_x: int, grid_y: int):
-    @K.kernel(warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=(grid_x, grid_y))
+    @txl.kernel(warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=(grid_x, grid_y))
     def tinygemm2_sm100(
-        a_tmap_wt: K.TensorMap,
-        b_tmap_act: K.TensorMap,
-        c_output: K.gptr[K.bf16],
-        d_bias: K.gptr[K.bf16],
-        a_M: K.i32,
-        b_N: K.i32,
-        c_K: K.i32,
+        a_tmap_wt: txl.TensorMap,
+        b_tmap_act: txl.TensorMap,
+        c_output: txl.gptr[txl.bf16],
+        d_bias: txl.gptr[txl.bf16],
+        a_M: txl.i32,
+        b_N: txl.i32,
+        c_K: txl.i32,
     ):
-        block_m_scope, block_n_scope = K.cta_id()
+        block_m_scope, block_n_scope = txl.cta_id()
         # TIRX_TRANSCRIBE_START tinygemm2_sm100
 
-        tid_u32 = _materialize(K.cast(K.thread_id(), "uint32"))
-        tid = _materialize(K.cast(tid_u32, "int32"))
-        warp = K.warp_id()
+        tid_u32 = _materialize(txl.cast(txl.thread_id(), "uint32"))
+        tid = _materialize(txl.cast(tid_u32, "int32"))
+        warp = txl.warp_id()
         lane = _materialize(tid % 32)
-        lane_u32 = _materialize(tid_u32 % K.uint32(32))
+        lane_u32 = _materialize(tid_u32 % txl.uint32(32))
         block_m = _materialize(block_m_scope)
         block_n = _materialize(block_n_scope)
 
         smem_total = 52352 if stages == 4 else 101504
-        smem = K.smem_pool()
-        init_leader = K.local_scalar(K.u32, init=K.uint32(0))
-        weight_ready = K.TMABar(smem, stages, leader=init_leader != K.uint32(0))
-        activation_ready = K.TMABar(smem, stages, leader=init_leader != K.uint32(0))
-        consumed = K.MBarrier(smem, stages, phase_offset=1, leader=init_leader != K.uint32(0))
+        smem = txl.smem_pool()
+        init_leader = txl.local_scalar(txl.u32, init=txl.uint32(0))
+        weight_ready = txl.TMABar(smem, stages, leader=init_leader != txl.uint32(0))
+        activation_ready = txl.TMABar(smem, stages, leader=init_leader != txl.uint32(0))
+        consumed = txl.MBarrier(smem, stages, phase_offset=1, leader=init_leader != txl.uint32(0))
         if smem.bytes != 3 * stages * 8:
             raise AssertionError(f"unexpected TinyGEMM2 barrier header: {smem.bytes}")
-        weight_smem = smem.alloc((stages, 64, 64), K.bf16, swizzle=K.SW128B)
-        activation_smem = smem.alloc((stages, 32, 64), K.bf16, swizzle=K.SW128B)
-        reduction_smem = smem.alloc((128, 4), K.f32, align=16)
-        bias_smem = smem.alloc((BIAS_BYTES // 2,), K.bf16, align=2)
+        weight_smem = smem.alloc((stages, 64, 64), txl.bf16, swizzle=txl.SW128B)
+        activation_smem = smem.alloc((stages, 32, 64), txl.bf16, swizzle=txl.SW128B)
+        reduction_smem = smem.alloc((128, 4), txl.f32, align=16)
+        bias_smem = smem.alloc((BIAS_BYTES // 2,), txl.bf16, align=2)
         expected_used = (
             WT_OFF + stages * (WT_STAGE_BYTES + ACT_STAGE_BYTES) + RED_BYTES + BIAS_BYTES
         )
@@ -157,100 +157,101 @@ def _make_tinygemm2_kernel(stages: int, use_pdl: bool, grid_x: int, grid_y: int)
             )
         smem.commit(smem_total)
 
-        with K.If(tid == 0), K.Then():
-            K.ptx.prefetch.tensormap(K.address_of(a_tmap_wt))
-            K.ptx.prefetch.tensormap(K.address_of(b_tmap_act))
+        with txl.If(tid == 0), txl.Then():
+            txl.ptx.prefetch.tensormap(txl.address_of(a_tmap_wt))
+            txl.ptx.prefetch.tensormap(txl.address_of(b_tmap_act))
 
-        with K.If(warp == 0), K.Then():
-            K.assign(init_leader, K.cuda.elect_sync())
+        with txl.If(warp == 0), txl.Then():
+            txl.assign(init_leader, txl.cuda.elect_sync())
 
         weight_ready.init(1)
         activation_ready.init(1)
         consumed.init(32)
 
-        with K.If(warp == 0), K.Then():
-            K.ptx.fence.mbarrier_init.release.cluster()
+        with txl.If(warp == 0), txl.Then():
+            txl.ptx.fence.mbarrier_init.release.cluster()
 
-        K.ptx.bar.sync(K.uint32(0))
-        K.ptx.bar.sync(K.uint32(0))
+        txl.ptx.bar.sync(txl.uint32(0))
+        txl.ptx.bar.sync(txl.uint32(0))
 
-        roles = K.specialize()
+        roles = txl.specialize()
         compute = roles.role("compute", warps=range(4))
         weight = roles.role("weight", warps=range(4, 8))
         activation = roles.role("activation", warps=range(8, 12))
 
         with compute:
-            k_loops_c = _materialize(K.truncdiv(c_K + 1023, 1024))
+            k_loops_c = _materialize(txl.truncdiv(c_K + 1023, 1024))
             mib_c = _materialize(block_m * 16)
             ni_c = _materialize(block_n * 8)
-            with K.If(tid < 16), K.Then():
-                bias_bits = K.alloc_local([1], "uint16")
-                K.ptx.ld.global_.b16(bias_bits[0], d_bias.ptr_to([mib_c + tid]))
-                K.ptx.st.shared.b16(bias_smem.ptr_to([tid]), bias_bits[0])
+            with txl.If(tid < 16), txl.Then():
+                bias_bits = txl.alloc_local([1], "uint16")
+                txl.ptx.ld.global_.b16(bias_bits[0], d_bias.ptr_to([mib_c + tid]))
+                txl.ptx.st.shared.b16(bias_smem.ptr_to([tid]), bias_bits[0])
 
-            accum = K.alloc_local((4,), "float32", align=4)
+            accum = txl.alloc_local((4,), "float32", align=4)
             for z in range(4):
-                K.ptx.mov.b32(accum[z], K.float32(0))
+                txl.ptx.mov.b32(accum[z], txl.float32(0))
 
-            lane_div8 = _materialize(lane_u32 // K.uint32(8))
-            lane_mod8 = _materialize(lane_u32 % K.uint32(8))
-            row_wt = _materialize(lane_mod8 + lane_div8 % K.uint32(2) * K.uint32(8))
-            col_off_wt = _materialize(lane_div8 // K.uint32(2))
+            lane_div8 = _materialize(lane_u32 // txl.uint32(8))
+            lane_mod8 = _materialize(lane_u32 % txl.uint32(8))
+            row_wt = _materialize(lane_mod8 + lane_div8 % txl.uint32(2) * txl.uint32(8))
+            col_off_wt = _materialize(lane_div8 // txl.uint32(2))
             row_act = _materialize(lane_mod8)
-            compute_state = K.PipelineState(stages // 4, phase=0)
+            compute_state = txl.PipelineState(stages // 4, phase=0)
 
             def compute_iter():
                 stage_c = _materialize(
-                    K.cast(warp, "uint32") + K.uint32(4) * K.cast(compute_state.stage, "uint32")
+                    txl.cast(warp, "uint32")
+                    + txl.uint32(4) * txl.cast(compute_state.stage, "uint32")
                 )
-                phase_c = _materialize(K.cast(compute_state.phase, "uint32"))
+                phase_c = _materialize(txl.cast(compute_state.phase, "uint32"))
                 weight_ready.wait(stage_c, phase_c)
                 activation_ready.wait(stage_c, phase_c)
 
-                with K.unroll(4) as su:
-                    with K.unroll(4) as kii:
-                        a_frag = K.alloc_local((4,), "uint32", align=4)
-                        b_frag = K.alloc_local((2,), "uint32", align=4)
-                        col_w: K.uint32 = K.uint32(2 * kii) + col_off_wt
-                        K.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
+                with txl.unroll(4) as su:
+                    with txl.unroll(4) as kii:
+                        a_frag = txl.alloc_local((4,), "uint32", align=4)
+                        b_frag = txl.alloc_local((2,), "uint32", align=4)
+                        col_w: txl.uint32 = txl.uint32(2 * kii) + col_off_wt
+                        txl.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
                             a_frag[0],
                             a_frag[1],
                             a_frag[2],
                             a_frag[3],
-                            weight_smem[stage_c].m8n8(su * 16 + row_wt, col_w * K.uint32(8)),
+                            weight_smem[stage_c].m8n8(su * 16 + row_wt, col_w * txl.uint32(8)),
                         )
-                        col_a: K.uint32 = K.uint32(2 * kii) + lane_div8
-                        K.ptx.ldmatrix.sync.aligned.m8n8.x2.shared.b16(
+                        col_a: txl.uint32 = txl.uint32(2 * kii) + lane_div8
+                        txl.ptx.ldmatrix.sync.aligned.m8n8.x2.shared.b16(
                             b_frag[0],
                             b_frag[1],
-                            activation_smem[stage_c].m8n8(su * 8 + row_act, col_a * K.uint32(8)),
+                            activation_smem[stage_c].m8n8(su * 8 + row_act, col_a * txl.uint32(8)),
                         )
                         _mma_bf16(accum, a_frag, b_frag)
 
-                K.ptx.fence.proxy.async_.shared__cta()
-                K.ptx.mbarrier.arrive.release.cta.shared__cta.b64(consumed.ptr_to([stage_c]))
+                txl.ptx.fence.proxy.async_.shared__cta()
+                txl.ptx.mbarrier.arrive.release.cta.shared__cta.b64(consumed.ptr_to([stage_c]))
                 compute_state.advance()
 
-            with K.serial(0, k_loops_c, unroll=2, dtype="uint32"):
+            with txl.serial(0, k_loops_c, unroll=2, dtype="uint32"):
                 compute_iter()
 
-            accum_bits = K.alloc_local((4,), "uint32", align=4)
+            accum_bits = txl.alloc_local((4,), "uint32", align=4)
             for z in range(4):
-                K.ptx.mov.b32(accum_bits[z], K.reinterpret("uint32", accum[z]))
-            K.ptx.st.shared.v4.b32(
+                txl.ptx.mov.b32(accum_bits[z], txl.reinterpret("uint32", accum[z]))
+            txl.ptx.st.shared.v4.b32(
                 reduction_smem.ptr_to([tid, 0]),
                 accum_bits[0],
                 accum_bits[1],
                 accum_bits[2],
                 accum_bits[3],
             )
-            K.ptx.barrier.sync(K.uint32(2), K.uint32(THREADS))
+            txl.ptx.barrier.sync(txl.uint32(2), txl.uint32(THREADS))
 
-            with K.If(warp == 0), K.Then():
-                part_bits = K.alloc_local((12,), "uint32", align=4)
+            with txl.If(warp == 0), txl.Then():
+                part_bits = txl.alloc_local((12,), "uint32", align=4)
                 part = part_bits.view("float32")
                 for other_warp in range(3):
-                    K.ptx.ld.shared.v4.b32(
+                    txl.ptx.ld.shared.v4.b32(
                         part_bits[other_warp * 4],
                         part_bits[other_warp * 4 + 1],
                         part_bits[other_warp * 4 + 2],
@@ -259,66 +260,70 @@ def _make_tinygemm2_kernel(stages: int, use_pdl: bool, grid_x: int, grid_y: int)
                     )
 
                 for z in range(4):
-                    K.ptx["add.ftz.f32"](accum[z], accum[z], part[z])
-                    K.ptx["add.ftz.f32"](accum[z], accum[z], part[4 + z])
-                    K.ptx["add.ftz.f32"](accum[z], accum[z], part[8 + z])
+                    txl.ptx["add.ftz.f32"](accum[z], accum[z], part[z])
+                    txl.ptx["add.ftz.f32"](accum[z], accum[z], part[4 + z])
+                    txl.ptx["add.ftz.f32"](accum[z], accum[z], part[8 + z])
 
                 tm = _materialize(mib_c + lane // 4)
                 tn = _materialize(ni_c + 2 * (lane % 4))
-                bias_bits = K.alloc_local([2], "uint16")
-                K.ptx.ld.shared.b16(bias_bits[0], bias_smem.ptr_to([lane // 4]))
-                K.ptx.ld.shared.b16(bias_bits[1], bias_smem.ptr_to([lane // 4 + 8]))
-                bias_lo = _materialize(K.cast(K.reinterpret("bfloat16", bias_bits[0]), "float32"))
-                bias_hi = _materialize(K.cast(K.reinterpret("bfloat16", bias_bits[1]), "float32"))
-                out_frag = K.alloc_local((4,), "float32", align=4)
-                K.ptx["add.ftz.f32"](out_frag[0], accum[0], bias_lo)
-                K.ptx["add.ftz.f32"](out_frag[1], accum[1], bias_lo)
-                K.ptx["add.ftz.f32"](out_frag[2], accum[2], bias_hi)
-                K.ptx["add.ftz.f32"](out_frag[3], accum[3], bias_hi)
+                bias_bits = txl.alloc_local([2], "uint16")
+                txl.ptx.ld.shared.b16(bias_bits[0], bias_smem.ptr_to([lane // 4]))
+                txl.ptx.ld.shared.b16(bias_bits[1], bias_smem.ptr_to([lane // 4 + 8]))
+                bias_lo = _materialize(
+                    txl.cast(txl.reinterpret("bfloat16", bias_bits[0]), "float32")
+                )
+                bias_hi = _materialize(
+                    txl.cast(txl.reinterpret("bfloat16", bias_bits[1]), "float32")
+                )
+                out_frag = txl.alloc_local((4,), "float32", align=4)
+                txl.ptx["add.ftz.f32"](out_frag[0], accum[0], bias_lo)
+                txl.ptx["add.ftz.f32"](out_frag[1], accum[1], bias_lo)
+                txl.ptx["add.ftz.f32"](out_frag[2], accum[2], bias_hi)
+                txl.ptx["add.ftz.f32"](out_frag[3], accum[3], bias_hi)
                 out_base = _materialize(tn * a_M + tm)
                 out_next = _materialize(out_base + a_M)
 
-                with K.If(tn < b_N), K.Then():
-                    with K.If(tm < a_M), K.Then():
-                        K.ptx.st.global_.b16(
+                with txl.If(tn < b_N), txl.Then():
+                    with txl.If(tm < a_M), txl.Then():
+                        txl.ptx.st.global_.b16(
                             c_output.ptr_to([out_base]),
-                            K.reinterpret("uint16", K.cast(out_frag[0], "bfloat16")),
+                            txl.reinterpret("uint16", txl.cast(out_frag[0], "bfloat16")),
                         )
-                with K.If(tn + 1 < b_N), K.Then():
-                    with K.If(tm < a_M), K.Then():
-                        K.ptx.st.global_.b16(
+                with txl.If(tn + 1 < b_N), txl.Then():
+                    with txl.If(tm < a_M), txl.Then():
+                        txl.ptx.st.global_.b16(
                             c_output.ptr_to([out_next]),
-                            K.reinterpret("uint16", K.cast(out_frag[1], "bfloat16")),
+                            txl.reinterpret("uint16", txl.cast(out_frag[1], "bfloat16")),
                         )
-                with K.If(tn < b_N), K.Then():
-                    with K.If(tm + 8 < a_M), K.Then():
-                        K.ptx.st.global_.b16(
+                with txl.If(tn < b_N), txl.Then():
+                    with txl.If(tm + 8 < a_M), txl.Then():
+                        txl.ptx.st.global_.b16(
                             c_output.ptr_to([out_base + 8]),
-                            K.reinterpret("uint16", K.cast(out_frag[2], "bfloat16")),
+                            txl.reinterpret("uint16", txl.cast(out_frag[2], "bfloat16")),
                         )
-                with K.If(tn + 1 < b_N), K.Then():
-                    with K.If(tm + 8 < a_M), K.Then():
-                        K.ptx.st.global_.b16(
+                with txl.If(tn + 1 < b_N), txl.Then():
+                    with txl.If(tm + 8 < a_M), txl.Then():
+                        txl.ptx.st.global_.b16(
                             c_output.ptr_to([out_next + 8]),
-                            K.reinterpret("uint16", K.cast(out_frag[3], "bfloat16")),
+                            txl.reinterpret("uint16", txl.cast(out_frag[3], "bfloat16")),
                         )
 
         with weight:
-            k_loops_w = _materialize(K.truncdiv(c_K + 1023, 1024))
+            k_loops_w = _materialize(txl.truncdiv(c_K + 1023, 1024))
             mib_w = _materialize(block_m * 16)
-            wslot = _materialize(K.cast(warp, "uint32") % K.uint32(4))
-            weight_state = K.PipelineState(stages // 4, phase=0)
-            with K.If(K.cuda.elect_sync()), K.Then():
-                with K.serial(0, k_loops_w, unroll=False, dtype="uint32") as ki:
+            wslot = _materialize(txl.cast(warp, "uint32") % txl.uint32(4))
+            weight_state = txl.PipelineState(stages // 4, phase=0)
+            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.serial(0, k_loops_w, unroll=False, dtype="uint32") as ki:
                     stage_w = _materialize(
-                        wslot + K.uint32(4) * K.cast(weight_state.stage, "uint32")
+                        wslot + txl.uint32(4) * txl.cast(weight_state.stage, "uint32")
                     )
                     k_base_w = _materialize(
-                        K.cast((ki * K.uint32(4) + wslot) * K.uint32(256), "int32")
+                        txl.cast((ki * txl.uint32(4) + wslot) * txl.uint32(256), "int32")
                     )
                     consumed.wait(stage_w, weight_state.phase)
-                    K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
-                        weight_ready.ptr_to([stage_w]), K.uint32(WT_STAGE_BYTES)
+                    txl.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
+                        weight_ready.ptr_to([stage_w]), txl.uint32(WT_STAGE_BYTES)
                     )
                     for box in range(4):
                         _tma_2d_g2s(
@@ -331,30 +336,30 @@ def _make_tinygemm2_kernel(stages: int, use_pdl: bool, grid_x: int, grid_y: int)
                     weight_state.advance()
                 if stages == 8:
                     drain_stage_w = _materialize(
-                        wslot + K.uint32(4) * K.cast(weight_state.stage, "uint32")
+                        wslot + txl.uint32(4) * txl.cast(weight_state.stage, "uint32")
                     )
                     consumed.wait(drain_stage_w, weight_state.phase)
-            K.ptx.barrier.sync(K.uint32(2), K.uint32(THREADS))
+            txl.ptx.barrier.sync(txl.uint32(2), txl.uint32(THREADS))
 
         with activation:
-            k_loops_a = _materialize(K.truncdiv(c_K + 1023, 1024))
+            k_loops_a = _materialize(txl.truncdiv(c_K + 1023, 1024))
             ni_a = _materialize(block_n * 8)
-            aslot = _materialize(K.cast(warp, "uint32") % K.uint32(4))
-            activation_state = K.PipelineState(stages // 4, phase=0)
-            with K.If(K.cuda.elect_sync()), K.Then():
+            aslot = _materialize(txl.cast(warp, "uint32") % txl.uint32(4))
+            activation_state = txl.PipelineState(stages // 4, phase=0)
+            with txl.If(txl.cuda.elect_sync()), txl.Then():
                 if use_pdl:
-                    K.ptx.griddepcontrol.wait()
-                    K.ptx.griddepcontrol.launch_dependents()
-                with K.serial(0, k_loops_a, unroll=False, dtype="uint32") as ki:
+                    txl.ptx.griddepcontrol.wait()
+                    txl.ptx.griddepcontrol.launch_dependents()
+                with txl.serial(0, k_loops_a, unroll=False, dtype="uint32") as ki:
                     stage_a = _materialize(
-                        aslot + K.uint32(4) * K.cast(activation_state.stage, "uint32")
+                        aslot + txl.uint32(4) * txl.cast(activation_state.stage, "uint32")
                     )
                     k_base_a = _materialize(
-                        K.cast((ki * K.uint32(4) + aslot) * K.uint32(256), "int32")
+                        txl.cast((ki * txl.uint32(4) + aslot) * txl.uint32(256), "int32")
                     )
                     consumed.wait(stage_a, activation_state.phase)
-                    K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
-                        activation_ready.ptr_to([stage_a]), K.uint32(ACT_STAGE_BYTES)
+                    txl.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
+                        activation_ready.ptr_to([stage_a]), txl.uint32(ACT_STAGE_BYTES)
                     )
                     for box in range(4):
                         _tma_2d_g2s(
@@ -367,10 +372,10 @@ def _make_tinygemm2_kernel(stages: int, use_pdl: bool, grid_x: int, grid_y: int)
                     activation_state.advance()
                 if stages == 8:
                     drain_stage_a = _materialize(
-                        aslot + K.uint32(4) * K.cast(activation_state.stage, "uint32")
+                        aslot + txl.uint32(4) * txl.cast(activation_state.stage, "uint32")
                     )
                     consumed.wait(drain_stage_a, activation_state.phase)
-            K.ptx.barrier.sync(K.uint32(2), K.uint32(THREADS))
+            txl.ptx.barrier.sync(txl.uint32(2), txl.uint32(THREADS))
 
     return tinygemm2_sm100.func
 

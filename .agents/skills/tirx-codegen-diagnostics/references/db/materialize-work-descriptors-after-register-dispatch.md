@@ -20,12 +20,12 @@ scheduler protocol.
 ```python
 # before: every role carries the descriptor across register redistribution.
 load_work_descriptor(work_index)
-roles = K.specialize()
+roles = txl.specialize()
 with worker_role:
     consume_work()
 
 # after: only consuming roles materialize role-local state.
-roles = K.specialize()
+roles = txl.specialize()
 with worker_role:
     load_work_descriptor(work_index)
     consume_work()

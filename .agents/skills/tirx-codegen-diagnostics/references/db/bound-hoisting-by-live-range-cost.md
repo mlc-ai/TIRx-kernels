@@ -78,7 +78,7 @@ the first.
 
 ```python
 # before: three fragments are simultaneously live.
-combined = K.alloc_local((WIDTH,), "float32")
+combined = txl.alloc_local((WIDTH,), "float32")
 _scale(values0, scale0, combined)
 _scale_add(values1, scale1, combined)
 

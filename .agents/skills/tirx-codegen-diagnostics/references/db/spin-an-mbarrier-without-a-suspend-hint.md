@@ -16,11 +16,11 @@ Drop the suspend-time hint from the `try_wait` the spin loop retries on.
 # Four instructions, inline, with the sleep and the re-check standing between
 # the barrier and the load that depends on it:
 #   TRYWAIT; @!P NANOSLEEP 0x989680; @!P PHASECHK; @!P BRA
-K.ptx.mbarrier.try_wait.parity.shared.b64(ready, barrier, phase, K.uint32(10_000_000))
+txl.ptx.mbarrier.try_wait.parity.shared.b64(ready, barrier, phase, txl.uint32(10_000_000))
 
 # Two, with the retry out of line and the dependent load directly behind:
 #   TRYWAIT; @!P BRA <out-of-line>
-K.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(ready, barrier, phase)
+txl.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(ready, barrier, phase)
 ```
 
 ## Rationale
@@ -56,7 +56,7 @@ divergence with a clean mechanism is not a timing result; keep the change if it
 matches the reference, but do not spend expansions on it.
 
 A dense SM100 block-scaled GEMM exposed a related boundary: replacing a TIRx
-`While` around the hinted `try_wait` with the native `K.cuda.mbarrier_wait`
+`While` around the hinted `try_wait` with the native `txl.cuda.mbarrier_wait`
 helper kept the same 10,000,000-tick hint but moved the slow retry loop out of
 line, matching the reference's hot `TRYWAIT; @!P BRA` control-flow shape. The
 change was unique, correctness-clean, spill-free, and preserved 69 registers

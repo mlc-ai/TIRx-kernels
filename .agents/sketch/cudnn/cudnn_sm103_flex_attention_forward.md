@@ -22,11 +22,11 @@ streams, native SM103 row-max/exp2 behavior, correction protocols, fixed TMA
 and true-varlen vector output paths, packed/unpacked GQA addressing, D192
 Q/output alias, and the narrow-workset PV/K-wait choice.
 
-The module uses only import tirx_kernels.kern as K for device construction.
-It uses scalar control flow, opaque TensorMaps, raw K.ptx instructions,
+The module uses only import tirx_kernels.tirx_lite as txl for device construction.
+It uses scalar control flow, opaque TensorMaps, raw txl.ptx instructions,
 rank-one storage, and scalar byte/address expressions. It uses no tile
 primitive, first-class layout object, inline CUDA device call, IR-check
-exemption, or modification below tirx_kernels/kern/.
+exemption, or modification below tirx_kernels/tirx_lite/.
 
 After the independent sketch reviewer first returns PASS, this file is
 immutable.

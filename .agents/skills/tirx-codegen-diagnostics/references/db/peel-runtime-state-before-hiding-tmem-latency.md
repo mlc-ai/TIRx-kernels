@@ -22,24 +22,24 @@ arithmetic instruction.
 
 ```python
 # before: moving the load would split one runtime predicate into two regions.
-with K.serial(num_chunks) as local_chunk:
+with txl.serial(num_chunks) as local_chunk:
     have_state = local_chunk > 0
     load_v()
     load_w()
-    with K.If(have_state), K.Then():
+    with txl.If(have_state), txl.Then():
         wait_state_ready()
         load_state_from_tmem()
-        K.ptx.tcgen05.wait__ld.sync.aligned()
+        txl.ptx.tcgen05.wait__ld.sync.aligned()
     consume_v_w_and_state()
 
 # after: first-iteration semantics and recurrent semantics are specialized.
 load_first_v_w_without_state()
-with K.serial(num_chunks - 1) as recurrent_chunk:
+with txl.serial(num_chunks - 1) as recurrent_chunk:
     load_v()
     wait_state_ready()
     load_state_from_tmem()
     load_w()  # independent work covers part of the TMEM latency
-    K.ptx.tcgen05.wait__ld.sync.aligned()
+    txl.ptx.tcgen05.wait__ld.sync.aligned()
     consume_v_w_and_state()
 ```
 

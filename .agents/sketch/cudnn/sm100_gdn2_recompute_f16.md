@@ -76,11 +76,11 @@ waits, commits, cursor advancement, register-budget changes, TensorMap field
 replacement, and TMEM lifecycle operations remain explicit schedule actions.
 
 The executable module imports device language only as
-`import tirx_kernels.kern as K`. It may use scalar K control flow, opaque
-TensorMaps, raw `K.ptx[...]`, rank-one shared storage, and integer descriptor
+`import tirx_kernels.tirx_lite as txl`. It may use scalar txl control flow, opaque
+TensorMaps, raw `txl.ptx[...]`, rank-one shared storage, and integer descriptor
 assembly. It must not use direct TVM script namespaces, a tile primitive,
-`TilePrimitiveCall`, a first-class layout, rank>1 SMEM, `K.cuda.func_call`, or
-an inline-CUDA exemption. Nothing under `tirx_kernels/kern/` is modified.
+`TilePrimitiveCall`, a first-class layout, rank>1 SMEM, `txl.cuda.func_call`, or
+an inline-CUDA exemption. Nothing under `tirx_kernels/tirx_lite/` is modified.
 
 ## Complete non-executable sketch
 

@@ -42,7 +42,7 @@ from unittest import SkipTest
 
 import torch
 
-import tirx_kernels.kern as K
+import tirx_kernels.tirx_lite as txl
 
 from . import flashkda_decode_t2_precomputed as _t2
 
@@ -95,9 +95,9 @@ def _load_f32(buffer, index):
     dt_bias's four elements per lane are contiguous and nvcc still emits four
     scalar loads, not an ld.global.nc.v4.b32; the port matches that.
     """
-    out = K.local_scalar("uint32")
-    K.ptx.ld.global_.nc.b32(out, buffer.ptr_to([index]))
-    return K.reinterpret("float32", out)
+    out = txl.local_scalar("uint32")
+    txl.ptx.ld.global_.nc.b32(out, buffer.ptr_to([index]))
+    return txl.reinterpret("float32", out)
 
 
 HEAD_DIM = _t2.HEAD_DIM
@@ -119,53 +119,53 @@ SMEM_TOTAL = 15872
 
 
 def _store_smem_f32(buffer, index, value):
-    K.ptx.st.shared.b32(buffer.ptr_to([index]), K.reinterpret("uint32", value))
+    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret("uint32", value))
 
 
 def _load_smem_f32(buffer, index):
-    out = K.local_scalar(K.u32)
-    K.ptx.ld.shared.b32(out, buffer.ptr_to([index]))
-    return K.reinterpret("float32", out)
+    out = txl.local_scalar(txl.u32)
+    txl.ptx.ld.shared.b32(out, buffer.ptr_to([index]))
+    return txl.reinterpret("float32", out)
 
 
 def _store_smem_i32(buffer, index, value):
-    K.ptx.st.shared.b32(buffer.ptr_to([index]), K.reinterpret("uint32", value))
+    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret("uint32", value))
 
 
 def _load_smem_i32(buffer, index):
-    out = K.local_scalar(K.u32)
-    K.ptx.ld.shared.b32(out, buffer.ptr_to([index]))
-    return K.reinterpret("int32", out)
+    out = txl.local_scalar(txl.u32)
+    txl.ptx.ld.shared.b32(out, buffer.ptr_to([index]))
+    return txl.reinterpret("int32", out)
 
 
 def _load_smem_f32x4(buffer, index, dst, base):
-    words = K.alloc_local((4,), K.u32)
-    K.ptx.ld.shared.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
+    words = txl.alloc_local((4,), txl.u32)
+    txl.ptx.ld.shared.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
     for i in range(4):
-        K.buffer_store(dst, K.reinterpret("float32", words[i]), [base + i])
+        txl.buffer_store(dst, txl.reinterpret("float32", words[i]), [base + i])
 
 
 def _store_smem_u32x4_at(ptr, words):
-    K.ptx.st.shared.v4.b32(ptr, words[0], words[1], words[2], words[3])
+    txl.ptx.st.shared.v4.b32(ptr, words[0], words[1], words[2], words[3])
 
 
 def _store_smem_b16_at(ptr, bits):
-    K.ptx.st.shared.b16(ptr, bits)
+    txl.ptx.st.shared.b16(ptr, bits)
 
 
 def _ldmatrix_x4_at(ptr, frag, trans: bool):
     if trans:
-        K.ptx.ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
+        txl.ptx.ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
             frag[0], frag[1], frag[2], frag[3], ptr
         )
     else:
-        K.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(frag[0], frag[1], frag[2], frag[3], ptr)
+        txl.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(frag[0], frag[1], frag[2], frag[3], ptr)
 
 
 def _svec_ptr(s_vec, k_index, column):
     """Logical ``[HEAD_DIM, 16]`` view over one 128B-swizzled 4 KiB tile."""
-    row = K.shift_right(k_index, K.int32(2))
-    col = K.bitwise_and(k_index, K.int32(3)) * 16 + column
+    row = txl.shift_right(k_index, txl.int32(2))
+    col = txl.bitwise_and(k_index, txl.int32(3)) * 16 + column
     return s_vec.ptr_to(row, col)
 
 
@@ -295,176 +295,179 @@ def _make_flashkda_decode_t3_lower_bound(spec: dict[str, Any]):
     STATE_SLOT_STRIDE = spec["STATE_SLOT_STRIDE"]
     GATE_TOKEN_STRIDE = spec["GATE_TOKEN_STRIDE"]
 
-    @K.kernel(warps=THREADS // 32, arch="sm_100a", grid=(NUM_VALUE_HEADS * VALUE_SPLIT, NUM_SEQS))
+    @txl.kernel(warps=THREADS // 32, arch="sm_100a", grid=(NUM_VALUE_HEADS * VALUE_SPLIT, NUM_SEQS))
     def _flashkda_decode_t3_lower_bound(
-        q: K.gptr[K.bf16],
-        k: K.gptr[K.bf16],
-        v: K.gptr[K.bf16],
-        g: K.gptr[K.bf16],
-        beta: K.gptr[K.bf16],
-        state: K.gptr[K.bf16],
-        out: K.gptr[K.bf16],
-        a_log: K.gptr[K.f32],
-        dt_bias: K.gptr[K.f32],
-        cu: K.gptr[K.i32],
-        ssm_idx: K.gptr[K.i32],
-        nat: K.gptr[K.i32],
-        scale: K.f32,
-        lower_bound: K.f32,
+        q: txl.gptr[txl.bf16],
+        k: txl.gptr[txl.bf16],
+        v: txl.gptr[txl.bf16],
+        g: txl.gptr[txl.bf16],
+        beta: txl.gptr[txl.bf16],
+        state: txl.gptr[txl.bf16],
+        out: txl.gptr[txl.bf16],
+        a_log: txl.gptr[txl.f32],
+        dt_bias: txl.gptr[txl.f32],
+        cu: txl.gptr[txl.i32],
+        ssm_idx: txl.gptr[txl.i32],
+        nat: txl.gptr[txl.i32],
+        scale: txl.f32,
+        lower_bound: txl.f32,
     ):
-        smem = K.smem_pool()
-        s_state0 = smem.alloc((ROWS_PER_CTA, 64), K.bf16, swizzle=K.SW128B, align=1024)
-        s_state1 = smem.alloc((ROWS_PER_CTA, 64), K.bf16, swizzle=K.SW128B, align=1024)
-        s_vec = smem.alloc((32, 64), K.bf16, swizzle=K.SW128B, align=1024)
-        s_k = smem.alloc((NUM_TOKENS * HEAD_DIM,), K.f32)
-        s_d = smem.alloc((NUM_TOKENS * HEAD_DIM,), K.f32)
-        s_beta = smem.alloc((NUM_TOKENS,), K.f32)
-        s_slot = smem.alloc((NUM_TOKENS,), K.i32)
-        s_token = smem.alloc((NUM_TOKENS,), K.i32)
-        s_init = smem.alloc((4,), K.i32)
-        s_l = smem.alloc((NUM_TOKENS * NUM_TOKENS,), K.f32)
-        s_r = smem.alloc((NUM_TOKENS * NUM_TOKENS,), K.f32)
-        s_u = smem.alloc((NUM_TOKENS * ROWS_PER_CTA,), K.f32)
+        smem = txl.smem_pool()
+        s_state0 = smem.alloc((ROWS_PER_CTA, 64), txl.bf16, swizzle=txl.SW128B, align=1024)
+        s_state1 = smem.alloc((ROWS_PER_CTA, 64), txl.bf16, swizzle=txl.SW128B, align=1024)
+        s_vec = smem.alloc((32, 64), txl.bf16, swizzle=txl.SW128B, align=1024)
+        s_k = smem.alloc((NUM_TOKENS * HEAD_DIM,), txl.f32)
+        s_d = smem.alloc((NUM_TOKENS * HEAD_DIM,), txl.f32)
+        s_beta = smem.alloc((NUM_TOKENS,), txl.f32)
+        s_slot = smem.alloc((NUM_TOKENS,), txl.i32)
+        s_token = smem.alloc((NUM_TOKENS,), txl.i32)
+        s_init = smem.alloc((4,), txl.i32)
+        s_l = smem.alloc((NUM_TOKENS * NUM_TOKENS,), txl.f32)
+        s_r = smem.alloc((NUM_TOKENS * NUM_TOKENS,), txl.f32)
+        s_u = smem.alloc((NUM_TOKENS * ROWS_PER_CTA,), txl.f32)
         smem.commit(SMEM_TOTAL)
 
-        roles = K.specialize()
+        roles = txl.specialize()
         compute = roles.role("compute", warps=[0, 1])
         roles.role("token_only", warps=[2])
 
-        work, n = K.cta_id()
-        warp = K.warp_id()
-        lane = K.lane_id()
-        value_tile = K.local_scalar(K.i32)
-        hv = K.local_scalar(K.i32)
-        query_head = K.local_scalar(K.i32)
-        lane_quad = K.local_scalar(K.i32)
-        frag_row = K.local_scalar(K.i32)
-        quad_base = K.local_scalar(K.i32)
-        elem_start = K.local_scalar(K.i32)
-        tile_row_base = K.local_scalar(K.i32)
-        token_base = K.local_scalar(K.i32)
-        seq_len = K.local_scalar(K.i32)
-        K.assign(value_tile, work % VALUE_SPLIT)
-        K.assign(hv, work // VALUE_SPLIT)
-        K.assign(query_head, hv // HEAD_RATIO)
-        K.assign(lane_quad, lane % 4)
-        K.assign(frag_row, lane // 4)
-        K.assign(quad_base, lane - lane_quad)
-        K.assign(elem_start, lane * 4)
-        K.assign(tile_row_base, value_tile * ROWS_PER_CTA)
-        K.assign(token_base, _load_i32(cu, K.cast(n, "int64")))
-        K.assign(seq_len, _load_i32(cu, K.cast(n + 1, "int64")) - token_base)
+        work, n = txl.cta_id()
+        warp = txl.warp_id()
+        lane = txl.lane_id()
+        value_tile = txl.local_scalar(txl.i32)
+        hv = txl.local_scalar(txl.i32)
+        query_head = txl.local_scalar(txl.i32)
+        lane_quad = txl.local_scalar(txl.i32)
+        frag_row = txl.local_scalar(txl.i32)
+        quad_base = txl.local_scalar(txl.i32)
+        elem_start = txl.local_scalar(txl.i32)
+        tile_row_base = txl.local_scalar(txl.i32)
+        token_base = txl.local_scalar(txl.i32)
+        seq_len = txl.local_scalar(txl.i32)
+        txl.assign(value_tile, work % VALUE_SPLIT)
+        txl.assign(hv, work // VALUE_SPLIT)
+        txl.assign(query_head, hv // HEAD_RATIO)
+        txl.assign(lane_quad, lane % 4)
+        txl.assign(frag_row, lane // 4)
+        txl.assign(quad_base, lane - lane_quad)
+        txl.assign(elem_start, lane * 4)
+        txl.assign(tile_row_base, value_tile * ROWS_PER_CTA)
+        txl.assign(token_base, _load_i32(cu, txl.cast(n, "int64")))
+        txl.assign(seq_len, _load_i32(cu, txl.cast(n + 1, "int64")) - token_base)
 
-        r_q = K.alloc_local((4,), K.f32)
-        r_k = K.alloc_local((4,), K.f32)
-        r_d = K.alloc_local((4,), K.f32)
+        r_q = txl.alloc_local((4,), txl.f32)
+        r_k = txl.alloc_local((4,), txl.f32)
+        r_d = txl.alloc_local((4,), txl.f32)
 
         # Phase A: all three warps preprocess one token each.
         token = warp
         active_token = token < seq_len
-        token_pos = K.local_scalar(K.i32)
-        qk_base = K.local_scalar(K.i32)
-        gate_base = K.local_scalar(K.i32)
-        K.assign(token_pos, K.if_then_else(active_token, token_base + token, 0))
-        K.assign(qk_base, (token_pos * NUM_HEADS + query_head) * HEAD_DIM + elem_start)
-        K.assign(gate_base, token_pos * GATE_TOKEN_STRIDE + hv * HEAD_DIM + elem_start)
-        q_words = _load_u32x2(q, K.cast(qk_base, "int64"))
-        k_words = _load_u32x2(k, K.cast(qk_base, "int64"))
-        g_words = _load_u32x2(g, K.cast(gate_base, "int64"))
+        token_pos = txl.local_scalar(txl.i32)
+        qk_base = txl.local_scalar(txl.i32)
+        gate_base = txl.local_scalar(txl.i32)
+        txl.assign(token_pos, txl.if_then_else(active_token, token_base + token, 0))
+        txl.assign(qk_base, (token_pos * NUM_HEADS + query_head) * HEAD_DIM + elem_start)
+        txl.assign(gate_base, token_pos * GATE_TOKEN_STRIDE + hv * HEAD_DIM + elem_start)
+        q_words = _load_u32x2(q, txl.cast(qk_base, "int64"))
+        k_words = _load_u32x2(k, txl.cast(qk_base, "int64"))
+        g_words = _load_u32x2(g, txl.cast(gate_base, "int64"))
         for pair in range(2):
-            K.ptx.mov.b32(r_q[2 * pair], _widen_lo(q_words[pair]))
-            K.ptx.mov.b32(r_q[2 * pair + 1], _widen_hi(q_words[pair]))
-            K.ptx.mov.b32(r_k[2 * pair], _widen_lo(k_words[pair]))
-            K.ptx.mov.b32(r_k[2 * pair + 1], _widen_hi(k_words[pair]))
-            K.ptx.mov.b32(r_d[2 * pair], _widen_lo(g_words[pair]))
-            K.ptx.mov.b32(r_d[2 * pair + 1], _widen_hi(g_words[pair]))
+            txl.ptx.mov.b32(r_q[2 * pair], _widen_lo(q_words[pair]))
+            txl.ptx.mov.b32(r_q[2 * pair + 1], _widen_hi(q_words[pair]))
+            txl.ptx.mov.b32(r_k[2 * pair], _widen_lo(k_words[pair]))
+            txl.ptx.mov.b32(r_k[2 * pair + 1], _widen_hi(k_words[pair]))
+            txl.ptx.mov.b32(r_d[2 * pair], _widen_lo(g_words[pair]))
+            txl.ptx.mov.b32(r_d[2 * pair + 1], _widen_hi(g_words[pair]))
 
         q_sq = _fma(
             r_q[3],
             r_q[3],
-            _fma(r_q[2], r_q[2], _fma(r_q[1], r_q[1], _fma(r_q[0], r_q[0], K.float32(0.0)))),
+            _fma(r_q[2], r_q[2], _fma(r_q[1], r_q[1], _fma(r_q[0], r_q[0], txl.float32(0.0)))),
         )
         k_sq = _fma(
             r_k[3],
             r_k[3],
-            _fma(r_k[2], r_k[2], _fma(r_k[1], r_k[1], _fma(r_k[0], r_k[0], K.float32(0.0)))),
+            _fma(r_k[2], r_k[2], _fma(r_k[1], r_k[1], _fma(r_k[0], r_k[0], txl.float32(0.0)))),
         )
         for off in range(5):
             q_sq = _add(q_sq, _shfl_bfly(q_sq, 16 >> off))
         for off in range(5):
             k_sq = _add(k_sq, _shfl_bfly(k_sq, 16 >> off))
-        q_norm = _mul(_rsqrt(_add(q_sq, K.float32(L2_EPS))), scale)
-        k_norm = _rsqrt(_add(k_sq, K.float32(L2_EPS)))
-        gate_a = _expf(_load_f32(a_log, K.cast(query_head, "int64")))
+        q_norm = _mul(_rsqrt(_add(q_sq, txl.float32(L2_EPS))), scale)
+        k_norm = _rsqrt(_add(k_sq, txl.float32(L2_EPS)))
+        gate_a = _expf(_load_f32(a_log, txl.cast(query_head, "int64")))
         neg_gate_a = _neg(gate_a)
 
-        k_pub = K.alloc_local((4,), K.u32)
-        d_pub = K.alloc_local((4,), K.u32)
+        k_pub = txl.alloc_local((4,), txl.u32)
+        d_pub = txl.alloc_local((4,), txl.u32)
         for i in range(4):
             k_idx_a = elem_start + i
-            K.ptx.mov.b32(r_q[i], _mul(r_q[i], q_norm))
-            K.ptx.mov.b32(r_k[i], _mul(r_k[i], k_norm))
+            txl.ptx.mov.b32(r_q[i], _mul(r_q[i], q_norm))
+            txl.ptx.mov.b32(r_k[i], _mul(r_k[i], k_norm))
             biased = _add(
-                r_d[i], _load_f32(dt_bias, K.cast(query_head * HEAD_DIM + k_idx_a, "int64"))
+                r_d[i], _load_f32(dt_bias, txl.cast(query_head * HEAD_DIM + k_idx_a, "int64"))
             )
             sig = _expf(_mul(biased, neg_gate_a))
-            K.ptx.mov.b32(r_d[i], _expf(_div(lower_bound, _add(sig, K.float32(1.0)))))
-            K.ptx.mov.b32(k_pub[i], K.reinterpret("uint32", r_k[i]))
-            K.ptx.mov.b32(d_pub[i], K.reinterpret("uint32", r_d[i]))
+            txl.ptx.mov.b32(r_d[i], _expf(_div(lower_bound, _add(sig, txl.float32(1.0)))))
+            txl.ptx.mov.b32(k_pub[i], txl.reinterpret("uint32", r_k[i]))
+            txl.ptx.mov.b32(d_pub[i], txl.reinterpret("uint32", r_d[i]))
         _store_smem_u32x4_at(s_k.ptr_to([token * HEAD_DIM + elem_start]), k_pub)
         _store_smem_u32x4_at(s_d.ptr_to([token * HEAD_DIM + elem_start]), d_pub)
 
-        with K.If(lane == 0), K.Then():
-            raw_slot = _load_i32(ssm_idx, K.cast(n * NUM_TOKENS + token, "int64"))
-            _store_smem_i32(s_slot, token, K.if_then_else(active_token, raw_slot, -1))
+        with txl.If(lane == 0), txl.Then():
+            raw_slot = _load_i32(ssm_idx, txl.cast(n * NUM_TOKENS + token, "int64"))
+            _store_smem_i32(s_slot, token, txl.if_then_else(active_token, raw_slot, -1))
             _store_smem_i32(s_token, token, token_pos)
             _store_smem_f32(
                 s_beta,
                 token,
-                _load_bf16_f32(beta, K.cast(token_pos * NUM_VALUE_HEADS + hv, "int64")),
+                _load_bf16_f32(beta, txl.cast(token_pos * NUM_VALUE_HEADS + hv, "int64")),
             )
-            with K.If(token == 0), K.Then():
-                accepted = K.min(K.max(_load_i32(nat, K.cast(n, "int64")) - 1, 0), NUM_TOKENS - 1)
-                initial_slot = _load_i32(ssm_idx, K.cast(n * NUM_TOKENS + accepted, "int64"))
-                _store_smem_i32(s_init, 0, K.max(initial_slot, 0))
+            with txl.If(token == 0), txl.Then():
+                accepted = txl.min(
+                    txl.max(_load_i32(nat, txl.cast(n, "int64")) - 1, 0), NUM_TOKENS - 1
+                )
+                initial_slot = _load_i32(ssm_idx, txl.cast(n * NUM_TOKENS + accepted, "int64"))
+                _store_smem_i32(s_init, 0, txl.max(initial_slot, 0))
 
-        K.cuda.cta_sync()
+        txl.cuda.cta_sync()
 
         # Phase B: only the compute role gathers state.
-        hist = K.alloc_local((64,), K.f32)
+        hist = txl.alloc_local((64,), txl.f32)
         with compute:
-            compute_group = K.tid_in_role() // 16
-            lane_group = K.tid_in_role() % 16
+            compute_group = txl.tid_in_role() // 16
+            lane_group = txl.tid_in_role() % 16
             k_start = lane_group * 8
             owned_row_base = compute_group * 8
             init_slot = _load_smem_i32(s_init, 0)
-            head_base = K.local_scalar(
-                K.i64,
-                init=K.cast(init_slot, "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
-                + K.cast(hv * HEAD_DIM * HEAD_DIM, "int64"),
+            head_base = txl.local_scalar(
+                txl.i64,
+                init=txl.cast(init_slot, "int64") * txl.cast(STATE_SLOT_STRIDE, "int64")
+                + txl.cast(hv * HEAD_DIM * HEAD_DIM, "int64"),
             )
             for row_local in range(8):
                 row_l = owned_row_base + row_local
                 pack = _load_u32x4(
-                    state, head_base + K.cast((tile_row_base + row_l) * HEAD_DIM + k_start, "int64")
+                    state,
+                    head_base + txl.cast((tile_row_base + row_l) * HEAD_DIM + k_start, "int64"),
                 )
                 for pr in range(4):
-                    K.ptx.mov.b32(hist[row_local * 8 + 2 * pr], _widen_lo(pack[pr]))
-                    K.ptx.mov.b32(hist[row_local * 8 + 2 * pr + 1], _widen_hi(pack[pr]))
-                with K.If(lane_group < 8):
-                    with K.Then():
+                    txl.ptx.mov.b32(hist[row_local * 8 + 2 * pr], _widen_lo(pack[pr]))
+                    txl.ptx.mov.b32(hist[row_local * 8 + 2 * pr + 1], _widen_hi(pack[pr]))
+                with txl.If(lane_group < 8):
+                    with txl.Then():
                         _store_smem_u32x4_at(s_state0.ptr_to(row_l, k_start), pack)
-                    with K.Else():
+                    with txl.Else():
                         _store_smem_u32x4_at(s_state1.ptr_to(row_l, k_start - 64), pack)
 
         # Phase C: token-only warp 2 remains active through the second edge.
         token_c = warp
         for i in range(4):
             k_idx = elem_start + i
-            prefix = K.local_scalar(K.f32, init=K.float32(1.0))
+            prefix = txl.local_scalar(txl.f32, init=txl.float32(1.0))
             for j in range(NUM_TOKENS):
-                with K.If(token_c >= j), K.Then():
-                    K.assign(prefix, _mul(prefix, _load_smem_f32(s_d, j * HEAD_DIM + k_idx)))
+                with txl.If(token_c >= j), txl.Then():
+                    txl.assign(prefix, _mul(prefix, _load_smem_f32(s_d, j * HEAD_DIM + k_idx)))
             _store_smem_b16_at(
                 _svec_ptr(s_vec, k_idx, token_c),
                 _ptx_un("cvt.rn.bf16.f32", _mul(prefix, r_k[i]), dtype="uint16"),
@@ -474,53 +477,53 @@ def _make_flashkda_decode_t3_lower_bound(spec: dict[str, Any]):
                 _ptx_un("cvt.rn.bf16.f32", _mul(prefix, r_q[i]), dtype="uint16"),
             )
 
-        ratio = K.alloc_local((4,), K.f32)
+        ratio = txl.alloc_local((4,), txl.f32)
         for i in range(4):
-            K.ptx.mov.b32(ratio[i], K.float32(1.0))
+            txl.ptx.mov.b32(ratio[i], txl.float32(1.0))
         for source_offset in range(NUM_TOKENS):
             source_token = token_c - source_offset
-            with K.If(source_token >= 0), K.Then():
-                dot_kk = K.local_scalar(K.f32)
-                dot_qk = K.local_scalar(K.f32)
-                sk_vec = K.alloc_local((4,), K.f32)
-                K.assign(dot_kk, K.float32(0.0))
-                K.assign(dot_qk, K.float32(0.0))
+            with txl.If(source_token >= 0), txl.Then():
+                dot_kk = txl.local_scalar(txl.f32)
+                dot_qk = txl.local_scalar(txl.f32)
+                sk_vec = txl.alloc_local((4,), txl.f32)
+                txl.assign(dot_kk, txl.float32(0.0))
+                txl.assign(dot_qk, txl.float32(0.0))
                 _load_smem_f32x4(s_k, source_token * HEAD_DIM + elem_start, sk_vec, 0)
                 for i in range(4):
-                    K.assign(dot_kk, _fma(_mul(r_k[i], sk_vec[i]), ratio[i], dot_kk))
-                    K.assign(dot_qk, _fma(_mul(r_q[i], sk_vec[i]), ratio[i], dot_qk))
+                    txl.assign(dot_kk, _fma(_mul(r_k[i], sk_vec[i]), ratio[i], dot_kk))
+                    txl.assign(dot_qk, _fma(_mul(r_q[i], sk_vec[i]), ratio[i], dot_qk))
                 for off in range(5):
-                    K.assign(dot_kk, _add(dot_kk, _shfl_bfly(dot_kk, 16 >> off)))
+                    txl.assign(dot_kk, _add(dot_kk, _shfl_bfly(dot_kk, 16 >> off)))
                 for off in range(5):
-                    K.assign(dot_qk, _add(dot_qk, _shfl_bfly(dot_qk, 16 >> off)))
-                with K.If(lane == 0), K.Then():
+                    txl.assign(dot_qk, _add(dot_qk, _shfl_bfly(dot_qk, 16 >> off)))
+                with txl.If(lane == 0), txl.Then():
                     beta_source = _load_smem_f32(s_beta, source_token)
-                    with K.If(source_token < token_c), K.Then():
+                    with txl.If(source_token < token_c), txl.Then():
                         _store_smem_f32(
                             s_l, token_c * NUM_TOKENS + source_token, _mul(beta_source, dot_kk)
                         )
                     _store_smem_f32(
                         s_r, token_c * NUM_TOKENS + source_token, _mul(beta_source, dot_qk)
                     )
-                with K.If(source_token > 0), K.Then():
-                    sd_vec = K.alloc_local((4,), K.f32)
+                with txl.If(source_token > 0), txl.Then():
+                    sd_vec = txl.alloc_local((4,), txl.f32)
                     _load_smem_f32x4(s_d, source_token * HEAD_DIM + elem_start, sd_vec, 0)
                     for i in range(4):
-                        K.ptx.mov.b32(ratio[i], _mul(ratio[i], sd_vec[i]))
+                        txl.ptx.mov.b32(ratio[i], _mul(ratio[i], sd_vec[i]))
 
-        K.cuda.cta_sync()
+        txl.cuda.cta_sync()
 
         # Phases D-H belong solely to the two compute warps.
         with compute:
-            compute_warp = K.warp_id_in_role()
-            compute_group = K.tid_in_role() // 16
-            lane_group = K.tid_in_role() % 16
+            compute_warp = txl.warp_id_in_role()
+            compute_group = txl.tid_in_role() // 16
+            lane_group = txl.tid_in_role() % 16
             k_start = lane_group * 8
             owned_row_base = compute_group * 8
 
-            acc = K.alloc_local((4,), K.f32, align=4)
-            vec_frag = K.alloc_local((4,), K.u32, align=4)
-            state_frag = K.alloc_local((4,), K.u32, align=4)
+            acc = txl.alloc_local((4,), txl.f32, align=4)
+            vec_frag = txl.alloc_local((4,), txl.u32, align=4)
+            state_frag = txl.alloc_local((4,), txl.u32, align=4)
             for state_half in range(2):
                 for mma_step in range(4):
                     mma_k = mma_step * 16
@@ -539,103 +542,115 @@ def _make_flashkda_decode_t3_lower_bound(spec: dict[str, Any]):
                     else:
                         _mma_acc(acc, state_frag, vec_frag)
 
-            u_lo = K.alloc_local((NUM_TOKENS,), K.f32)
-            u_hi = K.alloc_local((NUM_TOKENS,), K.f32)
-            ha_lo = K.alloc_local((4,), K.f32)
-            ha_hi = K.alloc_local((4,), K.f32)
+            u_lo = txl.alloc_local((NUM_TOKENS,), txl.f32)
+            u_hi = txl.alloc_local((NUM_TOKENS,), txl.f32)
+            ha_lo = txl.alloc_local((4,), txl.f32)
+            ha_hi = txl.alloc_local((4,), txl.f32)
             for t in range(4):
-                K.ptx.mov.b32(ha_lo[t], _shfl_idx(acc[t % 2], quad_base + t // 2))
+                txl.ptx.mov.b32(ha_lo[t], _shfl_idx(acc[t % 2], quad_base + t // 2))
             for t in range(4):
-                K.ptx.mov.b32(ha_hi[t], _shfl_idx(acc[2 + t % 2], quad_base + t // 2))
-            with K.If(lane_quad == 2), K.Then():
+                txl.ptx.mov.b32(ha_hi[t], _shfl_idx(acc[2 + t % 2], quad_base + t // 2))
+            with txl.If(lane_quad == 2), txl.Then():
                 row_lo = compute_warp * 16 + frag_row
                 row_hi = row_lo + 8
                 for t in range(NUM_TOKENS):
-                    base_t = K.local_scalar(K.i32)
-                    solved_lo = K.local_scalar(K.f32)
-                    solved_hi = K.local_scalar(K.f32)
-                    K.assign(base_t, (_load_smem_i32(s_token, t) * NUM_VALUE_HEADS + hv) * HEAD_DIM)
-                    K.assign(
+                    base_t = txl.local_scalar(txl.i32)
+                    solved_lo = txl.local_scalar(txl.f32)
+                    solved_hi = txl.local_scalar(txl.f32)
+                    txl.assign(
+                        base_t, (_load_smem_i32(s_token, t) * NUM_VALUE_HEADS + hv) * HEAD_DIM
+                    )
+                    txl.assign(
                         solved_lo,
                         _sub(
-                            _load_bf16_f32(v, K.cast(base_t + tile_row_base + row_lo, "int64")),
+                            _load_bf16_f32(v, txl.cast(base_t + tile_row_base + row_lo, "int64")),
                             ha_lo[t],
                         ),
                     )
-                    K.assign(
+                    txl.assign(
                         solved_hi,
                         _sub(
-                            _load_bf16_f32(v, K.cast(base_t + tile_row_base + row_hi, "int64")),
+                            _load_bf16_f32(v, txl.cast(base_t + tile_row_base + row_hi, "int64")),
                             ha_hi[t],
                         ),
                     )
                     for prev in range(t):
                         lts = _load_smem_f32(s_l, t * NUM_TOKENS + prev)
-                        K.assign(solved_lo, _sub(solved_lo, _mul(lts, u_lo[prev])))
-                        K.assign(solved_hi, _sub(solved_hi, _mul(lts, u_hi[prev])))
-                    K.ptx.mov.b32(u_lo[t], solved_lo)
-                    K.ptx.mov.b32(u_hi[t], solved_hi)
+                        txl.assign(solved_lo, _sub(solved_lo, _mul(lts, u_lo[prev])))
+                        txl.assign(solved_hi, _sub(solved_hi, _mul(lts, u_hi[prev])))
+                    txl.ptx.mov.b32(u_lo[t], solved_lo)
+                    txl.ptx.mov.b32(u_hi[t], solved_hi)
             for t in range(NUM_TOKENS):
-                K.ptx.mov.b32(u_lo[t], _shfl_idx(u_lo[t], quad_base + 2))
-                K.ptx.mov.b32(u_hi[t], _shfl_idx(u_hi[t], quad_base + 2))
+                txl.ptx.mov.b32(u_lo[t], _shfl_idx(u_lo[t], quad_base + 2))
+                txl.ptx.mov.b32(u_hi[t], _shfl_idx(u_hi[t], quad_base + 2))
 
-            with K.If(lane_quad >= 2), K.Then():
+            with txl.If(lane_quad >= 2), txl.Then():
                 token0 = (lane_quad - 2) * 2
                 token1 = token0 + 1
                 row_lo_f = compute_warp * 16 + frag_row
                 row_hi_f = row_lo_f + 8
-                out0_lo = K.local_scalar(K.f32)
-                out1_lo = K.local_scalar(K.f32)
-                out0_hi = K.local_scalar(K.f32)
-                out1_hi = K.local_scalar(K.f32)
-                K.assign(out0_lo, acc[0])
-                K.assign(out1_lo, acc[1])
-                K.assign(out0_hi, acc[2])
-                K.assign(out1_hi, acc[3])
+                out0_lo = txl.local_scalar(txl.f32)
+                out1_lo = txl.local_scalar(txl.f32)
+                out0_hi = txl.local_scalar(txl.f32)
+                out1_hi = txl.local_scalar(txl.f32)
+                txl.assign(out0_lo, acc[0])
+                txl.assign(out1_lo, acc[1])
+                txl.assign(out0_hi, acc[2])
+                txl.assign(out1_hi, acc[3])
                 for src in range(NUM_TOKENS):
-                    coef0 = K.local_scalar(K.f32)
-                    coef1 = K.local_scalar(K.f32)
-                    K.assign(coef0, K.float32(0.0))
-                    K.assign(coef1, K.float32(0.0))
-                    with K.If(token0 >= src), K.Then():
-                        K.assign(coef0, _load_smem_f32(s_r, token0 * NUM_TOKENS + src))
-                    with K.If(K.And(token1 < NUM_TOKENS, token1 >= src)), K.Then():
-                        K.assign(coef1, _load_smem_f32(s_r, token1 * NUM_TOKENS + src))
-                    K.assign(out0_lo, _fma(coef0, u_lo[src], out0_lo))
-                    K.assign(out1_lo, _fma(coef1, u_lo[src], out1_lo))
-                    K.assign(out0_hi, _fma(coef0, u_hi[src], out0_hi))
-                    K.assign(out1_hi, _fma(coef1, u_hi[src], out1_hi))
+                    coef0 = txl.local_scalar(txl.f32)
+                    coef1 = txl.local_scalar(txl.f32)
+                    txl.assign(coef0, txl.float32(0.0))
+                    txl.assign(coef1, txl.float32(0.0))
+                    with txl.If(token0 >= src), txl.Then():
+                        txl.assign(coef0, _load_smem_f32(s_r, token0 * NUM_TOKENS + src))
+                    with txl.If(txl.And(token1 < NUM_TOKENS, token1 >= src)), txl.Then():
+                        txl.assign(coef1, _load_smem_f32(s_r, token1 * NUM_TOKENS + src))
+                    txl.assign(out0_lo, _fma(coef0, u_lo[src], out0_lo))
+                    txl.assign(out1_lo, _fma(coef1, u_lo[src], out1_lo))
+                    txl.assign(out0_hi, _fma(coef0, u_hi[src], out0_hi))
+                    txl.assign(out1_hi, _fma(coef1, u_hi[src], out1_hi))
                 for half in range(2):
                     token_o = token0 if half == 0 else token1
                     o_lo = out0_lo if half == 0 else out1_lo
                     o_hi = out0_hi if half == 0 else out1_hi
-                    with K.If(token_o < NUM_TOKENS), K.Then():
+                    with txl.If(token_o < NUM_TOKENS), txl.Then():
                         active_o = _load_smem_i32(s_slot, token_o) >= 0
-                        base_o = K.local_scalar(K.i32)
-                        K.assign(
+                        base_o = txl.local_scalar(txl.i32)
+                        txl.assign(
                             base_o,
                             (_load_smem_i32(s_token, token_o) * NUM_VALUE_HEADS + hv) * HEAD_DIM
                             + tile_row_base,
                         )
-                        _store_f32_as_bf16(out, K.cast(base_o + row_lo_f, "int64"), o_lo, active_o)
-                        _store_f32_as_bf16(out, K.cast(base_o + row_hi_f, "int64"), o_hi, active_o)
                         _store_f32_as_bf16(
-                            out, K.cast(base_o + row_lo_f, "int64"), K.float32(0.0), K.Not(active_o)
+                            out, txl.cast(base_o + row_lo_f, "int64"), o_lo, active_o
                         )
                         _store_f32_as_bf16(
-                            out, K.cast(base_o + row_hi_f, "int64"), K.float32(0.0), K.Not(active_o)
+                            out, txl.cast(base_o + row_hi_f, "int64"), o_hi, active_o
+                        )
+                        _store_f32_as_bf16(
+                            out,
+                            txl.cast(base_o + row_lo_f, "int64"),
+                            txl.float32(0.0),
+                            txl.Not(active_o),
+                        )
+                        _store_f32_as_bf16(
+                            out,
+                            txl.cast(base_o + row_hi_f, "int64"),
+                            txl.float32(0.0),
+                            txl.Not(active_o),
                         )
 
-            with K.If(lane_quad == 2), K.Then():
+            with txl.If(lane_quad == 2), txl.Then():
                 row_lo_g = compute_warp * 16 + frag_row
                 for t in range(NUM_TOKENS):
                     _store_smem_f32(s_u, t * ROWS_PER_CTA + row_lo_g, u_lo[t])
                     _store_smem_f32(s_u, t * ROWS_PER_CTA + row_lo_g + 8, u_hi[t])
-            K.cuda.warp_sync()
+            txl.cuda.warp_sync()
 
-            words_w = K.alloc_local((4,), K.u32)
-            sd_t = K.alloc_local((8,), K.f32)
-            sk_t = K.alloc_local((8,), K.f32)
+            words_w = txl.alloc_local((4,), txl.u32)
+            sd_t = txl.alloc_local((8,), txl.f32)
+            sk_t = txl.alloc_local((8,), txl.f32)
             for t in range(NUM_TOKENS):
                 slot_t = _load_smem_i32(s_slot, t)
                 beta_t = _load_smem_f32(s_beta, t)
@@ -647,22 +662,22 @@ def _make_flashkda_decode_t3_lower_bound(spec: dict[str, Any]):
                     row_h = owned_row_base + row_local
                     update = _mul(_load_smem_f32(s_u, t * ROWS_PER_CTA + row_h), beta_t)
                     for i in range(8):
-                        K.ptx.mov.b32(
+                        txl.ptx.mov.b32(
                             hist[row_local * 8 + i],
                             _fma(hist[row_local * 8 + i], sd_t[i], _mul(update, sk_t[i])),
                         )
                     for pr in range(4):
-                        K.ptx.mov.b32(
+                        txl.ptx.mov.b32(
                             words_w[pr],
                             _pack_bf16x2(
                                 hist[row_local * 8 + 2 * pr + 1], hist[row_local * 8 + 2 * pr]
                             ),
                         )
-                    with K.If(slot_t >= 0), K.Then():
+                    with txl.If(slot_t >= 0), txl.Then():
                         _store_u32x4(
                             state,
-                            K.cast(slot_t, "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
-                            + K.cast(
+                            txl.cast(slot_t, "int64") * txl.cast(STATE_SLOT_STRIDE, "int64")
+                            + txl.cast(
                                 hv * HEAD_DIM * HEAD_DIM
                                 + (tile_row_base + row_h) * HEAD_DIM
                                 + k_start,

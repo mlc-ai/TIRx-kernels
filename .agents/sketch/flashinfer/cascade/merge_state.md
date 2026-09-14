@@ -292,13 +292,13 @@ switches on `head_dim`; this module bakes the same values per config.
 - `KERNEL_META = {"name": "merge_state", "category": "flashinfer",
   "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"]}`.
 - The executable kernel is expressed entirely in plain TIRx: register buffers,
-  explicit global loads/stores, and native `K.ptx.*` forms for every non-trivial
+  explicit global loads/stores, and native `txl.ptx.*` forms for every non-trivial
   instruction (`ld.global.nc.b32`, `ld.global.nc.v4.b32`, `max.ftz.f32`,
   `sub.ftz.f32`, `ex2.approx.ftz.f32`, `add.ftz.f32`, `div.approx.ftz.f32`,
   `mov.b32` unpack, `cvt.f32.f16`/`cvt.f32.bf16`, `mul.ftz.f32`,
   `fma.rn.ftz.f32`, `cvt.rn.f16x2.f32`/`cvt.rn.bf16x2.f32`, `st.global.v4.b32`,
   `lg2.approx.ftz.f32`, `st.global.b32`). The null test is the codegen's
-  pointer comparison (`K.isnullptr`), which lowers to `setp.eq.s64`. There is
+  pointer comparison (`txl.isnullptr`), which lowers to `setp.eq.s64`. There is
   no `T.cuda.func_call`, no shared memory, and no `Tx` tile primitives.
 - `get_kernel(dtype, seq_len, num_heads, head_dim)` returns the specialized
   primfunc; `prepare_data`, `run_test`, `run_bench` follow the repository

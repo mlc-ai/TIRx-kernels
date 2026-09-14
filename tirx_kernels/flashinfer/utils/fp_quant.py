@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Compatibility name for the single Kern-DSL quantization helper module.
+"""Compatibility name for the single tirx-lite-DSL quantization helper module.
 
-The old parser helper and the Kern helper were instruction-for-instruction
+The old parser helper and the tirx-lite helper were instruction-for-instruction
 duplicates. Keep one implementation so a helper cannot silently diverge by
 being imported under the historical name.
 """
 
-from .fp_quant_kern import *  # noqa: F403
+from .fp_quant_tirx_lite import *  # noqa: F403

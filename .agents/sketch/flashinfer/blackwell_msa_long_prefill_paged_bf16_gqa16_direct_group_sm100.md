@@ -40,12 +40,12 @@ partial LSE, and optional identical temperature partial LSE. Reduction is a
 separate source kernel and is not timed or ported here.
 
 The executable imports the device language only as
-`import tirx_kernels.kern as K`. It uses scalar K control flow, opaque
+`import tirx_kernels.tirx_lite as txl`. It uses scalar txl control flow, opaque
 TensorMaps, one-dimensional shared/register allocations, and supported
-`K.ptx[...]` instructions. It uses no tile primitive, first-class layout or
+`txl.ptx[...]` instructions. It uses no tile primitive, first-class layout or
 mapping value, `layout=` argument, direct TVM script namespace,
-`K.cuda.func_call`, inline-CUDA function-call exemption, or change under
-`tirx_kernels/kern/`.
+`txl.cuda.func_call`, inline-CUDA function-call exemption, or change under
+`tirx_kernels/tirx_lite/`.
 
 The seven group-boundary scalars, `work_capacity`, and `num_work_items` are
 retained in the ABI but device-dead. Grid x is supplied as `num_work_items`.
