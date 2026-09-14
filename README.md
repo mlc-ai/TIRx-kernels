@@ -15,6 +15,8 @@ runs on that architecture in addition to the default three. Annotations follow
 `KERNEL_META["runtime_cuda_archs"]` and `tests/lint/check_readme_kernels.py`
 keeps them in sync.
 
+Thor (`sm_110a`) runtime support: **22 kernels**.
+
 ### Native TIRx
 
 - **GEMM:**
