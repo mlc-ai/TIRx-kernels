@@ -699,6 +699,7 @@ def get_kernel(**kwargs: Any):
                 K.ptx.st.shared.u32(
                     buf.ptr_to([*prefix, K.Cast("int32", base_offset + col[0])]), values[i]
                 )
+            K.cuda.warp_sync()
 
         def load_num_kv(q_atom_idx_arg, runtime_batch_size_arg):
             # The one-page specialization has exactly one positive BLOCK_KV

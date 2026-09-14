@@ -1507,7 +1507,7 @@ def _make_kernel(
                     )
                 K.ptx.fence.proxy.async_.shared__cta()
                 K.ptx.bar.sync(K.uint32(2), K.uint32(128))
-                with K.If(warp == 0):
+                with K.If((warp == 0) & (lane == 0)):
                     with K.Then():
                         if c_major == "n":
                             K.ptx[

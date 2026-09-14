@@ -1402,6 +1402,7 @@ def _make_main(
                                 arena.ptr_to(
                                     [checkpoint_base + cp_stage * 32768 + value_coord * 256]
                                 ),
+                                pred=K.cast(_elected(), "bool"),
                             )
                         K.ptx.cp.async_.bulk.commit_group()
                         K.ptx.cp.async_.bulk.wait_group.read(0)
@@ -1431,6 +1432,7 @@ def _make_main(
                                         arena.ptr_to(
                                             [checkpoint_base + cp_stage * 32768 + value_coord * 256]
                                         ),
+                                        pred=K.cast(_elected(), "bool"),
                                     )
                                 K.ptx.cp.async_.bulk.commit_group()
                                 K.ptx.cp.async_.bulk.wait_group.read(0)

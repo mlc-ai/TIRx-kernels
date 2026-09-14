@@ -2224,6 +2224,7 @@ def bf16_fused_m128(**kwargs: Any):
                     with K.unroll(4) as word_6:  # .cu:2246-2249
                         K.ptx.st.shared.b32(smem_raw.ptr_to([smem_inv_work_addr + prep_stage_byte_base + swizzled_off_2 + word_6 * 4 - K.cast(smem, "int32")]), packed_0_3[word_6])  # fmt: skip
                 with K.If(prep_local_warp < 2), K.Then():  # .cu:2251-2256
+                    K.cuda.warp_sync()
                     with K.If(K.cuda.elect_sync()), K.Then():
                         _mbarrier_arrive(prep_diag_ready, prep_stage)
                     _mbarrier_wait(prep_diag_ready, prep_stage, prep_phase.phase)

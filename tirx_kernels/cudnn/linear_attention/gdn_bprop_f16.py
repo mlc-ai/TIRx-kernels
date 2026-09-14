@@ -3667,6 +3667,7 @@ def _make_main(
                                 K.cast(head, "int32"),
                                 K.cast(token, "int32"),
                                 arena.ptr_to([_DV_DY_BASE + byte_offset]),
+                                pred=K.cast(_elected(), "bool"),
                             )
                         K.ptx.cp.async_.bulk.commit_group()
 
@@ -3681,6 +3682,7 @@ def _make_main(
                                 K.cast(head, "int32"),
                                 K.cast(token, "int32"),
                                 arena.ptr_to([_DQ_BASE + byte_offset]),
+                                pred=K.cast(_elected(), "bool"),
                             )
                         K.ptx.cp.async_.bulk.commit_group()
 
@@ -3695,6 +3697,7 @@ def _make_main(
                                 K.cast(head, "int32"),
                                 K.cast(token, "int32"),
                                 arena.ptr_to([_DK_BASE + byte_offset]),
+                                pred=K.cast(_elected(), "bool"),
                             )
                         K.ptx.cp.async_.bulk.commit_group()
 

@@ -51,6 +51,14 @@ TMA store, bulk copy). Stores consumed by `tcgen05.st`/`tcgen05.ld` register
 paths or by ordinary loads after an mbarrier do not need it. Do not treat a
 bitwise-clean single-tile matrix as proof: the failing regime is multi-tile.
 
+An elected publisher must also gather the other lanes' writes before arriving.
+Adding that warp gather to two FP4 scale-staging paths passed numerical,
+synccheck, Racecheck and GPU/reference comparisons. A fence issued before the
+stores, or an `arrive.expect_tx` issued before the generic metadata writes,
+does not publish those later writes through asynchronous completion. Move the
+arrival after the writes and their existing gather/fence; do not add a second
+arrival to the same phase. These correctness results establish no timing bound.
+
 ## Verification
 
 Launch the reference twice on a multi-tile persistent shape and `torch.equal`

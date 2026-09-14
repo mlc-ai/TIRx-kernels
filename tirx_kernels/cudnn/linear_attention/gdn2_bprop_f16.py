@@ -1894,8 +1894,9 @@ def _make_main(
                 desc_db,
                 desc_dwo,
             ):
+                issue_store = K.And(pend_writes, _elected() != 0)
                 _wait_barrier(arena, _BAR_DQ_TMASTG_READY, dq_store.stage, dq_store.phase)
-                with K.If(pend_writes), K.Then():
+                with K.If(issue_store), K.Then():
                     for d_coord in (0, 64):
                         K.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"](
                             desc_dq,
@@ -1906,7 +1907,7 @@ def _make_main(
                         )
                     K.ptx.cp.async_.bulk.commit_group()
                 _wait_barrier(arena, _BAR_DK_TMASTG_READY, dk_store.stage, dk_store.phase)
-                with K.If(pend_writes), K.Then():
+                with K.If(issue_store), K.Then():
                     for d_coord in (0, 64):
                         K.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"](
                             desc_dk,
@@ -1917,7 +1918,7 @@ def _make_main(
                         )
                     K.ptx.cp.async_.bulk.commit_group()
                 _wait_barrier(arena, _BAR_DGATE_TMASTG_READY, dgate_store.stage, dgate_store.phase)
-                with K.If(pend_writes), K.Then():
+                with K.If(issue_store), K.Then():
                     for d_coord in (0, 32, 64, 96):
                         K.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"](
                             desc_dgate,
@@ -1928,7 +1929,7 @@ def _make_main(
                         )
                     K.ptx.cp.async_.bulk.commit_group()
                 _wait_barrier(arena, _BAR_DB_TMASTG_READY, db_store.stage, db_store.phase)
-                with K.If(pend_writes), K.Then():
+                with K.If(issue_store), K.Then():
                     for d_coord in (0, 64):
                         K.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"](
                             desc_db,
@@ -1939,7 +1940,7 @@ def _make_main(
                         )
                     K.ptx.cp.async_.bulk.commit_group()
                 _wait_barrier(arena, _BAR_DV_TMASTG_READY, dv_store.stage, dv_store.phase)
-                with K.If(pend_writes), K.Then():
+                with K.If(issue_store), K.Then():
                     for d_coord in (0, 64):
                         K.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"](
                             desc_dv,
@@ -1952,7 +1953,7 @@ def _make_main(
                         )
                     K.ptx.cp.async_.bulk.commit_group()
                 _wait_barrier(arena, _BAR_DWO_TMASTG_READY, dwo_store.stage, dwo_store.phase)
-                with K.If(pend_writes), K.Then():
+                with K.If(issue_store), K.Then():
                     for d_coord in (0, 64):
                         K.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"](
                             desc_dwo,

@@ -367,11 +367,6 @@ def _make_kernel(tokens, k_dim, num_heads):
                     _wait_plain(ab_pipe.empty.ptr_to([handle_stage]), handle_phase)
                     K.ptx["fence.proxy.async.shared::cta"]()
                     _advance(tma_state)
-                    with K.If(_elected()):
-                        with K.Then():
-                            K.ptx.mbarrier.arrive.expect_tx.shared.b64(
-                                ab_pipe.full.ptr_to([handle_stage]), K.uint32(40_960)
-                            )
 
                     scale_word = k_tile * 4
                     sfa_row = m_idx * _TILE_M + lane
@@ -414,6 +409,9 @@ def _make_kernel(tokens, k_dim, num_heads):
                     K.ptx["fence.proxy.async.shared::cta"]()
                     with K.If(_elected()):
                         with K.Then():
+                            K.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                ab_pipe.full.ptr_to([handle_stage]), K.uint32(40_960)
+                            )
                             K.ptx[_TMA_G2S_2D](
                                 smem_base + _A_OFFSET + handle_stage * _A_STAGE_BYTES,
                                 K.address_of(a_map),

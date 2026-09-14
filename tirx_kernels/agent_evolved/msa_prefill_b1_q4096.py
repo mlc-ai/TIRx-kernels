@@ -304,7 +304,7 @@ def make_kernel(TOTAL_Q, HQ, HKV, TOPK, NUM_CTAS):
         union_ready = K.MBarrier(smem, 2)                 
         union_ready.init(32)
         union_free = K.MBarrier(smem, 2)                                                          
-        union_free.init(256 + 32)
+        union_free.init(256 + 32 + 32)
 
         K.ptx.fence.proxy.async_.shared__cta()
         K.ptx.fence.mbarrier_init.release.cluster()
@@ -909,6 +909,7 @@ def make_kernel(TOTAL_Q, HQ, HKV, TOPK, NUM_CTAS):
                           tmem_epoch.advance()
                           K.assign(gstep_m, gstep_m + 1)
                       q_epoch.advance()
+                      union_free.arrive(slot_m)
                   K.assign(it_m, it_m + 1)
 
                                                                               

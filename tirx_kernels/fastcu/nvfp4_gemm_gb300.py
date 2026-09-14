@@ -74,7 +74,8 @@ _TMA_4D_MCAST = (
     ".mbarrier::complete_tx::bytes.multicast::cluster.cta_group::2"
 )
 _TCGEN05_CP = "tcgen05.cp.cta_group::2.32x128b.warpx4"
-_TCGEN05_MMA = "tcgen05.mma.cta_group::2.kind::mxf4nvf4.block_scale.scale_vec::4X"
+# K=96 consumes six block16 scales, not four fixed scale vectors.
+_TCGEN05_MMA = "tcgen05.mma.cta_group::2.kind::mxf4nvf4.block_scale.block16"
 _TCGEN05_COMMIT = (
     "tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64"
 )

@@ -983,6 +983,7 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
                                 K.Cast("int32", batch),
                                 sO.ptr_to([stage * o_stage_bytes + half * 16384]),
                                 K.uint64(0),
+                                pred=K.cast(elected(), "bool"),
                             )
                         K.ptx.cp.async_.bulk.commit_group()
                     K.ptx.cp.async_.bulk.wait_group.read(1)

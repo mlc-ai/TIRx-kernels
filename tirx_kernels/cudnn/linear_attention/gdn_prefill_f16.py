@@ -2764,6 +2764,7 @@ def _make_main(
                                     ckpt_coord,
                                     head,
                                     arena.ptr_to([_CKPT_BASE + byte_off]),
+                                    pred=K.cast(_elected(), "bool"),
                                 )
                             K.ptx.cp.async_.bulk.commit_group()
                             K.ptx.cp.async_.bulk.wait_group.read(0)
@@ -2785,6 +2786,7 @@ def _make_main(
                                     head,
                                     chunk * _BT,
                                     arena.ptr_to([_O_BASE + byte_off]),
+                                    pred=K.cast(_elected(), "bool"),
                                 )
                             K.ptx.cp.async_.bulk.commit_group()
                             K.assign(did_o, K.int32(1))
@@ -2806,6 +2808,7 @@ def _make_main(
                                         ckpt_coord,
                                         head,
                                         arena.ptr_to([_CKPT_BASE + byte_off]),
+                                        pred=K.cast(_elected(), "bool"),
                                     )
                                 K.ptx.cp.async_.bulk.commit_group()
                                 K.assign(ckpt_coord, ckpt_coord + 1)

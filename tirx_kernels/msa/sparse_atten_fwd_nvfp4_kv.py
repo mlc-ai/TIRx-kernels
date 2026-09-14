@@ -1828,10 +1828,7 @@ def _make_kernel(**config):
                             with K.If(warp_in_wg == 0), K.Then():
                                 bar_q_empty.wait(slot, phase ^ 1)
                                 with K.If(K.cuda.elect_sync()), K.Then():
-                                    K.ptx.mbarrier.arrive.expect_tx.shared.b64(
-                                        bar_q_full.ptr_to([slot]),
-                                        K.uint32(M_BLOCK * HEAD_DIM * q_bytes),
-                                    )
+                                    _mbar_expect_tx(bar_q_full, slot, M_BLOCK * HEAD_DIM * q_bytes)
                             bar_sync_named(BAR_LOAD_WG, SOFTMAX_THREADS)
 
                             load_meta_slot = K.local_scalar(
@@ -1876,6 +1873,10 @@ def _make_kernel(**config):
                                             s_q_load_m_idx, load_meta_slot + lane_idx, q_oob_m_idx
                                         )
                             bar_sync_named(BAR_LOAD_WG, SOFTMAX_THREADS)
+
+                            # Publish metadata only after every writer joins.
+                            with K.If((warp_in_wg == 0) & (lane_idx == 0)), K.Then():
+                                bar_q_full.arrive(slot)
 
                             with K.unroll(TOKENS_PER_WARP(qheadperkv)) as qi_slot:
                                 tok = K.local_scalar(
@@ -1937,10 +1938,7 @@ def _make_kernel(**config):
                             with K.If(warp_in_wg == 0), K.Then():
                                 bar_q_empty.wait(slot, phase ^ 1)
                                 with K.If(K.cuda.elect_sync()), K.Then():
-                                    K.ptx.mbarrier.arrive.expect_tx.shared.b64(
-                                        bar_q_full.ptr_to([slot]),
-                                        K.uint32(M_BLOCK * HEAD_DIM * q_bytes),
-                                    )
+                                    _mbar_expect_tx(bar_q_full, slot, M_BLOCK * HEAD_DIM * q_bytes)
                             # Issue the qsplit reads BEFORE the barrier and store
                             # them after it. The barrier only orders the shared
                             # writes against last iteration's readers; the reads
@@ -1997,6 +1995,8 @@ def _make_kernel(**config):
                                         s_qidx_meta, qidx_meta_slot + tok_g4, qsplit_word[meta_iter]
                                     )
                             bar_sync_named(BAR_LOAD_WG, SOFTMAX_THREADS)
+                            with K.If((warp_in_wg == 0) & (lane_idx == 0)), K.Then():
+                                bar_q_full.arrive(slot)
 
                             with K.If(K.cuda.elect_sync()), K.Then():
                                 with K.unroll(gathers_per_warp) as gather_slot:

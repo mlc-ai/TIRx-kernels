@@ -1693,6 +1693,7 @@ def _make_kernel(
                         smem.ptr_to([c_slot + _swizzled(row_offset, word // 4, row_bytes)]),
                     )
                 K.ptx.fence.proxy.async_.shared__cta()
+                K.cuda.warp_sync()
                 with K.If(lane == 0):
                     with K.Then():
                         K.ptx.mbarrier.arrive.shared.b64(c_pipe.empty.ptr_to([c_state.stage]))
@@ -1873,7 +1874,7 @@ def _make_kernel(
                     stage_output(d_dtype, d_bits, d_words, d_wide, d_offsets, d_stage)
                     K.ptx.fence.proxy.async_.shared__cta()
                     K.ptx.bar.sync(K.uint32(1), K.uint32(128))
-                    with K.If(warp == 0):
+                    with K.If((warp == 0) & (lane == 0)):
                         with K.Then():
                             tma_store_d(d_stage, subtile)
                             K.ptx.cp.async_.bulk.commit_group()

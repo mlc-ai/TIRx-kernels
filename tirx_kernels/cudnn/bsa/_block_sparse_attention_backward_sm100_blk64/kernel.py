@@ -402,18 +402,14 @@ def get_kernel(**config):
                         for item in range(2):
                             q_row = q_block * K.int32(64) + lane * K.int32(2) + K.int32(item)
                             dst = OFF_SLSE + pair_slot * 256 + lane * K.int32(8) + item * 4
-                            with K.If(q_row < K.int32(seqlen_q)):
-                                with K.Then():
-                                    K.ptx["cp.async.ca.shared.global"](
-                                        arena.ptr_to([dst]),
-                                        workspace.ptr_to(
-                                            [K.int64(sum_plane) + bh_q + K.cast(q_row, "int64")]
-                                        ),
-                                        4,
-                                        4,
-                                    )
-                                with K.Else():
-                                    K.ptx.st.shared.b32(arena.ptr_to([dst]), K.uint32(0))
+                            K.ptx["cp.async.ca.shared.global"](
+                                arena.ptr_to([dst]),
+                                workspace.ptr_to(
+                                    [K.int64(sum_plane) + bh_q + K.cast(q_row, "int64")]
+                                ),
+                                4,
+                                K.Select(q_row < K.int32(seqlen_q), K.uint32(4), K.uint32(0)),
+                            )
                     K.ptx["cp.async.mbarrier.arrive.noinc.shared.b64"](
                         lse_pipe.full.buf.ptr_to([lse_stage])
                     )
@@ -445,16 +441,12 @@ def get_kernel(**config):
                         for item in range(2):
                             q_row = q_block * K.int32(64) + lane * K.int32(2) + K.int32(item)
                             dst = OFF_SSUM + pair_slot * 256 + lane * K.int32(8) + item * 4
-                            with K.If(q_row < K.int32(seqlen_q)):
-                                with K.Then():
-                                    K.ptx["cp.async.ca.shared.global"](
-                                        arena.ptr_to([dst]),
-                                        workspace.ptr_to([bh_q + K.cast(q_row, "int64")]),
-                                        4,
-                                        4,
-                                    )
-                                with K.Else():
-                                    K.ptx.st.shared.b32(arena.ptr_to([dst]), K.uint32(0))
+                            K.ptx["cp.async.ca.shared.global"](
+                                arena.ptr_to([dst]),
+                                workspace.ptr_to([bh_q + K.cast(q_row, "int64")]),
+                                4,
+                                K.Select(q_row < K.int32(seqlen_q), K.uint32(4), K.uint32(0)),
+                            )
                     K.ptx["cp.async.mbarrier.arrive.noinc.shared.b64"](
                         sum_pipe.full.buf.ptr_to([sum_stage])
                     )
