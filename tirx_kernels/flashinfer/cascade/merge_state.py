@@ -16,15 +16,16 @@ source host launcher ``flashinfer::MergeState`` does.  One CTA per position,
 ``head_dim / vec_size`` threads per head along ``x`` and one head per ``y``.
 """
 
+import os
 from typing import Any
 
 import tirx_kernels.kern as K
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
 
 KERNEL_META = {
     "name": "merge_state",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -62,6 +63,8 @@ def _validate(dtype: str, seq_len: int, num_heads: int, head_dim: int) -> None:
         raise ValueError(f"head_dim={head_dim} outside the source DISPATCH_HEAD_DIM domain")
     if seq_len < 1 or num_heads < 1:
         raise ValueError("seq_len and num_heads must be positive")
+    if seq_len * num_heads * head_dim > 2**32:
+        raise ValueError("Tensor exceeds the source uint32 element-offset domain")
     if _bdx(head_dim) * num_heads > MAX_THREADS:
         raise ValueError(
             f"bdx*bdy = {_bdx(head_dim)}*{num_heads} exceeds the {MAX_THREADS}-thread block limit"
@@ -84,6 +87,9 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
     warps = (nthreads + 31) // 32
     bdx_shift = bdx.bit_length() - 1  # bdx is 8, 16, or 32
     is_f16 = dtype == "float16"
+    index_dtype = "int64" if seq_len * num_heads * head_dim > 2**31 else "int32"
+    thor_flat_index = os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a"
+    fused_index = thor_flat_index and index_dtype == "int32"
 
     def widen_pair(dst, w, word):
         # vec_cast<float, DTypeIn>: one packed pair -> two f32.
@@ -114,6 +120,7 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
         s_merged: K.gptr[K.f32],
     ):
         pos = K.cta_id()  # blockIdx.x
+        index_pos = K.Cast("int64", pos) if index_dtype == "int64" else pos
         tid = K.thread_id()
         # The source launches a (bdx, bdy) block and reads threadIdx.x / threadIdx.y.
         # Kern owns one flat thread axis of the same order (tid = ty * bdx + tx).
@@ -127,7 +134,13 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
 
         def body():
             # ---- blend weights from the two log2-sum-exp values (source L53-59) ----
-            row = K.local_scalar("int32", init=pos * num_heads + ty)  # pos * num_heads + head_idx
+            if fused_index:
+                row = K.local_scalar("uint32")
+                K.ptx.mad.lo.u32(
+                    row, K.cast(pos, "uint32"), K.uint32(num_heads), K.cast(ty, "uint32")
+                )
+            else:
+                row = K.local_scalar(index_dtype, init=index_pos * num_heads + ty)
             row64 = K.Cast("int64", row)
             s_a_val = K.local_scalar("float32")
             s_b_val = K.local_scalar("float32")
@@ -152,7 +165,23 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
             K.ptx.div.approx.ftz.f32(b_scale, e_b, denom)
 
             # ---- cast_load of the vec_size slice: v_a (L61), then v_b (L62) ----
-            slice_ = K.local_scalar("int32", init=row * head_dim + tx * vec)
+            # head_dim == bdx * vec, so the flat thread index already combines
+            # the source head and vector coordinates for these accesses.
+            vector_index = (
+                index_pos * num_heads * head_dim + tid * vec
+                if thor_flat_index
+                else row * head_dim + tx * vec
+            )
+            if fused_index:
+                slice_ = K.local_scalar("uint32")
+                K.ptx.mad.lo.u32(
+                    slice_,
+                    K.cast(pos, "uint32"),
+                    K.uint32(num_heads * head_dim),
+                    K.cast(tid, "uint32") * K.uint32(vec),
+                )
+            else:
+                slice_ = K.local_scalar(index_dtype, init=vector_index)
             slice64 = K.Cast("int64", slice_)
 
             a_bits = K.alloc_local([nwords], "uint32")
