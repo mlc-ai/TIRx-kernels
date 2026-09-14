@@ -133,11 +133,7 @@ def _fast_divmod(divisor):
 def _shfl_bfly_f32(value, lane_mask):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out,
-        txl.reinterpret("uint32", value),
-        txl.uint32(lane_mask),
-        txl.uint32(31),
-        txl.uint32(0xFFFFFFFF),
+        out, txl.reinterpret("uint32", value), txl.uint32(lane_mask), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
     return txl.reinterpret("float32", out)
 
@@ -145,11 +141,7 @@ def _shfl_bfly_f32(value, lane_mask):
 def _shfl_bfly_i32(value, lane_mask):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out,
-        txl.reinterpret("uint32", value),
-        txl.uint32(lane_mask),
-        txl.uint32(31),
-        txl.uint32(0xFFFFFFFF),
+        out, txl.reinterpret("uint32", value), txl.uint32(lane_mask), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
     return txl.reinterpret("int32", out)
 
@@ -202,9 +194,7 @@ def _make_kernel(log_max_splits):
 
         def _lse_index(split, row):
             linear = split * _TILE_M + row
-            return txl.bitwise_xor(
-                linear, txl.bitwise_and(txl.shift_right(linear, 4), txl.int32(15))
-            )
+            return txl.bitwise_xor(linear, txl.bitwise_and(txl.shift_right(linear, 4), txl.int32(15)))
 
         def _o_index(stage, row, col):
             return stage * (_TILE_M * _K_BLOCK) + row * _K_BLOCK + col

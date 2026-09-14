@@ -114,9 +114,7 @@ def test_sigmoid_tanh_approx_f32_has_materialized_ptx_call_contract():
     names = []
     structural_walk(probe.func.body, (ir.Call, lambda op: names.append(op.op.name)))
     assert [name for name in names if name.startswith("tirx.ptx.")] == [
-        "tirx.ptx.tanh",
-        "tirx.ptx.fma",
-        "tirx.ptx.st",
+        "tirx.ptx.tanh", "tirx.ptx.fma", "tirx.ptx.st"
     ]
 
 
@@ -169,13 +167,10 @@ def test_stack_alloca_is_bound_exactly_once():
 
     statements = []
     structural_walk(probe.func.body, (tirx.Bind, lambda op: statements.append(op)))
-    assert (
-        sum(
-            getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_stack_alloca"
-            for op in statements
-        )
-        == 1
-    )
+    assert sum(
+        getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_stack_alloca"
+        for op in statements
+    ) == 1
 
 
 def test_call_packed_has_statement_semantics():
@@ -186,13 +181,10 @@ def test_call_packed_has_statement_semantics():
 
     statements = []
     structural_walk(probe.func.body, (tirx.Evaluate, lambda op: statements.append(op)))
-    assert (
-        sum(
-            getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_call_packed"
-            for op in statements
-        )
-        == 1
-    )
+    assert sum(
+        getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_call_packed"
+        for op in statements
+    ) == 1
 
 
 def test_retired_binding_forms_are_rejected_with_guidance():

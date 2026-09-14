@@ -90,12 +90,8 @@ def _ring_next(slot, phase, size):
 
 def _ring_prev(slot, phase, size):
     at_zero = txl.local_scalar("uint32", init=txl.cast(slot == 0, "uint32"))
-    prev_slot = txl.local_scalar(
-        "int32", init=txl.Select(at_zero != 0, txl.int32(size - 1), slot - 1)
-    )
-    prev_phase = txl.local_scalar(
-        "uint32", init=txl.Select(at_zero != 0, phase, phase ^ txl.uint32(1))
-    )
+    prev_slot = txl.local_scalar("int32", init=txl.Select(at_zero != 0, txl.int32(size - 1), slot - 1))
+    prev_phase = txl.local_scalar("uint32", init=txl.Select(at_zero != 0, phase, phase ^ txl.uint32(1)))
     return prev_slot, prev_phase
 
 
@@ -125,13 +121,9 @@ def _bit_or64(*values):
 def _ab_desc(smbase, region, slot, atom):
     base = smbase + txl.uint32(region) + txl.cast(slot * _AB_STRIDE, "uint32")
     addr = txl.cast(
-        txl.bitwise_and(txl.shift_right(base, txl.uint32(4)), txl.uint32(0x7FC0))
-        + txl.uint32(atom),
-        "uint64",
+        txl.bitwise_and(txl.shift_right(base, txl.uint32(4)), txl.uint32(0x7FC0)) + txl.uint32(atom), "uint64"
     )
-    lbo = txl.cast(
-        txl.bitwise_and(txl.shift_left(base, txl.uint32(12)), txl.uint32(0x7FC00000)), "uint64"
-    )
+    lbo = txl.cast(txl.bitwise_and(txl.shift_left(base, txl.uint32(12)), txl.uint32(0x7FC00000)), "uint64")
     return _bit_or64(txl.uint64(0x4010404000000000), addr, lbo)
 
 
@@ -154,8 +146,7 @@ def _ab_desc_low(smbase, region, slot, atom):
     """Low word of the source K96 shared-memory operand descriptor."""
     base = smbase + txl.uint32(region) + txl.cast(slot * _AB_STRIDE, "uint32")
     return txl.bitwise_or(
-        txl.bitwise_and(txl.shift_right(base, txl.uint32(4)), txl.uint32(0x7FC0))
-        + txl.uint32(atom),
+        txl.bitwise_and(txl.shift_right(base, txl.uint32(4)), txl.uint32(0x7FC0)) + txl.uint32(atom),
         txl.bitwise_and(txl.shift_left(base, txl.uint32(12)), txl.uint32(0x7FC00000)),
     )
 
@@ -169,16 +160,12 @@ def _ab_desc_low_straddle(smbase, region, addr_slot, lbo_slot, atom):
 
 
 def _join_desc(high, low):
-    return txl.bitwise_or(
-        txl.shift_left(txl.cast(high, "uint64"), txl.uint32(32)), txl.cast(low, "uint64")
-    )
+    return txl.bitwise_or(txl.shift_left(txl.cast(high, "uint64"), txl.uint32(32)), txl.cast(low, "uint64"))
 
 
 def _sf_cp_desc(smbase, region, slot, slot_units, tile):
     base = smbase + txl.uint32(region)
-    addr = txl.cast(
-        txl.bitwise_and(txl.shift_right(base, txl.uint32(4)), txl.uint32(0x3FC0)), "uint64"
-    )
+    addr = txl.cast(txl.bitwise_and(txl.shift_right(base, txl.uint32(4)), txl.uint32(0x3FC0)), "uint64")
     desc = _bit_or64(txl.uint64(0x400800010000), addr)
     return desc + txl.cast(slot * slot_units + tile * 32, "uint64")
 
@@ -253,16 +240,12 @@ def make_kernel():
         k_rem = txl.local_scalar("int32", init=K_dim - full_groups * 768)
         tail_cells = txl.local_scalar("int32", init=_uceil(k_rem, txl.int32(96)))
         t_sf = txl.local_scalar("int32", init=_uceil(tail_cells, txl.int32(2)))
-        num_groups = txl.local_scalar(
-            "int32", init=full_groups + txl.cast(tail_cells != 0, "int32")
-        )
+        num_groups = txl.local_scalar("int32", init=full_groups + txl.cast(tail_cells != 0, "int32"))
         k_rem_mod96 = txl.local_scalar("int32", init=_umod(k_rem, txl.int32(96)))
         b64_try = txl.local_scalar(
             "int32",
             init=txl.Select(
-                k_rem_mod96 == 64,
-                txl.int32(1),
-                txl.Select(k_rem_mod96 == 32, txl.int32(2), txl.int32(0)),
+                k_rem_mod96 == 64, txl.int32(1), txl.Select(k_rem_mod96 == 32, txl.int32(2), txl.int32(0))
             ),
         )
         a64 = txl.local_scalar("int32", init=tail_cells - b64_try)
@@ -279,9 +262,7 @@ def make_kernel():
         )
         t_win = txl.local_scalar(
             "int32",
-            init=txl.Select(
-                b64 != 0, _uceil(_udiv(k_rem, txl.int32(2)), txl.int32(128)), txl.int32(3)
-            ),
+            init=txl.Select(b64 != 0, _uceil(_udiv(k_rem, txl.int32(2)), txl.int32(128)), txl.int32(3)),
         )
 
         smid = txl.local_scalar("uint32", init=txl.cuda.mov_sreg(32, "smid"))
@@ -301,8 +282,7 @@ def make_kernel():
                     txl.uint32(1),
                 )
                 txl.ptx.mbarrier.init.shared.b64(
-                    txl.ptr_byte_offset(smem.ptr_to([0]), _AB_FREE + stage * 8, "uint64"),
-                    txl.uint32(1),
+                    txl.ptr_byte_offset(smem.ptr_to([0]), _AB_FREE + stage * 8, "uint64"), txl.uint32(1)
                 )
             for stage in range(7):
                 txl.ptx.mbarrier.init.shared.b64(
@@ -310,8 +290,7 @@ def make_kernel():
                     txl.uint32(1),
                 )
                 txl.ptx.mbarrier.init.shared.b64(
-                    txl.ptr_byte_offset(smem.ptr_to([0]), _SF_FREE + stage * 8, "uint64"),
-                    txl.uint32(1),
+                    txl.ptr_byte_offset(smem.ptr_to([0]), _SF_FREE + stage * 8, "uint64"), txl.uint32(1)
                 )
             txl.ptx.mbarrier.init.shared.b64(
                 txl.ptr_byte_offset(smem.ptr_to([0]), _ACC_READY, "uint64"), txl.uint32(1)
@@ -333,9 +312,7 @@ def make_kernel():
                     smbase + txl.uint32(_TMEM_ADDR), txl.uint32(512)
                 )
             txl.ptx.bar.sync(txl.uint32(2), txl.uint32(160))
-            txl.ptx.ld.shared.b32(
-                taddr, txl.ptr_byte_offset(smem.ptr_to([0]), _TMEM_ADDR, "uint32")
-            )
+            txl.ptx.ld.shared.b32(taddr, txl.ptr_byte_offset(smem.ptr_to([0]), _TMEM_ADDR, "uint32"))
 
         with ab_role:
             with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
@@ -354,27 +331,22 @@ def make_kernel():
                         for sub in range(3):
                             with txl.If((group < full_groups) | (sub < t_win)), txl.Then():
                                 _wait_acquire_cta(
-                                    smbase + txl.uint32(_AB_FREE) + txl.cast(slot * 8, "uint32"),
-                                    phase,
+                                    smbase + txl.uint32(_AB_FREE) + txl.cast(slot * 8, "uint32"), phase
                                 )
                                 mbar = txl.bitwise_and(
                                     smbase + txl.uint32(_AB_READY) + txl.cast(slot * 8, "uint32"),
                                     txl.uint32(0xFEFFFFFF),
                                 )
                                 with txl.If(m_pair == 0), txl.Then():
-                                    txl.ptx[
-                                        "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64"
-                                    ](mbar, txl.uint32(65536))
+                                    txl.ptx["mbarrier.arrive.expect_tx.release.cta.shared::cta.b64"](
+                                        mbar, txl.uint32(65536)
+                                    )
                                 x = group * 384 + sub * 128
                                 a_dst = (
-                                    smbase
-                                    + txl.uint32(_A_BASE)
-                                    + txl.cast(slot * _AB_STRIDE, "uint32")
+                                    smbase + txl.uint32(_A_BASE) + txl.cast(slot * _AB_STRIDE, "uint32")
                                 )
                                 b_dst = (
-                                    smbase
-                                    + txl.uint32(_B_BASE)
-                                    + txl.cast(slot * _AB_STRIDE, "uint32")
+                                    smbase + txl.uint32(_B_BASE) + txl.cast(slot * _AB_STRIDE, "uint32")
                                 )
                                 txl.ptx[_TMA_3D_MCAST](
                                     a_dst,
@@ -427,17 +399,16 @@ def make_kernel():
                         for sub in range(4):
                             with txl.If((group < full_groups) | (sub < t_sf)), txl.Then():
                                 _wait_acquire_cta(
-                                    smbase + txl.uint32(_SF_FREE) + txl.cast(slot * 8, "uint32"),
-                                    phase,
+                                    smbase + txl.uint32(_SF_FREE) + txl.cast(slot * 8, "uint32"), phase
                                 )
                                 mbar = txl.bitwise_and(
                                     smbase + txl.uint32(_SF_READY) + txl.cast(slot * 8, "uint32"),
                                     txl.uint32(0xFEFFFFFF),
                                 )
                                 with txl.If(m_pair == 0), txl.Then():
-                                    txl.ptx[
-                                        "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64"
-                                    ](mbar, txl.uint32(9216))
+                                    txl.ptx["mbarrier.arrive.expect_tx.release.cta.shared::cta.b64"](
+                                        mbar, txl.uint32(9216)
+                                    )
                                 sf_group = (group * 4 + sub) * 3
                                 sfa_dst = (
                                     smbase
@@ -506,25 +477,17 @@ def make_kernel():
                 sfa_t1 = txl.local_scalar("uint32", init=taddr + txl.uint32(480))
                 sfb_t0 = txl.local_scalar("uint32", init=taddr + txl.uint32(488))
                 sfb_t1 = txl.local_scalar("uint32", init=taddr + txl.uint32(496))
-                sfa_w1 = txl.local_scalar(
-                    "uint32", init=txl.bitwise_or(sfa_t1, txl.uint32(0x80000000))
-                )
-                sfb_w1 = txl.local_scalar(
-                    "uint32", init=txl.bitwise_or(sfb_t1, txl.uint32(0x80000000))
-                )
+                sfa_w1 = txl.local_scalar("uint32", init=txl.bitwise_or(sfa_t1, txl.uint32(0x80000000)))
+                sfb_w1 = txl.local_scalar("uint32", init=txl.bitwise_or(sfb_t1, txl.uint32(0x80000000)))
                 idesc_w0 = txl.local_scalar(
-                    "uint32",
-                    init=txl.bitwise_or(txl.uint32(0x90400480), _sf_id_bits(sfa_t0, sfb_t0)),
+                    "uint32", init=txl.bitwise_or(txl.uint32(0x90400480), _sf_id_bits(sfa_t0, sfb_t0))
                 )
                 idesc_w1 = txl.local_scalar(
-                    "uint32",
-                    init=txl.bitwise_or(txl.uint32(0x90400480), _sf_id_bits(sfa_w1, sfb_w1)),
+                    "uint32", init=txl.bitwise_or(txl.uint32(0x90400480), _sf_id_bits(sfa_w1, sfb_w1))
                 )
 
                 def stage_scale(slot, phase):
-                    _wait_plain(
-                        smbase + txl.uint32(_SF_READY) + txl.cast(slot * 8, "uint32"), phase
-                    )
+                    _wait_plain(smbase + txl.uint32(_SF_READY) + txl.cast(slot * 8, "uint32"), phase)
                     copies = (
                         (_SFA_BASE, 0, 96, 476),
                         (_SFA_BASE, 1, 96, 480),
@@ -539,8 +502,7 @@ def make_kernel():
                     for region, tile, stride, dst in copies:
                         src = sfa_src if region == _SFA_BASE else sfb_src
                         txl.ptx[_TCGEN05_CP](
-                            taddr + txl.uint32(dst),
-                            src + txl.cast(slot * stride + tile * 32, "uint64"),
+                            taddr + txl.uint32(dst), src + txl.cast(slot * stride + tile * 32, "uint64")
                         )
                     txl.ptx[_TCGEN05_COMMIT](
                         smbase + txl.uint32(_SF_FREE) + txl.cast(slot * 8, "uint32"), txl.uint16(3)
@@ -554,65 +516,37 @@ def make_kernel():
 
                 def issue96(cell, W0, W1, W2, d_tmem, accum, issue_pred=None):
                     if cell == 0:
-                        da = _join_desc(
-                            txl.uint32(0x40104040), _ab_desc_low(smbase, _A_BASE, W0, 0)
-                        )
-                        db = _join_desc(
-                            txl.uint32(0x40104040), _ab_desc_low(smbase, _B_BASE, W0, 0)
-                        )
+                        da = _join_desc(txl.uint32(0x40104040), _ab_desc_low(smbase, _A_BASE, W0, 0))
+                        db = _join_desc(txl.uint32(0x40104040), _ab_desc_low(smbase, _B_BASE, W0, 0))
                     elif cell == 1:
-                        da = _join_desc(
-                            txl.uint32(0x40104040), _ab_desc_low(smbase, _A_BASE, W0, 3)
-                        )
-                        db = _join_desc(
-                            txl.uint32(0x40104040), _ab_desc_low(smbase, _B_BASE, W0, 3)
-                        )
+                        da = _join_desc(txl.uint32(0x40104040), _ab_desc_low(smbase, _A_BASE, W0, 3))
+                        db = _join_desc(txl.uint32(0x40104040), _ab_desc_low(smbase, _B_BASE, W0, 3))
                     elif cell == 2:
                         da = _join_desc(
-                            txl.uint32(0x40104040),
-                            _ab_desc_low_straddle(smbase, _A_BASE, W0, W1, 6),
+                            txl.uint32(0x40104040), _ab_desc_low_straddle(smbase, _A_BASE, W0, W1, 6)
                         )
                         db = _join_desc(
-                            txl.uint32(0x40104040),
-                            _ab_desc_low_straddle(smbase, _B_BASE, W0, W1, 6),
+                            txl.uint32(0x40104040), _ab_desc_low_straddle(smbase, _B_BASE, W0, W1, 6)
                         )
                     elif cell == 3:
-                        da = _join_desc(
-                            txl.uint32(0x40104040), _ab_desc_low(smbase, _A_BASE, W1, 1)
-                        )
-                        db = _join_desc(
-                            txl.uint32(0x40104040), _ab_desc_low(smbase, _B_BASE, W1, 1)
-                        )
+                        da = _join_desc(txl.uint32(0x40104040), _ab_desc_low(smbase, _A_BASE, W1, 1))
+                        db = _join_desc(txl.uint32(0x40104040), _ab_desc_low(smbase, _B_BASE, W1, 1))
                     elif cell == 4:
-                        da = _join_desc(
-                            txl.uint32(0x40104040), _ab_desc_low(smbase, _A_BASE, W1, 4)
-                        )
-                        db = _join_desc(
-                            txl.uint32(0x40104040), _ab_desc_low(smbase, _B_BASE, W1, 4)
-                        )
+                        da = _join_desc(txl.uint32(0x40104040), _ab_desc_low(smbase, _A_BASE, W1, 4))
+                        db = _join_desc(txl.uint32(0x40104040), _ab_desc_low(smbase, _B_BASE, W1, 4))
                     elif cell == 5:
                         da = _join_desc(
-                            txl.uint32(0x40104040),
-                            _ab_desc_low_straddle(smbase, _A_BASE, W1, W2, 7),
+                            txl.uint32(0x40104040), _ab_desc_low_straddle(smbase, _A_BASE, W1, W2, 7)
                         )
                         db = _join_desc(
-                            txl.uint32(0x40104040),
-                            _ab_desc_low_straddle(smbase, _B_BASE, W1, W2, 7),
+                            txl.uint32(0x40104040), _ab_desc_low_straddle(smbase, _B_BASE, W1, W2, 7)
                         )
                     elif cell == 6:
-                        da = _join_desc(
-                            txl.uint32(0x40104040), _ab_desc_low(smbase, _A_BASE, W2, 2)
-                        )
-                        db = _join_desc(
-                            txl.uint32(0x40104040), _ab_desc_low(smbase, _B_BASE, W2, 2)
-                        )
+                        da = _join_desc(txl.uint32(0x40104040), _ab_desc_low(smbase, _A_BASE, W2, 2))
+                        db = _join_desc(txl.uint32(0x40104040), _ab_desc_low(smbase, _B_BASE, W2, 2))
                     else:
-                        da = _join_desc(
-                            txl.uint32(0x40104040), _ab_desc_low(smbase, _A_BASE, W2, 5)
-                        )
-                        db = _join_desc(
-                            txl.uint32(0x40104040), _ab_desc_low(smbase, _B_BASE, W2, 5)
-                        )
+                        da = _join_desc(txl.uint32(0x40104040), _ab_desc_low(smbase, _A_BASE, W2, 5))
+                        db = _join_desc(txl.uint32(0x40104040), _ab_desc_low(smbase, _B_BASE, W2, 5))
                     if cell % 2 == 0:
                         sfa = sfa_t0
                         sfb = sfb_t0
@@ -657,13 +591,7 @@ def make_kernel():
                         sfb = sfb_t1
                     idesc = txl.bitwise_or(txl.uint32(0x10400480), _sf_id_bits(sfa, sfb))
                     txl.ptx[_TCGEN05_MMA](
-                        d_tmem,
-                        da,
-                        db,
-                        idesc,
-                        sfa,
-                        sfb,
-                        txl.ptx.pred(txl.cast(accum != 0, "uint32")),
+                        d_tmem, da, db, idesc, sfa, sfb, txl.ptx.pred(txl.cast(accum != 0, "uint32"))
                     )
 
                 def issue_k64_variant(a_count, b_count, d_tmem, accum, need_wait, acc_wait):
@@ -718,9 +646,7 @@ def make_kernel():
                         txl.assign(sf_slot, ns)
                         txl.assign(sf_phase, np)
                     if t_windows >= 2:
-                        _wait_plain(
-                            smbase + txl.uint32(_AB_READY) + txl.cast(W1 * 8, "uint32"), ph1
-                        )
+                        _wait_plain(smbase + txl.uint32(_AB_READY) + txl.cast(W1 * 8, "uint32"), ph1)
                     issue_at(2)
                     commit_ab(W0)
                     issue_at(3)
@@ -731,9 +657,7 @@ def make_kernel():
                         txl.assign(sf_phase, np)
                     issue_at(4)
                     if t_windows >= 3:
-                        _wait_plain(
-                            smbase + txl.uint32(_AB_READY) + txl.cast(W2 * 8, "uint32"), ph2
-                        )
+                        _wait_plain(smbase + txl.uint32(_AB_READY) + txl.cast(W2 * 8, "uint32"), ph2)
                     if t_windows == 1:
                         txl.assign(ab_slot, W1)
                         txl.assign(ab_phase, ph1)
@@ -774,9 +698,7 @@ def make_kernel():
                         ns, np = stage_scale(sf_slot, sf_phase)
                         txl.assign(sf_slot, ns)
                         txl.assign(sf_phase, np)
-                        _wait_plain(
-                            smbase + txl.uint32(_AB_READY) + txl.cast(W0 * 8, "uint32"), ph0
-                        )
+                        _wait_plain(smbase + txl.uint32(_AB_READY) + txl.cast(W0 * 8, "uint32"), ph0)
                         with txl.If(need_wait != 0), txl.Then():
                             _wait_plain(smbase + txl.uint32(_ACC_FREE), acc_wait)
                             txl.assign(need_wait, txl.uint32(0))
@@ -787,9 +709,7 @@ def make_kernel():
                         ns, np = stage_scale(sf_slot, sf_phase)
                         txl.assign(sf_slot, ns)
                         txl.assign(sf_phase, np)
-                        _wait_plain(
-                            smbase + txl.uint32(_AB_READY) + txl.cast(W1 * 8, "uint32"), ph1
-                        )
+                        _wait_plain(smbase + txl.uint32(_AB_READY) + txl.cast(W1 * 8, "uint32"), ph1)
                         issue96(2, W0, W1, W2, d_tmem, accum)
                         commit_ab(W0)
                         issue96(3, W0, W1, W2, d_tmem, accum)
@@ -798,9 +718,7 @@ def make_kernel():
                         txl.assign(sf_slot, ns)
                         txl.assign(sf_phase, np)
                         issue96(4, W0, W1, W2, d_tmem, accum)
-                        _wait_plain(
-                            smbase + txl.uint32(_AB_READY) + txl.cast(W2 * 8, "uint32"), ph2
-                        )
+                        _wait_plain(smbase + txl.uint32(_AB_READY) + txl.cast(W2 * 8, "uint32"), ph2)
                         ns_ab, np_ab = _ring_next(W2, ph2, 6)
                         txl.assign(ab_slot, ns_ab)
                         txl.assign(ab_phase, np_ab)
@@ -895,17 +813,13 @@ def make_kernel():
                 tile_lane = txl.local_scalar("int32")
                 txl.ptx.ld.global_.ca.s32(tile_lane, route_table.ptr_to([work]))
                 tile = txl.local_scalar("uint32")
-                txl.ptx.redux_sync.min.u32(
-                    tile, txl.cast(tile_lane, "uint32"), txl.uint32(0xFFFFFFFF)
-                )
+                txl.ptx.redux_sync.min.u32(tile, txl.cast(tile_lane, "uint32"), txl.uint32(0xFFFFFFFF))
                 m_row = txl.local_scalar("int32", init=_umod(tile, cluster_grid_m))
                 n_group = txl.local_scalar("int32", init=_udiv(tile, cluster_grid_m))
                 off_n = txl.local_scalar("int32", init=n_group * 256)
                 _wait_plain(smbase + txl.uint32(_ACC_READY), acc_phase)
                 txl.assign(acc_phase, acc_phase ^ txl.uint32(1))
-                tmem_base = txl.local_scalar(
-                    "uint32", init=taddr + txl.cast(d_buffer * 220, "uint32")
-                )
+                tmem_base = txl.local_scalar("uint32", init=taddr + txl.cast(d_buffer * 220, "uint32"))
                 row = txl.local_scalar("int32", init=(m_row * 2 + m_pair) * 128 + warp * 32 + lane)
                 row_in = txl.local_scalar("uint32", init=txl.cast(row < M, "uint32"))
                 row_base = txl.local_scalar("int64", init=txl.cast(row, "int64") * N)

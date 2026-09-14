@@ -50,9 +50,7 @@ def _tile_byte(base, row, dim):
 
 def _epi_bf16_byte(base, wg, row, dim, columns):
     """Source make_smem_layout_epi address for one workgroup's BF16 tile."""
-    linear = (
-        base + wg * txl.int32(128 * columns * 2) + row * txl.int32(columns * 2) + txl.int32(dim * 2)
-    )
+    linear = base + wg * txl.int32(128 * columns * 2) + row * txl.int32(columns * 2) + txl.int32(dim * 2)
     mask = txl.int32(columns * 2 - 16)
     return _xor(linear, txl.bitwise_and(linear // txl.int32(8), mask))
 
@@ -69,8 +67,7 @@ def _desc_base(ldo, sdo=64, swizzle=3):
 
 def _desc_at(base, shared_address):
     field = txl.cast(
-        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)),
-        "uint64",
+        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)), "uint64"
     )
     return txl.bitwise_or(txl.uint64(base), field)
 
@@ -209,11 +206,7 @@ def _issue_tma_tile(desc, arena, dst, seq0, head, batch_idx, barrier, head_dim):
 def _bulk_stats(arena, dst, src, barrier, pred):
     txl.ptx.mbarrier.arrive.expect_tx.shared.b64(barrier, txl.uint32(512), pred=pred)
     txl.ptx["cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes"](
-        arena.ptr_to([dst]),
-        src,
-        txl.uint32(512),
-        txl.cuda.cvta_generic_to_shared(barrier),
-        pred=pred,
+        arena.ptr_to([dst]), src, txl.uint32(512), txl.cuda.cvta_generic_to_shared(barrier), pred=pred
     )
 
 
@@ -277,10 +270,7 @@ def get_kernel(**config):
         warps=8, arch="sm_100a", min_blocks_per_sm=1, grid=((seqlen_q + 127) // 128, heads, batch)
     )
     def preprocess(
-        o: txl.gptr[txl.bf16],
-        do: txl.gptr[txl.bf16],
-        lse: txl.gptr[txl.f32],
-        workspace: txl.gptr[txl.f32],
+        o: txl.gptr[txl.bf16], do: txl.gptr[txl.bf16], lse: txl.gptr[txl.f32], workspace: txl.gptr[txl.f32]
     ):
         required_block_size = txl.attr({"tirx.required_block_size": 1})
         required_block_size.__enter__()
@@ -298,10 +288,7 @@ def get_kernel(**config):
             with txl.If(q_idx < txl.int32(seqlen_q)), txl.Then():
                 row = (
                     (
-                        (
-                            txl.cast(batch_idx, "int64") * txl.int64(seqlen_q)
-                            + txl.cast(q_idx, "int64")
-                        )
+                        (txl.cast(batch_idx, "int64") * txl.int64(seqlen_q) + txl.cast(q_idx, "int64"))
                         * txl.int64(heads)
                         + txl.cast(head, "int64")
                     )
@@ -382,9 +369,7 @@ def get_kernel(**config):
             )
         required_block_size.__exit__(None, None, None)
 
-    @txl.kernel(
-        warps=WARPS, arch="sm_100a", min_blocks_per_sm=1, grid=(tasks * groups, heads, batch)
-    )
+    @txl.kernel(warps=WARPS, arch="sm_100a", min_blocks_per_sm=1, grid=(tasks * groups, heads, batch))
     def bwd(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -455,9 +440,9 @@ def get_kernel(**config):
 
         q_group = block // txl.int32(tasks)
         task = block - q_group * txl.int32(tasks)
-        offsets_base = (
-            (batch_idx * txl.int32(heads) + head) * txl.int32(groups) + q_group
-        ) * txl.int32(tasks + 1)
+        offsets_base = ((batch_idx * txl.int32(heads) + head) * txl.int32(groups) + q_group) * txl.int32(
+            tasks + 1
+        )
         begin = _load_i32(bucketed_offsets, offsets_base + task)
         end = _load_i32(bucketed_offsets, offsets_base + task + txl.int32(1))
         count = end - begin
@@ -486,9 +471,7 @@ def get_kernel(**config):
 
             with txl.While(edge < count):
                 q_block = _load_i32(bucketed_indices, bh_edge + txl.cast(begin + edge, "int64"))
-                q_block_safe = txl.Select(
-                    q_block < txl.int32(q_blocks), q_block, txl.int32(q_blocks - 1)
-                )
+                q_block_safe = txl.Select(q_block < txl.int32(q_blocks), q_block, txl.int32(q_blocks - 1))
                 first = edge == txl.int32(0)
 
                 q_pipe.empty.wait(q_prod.stage, q_prod.phase ^ 1)
@@ -625,8 +608,7 @@ def get_kernel(**config):
 
             def q_desc(state):
                 return _desc_at(
-                    desc,
-                    smem_base + txl.uint32(off_sq) + state.stage * txl.uint32(128 * head_dim * 2),
+                    desc, smem_base + txl.uint32(off_sq) + state.stage * txl.uint32(128 * head_dim * 2)
                 )
 
             def issue_qk(state):
@@ -792,9 +774,7 @@ def get_kernel(**config):
                     _tmem_store16(
                         packed_p,
                         rep * 16,
-                        txl.cuda.get_tmem_addr(
-                            tcol, row_group, txl.int32(TMEM_S + wg * 16 + rep * 32)
-                        ),
+                        txl.cuda.get_tmem_addr(tcol, row_group, txl.int32(TMEM_S + wg * 16 + rep * 32)),
                     )
                 txl.ptx["tcgen05.wait::st.sync.aligned"]()
                 txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE[0]), txl.uint32(BAR_COMPUTE[1]))
@@ -934,9 +914,7 @@ def get_kernel(**config):
                                     ),
                                     TMA_CACHE,
                                 )
-                            txl.ptx.bar.arrive(
-                                txl.cast(txl.int32(1) + wg, "uint32"), txl.uint32(160)
-                            )
+                            txl.ptx.bar.arrive(txl.cast(txl.int32(1) + wg, "uint32"), txl.uint32(160))
                         txl.ptx.fence.proxy.async_.shared__cta()
                         txl.ptx.bar.sync(txl.cast(txl.int32(1) + wg, "uint32"), txl.uint32(160))
                     else:
@@ -987,9 +965,7 @@ def get_kernel(**config):
                                 if stage < head_dim // 64 - 1:
                                     txl.ptx.cp.async_.bulk.commit_group()
                                     txl.ptx.cp.async_.bulk.wait_group.read(0)
-                                txl.ptx.bar.arrive(
-                                    txl.cast(txl.int32(1) + wg, "uint32"), txl.uint32(160)
-                                )
+                                txl.ptx.bar.arrive(txl.cast(txl.int32(1) + wg, "uint32"), txl.uint32(160))
                             txl.ptx.fence.proxy.async_.shared__cta()
                             txl.ptx.bar.sync(txl.cast(txl.int32(1) + wg, "uint32"), txl.uint32(160))
                     with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
@@ -1003,19 +979,13 @@ def get_kernel(**config):
                     compute_half = ctid // txl.int32(128) - txl.int32(1)
                     destination = (
                         (
-                            (
-                                txl.cast(batch_idx, "int64") * txl.int64(seqlen_kv)
-                                + txl.cast(seq, "int64")
-                            )
+                            (txl.cast(batch_idx, "int64") * txl.int64(seqlen_kv) + txl.cast(seq, "int64"))
                             * txl.int64(heads)
                             + txl.cast(head, "int64")
                         )
                         if bshd
                         else (
-                            (
-                                txl.cast(batch_idx, "int64") * txl.int64(heads)
-                                + txl.cast(head, "int64")
-                            )
+                            (txl.cast(batch_idx, "int64") * txl.int64(heads) + txl.cast(head, "int64"))
                             * txl.int64(seqlen_kv)
                             + txl.cast(seq, "int64")
                         )
@@ -1054,14 +1024,10 @@ def get_kernel(**config):
             with txl.While(edge < count):
                 dq_pipe.full.wait(dq_cons.stage, dq_cons.phase)
                 q_block = _load_i32(bucketed_indices, bh_edge + txl.cast(begin + edge, "int64"))
-                q_block_safe = txl.Select(
-                    q_block < txl.int32(q_blocks), q_block, txl.int32(q_blocks - 1)
-                )
+                q_block_safe = txl.Select(q_block < txl.int32(q_blocks), q_block, txl.int32(q_blocks - 1))
                 values = txl.alloc_local((head_dim,), "float32")
                 for chunk in range(head_dim // 32):
-                    address = txl.cuda.get_tmem_addr(
-                        tcol, row_group, txl.int32(tmem_dq + chunk * 32)
-                    )
+                    address = txl.cuda.get_tmem_addr(tcol, row_group, txl.int32(tmem_dq + chunk * 32))
                     _tmem_load32(values, chunk * 32, address)
                 txl.ptx["tcgen05.wait::ld.sync.aligned"]()
                 txl.ptx.bar.warp.sync(txl.uint32(0xFFFFFFFF))
@@ -1126,9 +1092,7 @@ def get_kernel(**config):
             min_blocks_per_sm=1,
             grid=((seq_len + 127) // 128, heads, batch),
         )
-        def postprocess(
-            workspace: txl.gptr[txl.f32], output: txl.gptr[txl.bf16], output_scale: txl.f32
-        ):
+        def postprocess(workspace: txl.gptr[txl.f32], output: txl.gptr[txl.bf16], output_scale: txl.f32):
             required_block_size = txl.attr({"tirx.required_block_size": 1})
             required_block_size.__enter__()
             seq_tile, head, batch_idx = txl.cta_id()
@@ -1200,19 +1164,13 @@ def get_kernel(**config):
                     )
                     destination = (
                         (
-                            (
-                                txl.cast(batch_idx, "int64") * txl.int64(seq_len)
-                                + txl.cast(seq, "int64")
-                            )
+                            (txl.cast(batch_idx, "int64") * txl.int64(seq_len) + txl.cast(seq, "int64"))
                             * txl.int64(heads)
                             + txl.cast(head, "int64")
                         )
                         if bshd
                         else (
-                            (
-                                txl.cast(batch_idx, "int64") * txl.int64(heads)
-                                + txl.cast(head, "int64")
-                            )
+                            (txl.cast(batch_idx, "int64") * txl.int64(heads) + txl.cast(head, "int64"))
                             * txl.int64(seq_len)
                             + txl.cast(seq, "int64")
                         )

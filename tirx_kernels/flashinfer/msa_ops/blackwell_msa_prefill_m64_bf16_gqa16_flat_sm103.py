@@ -871,9 +871,7 @@ def _build_kernel():
                     txl.assign(tile_max, _f32(_NEG_INF))
                 txl.assign(tile_max, _max_f32(tile_max, _shfl_xor_f32(tile_max, 16)))
                 new_max = _max_f32(tile_max, row_max)
-                txl.assign(
-                    safe_max, txl.if_then_else(new_max == _f32(_NEG_INF), _f32(0.0), new_max)
-                )
+                txl.assign(safe_max, txl.if_then_else(new_max == _f32(_NEG_INF), _f32(0.0), new_max))
                 txl.ptx.mul.f32(new_max_scaled, safe_max, softmax_scale_log2)
                 neg_new_max_scaled = txl.local_scalar("float32")
                 txl.ptx.neg.f32(neg_new_max_scaled, new_max_scaled)
@@ -884,8 +882,7 @@ def _build_kernel():
                         # The running max moves by less than 2^8: keep the old max, skip the rescale.
                         txl.assign(selected_max, row_max)
                         txl.assign(
-                            safe_max,
-                            txl.if_then_else(row_max == _f32(_NEG_INF), _f32(0.0), row_max),
+                            safe_max, txl.if_then_else(row_max == _f32(_NEG_INF), _f32(0.0), row_max)
                         )
                         txl.assign(acc_scale, _f32(1.0))
                         txl.assign(temperature_acc_scale, _f32(1.0))
@@ -919,9 +916,7 @@ def _build_kernel():
                 neg_bias = txl.local_scalar("float32")
                 txl.ptx.neg.f32(neg_bias, new_max_scaled)
                 score_bias = txl.local_scalar("float32")
-                txl.assign(
-                    score_bias, txl.if_then_else(valid_cols > _i32(0), neg_bias, _f32(_NEG_INF))
-                )
+                txl.assign(score_bias, txl.if_then_else(valid_cols > _i32(0), neg_bias, _f32(_NEG_INF)))
                 txl.assign(block_temperature_sum, _f32(0.0))
                 txl.assign(block_sum, _f32(0.0))
                 with txl.If(return_temperature_lse != _i32(0)):
@@ -1081,9 +1076,7 @@ def _build_kernel():
                 final_temperature_sum = _ld_shared_f32(stats_addr + _u32(384 * 4))
                 rcp_sum = txl.local_scalar("float32")
                 txl.ptx.rcp.approx.ftz.f32(rcp_sum, final_sum)
-                sum_positive = txl.local_scalar(
-                    "int32", init=txl.cast(final_sum > _f32(0.0), "int32")
-                )
+                sum_positive = txl.local_scalar("int32", init=txl.cast(final_sum > _f32(0.0), "int32"))
                 inv_sum = txl.local_scalar(
                     "float32", init=txl.if_then_else(sum_positive != _i32(0), rcp_sum, _f32(0.0))
                 )
@@ -1131,9 +1124,7 @@ def _build_kernel():
                             txl.ptx.fma.rn.f32(lse_value, max_scaled, _f32(_LN2_F32), log_sum)
                             txl.ptx.st.global_.b32(
                                 lse.ptr_to([stat_idx]),
-                                txl.if_then_else(
-                                    sum_positive != _i32(0), lse_value, _f32(_NEG_INF)
-                                ),
+                                txl.if_then_else(sum_positive != _i32(0), lse_value, _f32(_NEG_INF)),
                             )
                         with txl.If(return_temperature_lse != _i32(0)), txl.Then():
                             log2_tsum = txl.local_scalar("float32")
@@ -1177,9 +1168,7 @@ def _build_kernel():
                 )
                 b_lo = txl.local_scalar(
                     "uint32",
-                    init=txl.uniform(
-                        ((bar(_SMEM_K) >> 4) & _u32(0x3FFF)) + k_stage_now * _u32(2048)
-                    ),
+                    init=txl.uniform(((bar(_SMEM_K) >> 4) & _u32(0x3FFF)) + k_stage_now * _u32(2048)),
                 )
                 leader = txl.local_scalar("uint32", init=txl.cuda.elect_sync())
                 d_tmem = taddr + _u32(_TMEM_SCORES[instance])
@@ -1386,8 +1375,7 @@ def _build_kernel():
                         ) * _u32(4)
                         txl.ptx.st.shared.b32(union_addr, bit + _i32(32))
                         txl.assign(
-                            union_high,
-                            union_high ^ txl.shift_left(_u32(1), txl.cast(bit, "uint32")),
+                            union_high, union_high ^ txl.shift_left(_u32(1), txl.cast(bit, "uint32"))
                         )
                         txl.assign(union_count_l, union_count_l + _i32(1))
                     txl.assign(high_index, high_index + _i32(1))

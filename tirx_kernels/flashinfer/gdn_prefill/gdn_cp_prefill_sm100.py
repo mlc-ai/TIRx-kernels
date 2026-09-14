@@ -288,9 +288,7 @@ def _load_global_as_f32(values, value_index, source, source_index, SOURCE_DTYPE)
     else:
         bits = txl.local_scalar("uint16")
         txl.ptx.ld.global_.b16(bits, source.ptr_to([source_index]))
-        txl.ptx.mov.b32(
-            values[value_index], txl.cast(txl.reinterpret(SOURCE_DTYPE, bits), "float32")
-        )
+        txl.ptx.mov.b32(values[value_index], txl.cast(txl.reinterpret(SOURCE_DTYPE, bits), "float32"))
 
 
 def _store_global_from_f32(output, output_index, value, OUTPUT_DTYPE):
@@ -418,13 +416,9 @@ def _t_pack_f16x2(a, b):
 def _t_sub_zero_pack_f16x2(a, b, dst, dst_index):
     negated = txl.local_scalar("uint64")
     txl.ptx.sub.rn.f32x2(
-        negated,
-        txl.cuda.make_float2(txl.float32(0.0), txl.float32(0.0)),
-        txl.cuda.make_float2(a, b),
+        negated, txl.cuda.make_float2(txl.float32(0.0), txl.float32(0.0)), txl.cuda.make_float2(a, b)
     )
-    txl.ptx.mov.b32(
-        dst[dst_index], _t_pack_f16x2(txl.cuda.float2_x(negated), txl.cuda.float2_y(negated))
-    )
+    txl.ptx.mov.b32(dst[dst_index], _t_pack_f16x2(txl.cuda.float2_x(negated), txl.cuda.float2_y(negated)))
 
 
 _T_MMA_ZERO_C = [txl.float32(0.0)] * 4
@@ -673,12 +667,10 @@ def _t_inverse_32_to_64(storage, local_warp, lane):
                     txl.cast(reduced1[pair] >> 16, "uint16"),
                 )
                 txl.ptx.mov.b32(
-                    output0_f16[pair],
-                    txl.cast(sum_lo0, "uint32") | (txl.cast(sum_hi0, "uint32") << 16),
+                    output0_f16[pair], txl.cast(sum_lo0, "uint32") | (txl.cast(sum_hi0, "uint32") << 16)
                 )
                 txl.ptx.mov.b32(
-                    output1_f16[pair],
-                    txl.cast(sum_lo1, "uint32") | (txl.cast(sum_hi1, "uint32") << 16),
+                    output1_f16[pair], txl.cast(sum_lo1, "uint32") | (txl.cast(sum_hi1, "uint32") << 16)
                 )
             _t_stmatrix_x4(storage, row_base, 0, lane, output0_f16)
             _t_stmatrix_x4(storage, row_base, 16, lane, output1_f16)
@@ -793,9 +785,7 @@ def _mn_opt_initialize_matrix(tmem_base, column, thread, identity):
             col = txl.local_scalar("int32", init=sub * 32 + i)
             txl.ptx.mov.b32(
                 values[i],
-                txl.if_then_else(
-                    txl.And(identity, thread == col), txl.float32(1.0), txl.float32(0.0)
-                ),
+                txl.if_then_else(txl.And(identity, thread == col), txl.float32(1.0), txl.float32(0.0)),
             )
         _mn_opt_tmem_st_matrix_sub(tmem_base, column, thread, sub, values, 0)
     txl.ptx.tcgen05.wait__st.sync.aligned()
@@ -1106,9 +1096,7 @@ def _fixup_acc_to_tf32(tmem_base, thread, ROWS):
 
 def _fixup_smem_desc_m(smem_addr, M_OFF):
     desc_lo = txl.cast(
-        txl.bitwise_and(
-            txl.shift_right(smem_addr + txl.uint32(M_OFF), txl.uint32(4)), txl.uint32(0x3FFF)
-        ),
+        txl.bitwise_and(txl.shift_right(smem_addr + txl.uint32(M_OFF), txl.uint32(4)), txl.uint32(0x3FFF)),
         "uint64",
     )
     return txl.bitwise_or(txl.uint64(0x2000402004000000), desc_lo)
@@ -1154,9 +1142,7 @@ def _mn_opt_mma_ts_128x64_k128(tmem_d, tmem_a, b_desc_base, full_barrier, IO_DTY
     descriptor = txl.local_scalar("uint32")
     txl.assign(descriptor, _mn_opt_mma_descriptor(0x08100010, IO_DTYPE))
     for kphase in range(8):
-        phase_off = txl.local_scalar(
-            "uint64", init=txl.uint64((kphase % 4) * 2 + (kphase // 4) * 512)
-        )
+        phase_off = txl.local_scalar("uint64", init=txl.uint64((kphase % 4) * 2 + (kphase // 4) * 512))
         txl.ptx[_MN_OPT_MMA_CHAIN](
             txl.cast(tmem_d, "uint32"),
             txl.cast(tmem_a + kphase * 8, "uint32"),
@@ -1247,8 +1233,7 @@ def _mn_opt_process_y(
                     ),
                 )
                 txl.ptx.mov.b32(
-                    y_values[pair * 2],
-                    block_coeff * y_values[pair * 2] + txl.cuda.float2_x(updated),
+                    y_values[pair * 2], block_coeff * y_values[pair * 2] + txl.cuda.float2_x(updated)
                 )
                 txl.ptx.mov.b32(
                     y_values[pair * 2 + 1],
@@ -1288,8 +1273,7 @@ def _prefill_opt_load_t_fragment(tile, stage, thread, values, IO_DTYPE):
         "int32",
         init=txl.bitwise_or(
             txl.bitwise_or(
-                txl.bitwise_and(thread << 6, txl.int32(960)),
-                txl.bitwise_and(thread >> 1, txl.int32(8)),
+                txl.bitwise_and(thread << 6, txl.int32(960)), txl.bitwise_and(thread >> 1, txl.int32(8))
             ),
             txl.bitwise_and(thread << 5, txl.int32(3072)),
         )
@@ -1319,9 +1303,7 @@ def _prefill_opt_store_ainv_fragment(tile, stage, thread, values, IO_DTYPE):
     )
     lane_byte = txl.local_scalar(
         "int32",
-        init=txl.bitwise_or(
-            txl.bitwise_and(thread << 6, txl.int32(1024)), txl.bitwise_xor(a >> 3, c) << 1
-        ),
+        init=txl.bitwise_or(txl.bitwise_and(thread << 6, txl.int32(1024)), txl.bitwise_xor(a >> 3, c) << 1),
     )
     packed = txl.alloc_local((16,), "uint32")
     with txl.unroll(16) as pair:
@@ -1339,29 +1321,20 @@ def _prefill_opt_store_ainv_fragment(tile, stage, thread, values, IO_DTYPE):
 def _prefill_opt_store_qk_fragment(tile, stage, thread, values, IO_DTYPE):
     # QK carries the non-transposed TMEM accumulator fragment; it is not Ainv's layout.
     a = txl.local_scalar("int32", init=txl.bitwise_and(thread << 6, txl.int32(448)))
-    x = txl.local_scalar(
-        "int32", init=txl.bitwise_or(a, txl.bitwise_and(thread >> 1, txl.int32(8)))
-    )
+    x = txl.local_scalar("int32", init=txl.bitwise_or(a, txl.bitwise_and(thread >> 1, txl.int32(8))))
     g = txl.local_scalar("int32", init=txl.bitwise_xor(txl.bitwise_and(x >> 3, txl.int32(56)), x))
     hi = txl.local_scalar(
         "int32",
         init=txl.bitwise_or(
-            txl.bitwise_and(thread << 6, txl.int32(512)),
-            txl.bitwise_and(thread << 5, txl.int32(3072)),
+            txl.bitwise_and(thread << 6, txl.int32(512)), txl.bitwise_and(thread << 5, txl.int32(3072))
         ),
     )
     lane_byte = txl.local_scalar("int32", init=txl.bitwise_or(hi, g) << 1)
     delta1 = txl.local_scalar(
-        "int32",
-        init=txl.if_then_else(
-            txl.bitwise_and(x, txl.int32(128)) == 0, txl.int32(16), txl.int32(-16)
-        ),
+        "int32", init=txl.if_then_else(txl.bitwise_and(x, txl.int32(128)) == 0, txl.int32(16), txl.int32(-16))
     )
     delta2 = txl.local_scalar(
-        "int32",
-        init=txl.if_then_else(
-            txl.bitwise_and(x, txl.int32(256)) == 0, txl.int32(32), txl.int32(-32)
-        ),
+        "int32", init=txl.if_then_else(txl.bitwise_and(x, txl.int32(256)) == 0, txl.int32(32), txl.int32(-32))
     )
     packed = txl.alloc_local((16,), "uint32")
     with txl.unroll(16) as pair:
@@ -1406,9 +1379,7 @@ def _prefill_opt_transform_t(
     )
     col_base = txl.local_scalar("int32", init=txl.bitwise_and(thread << 1, txl.int32(6)))
     with txl.unroll(32) as i:
-        t_coord = txl.local_scalar(
-            "int32", init=row_base + txl.bitwise_and(i >> 1, txl.int32(1)) * 8
-        )
+        t_coord = txl.local_scalar("int32", init=row_base + txl.bitwise_and(i >> 1, txl.int32(1)) * 8)
         s_coord = txl.local_scalar(
             "int32",
             init=col_base
@@ -1419,9 +1390,7 @@ def _prefill_opt_transform_t(
         valid = txl.local_scalar("bool", init=s_coord >= t_coord)
         with txl.If(is_final_block):
             with txl.Then():
-                txl.assign(
-                    valid, txl.And(txl.And(valid, s_coord < valid_tokens), t_coord < valid_tokens)
-                )
+                txl.assign(valid, txl.And(txl.And(valid, s_coord < valid_tokens), t_coord < valid_tokens))
         gamma = txl.local_scalar("float32")
         txl.assign(
             gamma,
@@ -1470,9 +1439,7 @@ def _prefill_opt_mma_ss_64x64_k128(tmem_d, a_desc_base, b_desc_base, full_barrie
     descriptor = txl.local_scalar("uint32")
     txl.assign(descriptor, _prefill_opt_mma_descriptor(0x04100010, IO_DTYPE))
     for kphase in range(8):
-        phase_off = txl.local_scalar(
-            "uint64", init=txl.uint64((kphase % 4) * 2 + (kphase // 4) * 512)
-        )
+        phase_off = txl.local_scalar("uint64", init=txl.uint64((kphase % 4) * 2 + (kphase // 4) * 512))
         txl.ptx[_PREFILL_OPT_MMA_CHAIN](
             txl.cast(tmem_d, "uint32"),
             a_desc_base + phase_off,
@@ -1489,9 +1456,7 @@ def _prefill_opt_mma_ts_128x64_k128(tmem_d, tmem_a, b_desc_base, full_barrier, I
     descriptor = txl.local_scalar("uint32")
     txl.assign(descriptor, _prefill_opt_mma_descriptor(0x08100010, IO_DTYPE))
     for kphase in range(8):
-        phase_off = txl.local_scalar(
-            "uint64", init=txl.uint64((kphase % 4) * 2 + (kphase // 4) * 512)
-        )
+        phase_off = txl.local_scalar("uint64", init=txl.uint64((kphase % 4) * 2 + (kphase // 4) * 512))
         txl.ptx[_PREFILL_OPT_MMA_CHAIN](
             txl.cast(tmem_d, "uint32"),
             txl.cast(tmem_a + kphase * 8, "uint32"),
@@ -1904,9 +1869,7 @@ def _make_fixup_simt(spec):
                         transfer_index = (
                             (first_work_slot * state_heads + state_head) * D_HEAD + inner
                         ) * D_HEAD + col
-                        txl.ptx.ld.global_.nc.f32(
-                            m_values[inner], transfer.ptr_to([transfer_index])
-                        )
+                        txl.ptx.ld.global_.nc.f32(m_values[inner], transfer.ptr_to([transfer_index]))
 
                 with txl.serial(start, num_chunks) as chunk:
                     cp_slot = chunk_start + chunk
@@ -1966,9 +1929,7 @@ def _make_fixup_simt(spec):
                             )
                     txl.cuda.cta_sync()
                     with txl.unroll(rows_per_cta) as local_row:
-                        txl.ptx.st.shared.f32(
-                            shared_state.ptr_to([local_row, col]), accum[local_row]
-                        )
+                        txl.ptx.st.shared.f32(shared_state.ptr_to([local_row, col]), accum[local_row])
                         fixed_index = (
                             (cp_slot * state_heads + state_head) * D_HEAD + row_start + local_row
                         ) * D_HEAD + col
@@ -2071,9 +2032,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs):
                 tmem_base_invalid = txl.local_scalar("int32", init=0)
                 with txl.If(warp <= 4), txl.Then():
                     txl.ptx.bar.sync(txl.uint32(_FIXUP_TMEM_ALLOC_BARRIER), txl.uint32(160))
-                    txl.ptx.ld.volatile.shared.s32(
-                        tmem_base_invalid, txl.address_of(tmem_holding[0])
-                    )
+                    txl.ptx.ld.volatile.shared.s32(tmem_base_invalid, txl.address_of(tmem_holding[0]))
                 with txl.If(warp == 0), txl.Then():
                     txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                     txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
@@ -2354,9 +2313,7 @@ def _make_mn_precompute(spec):
                 tmem_base_invalid = txl.local_scalar("int32", init=0)
                 with txl.If((warp <= 8) | (warp == 11)), txl.Then():
                     txl.ptx.bar.sync(txl.uint32(MN_OPT_TMEM_ALLOC_BARRIER), txl.uint32(320))
-                    txl.ptx.ld.volatile.shared.s32(
-                        tmem_base_invalid, txl.address_of(tmem_holding[0])
-                    )
+                    txl.ptx.ld.volatile.shared.s32(tmem_base_invalid, txl.address_of(tmem_holding[0]))
                 with txl.If(warp == 4), txl.Then():
                     txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                     txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
@@ -2764,17 +2721,13 @@ def _make_mn_precompute(spec):
                         with txl.If(token1 >= valid_len), txl.Then():
                             txl.ptx.mov.b32(neg[1], txl.float32(0.0))
                         txl.ptx.st.shared.f32(s_alpha.ptr_to([st_alpha.stage, 0, lane]), logs[0])
-                        txl.ptx.st.shared.f32(
-                            s_alpha.ptr_to([st_alpha.stage, 0, lane + 32]), logs[1]
-                        )
+                        txl.ptx.st.shared.f32(s_alpha.ptr_to([st_alpha.stage, 0, lane + 32]), logs[1])
                         txl.ptx.st.shared.f32(s_alpha.ptr_to([st_alpha.stage, 1, lane]), cumprod0)
                         txl.ptx.st.shared.f32(
                             s_alpha.ptr_to([st_alpha.stage, 1, lane + 32]), cumprod1
                         )
                         txl.ptx.st.shared.f32(s_alpha.ptr_to([st_alpha.stage, 2, lane]), neg[0])
-                        txl.ptx.st.shared.f32(
-                            s_alpha.ptr_to([st_alpha.stage, 2, lane + 32]), neg[1]
-                        )
+                        txl.ptx.st.shared.f32(s_alpha.ptr_to([st_alpha.stage, 2, lane + 32]), neg[1])
                         txl.ptx.fence.proxy.async_.shared__cta()
                         p_alpha.full.arrive(st_alpha.stage)
                         st_alpha.advance()
@@ -2824,21 +2777,15 @@ def _make_prefill(spec):
             desc, txl.reinterpret("uint64", address)
         )
         txl.ptx.tensormap_replace.tile.global_dim.global_.b1024.b32(desc, 0, txl.uint32(128))
-        txl.ptx.tensormap_replace.tile.global_dim.global_.b1024.b32(
-            desc, 1, txl.cast(dim1, "uint32")
-        )
+        txl.ptx.tensormap_replace.tile.global_dim.global_.b1024.b32(desc, 1, txl.cast(dim1, "uint32"))
         txl.ptx.tensormap_replace.tile.global_stride.global_.b1024.b64(
             desc, 0, txl.cast(stride0, "uint64")
         )
-        txl.ptx.tensormap_replace.tile.global_dim.global_.b1024.b32(
-            desc, 2, txl.cast(dim2, "uint32")
-        )
+        txl.ptx.tensormap_replace.tile.global_dim.global_.b1024.b32(desc, 2, txl.cast(dim2, "uint32"))
         txl.ptx.tensormap_replace.tile.global_stride.global_.b1024.b64(
             desc, 1, txl.cast(stride1, "uint64")
         )
-        txl.ptx.tensormap_replace.tile.global_dim.global_.b1024.b32(
-            desc, 3, txl.cast(dim3, "uint32")
-        )
+        txl.ptx.tensormap_replace.tile.global_dim.global_.b1024.b32(desc, 3, txl.cast(dim3, "uint32"))
         txl.ptx.tensormap_replace.tile.global_stride.global_.b1024.b64(
             desc, 2, txl.cast(stride2, "uint64")
         )
@@ -2974,8 +2921,7 @@ def _make_prefill(spec):
                 qk_values = txl.alloc_local((32,), "float32")
                 _prefill_opt_cg0_tmem_ld(tmem_base[0], st_acc.stage, thread, qk_values)
                 row_base = txl.bitwise_or(
-                    txl.bitwise_and(thread >> 2, txl.int32(7)),
-                    txl.bitwise_and(thread >> 1, txl.int32(48)),
+                    txl.bitwise_and(thread >> 2, txl.int32(7)), txl.bitwise_and(thread >> 1, txl.int32(48))
                 )
                 col_base = txl.bitwise_and(thread << 1, txl.int32(6))
                 with txl.unroll(32) as frag:
@@ -2997,12 +2943,8 @@ def _make_prefill(spec):
                             ),
                         )
                     gamma = _prefill_predicated_gamma(
-                        txl.cuda.cvta_generic_to_shared(
-                            s_cumsumlog.ptr_to([st_gate.stage, score_s])
-                        ),
-                        txl.cuda.cvta_generic_to_shared(
-                            s_cumsumlog.ptr_to([st_gate.stage, score_t])
-                        ),
+                        txl.cuda.cvta_generic_to_shared(s_cumsumlog.ptr_to([st_gate.stage, score_s])),
+                        txl.cuda.cvta_generic_to_shared(s_cumsumlog.ptr_to([st_gate.stage, score_t])),
                         valid,
                     )
                     txl.ptx.mov.b32(qk_values[frag], qk_values[frag] * gamma * scale)
@@ -3067,8 +3009,7 @@ def _make_prefill(spec):
                             with txl.Else():
                                 if needs_initial_state:
                                     base = (
-                                        txl.Cast("int64", seq_idx * state_heads + state_head)
-                                        * D_HEAD
+                                        txl.Cast("int64", seq_idx * state_heads + state_head) * D_HEAD
                                         + txl.Cast("int64", cg1_thread)
                                     ) * D_HEAD + word_offset
                                     txl.ptx["ld.global.L1::no_allocate.v4.b32"](
@@ -3141,9 +3082,7 @@ def _make_prefill(spec):
                         state_mul = txl.local_scalar("uint64")
                         txl.ptx.mul.rn.f32x2(
                             state_mul,
-                            txl.cuda.make_float2(
-                                state_values[pair * 2], state_values[pair * 2 + 1]
-                            ),
+                            txl.cuda.make_float2(state_values[pair * 2], state_values[pair * 2 + 1]),
                             txl.cuda.make_float2(cumprod_total, cumprod_total),
                         )
                         txl.ptx.mov.b32(state_values[pair * 2], txl.cuda.float2_x(state_mul))
@@ -3164,9 +3103,7 @@ def _make_prefill(spec):
                     decay_factor = txl.alloc_local((16,), "float32")
                     factor_col_base = txl.bitwise_and(cg1_thread << 1, txl.int32(6))
                     last_log = txl.local_scalar("float32")
-                    txl.ptx.ld.shared.f32(
-                        last_log, s_cumsumlog.ptr_to([st_gate.stage, T_BLOCK - 1])
-                    )
+                    txl.ptx.ld.shared.f32(last_log, s_cumsumlog.ptr_to([st_gate.stage, T_BLOCK - 1]))
                     with txl.unroll(8) as factor_group:
                         factor_col = factor_col_base + factor_group * 8
                         txl.ptx.ld.shared.v2.f32(
@@ -3209,9 +3146,7 @@ def _make_prefill(spec):
                                 mul = txl.alloc_local((1,), "uint64")
                                 txl.ptx.mul.rn.f32x2(
                                     mul[0],
-                                    txl.cuda.make_float2(
-                                        fragment[pair * 2], fragment[pair * 2 + 1]
-                                    ),
+                                    txl.cuda.make_float2(fragment[pair * 2], fragment[pair * 2 + 1]),
                                     txl.cuda.make_float2(
                                         cumprod_factor[factor_group * 2],
                                         cumprod_factor[factor_group * 2 + 1],
@@ -3245,17 +3180,13 @@ def _make_prefill(spec):
                                 mul = txl.alloc_local((1,), "uint64")
                                 txl.ptx.mul.rn.f32x2(
                                     mul[0],
-                                    txl.cuda.make_float2(
-                                        fragment[pair * 2], fragment[pair * 2 + 1]
-                                    ),
+                                    txl.cuda.make_float2(fragment[pair * 2], fragment[pair * 2 + 1]),
                                     txl.cuda.make_float2(
                                         cumprod_factor[factor_group * 2],
                                         cumprod_factor[factor_group * 2 + 1],
                                     ),
                                 )
-                                txl.ptx.mul.rn.f32x2(
-                                    mul[0], mul[0], txl.cuda.make_float2(scale, scale)
-                                )
+                                txl.ptx.mul.rn.f32x2(mul[0], mul[0], txl.cuda.make_float2(scale, scale))
                                 txl.ptx.mov.b32(fragment[pair * 2], txl.cuda.float2_x(mul[0]))
                                 txl.ptx.mov.b32(fragment[pair * 2 + 1], txl.cuda.float2_y(mul[0]))
                     _prefill_tmem_st_128x64_f32(
@@ -3286,9 +3217,7 @@ def _make_prefill(spec):
                                 mul = txl.alloc_local((1,), "uint64")
                                 txl.ptx.mul.rn.f32x2(
                                     mul[0],
-                                    txl.cuda.make_float2(
-                                        fragment[pair * 2], fragment[pair * 2 + 1]
-                                    ),
+                                    txl.cuda.make_float2(fragment[pair * 2], fragment[pair * 2 + 1]),
                                     txl.cuda.make_float2(
                                         decay_factor[factor_group * 2],
                                         decay_factor[factor_group * 2 + 1],
@@ -3756,15 +3685,11 @@ def _make_prefill(spec):
                     prior = txl.alloc_local((2,), "float32")
                     txl.ptx.mov.b32(
                         prior[0],
-                        txl.tvm_warp_shuffle_up(
-                            txl.uint32(0xFFFFFFFF), gate[0], scan_offset, 32, 32
-                        ),
+                        txl.tvm_warp_shuffle_up(txl.uint32(0xFFFFFFFF), gate[0], scan_offset, 32, 32),
                     )
                     txl.ptx.mov.b32(
                         prior[1],
-                        txl.tvm_warp_shuffle_up(
-                            txl.uint32(0xFFFFFFFF), gate[1], scan_offset, 32, 32
-                        ),
+                        txl.tvm_warp_shuffle_up(txl.uint32(0xFFFFFFFF), gate[1], scan_offset, 32, 32),
                     )
                     with txl.If(lane >= scan_offset), txl.Then():
                         txl.ptx.mov.b32(gate[0], gate[0] + prior[0])

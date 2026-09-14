@@ -716,37 +716,25 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
                     target1 = target0 + 1
                     with txl.If(source_token < NUM_TOKENS), txl.Then():
                         beta_source = _ld_shared_f32(arena, OFF_SBETA + source_token * 4)
-                        with (
-                            txl.If(txl.And(source_token < target0, target0 < NUM_TOKENS)),
-                            txl.Then(),
-                        ):
+                        with txl.If(txl.And(source_token < target0, target0 < NUM_TOKENS)), txl.Then():
                             _st_shared_f32(
                                 arena,
                                 OFF_SL + (target0 * NUM_TOKENS + source_token) * 4,
                                 _mul(beta_source, gram_k_acc[0]),
                             )
-                        with (
-                            txl.If(txl.And(source_token < target1, target1 < NUM_TOKENS)),
-                            txl.Then(),
-                        ):
+                        with txl.If(txl.And(source_token < target1, target1 < NUM_TOKENS)), txl.Then():
                             _st_shared_f32(
                                 arena,
                                 OFF_SL + (target1 * NUM_TOKENS + source_token) * 4,
                                 _mul(beta_source, gram_k_acc[1]),
                             )
-                        with (
-                            txl.If(txl.And(source_token <= target0, target0 < NUM_TOKENS)),
-                            txl.Then(),
-                        ):
+                        with txl.If(txl.And(source_token <= target0, target0 < NUM_TOKENS)), txl.Then():
                             _st_shared_f32(
                                 arena,
                                 OFF_SR + (target0 * NUM_TOKENS + source_token) * 4,
                                 _mul(beta_source, gram_q_acc[0]),
                             )
-                        with (
-                            txl.If(txl.And(source_token <= target1, target1 < NUM_TOKENS)),
-                            txl.Then(),
-                        ):
+                        with txl.If(txl.And(source_token <= target1, target1 < NUM_TOKENS)), txl.Then():
                             _st_shared_f32(
                                 arena,
                                 OFF_SR + (target1 * NUM_TOKENS + source_token) * 4,
@@ -770,8 +758,7 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
                 # tile_row_base + row_l is the global row of `state` (:414-415).
                 row_l = owned_row_base + row_local
                 pack = _load_u32x4(
-                    state,
-                    head_base + txl.cast((tile_row_base + row_l) * HEAD_DIM + k_start, "int64"),
+                    state, head_base + txl.cast((tile_row_base + row_l) * HEAD_DIM + k_start, "int64")
                 )
                 for pr in range(4):
                     txl.ptx.mov.b32(hist[row_local * 8 + 2 * pr], _widen_lo(pack[pr]))
@@ -932,13 +919,9 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
                 # The masked-out coefficient is a real zero-operand fma, not a
                 # skipped iteration (:585-594).
                 with txl.If(token0 >= src), txl.Then():
-                    txl.assign(
-                        coef0, _ld_shared_f32(arena, OFF_SR + (token0 * NUM_TOKENS + src) * 4)
-                    )
+                    txl.assign(coef0, _ld_shared_f32(arena, OFF_SR + (token0 * NUM_TOKENS + src) * 4))
                 with txl.If(token1 >= src), txl.Then():
-                    txl.assign(
-                        coef1, _ld_shared_f32(arena, OFF_SR + (token1 * NUM_TOKENS + src) * 4)
-                    )
+                    txl.assign(coef1, _ld_shared_f32(arena, OFF_SR + (token1 * NUM_TOKENS + src) * 4))
                 txl.assign(out0_lo, _fma(coef0, residual_lo, out0_lo))
                 txl.assign(out1_lo, _fma(coef1, residual_lo, out1_lo))
                 txl.assign(out0_hi, _fma(coef0, residual_hi, out0_hi))

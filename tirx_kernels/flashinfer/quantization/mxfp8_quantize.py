@@ -344,8 +344,7 @@ def get_kernel(
                         with txl.While(sc_tail < pad_cols):
                             with txl.If(thread_in_unit == 0), txl.Then():
                                 st_global_u8(
-                                    txl.address_of(sf_out[sf_offset(row_idx, sc_tail)]),
-                                    txl.uint8(0),
+                                    txl.address_of(sf_out[sf_offset(row_idx, sc_tail)]), txl.uint8(0)
                                 )
                             txl.assign(sc_tail, sc_tail + col_units_per_block)
                 txl.assign(row_idx, row_idx + grid_x)

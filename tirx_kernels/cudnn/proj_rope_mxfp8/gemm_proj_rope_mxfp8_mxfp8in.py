@@ -52,8 +52,7 @@ _MMA_MXFP8 = "tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale.block32"
 
 def _descriptor_with_address(base, shared_address):
     address_field = txl.cast(
-        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)),
-        "uint64",
+        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)), "uint64"
     )
     return txl.bitwise_or(txl.uint64(base), address_field)
 
@@ -100,10 +99,7 @@ def _ffma2(a0, a1, b0, b1, c0, c1):
     out0 = txl.local_scalar("float32")
     out1 = txl.local_scalar("float32")
     txl.ptx.fma.rn.f32x2(
-        packed,
-        txl.cuda.make_float2(a0, a1),
-        txl.cuda.make_float2(b0, b1),
-        txl.cuda.make_float2(c0, c1),
+        packed, txl.cuda.make_float2(a0, a1), txl.cuda.make_float2(b0, b1), txl.cuda.make_float2(c0, c1)
     )
     txl.ptx.mov.b64(out0, out1, packed)
     return out0, out1
@@ -492,8 +488,7 @@ def _make_kernel(tokens, k_dim, num_heads):
                         runtime_instr_desc = txl.bitwise_or(
                             runtime_instr_desc,
                             txl.bitwise_and(
-                                txl.shift_right(sfa_tmem_addr, txl.uint32(1)),
-                                txl.uint32(0x60000000),
+                                txl.shift_right(sfa_tmem_addr, txl.uint32(1)), txl.uint32(0x60000000)
                             ),
                         )
                         runtime_instr_desc = txl.bitwise_or(
@@ -728,8 +723,7 @@ def _make_kernel(tokens, k_dim, num_heads):
                         row_scale_pair, txl.float32(0.0), row_amax * txl.float32(1.0 / 448.0)
                     )
                     row_scale = txl.cast(
-                        txl.bitwise_and(txl.cast(row_scale_pair, "uint32"), txl.uint32(0xFF)),
-                        "uint32",
+                        txl.bitwise_and(txl.cast(row_scale_pair, "uint32"), txl.uint32(0xFF)), "uint32"
                     )
                     token = token_base + tok0 + row_index
                     with txl.If((lane % 16) == 0):
@@ -780,9 +774,9 @@ def _make_kernel(tokens, k_dim, num_heads):
         "out_fp8_col": txl.gptr[txl.u8, (tokens * num_heads * _HEAD_DIM,)],
         "out_scales_col": txl.gptr[txl.u8, ((tokens // _BLOCK) * num_heads * _HEAD_DIM,)],
     }
-    return txl.kernel(
-        warps=14, arch="sm_100a", grid=[1, 1, num_clusters], host_prelude=host_prelude
-    )(kernel)
+    return txl.kernel(warps=14, arch="sm_100a", grid=[1, 1, num_clusters], host_prelude=host_prelude)(
+        kernel
+    )
 
 
 def get_kernel(tokens, k_dim, num_heads):

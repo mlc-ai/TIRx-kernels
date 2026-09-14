@@ -479,18 +479,10 @@ def get_kernel(**kwargs: Any):
                     q_idx * txl.uint32(block_q) + txl.uint32(schedule_i), seq_len - txl.uint32(1)
                 )
                 row = txl.alloc_local([2], "int32")
-                txl.ptx.ld.global_.s32(
-                    row[0], cu_seq_len_k_start.ptr_to([txl.Cast("int32", row_idx)])
-                )
-                txl.ptx.mov.b32(
-                    seq_k_start[schedule_i], txl.min(txl.Cast("uint32", row[0]), seq_len_kv)
-                )
-                txl.ptx.ld.global_.s32(
-                    row[1], cu_seq_len_k_end.ptr_to([txl.Cast("int32", row_idx)])
-                )
-                txl.ptx.mov.b32(
-                    seq_k_end[schedule_i], txl.min(txl.Cast("uint32", row[1]), seq_len_kv)
-                )
+                txl.ptx.ld.global_.s32(row[0], cu_seq_len_k_start.ptr_to([txl.Cast("int32", row_idx)]))
+                txl.ptx.mov.b32(seq_k_start[schedule_i], txl.min(txl.Cast("uint32", row[0]), seq_len_kv))
+                txl.ptx.ld.global_.s32(row[1], cu_seq_len_k_end.ptr_to([txl.Cast("int32", row_idx)]))
+                txl.ptx.mov.b32(seq_k_end[schedule_i], txl.min(txl.Cast("uint32", row[1]), seq_len_kv))
                 txl.assign(schedule_start, txl.min(schedule_start, seq_k_start[schedule_i]))
                 txl.assign(schedule_end, txl.max(schedule_end, seq_k_end[schedule_i]))
             txl.assign(schedule_start, schedule_start // txl.uint32(4) * txl.uint32(4))
@@ -775,8 +767,7 @@ def get_kernel(**kwargs: Any):
                                 # into the row's stride padding; a range guard
                                 # would become a BSSY/BRA region.
                                 col = txl.min(
-                                    kv_offset - seq_k_start[q_inner_i],
-                                    logits_stride - txl.uint32(1),
+                                    kv_offset - seq_k_start[q_inner_i], logits_stride - txl.uint32(1)
                                 )
                                 store_logits(q_offset + txl.Cast("uint64", col), result)
                             else:

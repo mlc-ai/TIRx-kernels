@@ -301,9 +301,7 @@ def stage_vector(buf, s_ordered, row_in, i, vec, load_bytes, is32, to_ordered, s
             lo = to_ordered(txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16"))
             hi = to_ordered(txl.cast(txl.shift_right(word, txl.uint32(16)), "uint16"))
             keys.append(
-                txl.bitwise_or(
-                    txl.cast(lo, "uint32"), txl.shift_left(txl.cast(hi, "uint32"), txl.uint32(16))
-                )
+                txl.bitwise_or(txl.cast(lo, "uint32"), txl.shift_left(txl.cast(hi, "uint32"), txl.uint32(16)))
             )
     if len(keys) == 4:
         st_shared_quad_u32(s_ordered, i, keys[0], keys[1], keys[2], keys[3])

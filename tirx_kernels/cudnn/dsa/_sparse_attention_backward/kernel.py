@@ -182,8 +182,7 @@ def _desc_base(ldo, sdo, swizzle=3):
 def _desc_at(base, shared_address):
     """`base` with the shared address folded into its 14-bit address field."""
     field = txl.cast(
-        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)),
-        "uint64",
+        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)), "uint64"
     )
     return txl.bitwise_or(txl.uint64(base), field)
 
@@ -1062,9 +1061,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     for i in range(16):
                         txl.ptx[_CVT_PACK[dtype]](rp[i], rs[2 * i + 1], rs[2 * i])
                     txl.ptx["tcgen05.wait::ld.sync.aligned"]()
-                    txl.ptx.bar.sync(
-                        txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1])
-                    )
+                    txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
                     for b in range(4):
                         txl.ptx["stmatrix.sync.aligned.m8n8.x4.trans.shared.b16"](
                             smem.ptr_to(
@@ -1131,9 +1128,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     # it is released before the stores rather than after
                     # (:1943 precedes :1946).
                     p_dp.empty.arrive(0)
-                    txl.ptx.bar.sync(
-                        txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1])
-                    )
+                    txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
                     for b in range(4):
                         txl.ptx["stmatrix.sync.aligned.m8n8.x4.trans.shared.b16"](
                             smem.ptr_to(
@@ -1175,9 +1170,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                         # A TMA-store pipeline acquires on the bulk group; it
                         # has no smem barrier at all.
                         txl.ptx["cp.async.bulk.wait_group.read"](txl.int32(0))
-                    txl.ptx.bar.sync(
-                        txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1])
-                    )
+                    txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
                     # 32x32b, NOT the dKV path's 16x256b: this shape is what
                     # makes the fragment match the 128x64 epilogue tile. Thread
                     # t owns dim t; its 64 registers are the 64 heads, eight
@@ -1203,13 +1196,9 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     # Two barriers around the fence: the first makes every
                     # thread's shared writes done, the second makes the fence
                     # observed before warp 4 issues the TMA (:2545-2552).
-                    txl.ptx.bar.sync(
-                        txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1])
-                    )
+                    txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
                     txl.ptx["fence.proxy.async.shared::cta"]()
-                    txl.ptx.bar.sync(
-                        txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1])
-                    )
+                    txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
                     with txl.If(rwarp == txl.int32(0)), txl.Then():
                         for h in range(2):
                             txl.ptx[TMA_S2G](
@@ -1221,9 +1210,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                                 txl.uint64(0),
                             )
                         txl.ptx["cp.async.bulk.commit_group"]()
-                    txl.ptx.bar.sync(
-                        txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1])
-                    )
+                    txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
                 if tail:
                     # The fifth round (:2116-2135). THIS is the only path by
                     # which d576's dQ columns 512:576 reach mdQ; omitting it
@@ -1231,9 +1218,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     # a d512 test cannot detect.
                     with txl.If(rwarp == txl.int32(0)), txl.Then():
                         txl.ptx["cp.async.bulk.wait_group.read"](txl.int32(0))
-                    txl.ptx.bar.sync(
-                        txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1])
-                    )
+                    txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
                     # 16x256b.x2, four issues of 8: M=64 halves the fragment
                     # and the head steps by 16 per issue.
                     rq4 = txl.alloc_local([32], "float32")
@@ -1245,9 +1230,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                             *[rq4[8 * e + k] for k in range(8)], a4
                         )
                     txl.ptx["tcgen05.wait::ld.sync.aligned"]()
-                    dim_b = (rtid // txl.int32(32)) * txl.int32(16) + (
-                        rtid % txl.int32(32)
-                    ) // txl.int32(4)
+                    dim_b = (rtid // txl.int32(32)) * txl.int32(16) + (rtid % txl.int32(32)) // txl.int32(4)
                     head_b = (rtid % txl.int32(4)) * txl.int32(2)
                     for j in range(32):
                         qv = txl.local_scalar("uint16")
@@ -1266,13 +1249,9 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                             ),
                             qv,
                         )
-                    txl.ptx.bar.sync(
-                        txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1])
-                    )
+                    txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
                     txl.ptx["fence.proxy.async.shared::cta"]()
-                    txl.ptx.bar.sync(
-                        txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1])
-                    )
+                    txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
                     with txl.If(rwarp == txl.int32(0)), txl.Then():
                         txl.ptx[TMA_S2G](
                             txl.address_of(desc_dq),
@@ -1283,9 +1262,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                             txl.uint64(0),
                         )
                         txl.ptx["cp.async.bulk.commit_group"]()
-                    txl.ptx.bar.sync(
-                        txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1])
-                    )
+                    txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
 
                 p_dq.empty.arrive(0)
                 # producer_tail: drain every outstanding store before the CTA
@@ -1296,9 +1273,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     # Barrier 9 is compute warp 4 plus the 8 reduce warps: the
                     # reduce warps must be drained out of TMEM before its
                     # columns are handed back (:120, :1095).
-                    txl.ptx.bar.sync(
-                        txl.uint32(BAR_TMEM_DEALLOC[0]), txl.uint32(BAR_TMEM_DEALLOC[1])
-                    )
+                    txl.ptx.bar.sync(txl.uint32(BAR_TMEM_DEALLOC[0]), txl.uint32(BAR_TMEM_DEALLOC[1]))
                     txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
                         tcol, txl.uint32(TMEM_ALLOC_COLUMNS)
                     )
@@ -1338,9 +1313,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     wide map walks off the end of the 64-dim tail.
                     """
                     regs = txl.alloc_local([16], "float32")
-                    a = txl.cuda.get_tmem_addr(
-                        rtcol, txl.int32(0), txl.int32(col) + wg * txl.int32(32)
-                    )
+                    a = txl.cuda.get_tmem_addr(rtcol, txl.int32(0), txl.int32(col) + wg * txl.int32(32))
                     txl.ptx["tcgen05.ld.sync.aligned.16x256b.x4.b32"](
                         *[regs[j] for j in range(16)], a
                     )
@@ -1359,11 +1332,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     """The 8 KV rows this thread reduces, or -1 where invalid."""
                     r = txl.alloc_local([8], "int32")
                     for i in range(8):
-                        g = (
-                            tile_index * txl.int32(block)
-                            + row_base
-                            + txl.int32((i // 2) * 8 + (i % 2))
-                        )
+                        g = tile_index * txl.int32(block) + row_base + txl.int32((i // 2) * 8 + (i % 2))
                         txl.assign(r[i], txl.int32(-1))
                         # With a whole number of tiles every row is in range,
                         # so the read needs no bound (:2202); the ragged case
@@ -1396,11 +1365,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                                 sink4[2],
                                 sink4[3],
                                 ws_dkv.ptr_to(
-                                    [
-                                        r[i] * txl.int32(head_dim)
-                                        + txl.int32(sub_tile * 128)
-                                        + col_group
-                                    ]
+                                    [r[i] * txl.int32(head_dim) + txl.int32(sub_tile * 128) + col_group]
                                 ),
                                 regs[b],
                                 regs[b + 2],
@@ -1423,9 +1388,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     # The registers are drained and the MMA warp released
                     # BEFORE the slow atomics -- that split is the whole point
                     # of the WAR barrier scheme (:2231).
-                    txl.ptx.bar.sync(
-                        txl.uint32(BAR_T2R_DKV01_DONE[0]), txl.uint32(BAR_T2R_DKV01_DONE[1])
-                    )
+                    txl.ptx.bar.sync(txl.uint32(BAR_T2R_DKV01_DONE[0]), txl.uint32(BAR_T2R_DKV01_DONE[1]))
                     reduce4(g0, r, 0)
                     reduce4(g1, r, 1)
                     p_dkv.empty.arrive(st_r.stage)
@@ -1456,9 +1419,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                                     g4[b + 2],
                                     pred=r[i] >= txl.int32(0),
                                 )
-                        txl.ptx.bar.sync(
-                            txl.uint32(BAR_REDUCE_SYNC[0]), txl.uint32(BAR_REDUCE_SYNC[1])
-                        )
+                        txl.ptx.bar.sync(txl.uint32(BAR_REDUCE_SYNC[0]), txl.uint32(BAR_REDUCE_SYNC[1]))
                         p_dkv.empty.arrive(st_r.stage)
                         st_r.advance()
 
@@ -1476,9 +1437,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     txl.assign(ridx, ridx - txl.int32(1))
 
                 # The reduce warps must not stall here -- they are done (:1095).
-                txl.ptx["bar.arrive"](
-                    txl.uint32(BAR_TMEM_DEALLOC[0]), txl.uint32(BAR_TMEM_DEALLOC[1])
-                )
+                txl.ptx["bar.arrive"](txl.uint32(BAR_TMEM_DEALLOC[0]), txl.uint32(BAR_TMEM_DEALLOC[1]))
 
             with r_loadkv:
                 _bwd_load_kv(
@@ -1654,9 +1613,7 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk):
                     is_inf = txl.local_scalar("uint32")
                     txl.ptx["setp.eq.f32"](is_inf, lse_v, txl.float32(float("inf")))
                     out_lse = txl.local_scalar(txl.f32)
-                    txl.ptx["selp.f32"](
-                        out_lse, txl.float32(float("-inf")), scaled, txl.ptx.pred(is_inf)
-                    )
+                    txl.ptx["selp.f32"](out_lse, txl.float32(float("-inf")), scaled, txl.ptx.pred(is_inf))
 
                     scaled_odo = txl.local_scalar(txl.f32)
                     txl.ptx["mul.f32"](scaled_odo, sum_odo_scale, total)

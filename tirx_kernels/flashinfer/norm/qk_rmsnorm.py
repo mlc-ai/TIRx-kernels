@@ -469,9 +469,7 @@ def get_kernel(
         y_head_stride: txl.i64,
     ):
         # QK_RMSNORM_KERNEL_START
-        block_raw = txl.cta_id(
-            [txl.cast(txl.ceildiv(runtime_B * runtime_N, txl.int64(rows)), "int32")]
-        )
+        block_raw = txl.cta_id([txl.cast(txl.ceildiv(runtime_B * runtime_N, txl.int64(rows)), "int32")])
         tid = txl.thread_id()
 
         if enable_pdl:
@@ -687,9 +685,7 @@ def get_kernel(
                 txl.ptx.mov.b64(x_f32[pair * 2], x_f32[pair * 2 + 1], packed)
 
             for pair in range(packed_pairs):
-                high_bias = (
-                    txl.float32(weight_bias) if pair * 2 + 1 < total_values else undefined_f32
-                )
+                high_bias = txl.float32(weight_bias) if pair * 2 + 1 < total_values else undefined_f32
                 txl.ptx.add.f32x2(
                     packed,
                     txl.cuda.make_float2(w_f32[pair * 2], w_f32[pair * 2 + 1]),

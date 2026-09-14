@@ -424,9 +424,7 @@ def _make_flashkda_decode_t3_lower_bound(spec: dict[str, Any]):
                 _load_bf16_f32(beta, txl.cast(token_pos * NUM_VALUE_HEADS + hv, "int64")),
             )
             with txl.If(token == 0), txl.Then():
-                accepted = txl.min(
-                    txl.max(_load_i32(nat, txl.cast(n, "int64")) - 1, 0), NUM_TOKENS - 1
-                )
+                accepted = txl.min(txl.max(_load_i32(nat, txl.cast(n, "int64")) - 1, 0), NUM_TOKENS - 1)
                 initial_slot = _load_i32(ssm_idx, txl.cast(n * NUM_TOKENS + accepted, "int64"))
                 _store_smem_i32(s_init, 0, txl.max(initial_slot, 0))
 
@@ -448,8 +446,7 @@ def _make_flashkda_decode_t3_lower_bound(spec: dict[str, Any]):
             for row_local in range(8):
                 row_l = owned_row_base + row_local
                 pack = _load_u32x4(
-                    state,
-                    head_base + txl.cast((tile_row_base + row_l) * HEAD_DIM + k_start, "int64"),
+                    state, head_base + txl.cast((tile_row_base + row_l) * HEAD_DIM + k_start, "int64")
                 )
                 for pr in range(4):
                     txl.ptx.mov.b32(hist[row_local * 8 + 2 * pr], _widen_lo(pack[pr]))
@@ -557,9 +554,7 @@ def _make_flashkda_decode_t3_lower_bound(spec: dict[str, Any]):
                     base_t = txl.local_scalar(txl.i32)
                     solved_lo = txl.local_scalar(txl.f32)
                     solved_hi = txl.local_scalar(txl.f32)
-                    txl.assign(
-                        base_t, (_load_smem_i32(s_token, t) * NUM_VALUE_HEADS + hv) * HEAD_DIM
-                    )
+                    txl.assign(base_t, (_load_smem_i32(s_token, t) * NUM_VALUE_HEADS + hv) * HEAD_DIM)
                     txl.assign(
                         solved_lo,
                         _sub(
@@ -622,23 +617,13 @@ def _make_flashkda_decode_t3_lower_bound(spec: dict[str, Any]):
                             (_load_smem_i32(s_token, token_o) * NUM_VALUE_HEADS + hv) * HEAD_DIM
                             + tile_row_base,
                         )
+                        _store_f32_as_bf16(out, txl.cast(base_o + row_lo_f, "int64"), o_lo, active_o)
+                        _store_f32_as_bf16(out, txl.cast(base_o + row_hi_f, "int64"), o_hi, active_o)
                         _store_f32_as_bf16(
-                            out, txl.cast(base_o + row_lo_f, "int64"), o_lo, active_o
+                            out, txl.cast(base_o + row_lo_f, "int64"), txl.float32(0.0), txl.Not(active_o)
                         )
                         _store_f32_as_bf16(
-                            out, txl.cast(base_o + row_hi_f, "int64"), o_hi, active_o
-                        )
-                        _store_f32_as_bf16(
-                            out,
-                            txl.cast(base_o + row_lo_f, "int64"),
-                            txl.float32(0.0),
-                            txl.Not(active_o),
-                        )
-                        _store_f32_as_bf16(
-                            out,
-                            txl.cast(base_o + row_hi_f, "int64"),
-                            txl.float32(0.0),
-                            txl.Not(active_o),
+                            out, txl.cast(base_o + row_hi_f, "int64"), txl.float32(0.0), txl.Not(active_o)
                         )
 
             with txl.If(lane_quad == 2), txl.Then():

@@ -636,9 +636,7 @@ def get_kernel(**kwargs: Any):
             if HAS_CU_SEQLENS:
                 txl.assign(
                     bos,
-                    txl.cast(
-                        _global_load_index_s64(cu_seqlens, seq_idx, CU_SEQLENS_DTYPE), "int32"
-                    ),
+                    txl.cast(_global_load_index_s64(cu_seqlens, seq_idx, CU_SEQLENS_DTYPE), "int32"),
                 )
                 eos: txl.int32 = txl.cast(
                     _global_load_index_s64(cu_seqlens, seq_idx + 1, CU_SEQLENS_DTYPE), "int32"
@@ -668,9 +666,7 @@ def get_kernel(**kwargs: Any):
             if ASSUME_NO_PAD:
                 txl.assign(is_pad, 0)
             else:
-                txl.assign(
-                    is_pad, txl.if_then_else(state_batch != txl.cast(pad_slot_id, "int64"), 0, 1)
-                )
+                txl.assign(is_pad, txl.if_then_else(state_batch != txl.cast(pad_slot_id, "int64"), 0, 1))
             txl.assign(
                 state_head_offset,
                 state_batch * state_stride_batch + txl.cast(head * DIM * DSTATE, "int64"),
@@ -764,9 +760,7 @@ def get_kernel(**kwargs: Any):
                             )
 
             if not IS_PAD:
-                with txl.serial(
-                    (16 * DSTATE // (16 // STATE_BYTES) + 127) // 128
-                ) as state_load_iter:
+                with txl.serial((16 * DSTATE // (16 // STATE_BYTES) + 127) // 128) as state_load_iter:
                     packed_i: txl.int32 = flat_tid + state_load_iter * 128
                     with txl.If(packed_i < 16 * DSTATE // (16 // STATE_BYTES)), txl.Then():
                         state_row: txl.int32 = packed_i // (DSTATE // (16 // STATE_BYTES))
@@ -864,9 +858,7 @@ def get_kernel(**kwargs: Any):
 
                 r_state = txl.alloc_local((NUM_TILES * PAIRS_PER_TILE_MEMBER,), "uint64")
                 with txl.unroll(NUM_TILES) as tile_idx:
-                    member_col: txl.int32 = (
-                        tile_idx * ELEMS_PER_TILE + member * ELEMS_PER_TILE_MEMBER
-                    )
+                    member_col: txl.int32 = tile_idx * ELEMS_PER_TILE + member * ELEMS_PER_TILE_MEMBER
                     with txl.If(txl.And(member_col < DSTATE, txl.Not(IS_PAD))):
                         with txl.Then():
                             state_words = txl.alloc_local((4,), "uint32")
@@ -882,9 +874,7 @@ def get_kernel(**kwargs: Any):
                             with txl.unroll(PAIRS_PER_TILE_MEMBER) as pair_idx:
                                 state_pair = txl.local_scalar("uint64")
                                 if STATE_DTYPE == "bfloat16":
-                                    txl.assign(
-                                        state_pair, _bf16_word_to_f32x2(state_words[pair_idx])
-                                    )
+                                    txl.assign(state_pair, _bf16_word_to_f32x2(state_words[pair_idx]))
                                 elif STATE_DTYPE == "float16":
                                     f16_f32_0 = txl.local_scalar("float32")
                                     txl.ptx.cvt.f32.f16(
@@ -896,13 +886,9 @@ def get_kernel(**kwargs: Any):
                                     f16_f32_1 = txl.local_scalar("float32")
                                     txl.ptx.cvt.f32.f16(
                                         f16_f32_1,
-                                        txl.cast(
-                                            _extract_u16(state_words[pair_idx], True), "uint16"
-                                        ),
+                                        txl.cast(_extract_u16(state_words[pair_idx], True), "uint16"),
                                     )
-                                    txl.assign(
-                                        state_pair, txl.cuda.make_float2(f16_f32_0, f16_f32_1)
-                                    )
+                                    txl.assign(state_pair, txl.cuda.make_float2(f16_f32_0, f16_f32_1))
                                 elif STATE_DTYPE == "int16":
                                     i16_f32_0 = txl.local_scalar("float32")
                                     txl.ptx.cvt.rn.f32.s16(
@@ -924,17 +910,13 @@ def get_kernel(**kwargs: Any):
                                             ),
                                         ),
                                     )
-                                    txl.assign(
-                                        state_pair, txl.cuda.make_float2(i16_f32_0, i16_f32_1)
-                                    )
+                                    txl.assign(state_pair, txl.cuda.make_float2(i16_f32_0, i16_f32_1))
                                 else:
                                     txl.assign(
                                         state_pair,
                                         txl.cuda.make_float2(
                                             txl.reinterpret("float32", state_words[pair_idx * 2]),
-                                            txl.reinterpret(
-                                                "float32", state_words[pair_idx * 2 + 1]
-                                            ),
+                                            txl.reinterpret("float32", state_words[pair_idx * 2 + 1]),
                                         ),
                                     )
                                 if SCALE_STATE:
@@ -982,9 +964,7 @@ def get_kernel(**kwargs: Any):
                         txl.ptx["mul.ftz.f32"](mul_5, dt_value, x_value)
                         dtx_value: txl.float32 = mul_5
                         out_pair = txl.local_scalar("uint64")
-                        txl.assign(
-                            out_pair, txl.cuda.make_float2(txl.float32(0.0), txl.float32(0.0))
-                        )
+                        txl.assign(out_pair, txl.cuda.make_float2(txl.float32(0.0), txl.float32(0.0)))
 
                         with txl.unroll(NUM_TILES) as tile_idx:
                             member_col: txl.int32 = (
@@ -1062,9 +1042,7 @@ def get_kernel(**kwargs: Any):
                         with txl.If(dst_slot != txl.int64(-1)), txl.Then():
                             encode_scale = txl.local_scalar("float32", init=1.0)
                             if SCALE_STATE:
-                                local_max = txl.local_scalar(
-                                    "float32", init=txl.float32(_FLT_LOWEST)
-                                )
+                                local_max = txl.local_scalar("float32", init=txl.float32(_FLT_LOWEST))
                                 with txl.unroll(NUM_TILES) as tile_idx:
                                     with txl.unroll(PAIRS_PER_TILE_MEMBER) as pair_idx:
                                         col0: txl.int32 = (
@@ -1080,13 +1058,9 @@ def get_kernel(**kwargs: Any):
                                                 ],
                                             )
                                             abs_0 = txl.local_scalar("float32")
-                                            txl.ptx["abs.ftz.f32"](
-                                                abs_0, txl.cuda.float2_x(state_pair)
-                                            )
+                                            txl.ptx["abs.ftz.f32"](abs_0, txl.cuda.float2_x(state_pair))
                                             abs_1 = txl.local_scalar("float32")
-                                            txl.ptx["abs.ftz.f32"](
-                                                abs_1, txl.cuda.float2_y(state_pair)
-                                            )
+                                            txl.ptx["abs.ftz.f32"](abs_1, txl.cuda.float2_y(state_pair))
                                             max_0 = txl.local_scalar("float32")
                                             txl.ptx["max.ftz.f32"](max_0, abs_0, abs_1)
                                             max_1 = txl.local_scalar("float32")
@@ -1151,9 +1125,7 @@ def get_kernel(**kwargs: Any):
                                                 txl.float32(-32767.0),
                                             )
                                             min_0 = txl.local_scalar("float32")
-                                            txl.ptx["min.ftz.f32"](
-                                                min_0, max_2, txl.float32(32767.0)
-                                            )
+                                            txl.ptx["min.ftz.f32"](min_0, max_2, txl.float32(32767.0))
                                             low_scaled: txl.float32 = min_0
                                             max_3 = txl.local_scalar("float32")
                                             txl.ptx["max.ftz.f32"](
@@ -1162,9 +1134,7 @@ def get_kernel(**kwargs: Any):
                                                 txl.float32(-32767.0),
                                             )
                                             min_1 = txl.local_scalar("float32")
-                                            txl.ptx["min.ftz.f32"](
-                                                min_1, max_3, txl.float32(32767.0)
-                                            )
+                                            txl.ptx["min.ftz.f32"](min_1, max_3, txl.float32(32767.0))
                                             high_scaled: txl.float32 = min_1
                                             low_i32 = txl.local_scalar("int32")
                                             high_i32 = txl.local_scalar("int32")
@@ -1173,12 +1143,8 @@ def get_kernel(**kwargs: Any):
                                             prmt_0 = txl.local_scalar("uint32")
                                             txl.ptx["prmt.b32"](
                                                 prmt_0,
-                                                txl.cast(
-                                                    txl.reinterpret("uint32", low_i32), "uint32"
-                                                ),
-                                                txl.cast(
-                                                    txl.reinterpret("uint32", high_i32), "uint32"
-                                                ),
+                                                txl.cast(txl.reinterpret("uint32", low_i32), "uint32"),
+                                                txl.cast(txl.reinterpret("uint32", high_i32), "uint32"),
                                                 txl.uint32(0x5410),
                                             )
                                             txl.ptx.mov.b32(store_words[pair_idx], prmt_0)
@@ -1270,19 +1236,11 @@ def get_kernel(**kwargs: Any):
                                                     )
                                                     next_k1: txl.int32 = add_s32_2
                                                     txl.assign(c0, next_c0)
-                                                    txl.assign(
-                                                        c1, txl.reinterpret("uint32", next_c1)
-                                                    )
+                                                    txl.assign(c1, txl.reinterpret("uint32", next_c1))
                                                     txl.assign(c2, next_c2)
-                                                    txl.assign(
-                                                        c3, txl.reinterpret("uint32", next_c3)
-                                                    )
-                                                    txl.assign(
-                                                        k0, txl.reinterpret("uint32", next_k0)
-                                                    )
-                                                    txl.assign(
-                                                        k1, txl.reinterpret("uint32", next_k1)
-                                                    )
+                                                    txl.assign(c3, txl.reinterpret("uint32", next_c3))
+                                                    txl.assign(k0, txl.reinterpret("uint32", next_k0))
+                                                    txl.assign(k1, txl.reinterpret("uint32", next_k1))
                                                 txl.ptx.mov.b32(random_words[0], c0)
                                                 txl.ptx.mov.b32(random_words[1], c1)
                                                 txl.ptx.mov.b32(random_words[2], c2)
@@ -1514,9 +1472,7 @@ def get_kernel(**kwargs: Any):
                             )
                             if HAS_Z:
                                 bf16_f32_2 = txl.local_scalar("float32")
-                                txl.ptx.cvt.f32.bf16(
-                                    bf16_f32_2, txl.cast(z_bits[element], "uint16")
-                                )
+                                txl.ptx.cvt.f32.bf16(bf16_f32_2, txl.cast(z_bits[element], "uint16"))
                                 z_value: txl.float32 = bf16_f32_2
                                 apply_z_gate(value, z_value)
                             txl.ptx.cvt.rn.bf16.f32(output_bits[element], value)
@@ -1542,9 +1498,7 @@ def get_kernel(**kwargs: Any):
                         with txl.If(lane < DIM_PER_CTA), txl.Then():
                             value = txl.local_scalar("float32")
                             sload_5 = txl.local_scalar("uint32")
-                            txl.ptx.ld.shared.b32(
-                                sload_5, s_out.ptr_to([step * DIM_PER_CTA + lane])
-                            )
+                            txl.ptx.ld.shared.b32(sload_5, s_out.ptr_to([step * DIM_PER_CTA + lane]))
                             txl.assign(value, txl.reinterpret("float32", sload_5))
                             if HAS_Z:
                                 gload_6 = txl.local_scalar("uint16")

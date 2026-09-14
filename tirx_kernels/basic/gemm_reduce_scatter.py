@@ -312,7 +312,9 @@ class GEMMMPMCQueue(MPMCQueue):
                     txl.ptx.ld.acquire.sys.global_.b32(
                         fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
                     )
-                txl.ptx.st.global_.s32(self.task_types.ptr_to([self.masked_pos[0]]), txl.int32(-1))
+                txl.ptx.st.global_.s32(
+                    self.task_types.ptr_to([self.masked_pos[0]]), txl.int32(-1)
+                )
                 txl.ptx.ld.global_.s32(
                     fetched_task_idx0[0], self.task_idxs.ptr_to([self.masked_pos[0], 0])
                 )

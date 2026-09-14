@@ -276,10 +276,7 @@ class ClusterLaunchControlScheduler(_ClusterLaunchControlScheduler):
                     txl.ptx[
                         "clusterlaunchcontrol.try_cancel.async.shared::cta"
                         ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
-                    ](
-                        txl.address_of(self.clc_handle[0]),
-                        txl.address_of(self.sched_arr.full.buf[0]),
-                    )
+                    ](txl.address_of(self.clc_handle[0]), txl.address_of(self.sched_arr.full.buf[0]))
                 self.sched_arr.full.arrive(0, 16)
                 self.sched_arr.full.wait(0, sa.phase)
                 sa.advance()

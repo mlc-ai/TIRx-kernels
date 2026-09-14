@@ -383,9 +383,7 @@ def _make_flashkda_decode_t4_precomputed(spec: dict[str, Any]):
                 _load_bf16_f32(beta, txl.cast(token_pos * NUM_VALUE_HEADS + hv, "int64")),
             )
             with txl.If(token == 0), txl.Then():
-                accepted = txl.min(
-                    txl.max(_load_i32(nat, txl.cast(n, "int64")) - 1, 0), NUM_TOKENS - 1
-                )
+                accepted = txl.min(txl.max(_load_i32(nat, txl.cast(n, "int64")) - 1, 0), NUM_TOKENS - 1)
                 initial_slot = _load_i32(ssm_idx, txl.cast(n * NUM_TOKENS + accepted, "int64"))
                 _store_smem_i32(s_init, 0, txl.max(initial_slot, 0))
 

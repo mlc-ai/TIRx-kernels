@@ -725,9 +725,7 @@ def make_kernel(HQ: int, HV: int):
                         # them under the same guard.        orig:L1560-1576
                         with txl.If(row0 >= col), txl.Then():
                             for j in range(2):
-                                txl.ptx.ld.shared.f32(
-                                    clog[j], txl.address_of(s_cumsumlog[g2[j], col])
-                                )
+                                txl.ptx.ld.shared.f32(clog[j], txl.address_of(s_cumsumlog[g2[j], col]))
                             for j in range(2):
                                 txl.ptx.ex2.approx.ftz.f32(transfer[j][i], rlog[j] - clog[j])
                     for j in range(2):
@@ -848,16 +846,12 @@ def make_kernel(HQ: int, HV: int):
             def cg1_acc_ld(fr, col):  # orig:L793-803
                 addr = tmem_at(tmem, col, rowbits1)
                 txl.ptx[TC_LD_256](*(fr[i] for i in range(32)), addr)
-                txl.ptx[TC_LD_256](
-                    *(fr[32 + i] for i in range(32)), addr + txl.uint32(tmem_row(16))
-                )
+                txl.ptx[TC_LD_256](*(fr[32 + i] for i in range(32)), addr + txl.uint32(tmem_row(16)))
 
             def cg1_acc_st(fr, col):  # orig:L805-815
                 addr = tmem_at(tmem, col, rowbits1)
                 txl.ptx[TC_ST_256](addr, *(fr[i] for i in range(32)))
-                txl.ptx[TC_ST_256](
-                    addr + txl.uint32(tmem_row(16)), *(fr[32 + i] for i in range(32))
-                )
+                txl.ptx[TC_ST_256](addr + txl.uint32(tmem_row(16)), *(fr[32 + i] for i in range(32)))
 
             def cg1_f16_st_half(col, words, half):  # orig:L817-824
                 addr = tmem_at(tmem, col, rowbits1) + txl.uint32(tmem_row(16 * half))
@@ -889,9 +883,9 @@ def make_kernel(HQ: int, HV: int):
 
             def state_gidx(batch, head):  # orig:L894-897
                 t = txl.Cast("int64", tid1 & 127)
-                return (
-                    txl.Cast("int64", batch) * txl.int64(HV) + txl.Cast("int64", head)
-                ) * txl.int64(D_HEAD * D_HEAD) + t * txl.int64(D_HEAD)
+                return (txl.Cast("int64", batch) * txl.int64(HV) + txl.Cast("int64", head)) * txl.int64(
+                    D_HEAD * D_HEAD
+                ) + t * txl.int64(D_HEAD)
 
             def load_initial_state(batch, head):  # orig:L888-912
                 # acquire the kv ring (empty-wait), fill S, software-arrive the
@@ -1024,9 +1018,7 @@ def make_kernel(HQ: int, HV: int):
                                 # the packed subtraction, so express that.
                                 txl.ptx.sub.rn.f32x2(dd, f2(ll, ll), f2(cl2[0], cl2[1]))
                                 txl.ptx.ex2.approx.ftz.f32(decay_f[2 * g], txl.cuda.float2_x(dd))
-                                txl.ptx.ex2.approx.ftz.f32(
-                                    decay_f[2 * g + 1], txl.cuda.float2_y(dd)
-                                )
+                                txl.ptx.ex2.approx.ftz.f32(decay_f[2 * g + 1], txl.cuda.float2_y(dd))
                             p_gate.empty.arrive(st_g1.stage)  # release gate
                             st_g1.advance()
 
@@ -1539,9 +1531,7 @@ def make_kernel(HQ: int, HV: int):
                             if RANK == 4
                             else (txl.int32(d), txl.Cast("int32", off), head)
                         )
-                        txl.ptx[TMA_S2G_O](
-                            d_o, *coords, s_o[st_oc.stage].ptr_to(d, 0), txl.uint64(0)
-                        )
+                        txl.ptx[TMA_S2G_O](d_o, *coords, s_o[st_oc.stage].ptr_to(d, 0), txl.uint64(0))
                     txl.ptx[BULK_COMMIT]()
                     # wait only until the bulk ops have finished READING their
                     # source, which is all the O epilogue needs.

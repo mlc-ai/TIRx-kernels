@@ -234,9 +234,7 @@ def _store_state_row(
                     hi = txl.local_scalar("uint64")
                     txl.ptx.mov.b64(lo, words[0], words[1])
                     txl.ptx.mov.b64(hi, words[2], words[3])
-                    txl.ptx.st.global_.v2.b64(
-                        intermediate_states.ptr_to([intermediate_base]), lo, hi
-                    )
+                    txl.ptx.st.global_.v2.b64(intermediate_states.ptr_to([intermediate_base]), lo, hi)
                     txl.ptx.st.global_.v2.b64(state.ptr_to([final_base]), lo, hi)
                 with txl.Else():
                     txl.ptx.st.global_.v4.b32(
@@ -264,9 +262,7 @@ def _store_state_row(
                     with txl.Then():
                         word = txl.local_scalar("uint32")
                         txl.ptx.mov.b32(word, bits[0], bits[1])
-                        txl.ptx.st.global_.b32(
-                            intermediate_states.ptr_to([intermediate_base]), word
-                        )
+                        txl.ptx.st.global_.b32(intermediate_states.ptr_to([intermediate_base]), word)
                         txl.ptx.st.global_.b32(state.ptr_to([final_base]), word)
                     with txl.Else():
                         txl.ptx.st.global_.v2.b16(
@@ -530,10 +526,7 @@ def get_kernel(**kwargs: Any):
                     )
                     if HAS_DT_BIAS:
                         txl.ptx["add.ftz.f32"](dt_value, dt_value, bias_value)
-                    with (
-                        txl.If(txl.And(dt_softplus != 0, dt_value <= txl.float32(20.0))),
-                        txl.Then(),
-                    ):
+                    with txl.If(txl.And(dt_softplus != 0, dt_value <= txl.float32(20.0))), txl.Then():
                         mul_0 = txl.local_scalar("float32")
                         txl.ptx["mul.ftz.f32"](mul_0, dt_value, txl.float32(_LOG2_E))
                         exp_arg: txl.float32 = mul_0
@@ -547,14 +540,11 @@ def get_kernel(**kwargs: Any):
                         log_value: txl.float32 = log2_0
                         txl.ptx["mul.ftz.f32"](dt_value, log_value, txl.float32(_LN_2))
                     txl.ptx.st.shared.b32(
-                        s_dt.ptr_to([group * NTOKENS + dt_step]),
-                        txl.reinterpret("uint32", dt_value),
+                        s_dt.ptr_to([group * NTOKENS + dt_step]), txl.reinterpret("uint32", dt_value)
                     )
 
             _mbarrier_arrive_wait(bar_full_buf.ptr_to([group]))
-            lane_indicator: txl.float32 = txl.if_then_else(
-                lane == 0, txl.float32(1.0), txl.float32(0.0)
-            )
+            lane_indicator: txl.float32 = txl.if_then_else(lane == 0, txl.float32(1.0), txl.float32(0.0))
             seed_u64: txl.uint64 = txl.reinterpret("uint64", random_seed)
             seed_lo: txl.uint32 = txl.cast(seed_u64, "uint32")
             seed_hi: txl.uint32 = txl.cast(txl.shift_right(seed_u64, txl.uint64(32)), "uint32")
@@ -604,9 +594,7 @@ def get_kernel(**kwargs: Any):
                         elif DSTATE == 96:
                             with txl.unroll(3) as ii:
                                 sload_0 = txl.local_scalar("uint16")
-                                txl.ptx.ld.shared.b16(
-                                    sload_0, s_state_u16.ptr_to([state_index + ii])
-                                )
+                                txl.ptx.ld.shared.b16(sload_0, s_state_u16.ptr_to([state_index + ii]))
                                 txl.ptx.mov.b16(state_bits[ii], sload_0)
                         else:
                             txl.ptx.ld.shared.v4.b16(
@@ -1010,9 +998,7 @@ def get_kernel(**kwargs: Any):
                                 output_bits[2],
                                 output_bits[3],
                             )
-                    txl.ptx.mbarrier.arrive.shared__cta.b64(
-                        bar_done_buf.ptr_to([group]), txl.uint32(1)
-                    )
+                    txl.ptx.mbarrier.arrive.shared__cta.b64(bar_done_buf.ptr_to([group]), txl.uint32(1))
 
         with update:
             with txl.If(state_batch == txl.cast(pad_slot_id, "int64")):

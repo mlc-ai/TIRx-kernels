@@ -101,9 +101,7 @@ def _mma_chain(taddr_d, b_lo, taddr_a, enable_d, *, b_offsets, dhi, idesc):
     leader = txl.cuda.elect_sync()
     b_lo32 = txl.cast(b_lo, "uint32")
     for _i, _b_off in enumerate(b_offsets):
-        _b_desc = (txl.uint64(dhi) << txl.uint64(32)) | txl.cast(
-            b_lo32 + txl.uint32(_b_off), "uint64"
-        )
+        _b_desc = (txl.uint64(dhi) << txl.uint64(32)) | txl.cast(b_lo32 + txl.uint32(_b_off), "uint64")
         txl.ptx[_TCGEN05_MMA_F16](
             txl.cast(taddr_d, "uint32"),
             txl.cast(taddr_a + 8 * _i, "uint32"),
@@ -233,9 +231,7 @@ def _elect_commit2(barrier_a, barrier_b, stage):
 
 def _mbarrier_arrive(barrier, stage):
     # .cu:251-255 -> native; emits the same mbarrier.arrive.release.cta.shared::cta.b64 _, [addr]
-    return txl.ptx.mbarrier.arrive.release.cta.shared__cta.b64(
-        barrier.ptr_to([stage]), txl.uint32(1)
-    )
+    return txl.ptx.mbarrier.arrive.release.cta.shared__cta.b64(barrier.ptr_to([stage]), txl.uint32(1))
 
 
 def _mbarrier_arrive_expect_tx(barrier, stage, bytes_):
@@ -773,9 +769,7 @@ def bf16_fused_m128(**kwargs: Any):
         smem_gate_all = shared_view(
             (SMEM_SMEM_GATE_ALL_STAGE_BYTES // 4,), txl.f32, SMEM_SMEM_GATE_ALL_OFF
         )
-        smem_gt_all = shared_view(
-            (SMEM_SMEM_GT_ALL_STAGE_BYTES // 4,), txl.f32, SMEM_SMEM_GT_ALL_OFF
-        )
+        smem_gt_all = shared_view((SMEM_SMEM_GT_ALL_STAGE_BYTES // 4,), txl.f32, SMEM_SMEM_GT_ALL_OFF)
         smem_gt_prefix_all = shared_view(
             (SMEM_SMEM_GT_PREFIX_ALL_STAGE_BYTES // 4,), txl.f32, SMEM_SMEM_GT_PREFIX_ALL_OFF
         )
@@ -822,9 +816,7 @@ def bf16_fused_m128(**kwargs: Any):
         smem_ki_addr = smem_q_raw_prefetch_addr
         smem_gate_all_addr = txl.local_scalar(
             "int32",
-            init=txl.cast(
-                txl.cuda.cvta_generic_to_shared(txl.address_of(smem_gate_all[0])), "int32"
-            ),
+            init=txl.cast(txl.cuda.cvta_generic_to_shared(txl.address_of(smem_gate_all[0])), "int32"),
         )
         smem_inv_addr = smem_gate_all_addr + 4096
         smem_v_all_addr = txl.local_scalar(
@@ -907,8 +899,7 @@ def bf16_fused_m128(**kwargs: Any):
             warp_id_in_role: txl.int32 = txl.warp_id_in_role()  # .cu:743
             compute_local_warp: txl.int32 = warp_id_in_role  # .cu:744
             state_base: txl.int64 = (
-                (txl.cast(seq_idx, "int64") * txl.cast(h, "int64") + txl.cast(head_idx, "int64"))
-                * 128
+                (txl.cast(seq_idx, "int64") * txl.cast(h, "int64") + txl.cast(head_idx, "int64")) * 128
                 + txl.cast(state_row, "int64")
             ) * 128  # .cu:745
             initial_state_u32 = txl.decl_buffer(
@@ -1011,9 +1002,7 @@ def bf16_fused_m128(**kwargs: Any):
                                     _tmem_load_0[state_half * 16 + _ls * 2],
                                     _tmem_load_0[state_half * 16 + _ls * 2 + 1],
                                 ),
-                                txl.cuda.make_float2(
-                                    state_scale[_ls * 2], state_scale[_ls * 2 + 1]
-                                ),
+                                txl.cuda.make_float2(state_scale[_ls * 2], state_scale[_ls * 2 + 1]),
                             )
                             txl.ptx.mov.b32(
                                 _tmem_load_0[state_half * 16 + _ls * 2], txl.cuda.float2_x(_pk)
@@ -1071,9 +1060,7 @@ def bf16_fused_m128(**kwargs: Any):
                         txl.ptx.mul.rn.ftz.f32x2(
                             _pk,
                             txl.cuda.make_float2(residual_v[_ls * 2], residual_v[_ls * 2 + 1]),
-                            txl.cuda.make_float2(
-                                residual_beta[_ls * 2], residual_beta[_ls * 2 + 1]
-                            ),
+                            txl.cuda.make_float2(residual_beta[_ls * 2], residual_beta[_ls * 2 + 1]),
                         )
                         txl.ptx.mov.b32(residual_v[_ls * 2], txl.cuda.float2_x(_pk))
                         txl.ptx.mov.b32(residual_v[_ls * 2 + 1], txl.cuda.float2_y(_pk))
@@ -1096,8 +1083,7 @@ def bf16_fused_m128(**kwargs: Any):
                 _mbarrier_wait(u2_acc_ready, compute_state.stage, compute_state.phase)  # .cu:901
                 _tmem_load_2 = txl.alloc_local((32,), "float32")
                 txl.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
-                    *[_tmem_load_2[_j] for _j in range(32)],
-                    txl.cast(taddr + tmem_row_base, "uint32"),
+                    *[_tmem_load_2[_j] for _j in range(32)], txl.cast(taddr + tmem_row_base, "uint32")
                 )  # .cu:902-903
                 _tmem_load_2_bf16 = txl.alloc_local((16,), "uint32")
                 with txl.unroll(16) as _lp:  # .cu:904-909
@@ -1188,9 +1174,7 @@ def bf16_fused_m128(**kwargs: Any):
                             txl.cast(taddr + 192 + tmem_row_base_1 + 1048576, "uint32"),
                         )
                         txl.ptx.tcgen05.wait__ld.sync.aligned()  # .cu:1001
-                        txl.ptx.bar.sync(
-                            txl.uint32(9), txl.uint32(128)
-                        )  # .cu:1002 barrier.sync 9, 128
+                        txl.ptx.bar.sync(txl.uint32(9), txl.uint32(128))  # .cu:1002 barrier.sync 9, 128
                         with txl.If(epilogue_local_warp == 0), txl.Then():  # .cu:1003-1007
                             with txl.If(txl.cuda.elect_sync()), txl.Then():
                                 _mbarrier_arrive(out_empty, 0)
@@ -1210,9 +1194,7 @@ def bf16_fused_m128(**kwargs: Any):
                                             out_packed[_lp],
                                             txl.cuda.float22bfloat162_rn(
                                                 txl.cuda.uint_as_float(_tmem_load_4[_lp * 2 + 0]),
-                                                txl.cuda.uint_as_float(
-                                                    _tmem_load_4[_lp * 2 + 1 + 0]
-                                                ),
+                                                txl.cuda.uint_as_float(_tmem_load_4[_lp * 2 + 1 + 0]),
                                             ),
                                         )
                                 with txl.Else():  # .cu:1024-1030
@@ -1221,9 +1203,7 @@ def bf16_fused_m128(**kwargs: Any):
                                             out_packed[_lp],
                                             txl.cuda.float22bfloat162_rn(
                                                 txl.cuda.uint_as_float(_tmem_load_5[_lp * 2 + 0]),
-                                                txl.cuda.uint_as_float(
-                                                    _tmem_load_5[_lp * 2 + 1 + 0]
-                                                ),
+                                                txl.cuda.uint_as_float(_tmem_load_5[_lp * 2 + 1 + 0]),
                                             ),
                                         )
                             with txl.unroll(2) as token_group:  # .cu:1031-1048
@@ -1265,8 +1245,7 @@ def bf16_fused_m128(**kwargs: Any):
                                     head_idx_1,
                                     0,
                                     txl.cast(
-                                        smem_out_addr
-                                        + txl.cast(output_state.phase, "int32") * 8192,
+                                        smem_out_addr + txl.cast(output_state.phase, "int32") * 8192,
                                         "uint32",
                                     ),
                                 )  # .cu:1054
@@ -1316,9 +1295,7 @@ def bf16_fused_m128(**kwargs: Any):
                 out_state.advance()  # .cu:1111
                 mma_stage_byte_base = txl.cast(mma_state.stage, "int32") * SMEM_STAGE_BYTE_STRIDE
                 _mma_b_addr_0: txl.int32 = smem_qd_addr + mma_stage_byte_base  # .cu:1112
-                _mma_b_lo_0 = txl.uniform(
-                    txl.cast((_mma_b_addr_0 >> 4) & 0x3FFF, "uint32")
-                )  # .cu:1113
+                _mma_b_lo_0 = txl.uniform(txl.cast((_mma_b_addr_0 >> 4) & 0x3FFF, "uint32"))  # .cu:1113
                 _mma_chain(
                     tmem_tmem_out,
                     txl.cast(_mma_b_lo_0, "int32"),
@@ -1327,9 +1304,7 @@ def bf16_fused_m128(**kwargs: Any):
                     **_MMA_QK_8STEP,
                 )  # .cu:1114-1150
                 _mma_b_addr_1: txl.int32 = smem_kd_addr + mma_stage_byte_base  # .cu:1151
-                _mma_b_lo_1 = txl.uniform(
-                    txl.cast((_mma_b_addr_1 >> 4) & 0x3FFF, "uint32")
-                )  # .cu:1152
+                _mma_b_lo_1 = txl.uniform(txl.cast((_mma_b_addr_1 >> 4) & 0x3FFF, "uint32"))  # .cu:1152
                 _mma_chain(
                     tmem_tmem_u_acc,
                     txl.cast(_mma_b_lo_1, "int32"),
@@ -1340,9 +1315,7 @@ def bf16_fused_m128(**kwargs: Any):
                 _elect_commit2(old_out_ready, raw_inputs_free, mma_state.stage)  # .cu:1190
                 _mbarrier_wait(u_inp_ready, mma_state.stage, mma_state.phase)  # .cu:1191
                 _mma_b_addr_2: txl.int32 = smem_inv_addr + mma_stage_byte_base  # .cu:1192
-                _mma_b_lo_2 = txl.uniform(
-                    txl.cast((_mma_b_addr_2 >> 4) & 0x3FFF, "uint32")
-                )  # .cu:1193
+                _mma_b_lo_2 = txl.uniform(txl.cast((_mma_b_addr_2 >> 4) & 0x3FFF, "uint32"))  # .cu:1193
                 _mma_chain(
                     tmem_tmem_u2_acc,
                     txl.cast(_mma_b_lo_2, "int32"),
@@ -1406,9 +1379,7 @@ def bf16_fused_m128(**kwargs: Any):
                         v_item: txl.int32 = v_load_iter * 32 + lane  # .cu:1274
                         row: txl.int32 = v_item // 16  # .cu:1275
                         segment: txl.int32 = v_item % 16  # .cu:1276
-                        token: txl.int64 = bos_3 + txl.cast(
-                            chunk_idx_2 * 32 + row, "int64"
-                        )  # .cu:1277
+                        token: txl.int64 = bos_3 + txl.cast(chunk_idx_2 * 32 + row, "int64")  # .cu:1277
                         token_valid: txl.int32 = txl.if_then_else(token < eos_3, 1, 0)  # .cu:1278
                         v_src: txl.int64 = (
                             token * txl.cast(h, "int64") + txl.cast(head_idx_2, "int64")
@@ -1516,10 +1487,7 @@ def bf16_fused_m128(**kwargs: Any):
                                 qk_raw_full.ptr_to([prep_stage]),
                             )  # .cu:1355
                     _mbarrier_wait(gate_raw_full, prep_stage, prep_phase.phase)  # .cu:1358
-                    with (
-                        txl.If(txl.And(prep_local_warp == 2, lane < 32)),
-                        txl.Then(),
-                    ):  # .cu:1359-1380
+                    with txl.If(txl.And(prep_local_warp == 2, lane < 32)), txl.Then():  # .cu:1359-1380
                         beta_raw_pair = txl.alloc_local((1,), "uint32", align=4)  # .cu:1360
                         beta_raw_addr = txl.local_scalar("int32")
                         txl.ptx.add.s32(
@@ -1552,9 +1520,7 @@ def bf16_fused_m128(**kwargs: Any):
                         )  # .cu:1377-1379
                     with txl.If(prep_tid < 128), txl.Then():  # .cu:1381-1391
                         early_gate_rate = txl.local_scalar("float32")  # .cu:1382
-                        txl.ptx.ld.shared.f32(
-                            early_gate_rate, smem_gate_rate_all.ptr_to([stage_f32])
-                        )
+                        txl.ptx.ld.shared.f32(early_gate_rate, smem_gate_rate_all.ptr_to([stage_f32]))
                         early_gate_bias = txl.local_scalar("float32")  # .cu:1383
                         txl.ptx.ld.global_.f32(
                             early_gate_bias, dt_bias.ptr_to([head_idx_3 * 128 + prep_tid])
@@ -1603,10 +1569,7 @@ def bf16_fused_m128(**kwargs: Any):
                         )  # .cu:1407
                         gate_load_base = txl.local_scalar("int64")
                         txl.ptx.mad.lo.s64(
-                            gate_load_base,
-                            gate_load_token,
-                            txl.int64(h),
-                            txl.cast(head_idx_3, "int64"),
+                            gate_load_base, gate_load_token, txl.int64(h), txl.cast(head_idx_3, "int64")
                         )
                         txl.ptx.mad.lo.s64(
                             gate_load_base,
@@ -1635,10 +1598,7 @@ def bf16_fused_m128(**kwargs: Any):
                             txl.ptx.ld.global_.b16(
                                 _bits,
                                 beta.ptr_to(
-                                    [
-                                        beta_token * txl.cast(h, "int64")
-                                        + txl.cast(head_idx_3, "int64")
-                                    ]
+                                    [beta_token * txl.cast(h, "int64") + txl.cast(head_idx_3, "int64")]
                                 ),
                             )
                             beta_logit_1: txl.f32 = txl.cuda.bfloat162float(
@@ -1706,9 +1666,7 @@ def bf16_fused_m128(**kwargs: Any):
                     txl.ptx.ex2.approx.ftz.f32(
                         _i64,
                         total_log2
-                        - txl.float32(lower_bound)
-                        * txl.float32(1.4426950408889634)
-                        * txl.float32(16.0),
+                        - txl.float32(lower_bound) * txl.float32(1.4426950408889634) * txl.float32(16.0),
                     )
                     txl.ptx.st.shared.f32(
                         smem_restore_factor_all.ptr_to([stage_f32 + prep_tid]), _i64
@@ -1717,23 +1675,17 @@ def bf16_fused_m128(**kwargs: Any):
                     _i642 = txl.local_scalar("float32")
                     txl.ptx.ex2.approx.ftz.f32(
                         _i642,
-                        txl.float32(lower_bound)
-                        * txl.float32(1.4426950408889634)
-                        * txl.float32(16.0),
+                        txl.float32(lower_bound) * txl.float32(1.4426950408889634) * txl.float32(16.0),
                     )
                     txl.ptx.st.shared.f32(smem_restore_factor_all.ptr_to([stage_f32 + 128]), _i642)
                 q_u32 = txl.decl_buffer((total_tokens * h * D_HEAD // 2,), "uint32", data=q.data)
                 k_u32 = txl.decl_buffer((total_tokens * h * D_HEAD // 2,), "uint32", data=k.data)
-                with txl.serial(
-                    0, 4, unroll=False
-                ) as work_pass:  # .cu:1498-1694 (#pragma unroll 1)
+                with txl.serial(0, 4, unroll=False) as work_pass:  # .cu:1498-1694 (#pragma unroll 1)
                     work_item = txl.local_scalar("int32")
                     txl.assign(work_item, work_pass * 128 + prep_tid)  # .cu:1500
                     row_1: txl.int32 = work_item // 16  # .cu:1501
                     segment_1: txl.int32 = work_item % 16  # .cu:1502
-                    token_1: txl.int64 = bos_4 + txl.cast(
-                        chunk_idx_3 * 32 + row_1, "int64"
-                    )  # .cu:1503
+                    token_1: txl.int64 = bos_4 + txl.cast(chunk_idx_3 * 32 + row_1, "int64")  # .cu:1503
                     token_valid_1: txl.int32 = txl.if_then_else(
                         chunk_idx_3 * 32 + row_1 < seq_len_4, 1, 0
                     )  # .cu:1504
@@ -1759,9 +1711,7 @@ def bf16_fused_m128(**kwargs: Any):
                                 )
                                 txl.assign(
                                     packed_fp32[_pair * 2 + 1],
-                                    txl.cuda.uint_as_float(
-                                        packed[_pair + 0] & txl.uint32(0xFFFF0000)
-                                    ),
+                                    txl.cuda.uint_as_float(packed[_pair + 0] & txl.uint32(0xFFFF0000)),
                                 )
                             with txl.unroll(8) as value_idx:  # .cu:1540-1543
                                 txl.assign(q_raw_vec[value_idx], packed_fp32[value_idx])
@@ -1795,11 +1745,7 @@ def bf16_fused_m128(**kwargs: Any):
                                     with txl.unroll(4) as _pair:
                                         txl.assign(
                                             q_raw_vec[0 + _blk * 8 + _pair * 2],
-                                            (
-                                                txl.cuda.uint_as_float(
-                                                    _vldq[_pair] << txl.uint32(16)
-                                                )
-                                            ),
+                                            (txl.cuda.uint_as_float(_vldq[_pair] << txl.uint32(16))),
                                         )
                                         txl.assign(
                                             q_raw_vec[0 + _blk * 8 + _pair * 2 + 1],
@@ -1821,11 +1767,7 @@ def bf16_fused_m128(**kwargs: Any):
                                     with txl.unroll(4) as _pair:
                                         txl.assign(
                                             k_raw_vec[0 + _blk * 8 + _pair * 2],
-                                            (
-                                                txl.cuda.uint_as_float(
-                                                    _vldk[_pair] << txl.uint32(16)
-                                                )
-                                            ),
+                                            (txl.cuda.uint_as_float(_vldk[_pair] << txl.uint32(16))),
                                         )
                                         txl.assign(
                                             k_raw_vec[0 + _blk * 8 + _pair * 2 + 1],
@@ -1890,9 +1832,7 @@ def bf16_fused_m128(**kwargs: Any):
                         col: txl.int32 = segment_1 * 8 + elem_in_segment_1  # .cu:1645
                         prefix: txl.f32 = prefix_vec[elem_in_segment_1]  # .cu:1646
                         common_log2: txl.f32 = (
-                            txl.float32(lower_bound)
-                            * txl.float32(1.4426950408889634)
-                            * txl.float32(16.0)
+                            txl.float32(lower_bound) * txl.float32(1.4426950408889634) * txl.float32(16.0)
                         )  # .cu:1647
                         decay = txl.local_scalar("float32")  # .cu:1648-1649
                         txl.ptx.ex2.approx.ftz.f32(decay, prefix - common_log2)
@@ -2103,9 +2043,7 @@ def bf16_fused_m128(**kwargs: Any):
                         txl.cuda.float22bfloat162_rn(mqk[_lp * 2 + 0], mqk[_lp * 2 + 1 + 0]),
                     )
                 with txl.unroll(2) as publish_pair:  # .cu:2043-2051
-                    publish_row: txl.int32 = (
-                        pair_col_base + publish_pair * 8 + (lane & 7)
-                    )  # .cu:2045
+                    publish_row: txl.int32 = pair_col_base + publish_pair * 8 + (lane & 7)  # .cu:2045
                     publish_col: txl.int32 = 128 + pair_row_base + lane // 8 * 8  # .cu:2046
                     _pub_base: txl.int32 = (
                         publish_col // 64 * 4096 + publish_row * 128 + publish_col % 64 * 2
@@ -2152,9 +2090,7 @@ def bf16_fused_m128(**kwargs: Any):
                                 [stage_f32 + restore_segment * 8 + restore_vec * 4]
                             ),
                         )
-                    with txl.serial(
-                        0, n_passes, unroll=False
-                    ) as restore_pass:  # (#pragma unroll 1)
+                    with txl.serial(0, n_passes, unroll=False) as restore_pass:  # (#pragma unroll 1)
                         restore_row: txl.int32 = row_of(restore_pass)
                         restore_byte_off = (
                             restore_segment * 8 // 64 * 4096
@@ -2180,9 +2116,7 @@ def bf16_fused_m128(**kwargs: Any):
                                 )
                                 txl.ptx.mov.b32(
                                     _packed_fp32[_pair * 2 + 1],
-                                    txl.cuda.uint_as_float(
-                                        _packed[_pair + 0] & txl.uint32(0xFFFF0000)
-                                    ),
+                                    txl.cuda.uint_as_float(_packed[_pair + 0] & txl.uint32(0xFFFF0000)),
                                 )
                             with txl.unroll(8) as _value_idx:
                                 txl.ptx.mov.b32(_dst[_value_idx], _packed_fp32[_value_idx])
@@ -2229,9 +2163,7 @@ def bf16_fused_m128(**kwargs: Any):
                     inv_row = txl.alloc_local((8,), "float32")  # .cu:2192
                     packed_5 = txl.alloc_local((4,), "uint32", align=16)  # .cu:2193
                     byte_off_1: txl.int32 = inverse_row * 128 + diag_block * 8 * 2  # .cu:2194
-                    swizzled_off_1: txl.int32 = byte_off_1 ^ (
-                        (byte_off_1 >> 7 & 7) << 4
-                    )  # .cu:2195
+                    swizzled_off_1: txl.int32 = byte_off_1 ^ ((byte_off_1 >> 7 & 7) << 4)  # .cu:2195
                     txl.ptx.ld.shared.v4.b32(
                         packed_5[0],
                         packed_5[1],
@@ -2300,9 +2232,7 @@ def bf16_fused_m128(**kwargs: Any):
                     byte_off_2: txl.int32 = (prep_local_warp * 16 + 8 + lane_row) * 128 + (
                         prep_local_warp * 16 + 8
                     ) * 2  # .cu:2259
-                    swizzled_off_3: txl.int32 = byte_off_2 ^ (
-                        (byte_off_2 >> 7 & 7) << 4
-                    )  # .cu:2260
+                    swizzled_off_3: txl.int32 = byte_off_2 ^ ((byte_off_2 >> 7 & 7) << 4)  # .cu:2260
                     matrix_addr = txl.local_scalar("int32")
                     txl.ptx.add.s32(
                         matrix_addr, smem_inv_work_addr + prep_stage_byte_base, swizzled_off_3
@@ -2353,9 +2283,7 @@ def bf16_fused_m128(**kwargs: Any):
                     with txl.unroll(2) as _lp:  # .cu:2306-2310
                         txl.ptx.mov.b32(
                             o_bf16[_lp],
-                            txl.cuda.float22bfloat162_rn(
-                                o_acc[_lp * 2 + 0], o_acc[_lp * 2 + 1 + 0]
-                            ),
+                            txl.cuda.float22bfloat162_rn(o_acc[_lp * 2 + 0], o_acc[_lp * 2 + 1 + 0]),
                         )
                     txl.ptx.add.s32(matrix_addr, matrix_addr, txl.int32(1024))
                     # .cu:2314-2317 stmatrix.x1
@@ -2458,9 +2386,7 @@ def bf16_fused_m128(**kwargs: Any):
                             a32_frag[3],
                             smem_raw.ptr_to([(a_addr_1) - txl.cast(smem, "int32")]),
                         )
-                        _apb: txl.int32 = (
-                            lane_col // 16 * 1024 + lane_row_1 * 32 + lane_col % 16 * 2
-                        )
+                        _apb: txl.int32 = lane_col // 16 * 1024 + lane_row_1 * 32 + lane_col % 16 * 2
                         a_publish_addr: txl.int32 = (
                             smem_inv_addr + prep_stage_byte_base + (_apb ^ ((_apb >> 7 & 1) << 4))
                         )  # .cu:2375

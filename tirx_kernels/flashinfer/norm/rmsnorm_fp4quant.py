@@ -299,9 +299,7 @@ def _process_scale_block(
             scale_word = _cvt_f32_to_e4m3(scale_value)
             output_scale = _mul_f32(_e4m3_to_f32_rcp(scale_word), global_scale_value)
             scale_offset = _scale_offset(actual_row, sf_index, H, block_size, swizzled)
-            txl.ptx.st.global_.b8(
-                txl.address_of(scales[scale_offset]), txl.cast(scale_word, "uint8")
-            )
+            txl.ptx.st.global_.b8(txl.address_of(scales[scale_offset]), txl.cast(scale_word, "uint8"))
             packed0 = _quantize_and_pack_16(values0, output_scale)
             y_offset = txl.cast(actual_row, "int64") * (H // 2) + block_start // 2
             _store_global_u64(txl.address_of(y[y_offset]), packed0)
@@ -326,9 +324,7 @@ def _process_scale_block(
                 scale_word = _cvt_f32_to_e4m3(scale_value)
                 output_scale = _mul_f32(_e4m3_to_f32_rcp(scale_word), global_scale_value)
             scale_offset = _scale_offset(actual_row, sf_index, H, block_size, swizzled)
-            txl.ptx.st.global_.b8(
-                txl.address_of(scales[scale_offset]), txl.cast(scale_word, "uint8")
-            )
+            txl.ptx.st.global_.b8(txl.address_of(scales[scale_offset]), txl.cast(scale_word, "uint8"))
             packed0 = _quantize_and_pack_16(values0, output_scale)
             packed1 = _quantize_and_pack_16(values1, output_scale)
             y_offset = txl.cast(actual_row, "int64") * (H // 2) + block_start // 2

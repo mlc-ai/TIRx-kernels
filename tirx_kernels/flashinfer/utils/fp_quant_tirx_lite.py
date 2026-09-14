@@ -80,9 +80,7 @@ def unpack_lo_f32(word, dtype):
     and.b32 + shl.b32 + mov.b32)."""
     if dtype == "float16":
         return txl.cast(
-            txl.reinterpret(
-                "float16", txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")
-            ),
+            txl.reinterpret("float16", txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")),
             "float32",
         )
     return txl.reinterpret(
@@ -94,12 +92,9 @@ def unpack_hi_f32(word, dtype):
     """High lane of a packed pair as f32 (bf16: shr.b32 + shl.b32 + mov.b32)."""
     if dtype == "float16":
         return txl.cast(
-            txl.reinterpret("float16", txl.cast(txl.shift_right(word, txl.uint32(16)), "uint16")),
-            "float32",
+            txl.reinterpret("float16", txl.cast(txl.shift_right(word, txl.uint32(16)), "uint16")), "float32"
         )
-    return txl.reinterpret(
-        "float32", txl.shift_left(txl.shift_right(word, txl.uint32(16)), txl.uint32(16))
-    )
+    return txl.reinterpret("float32", txl.shift_left(txl.shift_right(word, txl.uint32(16)), txl.uint32(16)))
 
 
 def pair_max_to_f32(x, dtype):
@@ -124,11 +119,7 @@ def shfl_xor_f32(val, lane_xor):
     """``shfl.sync.bfly.b32`` with full membermask (utils:498 shuffle_xor_f32)."""
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out,
-        txl.reinterpret("uint32", val),
-        txl.uint32(lane_xor),
-        txl.uint32(31),
-        txl.uint32(0xFFFFFFFF),
+        out, txl.reinterpret("uint32", val), txl.uint32(lane_xor), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
     return txl.reinterpret("float32", out)
 
@@ -311,9 +302,7 @@ def cvt_e2m1x8(vals):
 
 def pack_u32x2_to_u64(lo, hi):
     """(u64(hi) << 32) | u64(lo): plain u64 shift/or (utils:996-997)."""
-    return txl.bitwise_or(
-        txl.shift_left(txl.cast(hi, "uint64"), txl.uint64(32)), txl.cast(lo, "uint64")
-    )
+    return txl.bitwise_or(txl.shift_left(txl.cast(hi, "uint64"), txl.uint64(32)), txl.cast(lo, "uint64"))
 
 
 # ---------------------------------------------------------------------------
@@ -394,8 +383,7 @@ def nvfp4_compute_output_scale(sf_u32, global_scale):
     h2 = txl.local_scalar("uint32")
     txl.ptx.cvt.rn.f16x2.e4m3x2(h2, pair16)
     sf_f32 = txl.cast(
-        txl.reinterpret("float16", txl.cast(txl.bitwise_and(h2, txl.uint32(0xFFFF)), "uint16")),
-        "float32",
+        txl.reinterpret("float16", txl.cast(txl.bitwise_and(h2, txl.uint32(0xFFFF)), "uint16")), "float32"
     )
     product = mul_f32(sf_f32, rcp_approx_ftz(global_scale))
     result = rcp_approx_ftz(product)

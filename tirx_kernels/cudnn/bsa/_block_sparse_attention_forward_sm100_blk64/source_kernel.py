@@ -416,9 +416,7 @@ def make_forward_kernel(**config):
         oepi_empty = txl.MBarrier(pool, 2)
         tmem_mailbox = pool.alloc((1,), "uint32", align=4)
         pool.alloc((4,), "uint8")
-        reduce_bar = txl.MBarrier(
-            pool, 2, leader=(warp == 15) & (txl.cuda.elect_sync() != txl.uint32(0))
-        )
+        reduce_bar = txl.MBarrier(pool, 2, leader=(warp == 15) & (txl.cuda.elect_sync() != txl.uint32(0)))
         stats_smem = pool.alloc((512,), "float32", align=8)
         pair_smem = pool.alloc((256,), "float32", align=8)
         if use_clc:
@@ -868,9 +866,7 @@ def make_forward_kernel(**config):
                                 txl.assign(new_max, tile_max)
                                 txl.assign(
                                     row_max_safe,
-                                    txl.if_then_else(
-                                        tile_max != txl.float32(NEG_INF), tile_max, 0.0
-                                    ),
+                                    txl.if_then_else(tile_max != txl.float32(NEG_INF), tile_max, 0.0),
                                 )
                                 txl.assign(old_scale, txl.float32(0.0))
                             with txl.Else():
@@ -1000,9 +996,7 @@ def make_forward_kernel(**config):
                             scale = _ld_shared_f32(stats_smem, stage * 128 + tid128)
                             ballot = txl.local_scalar("uint32")
                             txl.ptx.vote_sync.ballot.b32(
-                                ballot,
-                                txl.ptx.pred(scale < txl.float32(1.0)),
-                                txl.uint32(0xFFFFFFFF),
+                                ballot, txl.ptx.pred(scale < txl.float32(1.0)), txl.uint32(0xFFFFFFFF)
                             )
                             with txl.If(ballot != 0), txl.Then():
                                 _tmem_rescale(tmem_base + 256 + stage * 128, scale)

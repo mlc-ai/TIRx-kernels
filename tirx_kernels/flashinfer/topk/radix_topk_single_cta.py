@@ -287,9 +287,7 @@ def _stage_vector(buf, s_ordered, row_in, i, vec, load_bytes, is32, to_ordered, 
             lo = to_ordered(txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16"))
             hi = to_ordered(txl.cast(txl.shift_right(word, txl.uint32(16)), "uint16"))
             keys.append(
-                txl.bitwise_or(
-                    txl.cast(lo, "uint32"), txl.shift_left(txl.cast(hi, "uint32"), txl.uint32(16))
-                )
+                txl.bitwise_or(txl.cast(lo, "uint32"), txl.shift_left(txl.cast(hi, "uint32"), txl.uint32(16)))
             )
     if len(keys) == 4:
         st_shared_quad_u32(s_ordered, i, keys[0], keys[1], keys[2], keys[3])
@@ -448,8 +446,7 @@ def get_kernel(
                                 out_val,
                                 out_i,
                                 inp,
-                                txl.cast(row_idx, "int64") * txl.int64(length)
-                                + txl.cast(i0, "int64"),
+                                txl.cast(row_idx, "int64") * txl.int64(length) + txl.cast(i0, "int64"),
                             )
             batch_idx = row_idx
             offset = txl.int32(0)
@@ -462,9 +459,7 @@ def get_kernel(
                     with txl.serial(tx, k, step=BLOCK_THREADS) as i1:
                         page_id = txl.local_scalar("int32", init=txl.int32(-1))
                         with txl.If(i1 < row_len), txl.Then():
-                            txl.assign(
-                                page_id, ld_i32(aux, src0 + txl.cast(page_start + i1, "int64"))
-                            )
+                            txl.assign(page_id, ld_i32(aux, src0 + txl.cast(page_start + i1, "int64")))
                         st_i32(out_idx, row_out + txl.cast(i1, "int64"), page_id)
             if ragged:
                 offset = ld_i32(aux, txl.cast(row_idx, "int64"))
@@ -512,8 +507,7 @@ def get_kernel(
                         txl.assign(
                             mask,
                             txl.shift_left(
-                                txl.uint32(0xFFFFFFFF),
-                                txl.cast(txl.int32(obits) - rnd * 8, "uint32"),
+                                txl.uint32(0xFFFFFFFF), txl.cast(txl.int32(obits) - rnd * 8, "uint32")
                             ),
                         )
                     packed = ld_shared_u64(s_scalars, 0)
@@ -559,10 +553,7 @@ def get_kernel(
                         count_gt = txl.local_scalar("uint32", init=txl.uint32(0))
                         with txl.If(tx + 1 < RADIX), txl.Then():
                             txl.assign(count_gt, ld_shared_u32(s_suffix, tx + 1))
-                        with (
-                            txl.If(txl.And(count_ge >= remaining_k, count_gt < remaining_k)),
-                            txl.Then(),
-                        ):
+                        with txl.If(txl.And(count_ge >= remaining_k, count_gt < remaining_k)), txl.Then():
                             st_shared_pair_u32(
                                 s_scalars, 2, txl.cast(tx, "uint32"), remaining_k - count_gt
                             )
@@ -572,9 +563,7 @@ def get_kernel(
                         st_shared_pair_u32(
                             s_scalars,
                             0,
-                            txl.bitwise_or(
-                                prefix, txl.shift_left(found[0], txl.cast(shift, "uint32"))
-                            ),
+                            txl.bitwise_or(prefix, txl.shift_left(found[0], txl.cast(shift, "uint32"))),
                             found[1],
                         )
                     bar_sync()
@@ -596,13 +585,9 @@ def get_kernel(
                 txl.assign(my_eq, txl.uint32(0))
                 with txl.serial(tx, row_len, step=BLOCK_THREADS, unroll=2) as ic:
                     key2 = txl.cast(ld_key(s_ordered, ic), "uint32")
-                    txl.assign(
-                        my_gt, my_gt + txl.Select(key2 > pivot, txl.uint32(1), txl.uint32(0))
-                    )
+                    txl.assign(my_gt, my_gt + txl.Select(key2 > pivot, txl.uint32(1), txl.uint32(0)))
                     if deterministic:
-                        txl.assign(
-                            my_eq, my_eq + txl.Select(key2 == pivot, txl.uint32(1), txl.uint32(0))
-                        )
+                        txl.assign(my_eq, my_eq + txl.Select(key2 == pivot, txl.uint32(1), txl.uint32(0)))
                 with txl.unroll(5) as step:
                     delta = txl.shift_right(txl.int32(16), step)
                     txl.assign(my_gt, my_gt + shfl_down_u32(my_gt, delta))
@@ -655,9 +640,7 @@ def get_kernel(
                     with txl.serial(tx, row_len, step=BLOCK_THREADS, unroll=2) as i:
                         key4 = txl.cast(ld_key(s_ordered, i), "uint32")
                         with txl.If(key4 == pivot), txl.Then():
-                            pos2 = txl.cast(
-                                atom_shared_add_u32(s_scalars, 4, txl.uint32(1)), "int32"
-                            )
+                            pos2 = txl.cast(atom_shared_add_u32(s_scalars, 4, txl.uint32(1)), "int32")
                             with txl.If(pos2 < k), txl.Then():
                                 _emit(
                                     out_idx,
@@ -696,8 +679,7 @@ def get_kernel(
                             with txl.serial(tx, row_len, step=BLOCK_THREADS) as id1:
                                 key5 = txl.cast(ld_key(s_ordered, id1), "uint32")
                                 txl.assign(
-                                    sel,
-                                    sel + txl.Select(key5 > pivot, txl.uint32(1), txl.uint32(0)),
+                                    sel, sel + txl.Select(key5 > pivot, txl.uint32(1), txl.uint32(0))
                                 )
                             # cub BLOCK_SCAN_RAKING_MEMOIZE exclusive sum (:268-270):
                             # place into the padded raking grid, one warp serially
@@ -764,8 +746,7 @@ def get_kernel(
                                 )
                                 txl.assign(
                                     sel_eq,
-                                    sel_eq
-                                    + txl.Select(key7 == pivot, txl.uint32(1), txl.uint32(0)),
+                                    sel_eq + txl.Select(key7 == pivot, txl.uint32(1), txl.uint32(0)),
                                 )
                             # The same raking scan over the {gt, eq} pair (:1122-1125).
                             rake_off2 = _raking_offset(tx) * 2

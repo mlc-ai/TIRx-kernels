@@ -546,9 +546,7 @@ def get_kernel(
         row_in_cta: txl.int32 = tid // tpr
         thread_in_row: txl.int32 = tid % tpr
         compact_row_i32: txl.int32 = block_x * rows + row_in_cta
-        actual_row: txl.int64 = txl.cast(block_x, "int64") * txl.int64(rows) + txl.cast(
-            row_in_cta, "int64"
-        )
+        actual_row: txl.int64 = txl.cast(block_x, "int64") * txl.int64(rows) + txl.cast(row_in_cta, "int64")
         row_valid: txl.bool = actual_row < runtime_M
         warp: txl.int32 = tid // 32
         lane: txl.int32 = tid % 32
@@ -864,13 +862,9 @@ def get_kernel(
                         clamped: txl.float32 = _minimum_f32(clamped_low, txl.float32(fp8_max))
                         pair: txl.uint16 = _cvt_fp8_pair(clamped, txl.float32(0.0), output_dtype)
                         if compact:
-                            scalar_offset = actual_row * txl.int64(H) + txl.cast(
-                                scalar_col, "int64"
-                            )
+                            scalar_offset = actual_row * txl.int64(H) + txl.cast(scalar_col, "int64")
                         else:
-                            scalar_offset = actual_row * y_row_stride + txl.cast(
-                                scalar_col, "int64"
-                            )
+                            scalar_offset = actual_row * y_row_stride + txl.cast(scalar_col, "int64")
                         txl.ptx.st.global_.b8(out.ptr_to([scalar_offset]), txl.cast(pair, "uint8"))
 
             vector_guard = txl.And(absolute_col + vec <= H, row_valid)

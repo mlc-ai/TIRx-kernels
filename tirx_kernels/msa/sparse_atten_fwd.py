@@ -728,10 +728,7 @@ def _dequant_kv(src, dst, bar_tma, bar_ready, bar_id, count_raw, group_tidx, bat
                             txl.ptx.shr.u32(mant[0], mant[0], txl.uint32(4))
                             txl.ptx.or_.b32(acc[0], acc[0], mant[0])
                             txl.ptx.fma.rn.bf16x2(
-                                out_words[w * 2 + half],
-                                acc[0],
-                                txl.uint32(0x7B807B80),
-                                txl.uint32(0),
+                                out_words[w * 2 + half], acc[0], txl.uint32(0x7B807B80), txl.uint32(0)
                             )
                     for half in range(2):
                         txl.ptx.st.shared.v4.b32(
@@ -760,17 +757,14 @@ def _pack_p_words(words, regs, j, pv_dtype):
         with txl.unroll(8) as w:
             lo = txl.alloc_local((1,), "uint16")
             hi = txl.alloc_local((1,), "uint16")
-            txl.ptx.cvt.rn.satfinite.e4m3x2.f32(
-                lo[0], regs[j * 32 + w * 4 + 1], regs[j * 32 + w * 4]
-            )
+            txl.ptx.cvt.rn.satfinite.e4m3x2.f32(lo[0], regs[j * 32 + w * 4 + 1], regs[j * 32 + w * 4])
             txl.ptx.cvt.rn.satfinite.e4m3x2.f32(
                 hi[0], regs[j * 32 + w * 4 + 3], regs[j * 32 + w * 4 + 2]
             )
             txl.assign(
                 words[j * 8 + w],
                 txl.bitwise_or(
-                    txl.cast(lo[0], "uint32"),
-                    txl.shift_left(txl.cast(hi[0], "uint32"), txl.uint32(16)),
+                    txl.cast(lo[0], "uint32"), txl.shift_left(txl.cast(hi[0], "uint32"), txl.uint32(16))
                 ),
             )
     else:
@@ -882,8 +876,7 @@ def _store_o_partial(buf, elem_offset, vals, partial_dtype):
             txl.assign(
                 words[w],
                 txl.bitwise_or(
-                    txl.cast(lo[0], "uint32"),
-                    txl.shift_left(txl.cast(hi[0], "uint32"), txl.uint32(16)),
+                    txl.cast(lo[0], "uint32"), txl.shift_left(txl.cast(hi[0], "uint32"), txl.uint32(16))
                 ),
             )
         txl.ptx.st.global_.cs.v4.b32(
@@ -946,9 +939,7 @@ def _mbar_expect_tx(bar, stage, tx_bytes):
     from thread 0 (:911-918) and are arrived on later by the load warp, so this
     has to stay separate from the arrive -- the barrier's arrival count is 1.
     """
-    txl.ptx.mbarrier.expect_tx.relaxed.cta.shared__cta.b64(
-        bar.ptr_to([stage]), txl.uint32(tx_bytes)
-    )
+    txl.ptx.mbarrier.expect_tx.relaxed.cta.shared__cta.b64(bar.ptr_to([stage]), txl.uint32(tx_bytes))
 
 
 LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
@@ -1591,9 +1582,7 @@ def _make_kernel(**config):
                     txl.ptx.mbarrier.init.shared.b64(
                         bar_p_last_full.ptr_to([stage]), txl.uint32(SOFTMAX_THREADS)
                     )
-                    txl.ptx.mbarrier.init.shared.b64(
-                        bar_p_last_empty.ptr_to([stage]), txl.uint32(1)
-                    )
+                    txl.ptx.mbarrier.init.shared.b64(bar_p_last_empty.ptr_to([stage]), txl.uint32(1))
                 with txl.unroll(O_STAGE) as stage:
                     txl.ptx.mbarrier.init.shared.b64(bar_o_full.ptr_to([stage]), txl.uint32(1))
                     txl.ptx.mbarrier.init.shared.b64(
@@ -2142,9 +2131,7 @@ def _make_kernel(**config):
             with txl.If(group_tidx < q_tokens_per_group), txl.Then():
                 word = ld_shared_i32(s_qidx_meta, qidx_meta_slot + group_tidx)
                 st_shared_i32(
-                    s_q_idx,
-                    slot * q_tokens_per_group + group_tidx,
-                    txl.bitwise_and(word, Q_IDX_MASK),
+                    s_q_idx, slot * q_tokens_per_group + group_tidx, txl.bitwise_and(word, Q_IDX_MASK)
                 )
                 st_shared_i32(
                     s_split_idx,
@@ -2264,9 +2251,7 @@ def _make_kernel(**config):
                 split_l = ld_shared_i32(s_split_idx, slot * q_tokens_per_group + tok_l)
                 h_abs = head_kv_idx[0] * qheadperkv + h_local
                 lse_flat = (
-                    txl.cast(split_l, "int64")
-                    * txl.cast(total_q, "int64")
-                    * txl.cast(head_q, "int64")
+                    txl.cast(split_l, "int64") * txl.cast(total_q, "int64") * txl.cast(head_q, "int64")
                     + txl.cast(q_batch_off + q_idx_l, "int64") * txl.cast(head_q, "int64")
                     + txl.cast(h_abs, "int64")
                 )
@@ -2409,10 +2394,7 @@ def _make_kernel(**config):
                                 imm = txl.local_scalar(
                                     "int32", init=txl.int32((1 << i) if i < 31 else -(1 << 31))
                                 )
-                                with (
-                                    txl.If(txl.bitwise_and(signed_bits, imm) == txl.int32(0)),
-                                    txl.Then(),
-                                ):
+                                with txl.If(txl.bitwise_and(signed_bits, imm) == txl.int32(0)), txl.Then():
                                     txl.assign(s_regs[chunk * MASK_R2P_CHUNK + i], NEG_INF)
 
                     # One KV block per Q group, so this is always the first and
@@ -2461,9 +2443,7 @@ def _make_kernel(**config):
                     # packed conversion into the P operand dtype (:2307-2312).
                     # 128 P values pack into 64 words as bf16, 32 as fp8; the
                     # store repetition follows (:2429-2439).
-                    p_words = txl.alloc_local(
-                        (N_BLOCK * _DTYPE_BYTES[pv_dtype] * 8 // 32,), "uint32"
-                    )
+                    p_words = txl.alloc_local((N_BLOCK * _DTYPE_BYTES[pv_dtype] * 8 // 32,), "uint32")
                     # Preserve the parser kernel's trace-time expansion.  The
                     # zero-frequency specialization is also decided while tracing,
                     # so the modulo-by-zero arm remains unspellable.
@@ -2549,10 +2529,7 @@ def _make_kernel(**config):
                 txl.ptx.setmaxnreg.inc.sync.aligned.u32(txl.uint32(num_regs_softmax))
                 softmax_warpgroup(0)
 
-        with (
-            txl.If(txl.And(warp_idx >= SOFTMAX1_WARP_BASE, warp_idx < Q_LOAD_WARP_BASE)),
-            txl.Then(),
-        ):
+        with txl.If(txl.And(warp_idx >= SOFTMAX1_WARP_BASE, warp_idx < Q_LOAD_WARP_BASE)), txl.Then():
             with txl.If(cta_valid_work != 0), txl.Then():
                 txl.ptx.setmaxnreg.inc.sync.aligned.u32(txl.uint32(num_regs_softmax))
                 softmax_warpgroup(1)

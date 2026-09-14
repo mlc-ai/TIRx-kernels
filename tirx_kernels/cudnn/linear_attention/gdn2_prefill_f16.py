@@ -336,16 +336,11 @@ def _copy_tensormap(src_map, dst):
     for group in range(4):
         offset = txl.uint64(group * 32)
         txl.ptx.ld.global_.v4.b64(
-            payload[0],
-            payload[1],
-            payload[2],
-            payload[3],
-            txl.reinterpret("handle", source + offset),
+            payload[0], payload[1], payload[2], payload[3], txl.reinterpret("handle", source + offset)
         )
         for word in range(4):
             txl.ptx.st.global_.b64(
-                txl.reinterpret("handle", target + txl.uint64((group * 4 + word) * 8)),
-                payload[word],
+                txl.reinterpret("handle", target + txl.uint64((group * 4 + word) * 8)), payload[word]
             )
 
 
@@ -540,10 +535,7 @@ def _ffma2(a0, a1, b0, b1, c0, c1):
     out0 = txl.local_scalar("float32")
     out1 = txl.local_scalar("float32")
     txl.ptx.fma.rn.f32x2(
-        packed,
-        txl.cuda.make_float2(a0, a1),
-        txl.cuda.make_float2(b0, b1),
-        txl.cuda.make_float2(c0, c1),
+        packed, txl.cuda.make_float2(a0, a1), txl.cuda.make_float2(b0, b1), txl.cuda.make_float2(c0, c1)
     )
     txl.ptx.mov.b64(out0, out1, packed)
     return out0, out1
@@ -727,9 +719,7 @@ def _make_prologue(
                 else:
                     for field in range(8):
                         value = txl.local_scalar("int32")
-                        txl.ptx.ld.global_.s32(
-                            value, work_item_staging.ptr_to([source * 8 + field])
-                        )
+                        txl.ptx.ld.global_.s32(value, work_item_staging.ptr_to([source * 8 + field]))
                         txl.ptx.st.global_.s32(work_items.ptr_to([destination * 8 + field]), value)
 
             direct_condition = txl.bool(True) if uniform_generated_order else item_count > 4096
@@ -742,9 +732,7 @@ def _make_prologue(
             with txl.If(sort_condition), txl.Then():
                 with txl.If(thread == 0), txl.Then():
                     txl.ptx.st.shared.v2.u32(
-                        order_arena.ptr_to([32_768]),
-                        txl.uint32(2_147_483_647),
-                        txl.uint32(0x80000000),
+                        order_arena.ptr_to([32_768]), txl.uint32(2_147_483_647), txl.uint32(0x80000000)
                     )
                 padded_count = txl.local_scalar("int32", init=txl.int32(1))
                 with txl.While(padded_count < item_count):
@@ -768,9 +756,7 @@ def _make_prologue(
                                 txl.ptx.ld.global_.s32(
                                     cstart, work_item_staging.ptr_to([item * 8 + 4])
                                 )
-                                txl.ptx.ld.global_.s32(
-                                    cend, work_item_staging.ptr_to([item * 8 + 5])
-                                )
+                                txl.ptx.ld.global_.s32(cend, work_item_staging.ptr_to([item * 8 + 5]))
                                 txl.assign(key, cend - cstart)
                         txl.ptx.st.shared.s32(order_arena.ptr_to([item * 4]), key)
                         txl.ptx.st.shared.s32(order_arena.ptr_to([16_384 + item * 4]), item)
@@ -798,10 +784,7 @@ def _make_prologue(
                             for element in range(4):
                                 item = thread + element * 1024
                                 partner = txl.bitwise_xor(item, distance)
-                                with (
-                                    txl.If(txl.And(item < padded_count, partner > item)),
-                                    txl.Then(),
-                                ):
+                                with txl.If(txl.And(item < padded_count, partner > item)), txl.Then():
                                     key_i = txl.local_scalar("int32")
                                     key_j = txl.local_scalar("int32")
                                     txl.ptx.ld.shared.s32(key_i, order_arena.ptr_to([item * 4]))
@@ -1128,9 +1111,7 @@ def _make_main(
                             txl.uint32(num_sms) + ticket,
                         )
                     txl.cuda.warp_sync()
-                    txl.ptx.ld.shared.s32(
-                        tile, arena.ptr_to([sched_base + sched_producer.stage * 4])
-                    )
+                    txl.ptx.ld.shared.s32(tile, arena.ptr_to([sched_base + sched_producer.stage * 4]))
                     with txl.If(_elected()), txl.Then():
                         _arrive_barrier(arena, protocol[23][0], sched_producer.stage)
                     sched_producer.advance()
@@ -1284,9 +1265,7 @@ def _make_main(
                     _wait_barrier(
                         arena, protocol[23][0], sched_consumer.stage, sched_consumer.phase
                     )
-                    txl.ptx.ld.shared.s32(
-                        tile, arena.ptr_to([sched_base + sched_consumer.stage * 4])
-                    )
+                    txl.ptx.ld.shared.s32(tile, arena.ptr_to([sched_base + sched_consumer.stage * 4]))
                     with txl.If(_elected()), txl.Then():
                         _arrive_barrier(arena, protocol[23][1], sched_consumer.stage)
                     sched_consumer.advance()
@@ -1438,9 +1417,7 @@ def _make_main(
                     _wait_barrier(
                         arena, protocol[23][0], sched_consumer.stage, sched_consumer.phase
                     )
-                    txl.ptx.ld.shared.s32(
-                        tile, arena.ptr_to([sched_base + sched_consumer.stage * 4])
-                    )
+                    txl.ptx.ld.shared.s32(tile, arena.ptr_to([sched_base + sched_consumer.stage * 4]))
                     with txl.If(_elected()), txl.Then():
                         _arrive_barrier(arena, protocol[23][1], sched_consumer.stage)
                     sched_consumer.advance()
@@ -1466,9 +1443,7 @@ def _make_main(
                 store_swizzled = txl.bitwise_xor(
                     store_linear,
                     txl.shift_left(
-                        txl.bitwise_and(
-                            txl.shift_right(store_linear, txl.uint32(6)), txl.uint32(1)
-                        ),
+                        txl.bitwise_and(txl.shift_right(store_linear, txl.uint32(6)), txl.uint32(1)),
                         txl.uint32(3),
                     ),
                 )
@@ -1533,9 +1508,7 @@ def _make_main(
                         rhs_col = txl.if_then_else((mma_lane // 8) % 2 != 0, 8, 0)
                         lhs_row = mma_lane % 8 + txl.if_then_else((mma_lane // 8) % 2 != 0, 8, 0)
                         lhs_col = txl.if_then_else(mma_lane // 8 >= 2, 8, 0)
-                        store_row = (mma_lane & 7) + txl.if_then_else(
-                            (mma_lane // 8) & 1 != 0, 8, 0
-                        )
+                        store_row = (mma_lane & 7) + txl.if_then_else((mma_lane // 8) & 1 != 0, 8, 0)
                         store_col = txl.if_then_else(mma_lane // 8 >= 2, 8, 0)
                         store_linear = store_row * 16 + (store_col ^ 8)
                         store_swizzled = txl.bitwise_xor(
@@ -1696,9 +1669,7 @@ def _make_main(
                     _wait_barrier(
                         arena, protocol[23][0], sched_consumer.stage, sched_consumer.phase
                     )
-                    txl.ptx.ld.shared.s32(
-                        tile, arena.ptr_to([sched_base + sched_consumer.stage * 4])
-                    )
+                    txl.ptx.ld.shared.s32(tile, arena.ptr_to([sched_base + sched_consumer.stage * 4]))
                     with txl.If(_elected()), txl.Then():
                         _arrive_barrier(arena, protocol[23][1], sched_consumer.stage)
                     sched_consumer.advance()
@@ -1761,8 +1732,7 @@ def _make_main(
                             txl.assign(raw_gate, a_log_exp * (raw_gate + dt_value))
                             sigmoid = _tanh(raw_gate * txl.float32(0.5)) * txl.float32(0.5)
                             txl.assign(
-                                raw_gate,
-                                (sigmoid + txl.float32(0.5)) * txl.float32(gate_scale_log2),
+                                raw_gate, (sigmoid + txl.float32(0.5)) * txl.float32(gate_scale_log2)
                             )
                             if not full_tiles:
                                 with txl.If(chunk * 16 + row >= sequence_length), txl.Then():
@@ -1803,9 +1773,7 @@ def _make_main(
                     diagonal_swizzled = txl.bitwise_xor(
                         diagonal_linear,
                         txl.shift_left(
-                            txl.bitwise_and(
-                                txl.shift_right(diagonal_linear, txl.uint32(6)), txl.uint32(1)
-                            ),
+                            txl.bitwise_and(txl.shift_right(diagonal_linear, txl.uint32(6)), txl.uint32(1)),
                             txl.uint32(3),
                         ),
                     )
@@ -2083,9 +2051,7 @@ def _make_main(
                     _wait_barrier(
                         arena, protocol[23][0], sched_consumer.stage, sched_consumer.phase
                     )
-                    txl.ptx.ld.shared.s32(
-                        tile, arena.ptr_to([sched_base + sched_consumer.stage * 4])
-                    )
+                    txl.ptx.ld.shared.s32(tile, arena.ptr_to([sched_base + sched_consumer.stage * 4]))
                     with txl.If(_elected()), txl.Then():
                         _arrive_barrier(arena, protocol[23][1], sched_consumer.stage)
                     sched_consumer.advance()
@@ -2199,15 +2165,12 @@ def _make_main(
                         state_k_cursor.advance()
                         txl.ptx["tcgen05.ld.sync.aligned.16x256b.x2.b32"](
                             *[state_k0[i] for i in range(8)],
-                            txl.cast(
-                                tmem_col + 224 + txl.shift_left(row_id, txl.int32(16)), "uint32"
-                            ),
+                            txl.cast(tmem_col + 224 + txl.shift_left(row_id, txl.int32(16)), "uint32"),
                         )
                         txl.ptx["tcgen05.ld.sync.aligned.16x256b.x2.b32"](
                             *[state_k1[i] for i in range(8)],
                             txl.cast(
-                                tmem_col + 224 + txl.shift_left(row_id + 16, txl.int32(16)),
-                                "uint32",
+                                tmem_col + 224 + txl.shift_left(row_id + 16, txl.int32(16)), "uint32"
                             ),
                         )
                 _wait_barrier(arena, protocol[3][0], ready_stage, ready_phase)
@@ -2242,15 +2205,12 @@ def _make_main(
                         state_k_cursor.advance()
                         txl.ptx["tcgen05.ld.sync.aligned.16x256b.x2.b32"](
                             *[state_k0[i] for i in range(8)],
-                            txl.cast(
-                                tmem_col + 224 + txl.shift_left(row_id, txl.int32(16)), "uint32"
-                            ),
+                            txl.cast(tmem_col + 224 + txl.shift_left(row_id, txl.int32(16)), "uint32"),
                         )
                         txl.ptx["tcgen05.ld.sync.aligned.16x256b.x2.b32"](
                             *[state_k1[i] for i in range(8)],
                             txl.cast(
-                                tmem_col + 224 + txl.shift_left(row_id + 16, txl.int32(16)),
-                                "uint32",
+                                tmem_col + 224 + txl.shift_left(row_id + 16, txl.int32(16)), "uint32"
                             ),
                         )
                         txl.ptx.tcgen05.wait__ld.sync.aligned()
@@ -2285,9 +2245,7 @@ def _make_main(
                     y0[3],
                 )
                 txl.ptx["tcgen05.st.sync.aligned.16x128b.x2.b32"](
-                    txl.cast(
-                        tmem_col + 256 + txl.shift_left(tmem_row + 16, txl.int32(16)), "uint32"
-                    ),
+                    txl.cast(tmem_col + 256 + txl.shift_left(tmem_row + 16, txl.int32(16)), "uint32"),
                     y1[0],
                     y1[1],
                     y1[2],
@@ -2358,9 +2316,7 @@ def _make_main(
                                 txl.assign(state_values[key], value)
                             txl.ptx["tcgen05.st.sync.aligned.32x32b.x32.b32"](
                                 txl.cast(
-                                    tmem_col
-                                    + key_block * 32
-                                    + txl.shift_left(row_id, txl.int32(16)),
+                                    tmem_col + key_block * 32 + txl.shift_left(row_id, txl.int32(16)),
                                     "uint32",
                                 ),
                                 *[state_values[i] for i in range(32)],
@@ -2383,9 +2339,7 @@ def _make_main(
                             txl.ptx["tcgen05.ld.sync.aligned.32x32b.x16.b32"](
                                 *[values[i] for i in range(16)],
                                 txl.cast(
-                                    tmem_col
-                                    + key_block * 16
-                                    + txl.shift_left(row_id, txl.int32(16)),
+                                    tmem_col + key_block * 16 + txl.shift_left(row_id, txl.int32(16)),
                                     "uint32",
                                 ),
                             )
@@ -2707,9 +2661,7 @@ def _make_main(
                     _wait_barrier(
                         arena, protocol[23][0], sched_consumer.stage, sched_consumer.phase
                     )
-                    txl.ptx.ld.shared.s32(
-                        tile, arena.ptr_to([sched_base + sched_consumer.stage * 4])
-                    )
+                    txl.ptx.ld.shared.s32(tile, arena.ptr_to([sched_base + sched_consumer.stage * 4]))
                     with txl.If(_elected()), txl.Then():
                         _arrive_barrier(arena, protocol[23][1], sched_consumer.stage)
                     sched_consumer.advance()

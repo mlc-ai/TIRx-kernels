@@ -160,12 +160,8 @@ def build_preprocess(B, S, H, D):
             if not thor:
                 lhs_value = txl.alloc_local([2], "float32")
                 rhs_value = txl.alloc_local([2], "float32")
-            txl.ptx.ld.global_.nc.v4.b32(
-                lhs_words[0], lhs_words[1], lhs_words[2], lhs_words[3], lhs
-            )
-            txl.ptx.ld.global_.nc.v4.b32(
-                rhs_words[0], rhs_words[1], rhs_words[2], rhs_words[3], rhs
-            )
+            txl.ptx.ld.global_.nc.v4.b32(lhs_words[0], lhs_words[1], lhs_words[2], lhs_words[3], lhs)
+            txl.ptx.ld.global_.nc.v4.b32(rhs_words[0], rhs_words[1], rhs_words[2], rhs_words[3], rhs)
             txl.assign(dst[0], txl.float32(0))
             for pair in range(4):
                 txl.ptx.mov.b32(lhs_halves[0], lhs_halves[1], lhs_words[pair])
@@ -182,9 +178,7 @@ def build_preprocess(B, S, H, D):
                     for element in range(2):
                         txl.ptx.cvt.f32.f16(rhs_value[element], rhs_halves[element])
                     for element in range(2):
-                        txl.ptx.fma.rn.ftz.f32(
-                            dst[0], lhs_value[element], rhs_value[element], dst[0]
-                        )
+                        txl.ptx.fma.rn.ftz.f32(dst[0], lhs_value[element], rhs_value[element], dst[0])
 
         # Overlap the independent LSE load with the O/dO dot products.
         lse_for_log2 = txl.local_scalar("float32", init=txl.float32(0))

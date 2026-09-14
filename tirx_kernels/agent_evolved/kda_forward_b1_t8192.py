@@ -269,9 +269,7 @@ def build_kernel(
                     is_part = tvm.tirx.any(is_part, pred)
                     part_expr = txl.Select(pred, txl.int32(p), part_expr)
                     part_item = txl.Select(pred, cta - base, part_item)
-                    reserved_expr = txl.Select(
-                        cta >= base + nsplit, (p + 1) * nsplit, reserved_expr
-                    )
+                    reserved_expr = txl.Select(cta >= base + nsplit, (p + 1) * nsplit, reserved_expr)
                 half = txl.local_scalar("int32", init=part_expr)
                 qitem = txl.local_scalar("int32", init=part_item)
                 reserved = txl.local_scalar("int32", init=reserved_expr)
@@ -283,9 +281,7 @@ def build_kernel(
                 half = txl.local_scalar(
                     "int32",
                     init=txl.Select(
-                        cta >= total,
-                        txl.int32(1),
-                        txl.Select(cta < nsplit, txl.int32(0), txl.int32(-1)),
+                        cta >= total, txl.int32(1), txl.Select(cta < nsplit, txl.int32(0), txl.int32(-1))
                     ),
                 )
             h = txl.local_scalar("int32", init=item % H)
@@ -300,9 +296,7 @@ def build_kernel(
             rank = txl.local_scalar(
                 "int32",
                 init=txl.Select(
-                    is_a,
-                    txl.int32(0),
-                    txl.Select(tvm.tirx.any(is_b1, is_b2), txl.int32(1), txl.int32(2)),
+                    is_a, txl.int32(0), txl.Select(tvm.tirx.any(is_b1, is_b2), txl.int32(1), txl.int32(2))
                 ),
             )
             h = txl.local_scalar(
@@ -327,17 +321,14 @@ def build_kernel(
                 tvm.tirx.all(is_first, a_cnt == a_prev), tvm.tirx.all(cta >= W, j < nB2)
             )
             rank = txl.local_scalar(
-                "int32",
-                init=txl.Select(is_a, txl.int32(0), txl.Select(is_b, txl.int32(1), txl.int32(2))),
+                "int32", init=txl.Select(is_a, txl.int32(0), txl.Select(is_b, txl.int32(1), txl.int32(2)))
             )
             h = txl.local_scalar(
                 "int32",
                 init=txl.Select(
                     is_a,
                     a_prev,
-                    txl.Select(
-                        is_first, cta - a_cnt, txl.Select(is_b, (W - txl.int32(H)) + j, j - nB2)
-                    ),
+                    txl.Select(is_first, cta - a_cnt, txl.Select(is_b, (W - txl.int32(H)) + j, j - nB2)),
                 ),
             )
             item = rank
@@ -350,9 +341,7 @@ def build_kernel(
 
         def shfl_idx_i32(x, src):
             r = txl.local_scalar("int32")
-            txl.ptx.shfl_sync.idx.b32(
-                r, x, txl.Cast("uint32", src), txl.uint32(31), txl.uint32(0xFFFFFFFF)
-            )
+            txl.ptx.shfl_sync.idx.b32(r, x, txl.Cast("uint32", src), txl.uint32(31), txl.uint32(0xFFFFFFFF))
             return r
 
         def shfl_xor_i32(x, xr):
@@ -375,9 +364,7 @@ def build_kernel(
             txl.assign(seq, rank)
             if SPEC:
                 txl.assign(seq, txl.int32(0))
-                txl.assign(
-                    bos, txl.Select(rank == txl.int32(0), txl.int32(0), txl.int32(SPEC_A * BT))
-                )
+                txl.assign(bos, txl.Select(rank == txl.int32(0), txl.int32(0), txl.int32(SPEC_A * BT)))
                 txl.assign(
                     Lv,
                     txl.Select(
@@ -401,21 +388,16 @@ def build_kernel(
                     with txl.If(lane_ok), txl.Then():
                         txl.ptx.ld.global_.s64(c0, cu_seqlens.ptr_to([lane]))
                         txl.ptx.ld.global_.s64(c1, cu_seqlens.ptr_to([lane + 1]))
-                    txl.assign(
-                        mylen, txl.Select(lane_ok, txl.Cast("int32", c1 - c0), txl.int32(-1))
-                    )
+                    txl.assign(mylen, txl.Select(lane_ok, txl.Cast("int32", c1 - c0), txl.int32(-1)))
                     r = txl.local_scalar("int32", init=txl.int32(0))
                     with txl.serial(num_seqs, unroll=False) as j:
                         lj = shfl_idx_i32(mylen, j)
                         longer = tvm.tirx.any(lj > mylen, tvm.tirx.all(lj == mylen, j < lane))
                         txl.assign(
-                            r,
-                            r
-                            + txl.Select(tvm.tirx.all(lane_ok, longer), txl.int32(1), txl.int32(0)),
+                            r, r + txl.Select(tvm.tirx.all(lane_ok, longer), txl.int32(1), txl.int32(0))
                         )
                     sel = txl.local_scalar(
-                        "int32",
-                        init=txl.Select(tvm.tirx.all(lane_ok, r == rank), lane, txl.int32(0)),
+                        "int32", init=txl.Select(tvm.tirx.all(lane_ok, r == rank), lane, txl.int32(0))
                     )
                     for xr in (16, 8, 4, 2, 1):
                         txl.assign(sel, txl.max(sel, shfl_xor_i32(sel, xr)))
@@ -704,9 +686,7 @@ def build_kernel(
         ZERO4 = (txl.uint32(0),) * 4
 
         def mma(d, aop, bop, idesc, acc, dol=ZERO4):
-            txl.ptx[MMA](
-                txl.Cast("uint32", d), aop, bop, txl.uint32(idesc), *dol, txl.ptx.pred(acc)
-            )
+            txl.ptx[MMA](txl.Cast("uint32", d), aop, bop, txl.uint32(idesc), *dol, txl.ptx.pred(acc))
 
         def commit(ptr):
             txl.ptx[COMMIT](ptr)
@@ -1101,9 +1081,7 @@ def build_kernel(
                                     regs[4 * u + 1],
                                     regs[4 * u + 2],
                                     regs[4 * u + 3],
-                                    h0_s.ptr_to(
-                                        [rl * 64 + txl.bitwise_xor(txl.int32(u), rl % 16) * 4]
-                                    ),
+                                    h0_s.ptr_to([rl * 64 + txl.bitwise_xor(txl.int32(u), rl % 16) * 4]),
                                 )
                         txl.ptx.bar.sync(txl.uint32(NB_STATE), txl.uint32(128))
                     txl.ptx[ST32x64](tmem(C_SACC + 64 * half_), *[regs[j] for j in range(64)])
@@ -1144,9 +1122,7 @@ def build_kernel(
                                     regs[4 * u + 1],
                                     regs[4 * u + 2],
                                     regs[4 * u + 3],
-                                    h0_s.ptr_to(
-                                        [rl * 64 + txl.bitwise_xor(txl.int32(u), rl % 16) * 4]
-                                    ),
+                                    h0_s.ptr_to([rl * 64 + txl.bitwise_xor(txl.int32(u), rl % 16) * 4]),
                                 )
                         txl.ptx.bar.sync(txl.uint32(NB_STATE), txl.uint32(128))
                     txl.ptx[ST32x64](tmem(C_SACC + 64 * half_), *[regs[j] for j in range(64)])
@@ -1177,9 +1153,7 @@ def build_kernel(
                             txl.ptx.fence.acq_rel.gpu()
                             load_state_bf16(lambda off: state_x.ptr_to([xbase + off]))
                             with txl.If(tid == 0), txl.Then():
-                                txl.ptx.st.volatile.global_.s32(
-                                    flags.ptr_to([in_slot]), txl.int32(0)
-                                )
+                                txl.ptx.st.volatile.global_.s32(flags.ptr_to([in_slot]), txl.int32(0))
                         with txl.Else():
                             load_state(lambda off: h0.ptr_to([hbase + off]))
                 else:
@@ -1301,9 +1275,7 @@ def build_kernel(
                                     for hh in range(2):
                                         for cc in range(2):
                                             hb = txl.local_scalar("uint16")
-                                            txl.ptx.cvt.rn.bf16.f32(
-                                                hb, regs[b + 4 * u + 2 * hh + cc]
-                                            )
+                                            txl.ptx.cvt.rn.bf16.f32(hb, regs[b + 4 * u + 2 * hh + cc])
                                             txl.ptx.st.global_.b16(
                                                 baddr(obase, (8 * u + cc) * H * D * 2 + 16 * hh),
                                                 hb,
@@ -1518,9 +1490,7 @@ def build_kernel(
                 if MULTIPART_SPLIT:
                     out_slot = txl.local_scalar("int32", init=(SPLIT_PARTS - 1) * item + xflag - 1)
                     out_base = txl.local_scalar("int32", init=out_slot * D * D)
-                    publish = tvm.tirx.all(
-                        xflag >= txl.int32(1), xflag <= txl.int32(SPLIT_PARTS - 1)
-                    )
+                    publish = tvm.tirx.all(xflag >= txl.int32(1), xflag <= txl.int32(SPLIT_PARTS - 1))
                 else:
                     out_slot = item
                     out_base = xbase
@@ -1645,29 +1615,22 @@ def build_kernel(
                     z = 4 * nh
                     txl.assign(
                         acc[z],
-                        acc[z]
-                        + txl.Select(r16 == 8 * nh + 2 * c4, txl.float32(1.0), txl.float32(0.0)),
+                        acc[z] + txl.Select(r16 == 8 * nh + 2 * c4, txl.float32(1.0), txl.float32(0.0)),
                     )
                     txl.assign(
                         acc[z + 1],
                         acc[z + 1]
-                        + txl.Select(
-                            r16 == 8 * nh + 2 * c4 + 1, txl.float32(1.0), txl.float32(0.0)
-                        ),
+                        + txl.Select(r16 == 8 * nh + 2 * c4 + 1, txl.float32(1.0), txl.float32(0.0)),
                     )
                     txl.assign(
                         acc[z + 2],
                         acc[z + 2]
-                        + txl.Select(
-                            r16 + 8 == 8 * nh + 2 * c4, txl.float32(1.0), txl.float32(0.0)
-                        ),
+                        + txl.Select(r16 + 8 == 8 * nh + 2 * c4, txl.float32(1.0), txl.float32(0.0)),
                     )
                     txl.assign(
                         acc[z + 3],
                         acc[z + 3]
-                        + txl.Select(
-                            r16 + 8 == 8 * nh + 2 * c4 + 1, txl.float32(1.0), txl.float32(0.0)
-                        ),
+                        + txl.Select(r16 + 8 == 8 * nh + 2 * c4 + 1, txl.float32(1.0), txl.float32(0.0)),
                     )
 
             def beta_rows(sb, J):
@@ -2153,9 +2116,7 @@ def build_kernel(
                 pref = [[txl.float32(0.0)] + [None] * 4 for _ in range(2)]
                 for m in range(2):
                     for J in range(4):
-                        pref[m][J + 1] = txl.local_scalar(
-                            "float32", init=pref[m][J] + tt[2 * J + m]
-                        )
+                        pref[m][J + 1] = txl.local_scalar("float32", init=pref[m][J] + tt[2 * J + m])
                 for m in range(2):
                     r = pref[m][3]
                     for J in (2, 1, 0):
@@ -2403,9 +2364,7 @@ def build_fix_kernel(H: int, check_grid: int = 0, iket_trace: bool = False):
         def issue_loads(i, rs):
             """TMA-load one R tile for local pair i (caller guards i < nloc)."""
             mb = txl.cuda.cvta_generic_to_shared(bar_r.ptr_to([rs]))
-            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
-                bar_r.ptr_to([rs]), txl.uint32(128 * D * 2)
-            )
+            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_r.ptr_to([rs]), txl.uint32(128 * D * 2))
             txl.ptx[TMA3](
                 r_t[rs].ptr_to(0, 0),
                 txl.address_of(r_map),
@@ -2498,9 +2457,7 @@ def build_fix_kernel(H: int, check_grid: int = 0, iket_trace: bool = False):
                     n4 = []
                     for m in range(4):
                         n4.append(bf16x2(regs[8 * jj + 2 * m], regs[8 * jj + 2 * m + 1]))
-                    txl.ptx.st.shared.v4.b32(
-                        o_t[os_].ptr_to(tid, 8 * jj), n4[0], n4[1], n4[2], n4[3]
-                    )
+                    txl.ptx.st.shared.v4.b32(o_t[os_].ptr_to(tid, 8 * jj), n4[0], n4[1], n4[2], n4[3])
             if iket_trace:
                 iket_end(epilogue_token)
                 store_token = iket_start("fix-store")

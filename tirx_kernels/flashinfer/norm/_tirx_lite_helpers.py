@@ -86,11 +86,7 @@ def _cvt_pair_from_f32(high, low, dtype: str):
 def _shfl_bfly_f32(value, lane_xor: int):
     out = txl.local_scalar(txl.u32)
     txl.ptx.shfl_sync.bfly.b32(
-        out,
-        txl.reinterpret(txl.u32, value),
-        txl.uint32(lane_xor),
-        txl.uint32(31),
-        txl.uint32(0xFFFFFFFF),
+        out, txl.reinterpret(txl.u32, value), txl.uint32(lane_xor), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
     return txl.reinterpret(txl.f32, out)
 
@@ -126,9 +122,7 @@ def _load_global_bits(buffer, index, values, value_offset, VEC: int):
         if VEC == 4:
             txl.ptx.ld.global_.v2.b32(words[0], words[1], buffer.ptr_to([index]))
         else:
-            txl.ptx.ld.global_.v4.b32(
-                words[0], words[1], words[2], words[3], buffer.ptr_to([index])
-            )
+            txl.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
         for pair in range(VEC // 2):
             txl.assign(
                 values[value_offset + pair * 2],

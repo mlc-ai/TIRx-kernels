@@ -842,9 +842,7 @@ def _build_kernel():
                     txl.assign(tile_max, _f32(_NEG_INF))
                 txl.assign(tile_max, _max_f32(tile_max, _shfl_xor_f32(tile_max, 16)))
                 new_max = _max_f32(tile_max, row_max)
-                txl.assign(
-                    safe_max, txl.if_then_else(new_max == _f32(_NEG_INF), _f32(0.0), new_max)
-                )
+                txl.assign(safe_max, txl.if_then_else(new_max == _f32(_NEG_INF), _f32(0.0), new_max))
                 txl.ptx.mul.ftz.f32(new_max_scaled, safe_max, softmax_scale_log2)
                 neg_new_max_scaled = txl.local_scalar("float32")
                 txl.ptx.neg.ftz.f32(neg_new_max_scaled, new_max_scaled)
@@ -857,8 +855,7 @@ def _build_kernel():
                         # The running max moves by less than 2^8: keep the old max, skip the rescale.
                         txl.assign(selected_max, row_max)
                         txl.assign(
-                            safe_max,
-                            txl.if_then_else(row_max == _f32(_NEG_INF), _f32(0.0), row_max),
+                            safe_max, txl.if_then_else(row_max == _f32(_NEG_INF), _f32(0.0), row_max)
                         )
                         txl.assign(acc_scale, _f32(1.0))
                         txl.assign(temperature_acc_scale, _f32(1.0))
@@ -892,9 +889,7 @@ def _build_kernel():
                 neg_bias = txl.local_scalar("float32")
                 txl.ptx.neg.ftz.f32(neg_bias, new_max_scaled)
                 score_bias = txl.local_scalar("float32")
-                txl.assign(
-                    score_bias, txl.if_then_else(valid_cols > _i32(0), neg_bias, _f32(_NEG_INF))
-                )
+                txl.assign(score_bias, txl.if_then_else(valid_cols > _i32(0), neg_bias, _f32(_NEG_INF)))
                 txl.assign(block_temperature_sum, _f32(0.0))
                 txl.assign(block_sum, _f32(0.0))
                 with txl.If(return_temperature_lse != _i32(0)):
@@ -1022,9 +1017,7 @@ def _build_kernel():
                 final_temperature_sum = _ld_shared_f32(stats_addr + _u32(384 * 4))
                 rcp_sum = txl.local_scalar("float32")
                 txl.ptx.rcp.approx.ftz.f32(rcp_sum, final_sum)
-                sum_positive = txl.local_scalar(
-                    "int32", init=txl.cast(final_sum > _f32(0.0), "int32")
-                )
+                sum_positive = txl.local_scalar("int32", init=txl.cast(final_sum > _f32(0.0), "int32"))
                 inv_sum = txl.local_scalar(
                     "float32", init=txl.if_then_else(sum_positive != _i32(0), rcp_sum, _f32(0.0))
                 )
@@ -1070,9 +1063,7 @@ def _build_kernel():
                             txl.ptx.fma.rn.ftz.f32(lse_value, max_scaled, _f32(_LN2_F32), log_sum)
                             txl.ptx.st.global_.b32(
                                 lse.ptr_to([stat_idx]),
-                                txl.if_then_else(
-                                    sum_positive != _i32(0), lse_value, _f32(_NEG_INF)
-                                ),
+                                txl.if_then_else(sum_positive != _i32(0), lse_value, _f32(_NEG_INF)),
                             )
                         with txl.If(return_temperature_lse != _i32(0)), txl.Then():
                             log2_tsum = txl.local_scalar("float32")
@@ -1197,9 +1188,7 @@ def _build_kernel():
                         leader = pv_chain(instance, v_stage)
                         with txl.If(union_index_2 + _i32(1) == selected_blocks), txl.Then():
                             txl.ptx[_TCGEN05_COMMIT](bar(_MBAR_O_FULL + 8 * instance), pred=leader)
-                        txl.ptx[_TCGEN05_COMMIT](
-                            bar(_MBAR_V_EMPTY) + v_stage * _u32(8), pred=leader
-                        )
+                        txl.ptx[_TCGEN05_COMMIT](bar(_MBAR_V_EMPTY) + v_stage * _u32(8), pred=leader)
                     next_union_index = union_index_2 + _i32(1)
                     with txl.If(next_union_index < selected_blocks), txl.Then():
                         next_k_stage = txl.local_scalar("uint32", init=k_stage_cursor)
@@ -1262,9 +1251,7 @@ def _build_kernel():
                 txl.ptx.popc.b32(lower_count, vote & lower_lanes)
                 selected_slot = selected_count + txl.cast(lower_count, "int32")
                 with txl.If(selected_1 != _i32(0)), txl.Then():
-                    slot_addr = bar(_SMEM_UNION_BLOCKS) + txl.cast(selected_slot, "uint32") * _u32(
-                        4
-                    )
+                    slot_addr = bar(_SMEM_UNION_BLOCKS) + txl.cast(selected_slot, "uint32") * _u32(4)
                     txl.ptx.st.shared.b32(slot_addr, n_block_1)
                     txl.ptx.st.shared.b32(slot_addr + _u32(192 * 4), n_block_1)
                 txl.assign(selected_count, selected_count + txl.cast(ballot_count, "int32"))

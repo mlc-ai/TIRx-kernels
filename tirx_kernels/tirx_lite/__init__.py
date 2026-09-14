@@ -385,9 +385,7 @@ def stack_alloca(kind, size=1):
 def assign(dst, value):
     """Store into one writable scalar element of a local register tensor."""
     if not isinstance(dst, tvm.ir.TensorLoad):
-        raise TypeError(
-            f"txl.assign destination must be a writable scalar, got {type(dst).__name__}"
-        )
+        raise TypeError(f"txl.assign destination must be a writable scalar, got {type(dst).__name__}")
     if not isinstance(dst.source, tvm.tirx.Buffer) or dst.source.scope() != "local":
         raise TypeError("txl.assign destination must be a local scalar element")
     return _I.buffer_store(dst.source, value, list(dst.indices))

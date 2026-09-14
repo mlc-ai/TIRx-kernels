@@ -379,9 +379,7 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
         S_full.init(1)
         O_full = txl.TCGen05Bar(smem, 2)
         O_full.init(1)
-        softmax_corr = txl.Pipeline(
-            smem, 2, full="mbar", empty="mbar", init_full=128, init_empty=128
-        )
+        softmax_corr = txl.Pipeline(smem, 2, full="mbar", empty="mbar", init_full=128, init_empty=128)
         corr_epi = txl.Pipeline(smem, 2, full="mbar", empty="mbar", init_full=128, init_empty=32)
         tmem_dealloc = txl.MBarrier(smem, 1)
         tmem_dealloc.init(384)
@@ -1053,8 +1051,7 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
                 else:
                     txl.assign(new_max, reduce_max(s, 0, BLK_N, init=None if first else row_max))
                 safe = txl.local_scalar(
-                    "float32",
-                    init=txl.Select(new_max != txl.float32(NEG_INF), new_max, txl.float32(0.0)),
+                    "float32", init=txl.Select(new_max != txl.float32(NEG_INF), new_max, txl.float32(0.0))
                 )
                 acc_scale = txl.local_scalar("float32")
                 if not first:
@@ -1116,9 +1113,7 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
                             txl.ptx.ex2.approx.ftz.f32(s[g * gsize + i], s[g * gsize + i])
                         txl.ptx.ex2.approx.ftz.f32(sf[g], b)
                         gs = reduce_sum(s, g * gsize, gsize)
-                        txl.ptx.fma.rn.f32(
-                            row_acc, sf[g], gs, txl.float32(0.0) if g == 0 else row_acc
-                        )
+                        txl.ptx.fma.rn.f32(row_acc, sf[g], gs, txl.float32(0.0) if g == 0 else row_acc)
                         if pv_format == "nvfp4":
                             for w in range(gsize // 8):
                                 pack_e2m1x8(p_words[g * (gsize // 8) + w], s, g * gsize + 8 * w)
@@ -1301,8 +1296,7 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
                                 + txl.Cast(
                                     "int32",
                                     txl.bitwise_xor(
-                                        txl.Cast("uint32", (c % 64) // 8),
-                                        txl.Cast("uint32", row % 8),
+                                        txl.Cast("uint32", (c % 64) // 8), txl.Cast("uint32", row % 8)
                                     ),
                                 )
                                 * 16

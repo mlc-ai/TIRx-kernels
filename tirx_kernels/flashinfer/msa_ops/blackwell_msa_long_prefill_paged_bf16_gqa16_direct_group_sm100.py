@@ -651,11 +651,7 @@ def _build_kernel():
                     )
                 packed_q = txl.local_scalar("int32")
                 txl.ptx.shfl_sync.idx.b32(
-                    packed_q,
-                    owned_packed,
-                    txl.cast(owner_lane, "uint32"),
-                    _u32(31),
-                    _u32(_FULL_MASK),
+                    packed_q, owned_packed, txl.cast(owner_lane, "uint32"), _u32(31), _u32(_FULL_MASK)
                 )
                 q_idx = packed_q & _i32(0xFFFFFF)
                 valid_cols = txl.local_scalar("int32", init=_i32(0))
@@ -947,9 +943,7 @@ def _build_kernel():
             with txl.While(group < group_count):
                 stage = group & _i32(1)
                 phase = (group // _i32(2)) & _i32(1)
-                _mbar_wait(
-                    bar(_MBAR_Q_EMPTY) + txl.cast(stage * _i32(8), "uint32"), phase ^ _i32(1)
-                )
+                _mbar_wait(bar(_MBAR_Q_EMPTY) + txl.cast(stage * _i32(8), "uint32"), phase ^ _i32(1))
                 leader = txl.local_scalar("uint32", init=txl.cuda.elect_sync())
                 with txl.If(leader != _u32(0)), txl.Then():
                     q_full_addr = bar(_MBAR_Q_FULL) + txl.cast(stage * _i32(8), "uint32")
@@ -957,9 +951,7 @@ def _build_kernel():
                     for local_token in range(2):
                         token = (warp - _i32(8)) * _i32(2) + _i32(local_token)
                         edge = group * _i32(8) + token
-                        edge_valid = txl.local_scalar(
-                            "int32", init=txl.cast(edge < q_count, "int32")
-                        )
+                        edge_valid = txl.local_scalar("int32", init=txl.cast(edge < q_count, "int32"))
                         safe_edge = txl.if_then_else(edge_valid != _i32(0), edge, _i32(0))
                         packed = _ld_global_i32(
                             k2q_qsplit_indices, head_kv * nnz_per_head + row_start + safe_edge
@@ -1012,9 +1004,7 @@ def _build_kernel():
                 stage = pv_group & _i32(1)
                 phase = (pv_group // _i32(2)) & _i32(1)
                 _mbar_wait(bar(_MBAR_P_FULL) + txl.cast(stage * _i32(8), "uint32"), phase)
-                _mbar_wait(
-                    bar(_MBAR_O_EMPTY) + txl.cast(stage * _i32(8), "uint32"), phase ^ _i32(1)
-                )
+                _mbar_wait(bar(_MBAR_O_EMPTY) + txl.cast(stage * _i32(8), "uint32"), phase ^ _i32(1))
                 # The source issues the two PV halves on opposite sides of P-full-2.
                 v_lo = txl.local_scalar(
                     "uint32",
@@ -1091,17 +1081,14 @@ def _build_kernel():
                 txl.assign(group, group + _i32(1))
 
             drain_start = txl.local_scalar(
-                "int32",
-                init=txl.if_then_else(group_count == _i32(1), _i32(0), group_count - _i32(2)),
+                "int32", init=txl.if_then_else(group_count == _i32(1), _i32(0), group_count - _i32(2))
             )
             pv_group = txl.local_scalar("int32", init=drain_start)
             with txl.While(pv_group < group_count):
                 stage = pv_group & _i32(1)
                 phase = (pv_group // _i32(2)) & _i32(1)
                 _mbar_wait(bar(_MBAR_P_FULL) + txl.cast(stage * _i32(8), "uint32"), phase)
-                _mbar_wait(
-                    bar(_MBAR_O_EMPTY) + txl.cast(stage * _i32(8), "uint32"), phase ^ _i32(1)
-                )
+                _mbar_wait(bar(_MBAR_O_EMPTY) + txl.cast(stage * _i32(8), "uint32"), phase ^ _i32(1))
                 v_lo = txl.local_scalar(
                     "uint32",
                     init=txl.uniform(((bar(_SMEM_V) >> _u32(4)) & _u32(0x3FFF)) | _u32(_V_LBO_BIT)),

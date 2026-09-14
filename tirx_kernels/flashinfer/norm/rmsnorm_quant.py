@@ -279,9 +279,7 @@ def _load_global_bits(buffer, index, values, value_offset, VEC: txl.constexpr):
         if VEC == 4:
             txl.ptx.ld.global_.v2.b32(words[0], words[1], buffer.ptr_to([index]))
         else:
-            txl.ptx.ld.global_.v4.b32(
-                words[0], words[1], words[2], words[3], buffer.ptr_to([index])
-            )
+            txl.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
         for pair in range(VEC // 2):
             txl.ptx.mov.b32(
                 values[value_offset + pair * 2], values[value_offset + pair * 2 + 1], words[pair]
@@ -318,9 +316,7 @@ def _load_global_words(buffer, index, words, word_offset, VEC: txl.constexpr):
     if VEC == 2:
         txl.ptx.ld.global_.b32(words[word_offset], buffer.ptr_to([index]))
     elif VEC == 4:
-        txl.ptx.ld.global_.v2.b32(
-            words[word_offset], words[word_offset + 1], buffer.ptr_to([index])
-        )
+        txl.ptx.ld.global_.v2.b32(words[word_offset], words[word_offset + 1], buffer.ptr_to([index]))
     else:
         txl.ptx.ld.global_.v4.b32(
             words[word_offset],
@@ -691,9 +687,7 @@ def get_kernel(
             )
             _, cta_rank_raw = txl.cta_id_in_cluster([1, cluster_n], preferred=[1, cluster_n])
             block_y = txl.local_scalar(txl.i32, init=txl.cast(block_y_raw, "int32"), name="block_y")
-            cta_rank = txl.local_scalar(
-                txl.i32, init=txl.cast(cta_rank_raw, "int32"), name="cta_rank"
-            )
+            cta_rank = txl.local_scalar(txl.i32, init=txl.cast(cta_rank_raw, "int32"), name="cta_rank")
         else:
             block_x_raw = txl.cta_id([txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32")])
             block_y = txl.local_scalar(txl.i32, init=txl.int32(0), name="block_y")
@@ -803,9 +797,7 @@ def get_kernel(
                 if compact:
                     x_offset = txl.local_scalar(
                         txl.i32,
-                        init=txl.cast(
-                            row_i64 * txl.int64(H) + txl.cast(absolute_col, "int64"), "int32"
-                        ),
+                        init=txl.cast(row_i64 * txl.int64(H) + txl.cast(absolute_col, "int64"), "int32"),
                         name="x_offset",
                     )
                 else:
@@ -1024,9 +1016,7 @@ def get_kernel(
                     name="peer_reduce",
                 )
                 peer_mbar = txl.local_scalar(
-                    txl.u32,
-                    init=_mapa_u32(shared_raw.ptr_to([mbar_offset]), lane),
-                    name="peer_mbar",
+                    txl.u32, init=_mapa_u32(shared_raw.ptr_to([mbar_offset]), lane), name="peer_mbar"
                 )
                 txl.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.f32(
                     peer_reduce, warp_sum, peer_mbar
@@ -1068,9 +1058,7 @@ def get_kernel(
                 txl.f32, init=_fma_rn_f32(sum_sq, txl.float32(1.0 / H), runtime_eps), name="shifted"
             )
         else:
-            mean_sq = txl.local_scalar(
-                txl.f32, init=_div_rn_f32(sum_sq, txl.float32(H)), name="mean_sq"
-            )
+            mean_sq = txl.local_scalar(txl.f32, init=_div_rn_f32(sum_sq, txl.float32(H)), name="mean_sq")
             shifted = txl.local_scalar(txl.f32, init=_add_f32(mean_sq, runtime_eps), name="shifted")
         rstd = txl.local_scalar(txl.f32, init=_rsqrt_approx_ftz(shifted), name="rstd")
 
@@ -1179,9 +1167,7 @@ def get_kernel(
                 if pair * 2 + 1 < total_values:
                     txl.assign(high_scale, rstd)
                 packed = txl.alloc_local((1,), "uint64")
-                txl.ptx.mul.f32x2(
-                    packed[0], x_f32_pairs[pair], txl.cuda.make_float2(rstd, high_scale)
-                )
+                txl.ptx.mul.f32x2(packed[0], x_f32_pairs[pair], txl.cuda.make_float2(rstd, high_scale))
                 txl.assign(x_f32_pairs[pair], packed[0])
 
             for pair in range(packed_pairs):
@@ -1200,9 +1186,7 @@ def get_kernel(
                 txl.assign(x_f32_pairs[pair], packed[0])
 
             for pair in range(packed_pairs):
-                high_inv_scale = txl.local_scalar(
-                    txl.f32, init=undefined_f32[0], name="high_inv_scale"
-                )
+                high_inv_scale = txl.local_scalar(txl.f32, init=undefined_f32[0], name="high_inv_scale")
                 if pair * 2 + 1 < total_values:
                     txl.assign(high_inv_scale, inv_scale)
                 packed = txl.alloc_local((1,), "uint64")
@@ -1224,9 +1208,7 @@ def get_kernel(
 
         col_offset = txl.local_scalar(txl.i32, init=thread_in_row * vec, name="col_offset")
         for vb in range(vec_blocks):
-            local_col = txl.local_scalar(
-                txl.i32, init=col_offset + vb * tpr * vec, name="local_col"
-            )
+            local_col = txl.local_scalar(txl.i32, init=col_offset + vb * tpr * vec, name="local_col")
             absolute_col = txl.local_scalar(
                 txl.i32, init=block_y * cols + local_col, name="absolute_col"
             )
@@ -1238,9 +1220,7 @@ def get_kernel(
                 )
             else:
                 y_offset = txl.local_scalar(
-                    txl.i64,
-                    init=row_i64 * y_stride + txl.cast(absolute_col, "int64"),
-                    name="y_offset",
+                    txl.i64, init=row_i64 * y_stride + txl.cast(absolute_col, "int64"), name="y_offset"
                 )
 
             row_store_guard = None if rows == 1 else row_i64 < runtime_M
@@ -1264,9 +1244,7 @@ def get_kernel(
                         )
                     col_guard = scalar_col < H
                     scalar_guard = (
-                        col_guard
-                        if row_store_guard is None
-                        else txl.And(col_guard, row_store_guard)
+                        col_guard if row_store_guard is None else txl.And(col_guard, row_store_guard)
                     )
                     with txl.If(scalar_guard), txl.Then():
                         clamped_low = txl.local_scalar(
@@ -1309,12 +1287,8 @@ def get_kernel(
                         init=_cvt_fp8_pair(y_f32[vb * 8 + 6], y_f32[vb * 8 + 7], output_dtype),
                         name="p67",
                     )
-                    lo_word = txl.local_scalar(
-                        txl.u32, init=_pack_b16_pair(p01, p23), name="lo_word"
-                    )
-                    hi_word = txl.local_scalar(
-                        txl.u32, init=_pack_b16_pair(p45, p67), name="hi_word"
-                    )
+                    lo_word = txl.local_scalar(txl.u32, init=_pack_b16_pair(p01, p23), name="lo_word")
+                    hi_word = txl.local_scalar(txl.u32, init=_pack_b16_pair(p45, p67), name="hi_word")
                     txl.ptx.st.global_.v2.b32(out.ptr_to([y_offset]), lo_word, hi_word)
 
                 if full_columns:

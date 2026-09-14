@@ -174,8 +174,7 @@ def _kernel(
                         k2q_qsplit_indices,
                         head_kv_idx * nnz_capacity + edge,
                         txl.bitwise_or(
-                            q_idx,
-                            txl.shift_left(txl.bitwise_and(split_slot, SLOT_MASK), SLOT_SHIFT),
+                            q_idx, txl.shift_left(txl.bitwise_and(split_slot, SLOT_MASK), SLOT_SHIFT)
                         ),
                     )
             txl.assign(qi, qi + NUM_THREADS)

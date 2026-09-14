@@ -113,11 +113,7 @@ def _shfl_bfly(value, lane_xor):
     """``shfl.sync.bfly.b32``, clamp 31 and full member mask."""
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out,
-        txl.reinterpret("uint32", value),
-        txl.uint32(lane_xor),
-        txl.uint32(31),
-        txl.uint32(0xFFFFFFFF),
+        out, txl.reinterpret("uint32", value), txl.uint32(lane_xor), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
     return txl.reinterpret("float32", out)
 
@@ -411,9 +407,7 @@ def _make_flashkda_decode_t1_precomputed(spec: dict[str, Any]):
         txl.assign(seq_len, _load_i32(cu, gidx(n + 1)) - raw_token_pos)
         # `raw_token_pos < gridDim.y` is why the body only accepts an identity
         # cu_seqlens; the host forbids a user-supplied T=1 cu_seqlens.
-        txl.assign(
-            has_token, txl.And(txl.And(raw_token_pos >= 0, raw_token_pos < NUM_SEQS), seq_len > 0)
-        )
+        txl.assign(has_token, txl.And(txl.And(raw_token_pos >= 0, raw_token_pos < NUM_SEQS), seq_len > 0))
         txl.assign(token_pos, txl.if_then_else(has_token, raw_token_pos, 0))
         txl.assign(raw_slot, _load_i32(ssm_idx, gidx(n)))
         txl.assign(initial_slot, txl.max(raw_slot, 0))  # inactive rows clamp to slot 0
@@ -484,9 +478,7 @@ def _make_flashkda_decode_t1_precomputed(spec: dict[str, Any]):
             txl.ptx.mov.b32(
                 k_reg[i], _mul(_shfl_idx(k_src[i % ELEMS_PER_LANE], source_lane), k_scale)
             )
-            txl.ptx.mov.b32(
-                gate_reg[i], _expf(_shfl_idx(gate_src[i % ELEMS_PER_LANE], source_lane))
-            )
+            txl.ptx.mov.b32(gate_reg[i], _expf(_shfl_idx(gate_src[i % ELEMS_PER_LANE], source_lane)))
 
         # --- phase 4: k_dot_q, 16-lane butterfly (:165-176) --------------------
         # Association order copied from :167: (k0q0 + k1q1 + (k2q2 + k3q3))
@@ -537,9 +529,7 @@ def _make_flashkda_decode_t1_precomputed(spec: dict[str, Any]):
                     state, head_base + txl.cast(row_a * HEAD_DIM + k_lane * 8, "int64")
                 )
                 for pr in range(4):
-                    txl.ptx.mov.b32(
-                        state_rows[row_local * K_PER_LANE + 2 * pr], _widen_lo(words[pr])
-                    )
+                    txl.ptx.mov.b32(state_rows[row_local * K_PER_LANE + 2 * pr], _widen_lo(words[pr]))
                     txl.ptx.mov.b32(
                         state_rows[row_local * K_PER_LANE + 2 * pr + 1], _widen_hi(words[pr])
                     )
@@ -599,10 +589,7 @@ def _make_flashkda_decode_t1_precomputed(spec: dict[str, Any]):
                 # state is never re-read. The source contracts it to one fma (:262);
                 # spelling it mul-then-add would round twice.
                 _store_f32_as_bf16(
-                    out,
-                    gidx(vg_base + row),
-                    _fma(delta, k_dot_q, base),
-                    txl.And(active, k_lane == 0),
+                    out, gidx(vg_base + row), _fma(delta, k_dot_q, base), txl.And(active, k_lane == 0)
                 )
                 # An in-row but inactive sequence zeroes its output (:264-266).
                 _store_f32_as_bf16(

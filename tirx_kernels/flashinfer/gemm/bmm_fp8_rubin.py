@@ -194,8 +194,7 @@ def _descriptor_with_address(base: int, shared_address):
         txl.shift_left(txl.uint64(base >> 32), txl.uint64(32)), txl.uint64(base & 0xFFFFFFFF)
     )
     address_field = txl.cast(
-        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)),
-        "uint64",
+        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)), "uint64"
     )
     return txl.bitwise_or(base_value, address_field)
 
@@ -326,9 +325,7 @@ def _make_bmm_kernel(B: int, M: int, N: int, K_dim: int, ab_dtype: str, c_dtype:
         c_map = txl.stack_alloca("tensormap", 1)
 
         def encode(descriptor, dtype, rank, data, *fields):
-            txl.call_packed(
-                "runtime.cuTensorMapEncodeTiled", descriptor, dtype, rank, data, *fields
-            )
+            txl.call_packed("runtime.cuTensorMapEncodeTiled", descriptor, dtype, rank, data, *fields)
 
         a_fields = (K_dim, M, B, K_dim, M * K_dim, k_tile, a_cluster_piece, 1)
         b_fields = (N, K_dim, B, N, N * K_dim, b_chunk, b_cluster_piece, 1)
@@ -453,8 +450,7 @@ def _make_bmm_kernel(B: int, M: int, N: int, K_dim: int, ab_dtype: str, c_dtype:
             txl.assign(
                 a_mcast_mask,
                 txl.bitwise_or(
-                    a_mcast_mask,
-                    txl.uint32(1) << txl.cast(cluster_x + cluster_m * peer_n, "uint32"),
+                    a_mcast_mask, txl.uint32(1) << txl.cast(cluster_x + cluster_m * peer_n, "uint32")
                 ),
             )
         b_mcast_mask = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -463,8 +459,7 @@ def _make_bmm_kernel(B: int, M: int, N: int, K_dim: int, ab_dtype: str, c_dtype:
             txl.assign(
                 b_mcast_mask,
                 txl.bitwise_or(
-                    b_mcast_mask,
-                    txl.uint32(1) << txl.cast(peer_x + cluster_m * cluster_y, "uint32"),
+                    b_mcast_mask, txl.uint32(1) << txl.cast(peer_x + cluster_m * cluster_y, "uint32")
                 ),
             )
         ab_consumer_mask = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -667,9 +662,7 @@ def _make_bmm_kernel(B: int, M: int, N: int, K_dim: int, ab_dtype: str, c_dtype:
                                             "tcgen05.mma.cta_group::2.kind::f8f6f4"
                                             ".collector::a::discard"
                                         ](
-                                            txl.cast(
-                                                tmem_base + acc_state.stage * n_tile, "uint32"
-                                            ),
+                                            txl.cast(tmem_base + acc_state.stage * n_tile, "uint32"),
                                             a_descriptor
                                             + txl.cast(
                                                 mma_state.stage * (a_stage_bytes // 16) + a_kphase,
@@ -777,9 +770,7 @@ def _make_bmm_kernel(B: int, M: int, N: int, K_dim: int, ab_dtype: str, c_dtype:
                 swizzle_mask = 112 if row_bytes == 128 else 48
                 swizzled = txl.bitwise_xor(
                     unswizzled,
-                    txl.bitwise_and(
-                        txl.shift_right(unswizzled, txl.uint32(3)), txl.uint32(swizzle_mask)
-                    ),
+                    txl.bitwise_and(txl.shift_right(unswizzled, txl.uint32(3)), txl.uint32(swizzle_mask)),
                 )
                 return txl.cast(swizzled - smem_base, "int32")
 

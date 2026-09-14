@@ -668,17 +668,14 @@ def get_finalize_kernel(
                 elif page_table:
                     page_id = txl.local_scalar("int32", init=txl.int32(-1))
                     with txl.If(key != txl.uint32(0xFFFFFFFF)), txl.Then():
-                        src = txl.local_scalar(
-                            "int64", init=txl.cast(batch_idx, "int64") * aux_stride
-                        )
+                        src = txl.local_scalar("int64", init=txl.cast(batch_idx, "int64") * aux_stride)
                         txl.assign(
                             page_id,
                             txl.reinterpret(
                                 "int32",
                                 ld_global_u32(
                                     aux,
-                                    src
-                                    + txl.cast(page_start + txl.reinterpret("int32", key), "int64"),
+                                    src + txl.cast(page_start + txl.reinterpret("int32", key), "int64"),
                                 ),
                             ),
                         )

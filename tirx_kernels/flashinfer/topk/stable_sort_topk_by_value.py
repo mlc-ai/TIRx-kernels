@@ -258,9 +258,7 @@ def get_kernel(
                         txl.assign(
                             keys[i],
                             txl.cast(
-                                sort_key_u16(
-                                    txl.cast(ld_global_bits(out_val, slot, is32), "uint16")
-                                ),
+                                sort_key_u16(txl.cast(ld_global_bits(out_val, slot, is32), "uint16")),
                                 "uint32",
                             ),
                         )

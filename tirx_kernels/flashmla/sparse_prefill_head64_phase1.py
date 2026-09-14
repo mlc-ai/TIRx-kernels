@@ -242,9 +242,7 @@ def _ring_mod3(value: Any, max_value: int) -> Any:
     if max_value <= 8:
         packed_mod3 = txl.uint32(0x10210210)
         shift = txl.cast(value, "uint32") * txl.uint32(4)
-        return txl.cast(
-            txl.bitwise_and(txl.shift_right(packed_mod3, shift), txl.uint32(0xF)), "int32"
-        )
+        return txl.cast(txl.bitwise_and(txl.shift_right(packed_mod3, shift), txl.uint32(0xF)), "int32")
 
     max_offset = (max_value // NUM_BUFS) * NUM_BUFS
     result = value - max_offset
@@ -257,18 +255,14 @@ def _ring_phase_parity(value: Any, max_value: int) -> Any:
     if max_value <= 8:
         packed_phase = txl.uint32(0x38)
         return txl.cast(
-            txl.bitwise_and(
-                txl.shift_right(packed_phase, txl.cast(value, "uint32")), txl.uint32(1)
-            ),
+            txl.bitwise_and(txl.shift_right(packed_phase, txl.cast(value, "uint32")), txl.uint32(1)),
             "int32",
         )
 
     max_offset = (max_value // NUM_BUFS) * NUM_BUFS
     result = txl.int32((max_offset // NUM_BUFS) & 1)
     for offset in range(max_offset, 0, -NUM_BUFS):
-        result = txl.Select(
-            value < offset, txl.int32(((offset - NUM_BUFS) // NUM_BUFS) & 1), result
-        )
+        result = txl.Select(value < offset, txl.int32(((offset - NUM_BUFS) // NUM_BUFS) & 1), result)
     return result
 
 
@@ -496,11 +490,7 @@ def make_kernel(
         if have_rope:
             q_rope_cp_desc = txl.local_scalar("uint64")
             txl.cuda.tcgen05.encode_matrix_descriptor(
-                txl.address_of(q_rope_cp_desc),
-                txl.reinterpret(txl.handle().ty, txl.uint64(0)),
-                1,
-                32,
-                2,
+                txl.address_of(q_rope_cp_desc), txl.reinterpret(txl.handle().ty, txl.uint64(0)), 1, 32, 2
             )
         if not local_mma_desc:
             pv_a_lo_desc = txl.SmemDescriptor()
@@ -561,9 +551,7 @@ def make_kernel(
                 ),
                 "uint64",
             )
-            return txl.bitwise_or(
-                txl.bitwise_and(desc, txl.bitwise_not(txl.uint64(0x3FFF))), start_addr
-            )
+            return txl.bitwise_or(txl.bitwise_and(desc, txl.bitwise_not(txl.uint64(0x3FFF))), start_addr)
 
         def mul_f32x2(values, idx, multiplier):
             """orig:93-100, the `@txl.inline mul_f32x2`, as a kernel-local closure.
@@ -587,9 +575,7 @@ def make_kernel(
             {1,3} — the cross-warp P exchange's rendezvous. No FA4 analogue: it
             exists because the `.ws` M=64 gemm writes two batched 64x64
             lane-half partials that must be summed across the warp pair."""
-            txl.ptx.bar.sync(
-                txl.uint32(BAR_WG0_WARP02 + txl.bitwise_and(warp_idx, txl.int32(1))), 64
-            )
+            txl.ptx.bar.sync(txl.uint32(BAR_WG0_WARP02 + txl.bitwise_and(warp_idx, txl.int32(1))), 64)
 
         def iket_range(name):
             token = txl.alloc_local([1], "uint32")
@@ -889,8 +875,7 @@ def make_kernel(
                         for scale_i in range(32 // 2):
                             mul_f32x2(o_rescale, scale_i * 2, scale_for_old)
                         tmem_store(
-                            o_rescale,
-                            txl.cuda.get_tmem_addr(txl.uint32(o_tmem_col), 0, chunk_idx * 32),
+                            o_rescale, txl.cuda.get_tmem_addr(txl.uint32(o_tmem_col), 0, chunk_idx * 32)
                         )
                         txl.ptx.tcgen05.wait__st.sync.aligned()
                     txl.ptx.tcgen05.fence__before_thread_sync()
@@ -975,9 +960,7 @@ def make_kernel(
                         # orig:927-935, CUDA phase1.cuh:314-317 TMEM O load/fence.
                         tmem_load(
                             o_epi,
-                            txl.cuda.get_tmem_addr(
-                                txl.uint32(o_tmem_col), 0, epi_c * 128 + epi_k * 64
-                            ),
+                            txl.cuda.get_tmem_addr(txl.uint32(o_tmem_col), 0, epi_c * 128 + epi_k * 64),
                             64,
                         )
                         txl.ptx.tcgen05.wait__ld.sync.aligned()
@@ -1049,9 +1032,7 @@ def make_kernel(
                             )
 
             with txl.If(warp_idx == 0), txl.Then():
-                txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                    txl.uint32(0), txl.uint32(512)
-                )
+                txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(txl.uint32(0), txl.uint32(512))
             txl.cuda.iket.range_end(epilogue_token[0])
 
         def kv_nope_producer():
@@ -1217,9 +1198,7 @@ def make_kernel(
                     with txl.If(k < num_k_blocks_buf), txl.Then():
                         cur_buf = txl.local_scalar("int32", init=ring_mod3(k))
                         cur_phase = txl.local_scalar("int32", init=ring_phase_parity(k))
-                        bar_p_free.wait(
-                            0, txl.bitwise_xor(txl.bitwise_and(k, txl.int32(1)), txl.int32(1))
-                        )
+                        bar_p_free.wait(0, txl.bitwise_xor(txl.bitwise_and(k, txl.int32(1)), txl.int32(1)))
                         txl.ptx.tcgen05.fence__after_thread_sync()
 
                         if have_rope:
@@ -1252,8 +1231,7 @@ def make_kernel(
                             # orig:1245-1317, CUDA phase1.cuh:505-506 QNoPE x KNoPE.
                             clear_nope_accum = (not have_rope) and (kv_nope_part_idx == 0)
                             txl.assign(
-                                mma_p_accumulate,
-                                txl.uint32(0) if clear_nope_accum else txl.uint32(1),
+                                mma_p_accumulate, txl.uint32(0) if clear_nope_accum else txl.uint32(1)
                             )
                             if local_mma_desc:
                                 qk_nope_desc_local = txl.SmemDescriptor()
@@ -1270,9 +1248,7 @@ def make_kernel(
                         bar_so_ready.wait(0, txl.bitwise_and(k - 1, txl.int32(1)))
                         txl.ptx.tcgen05.fence__after_thread_sync()
                         # orig:1328-1457, CUDA phase1.cuh:521-523 S(i-1) x V(i-1).
-                        txl.assign(
-                            mma_o_accumulate, txl.if_then_else(k == 1, txl.uint32(0), txl.uint32(1))
-                        )
+                        txl.assign(mma_o_accumulate, txl.if_then_else(k == 1, txl.uint32(0), txl.uint32(1)))
                         if local_mma_desc:
                             pv_b_lo_desc_local = txl.SmemDescriptor()
                             pv_b_lo_desc_local.init(
@@ -1335,9 +1311,7 @@ def make_kernel(
                         ) // 8
                         txl.ptx[MMA_WS_F16](
                             txl.cast(tmem_p_col + mma_ni * 64, "uint32"),
-                            txl.cast(
-                                q_nope_tmem_col + kv_nope_part_idx * 64 + mma_ki * 8, "uint32"
-                            ),
+                            txl.cast(q_nope_tmem_col + kv_nope_part_idx * 64 + mma_ki * 8, "uint32"),
                             _add_smem_desc_offset(desc.desc, qk_nope_offset),
                             txl.uint32(ID_QK),
                             True if mma_ki != 0 else txl.cast(mma_p_accumulate, "bool"),

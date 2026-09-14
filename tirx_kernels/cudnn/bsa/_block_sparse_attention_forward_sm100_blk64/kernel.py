@@ -56,11 +56,7 @@ def _log2(value):
 def _shfl_xor_f32(value, lane_xor):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out,
-        txl.reinterpret("uint32", value),
-        txl.uint32(lane_xor),
-        txl.uint32(31),
-        txl.uint32(0xFFFFFFFF),
+        out, txl.reinterpret("uint32", value), txl.uint32(lane_xor), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
     return txl.reinterpret("float32", out)
 
@@ -68,11 +64,7 @@ def _shfl_xor_f32(value, lane_xor):
 def _shfl_xor_i32(value, lane_xor):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out,
-        txl.reinterpret("uint32", value),
-        txl.uint32(lane_xor),
-        txl.uint32(31),
-        txl.uint32(0xFFFFFFFF),
+        out, txl.reinterpret("uint32", value), txl.uint32(lane_xor), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
     return txl.reinterpret("int32", out)
 
@@ -333,9 +325,7 @@ def make_combine_kernel(**config):
             other_last = _shfl_xor_i32(local_last, lane_xor)
             txl.ptx.max.s32(local_last, local_last, other_last)
 
-        safe_max = txl.if_then_else(
-            local_max == txl.float32(-float("inf")), txl.float32(0.0), local_max
-        )
+        safe_max = txl.if_then_else(local_max == txl.float32(-float("inf")), txl.float32(0.0), local_max)
         local_sum = txl.local_scalar("float32", init=txl.float32(0.0))
         with txl.unroll(lse_slots_per_thread) as slot:
             txl.assign(lse_regs[slot], _exp2((lse_regs[slot] - safe_max) * txl.float32(LOG2_E)))
@@ -417,9 +407,7 @@ def make_combine_kernel(**config):
                 (acc1, part1, weight1, row1),
             ):
                 with (
-                    txl.If(
-                        (row_tile * 16 + row < seqlen_q * num_heads) & (weight > txl.float32(0.0))
-                    ),
+                    txl.If((row_tile * 16 + row < seqlen_q * num_heads) & (weight > txl.float32(0.0))),
                     txl.Then(),
                 ):
                     with txl.unroll(2) as pair:

@@ -312,8 +312,7 @@ def make_kernel(
                     )
                     t = txl.local_scalar("uint32", init=txl.reinterpret("uint32", idx) - q0)
                     t2 = txl.local_scalar(
-                        "uint32",
-                        init=txl.shift_right(t, txl.reinterpret("uint32", head_div_s1)) + q0,
+                        "uint32", init=txl.shift_right(t, txl.reinterpret("uint32", head_div_s1)) + q0
                     )
                     quot = txl.local_scalar(
                         "int32",
@@ -358,9 +357,7 @@ def make_kernel(
                                 txl.ptx.mov.b16(
                                     half_bits,
                                     txl.cast(
-                                        txl.bitwise_and(
-                                            txl.shift_right(words[w], 16 * half), 0xFFFF
-                                        ),
+                                        txl.bitwise_and(txl.shift_right(words[w], 16 * half), 0xFFFF),
                                         "uint16",
                                     ),
                                 )
@@ -375,9 +372,7 @@ def make_kernel(
                                 txl.ptx.mov.b16(
                                     bp,
                                     txl.cast(
-                                        txl.bitwise_and(
-                                            txl.shift_right(words[w], 16 * pair), 0xFFFF
-                                        ),
+                                        txl.bitwise_and(txl.shift_right(words[w], 16 * pair), 0xFFFF),
                                         "uint16",
                                     ),
                                 )
@@ -452,8 +447,7 @@ def make_kernel(
                         )
                         lse_row_base = txl.local_scalar(
                             "int64",
-                            init=txl.cast((q_offset + m_idx1), "int64")
-                            * txl.cast(stride_lp_q, "int64")
+                            init=txl.cast((q_offset + m_idx1), "int64") * txl.cast(stride_lp_q, "int64")
                             + txl.cast(head_idx1, "int64"),
                         )
                         for i in range(SPLITS_PT):
@@ -528,9 +522,7 @@ def make_kernel(
                     txl.assign(midx[m], txl.int32(0))
                     txl.assign(scount[m], txl.int32(0))
                     txl.assign(rowptr[m], txl.int64(0))
-                    idx2 = txl.local_scalar(
-                        "int32", init=m_block * TILE_M + o_row0 + m * O_ROW_STEP
-                    )
+                    idx2 = txl.local_scalar("int32", init=m_block * TILE_M + o_row0 + m * O_ROW_STEP)
                     with txl.If(idx2 < max_idx):
                         with txl.Then():
                             q2, h2 = _divmod_row(idx2)
@@ -891,9 +883,7 @@ def make_kernel(
                     # a branch; both put a chain on the cursor that gates the
                     # next iteration's shared addresses, and the branch costs
                     # most on short loops (topk=4 runs at most four iterations).
-                    txl.assign(
-                        stage_compute, txl.bitwise_and(stage_compute + 1, txl.int32(STAGES - 1))
-                    )
+                    txl.assign(stage_compute, txl.bitwise_and(stage_compute + 1, txl.int32(STAGES - 1)))
                     for m in range(NUM_ROWS):
                         # `setp.leu.f32` is unordered, so a NaN scale skips the row too;
                         # the `hidx >= 0` half reuses the predicate step 2 computed.

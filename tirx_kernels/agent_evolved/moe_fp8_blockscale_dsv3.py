@@ -159,9 +159,7 @@ def u32(v):
 
 
 def shfl_idx(dst, v, lane):
-    txl.ptx.shfl_sync.idx.b32(
-        dst, v, txl.cast(lane, "uint32"), txl.uint32(0x1F), txl.uint32(0xFFFFFFFF)
-    )
+    txl.ptx.shfl_sync.idx.b32(dst, v, txl.cast(lane, "uint32"), txl.uint32(0x1F), txl.uint32(0xFFFFFFFF))
 
 
 def shfl_bfly(dst, v, m):
@@ -186,9 +184,7 @@ def ue8m0_pack4(v):
     """Round a positive f32 scale into UE8M0 sub-column zero."""
     bits = txl.reinterpret("uint32", v)
 
-    code = txl.bitwise_and(
-        txl.shift_right(bits + txl.uint32(0x400000), txl.uint32(23)), txl.uint32(0xFF)
-    )
+    code = txl.bitwise_and(txl.shift_right(bits + txl.uint32(0x400000), txl.uint32(23)), txl.uint32(0xFF))
     return code
 
 
@@ -201,9 +197,7 @@ def with_sf_id(desc, sf_id):
 
 def with_smem_addr(desc_base, addr):
     """Fill descriptor address bits [13:0] from a 16-byte-aligned SMEM address."""
-    addr_field = txl.cast(
-        txl.bitwise_and(txl.shift_right(addr, txl.uint32(4)), txl.uint32(0x3FFF)), "uint64"
-    )
+    addr_field = txl.cast(txl.bitwise_and(txl.shift_right(addr, txl.uint32(4)), txl.uint32(0x3FFF)), "uint64")
     return txl.bitwise_or(txl.uint64(desc_base), addr_field)
 
 
@@ -238,9 +232,7 @@ def emit_grid_sync(ctr_ptr, cta, num_ctas, tid):
                 txl.ptx.atom.release.gpu.global_.add.u32(old, ctr_ptr, txl.uint32(1))
         cur = txl.local_scalar(txl.u32)
         txl.ptx.ld.acquire.gpu.global_.b32(cur, ctr_ptr)
-        with txl.While(
-            txl.bitwise_and(txl.bitwise_xor(cur, old), txl.uint32(0x80000000)) == txl.uint32(0)
-        ):
+        with txl.While(txl.bitwise_and(txl.bitwise_xor(cur, old), txl.uint32(0x80000000)) == txl.uint32(0)):
             txl.ptx.ld.acquire.gpu.global_.b32(cur, ctr_ptr)
     txl.ptx.bar.sync(txl.uint32(0))
 
@@ -253,9 +245,7 @@ def emit_route_token(
     sv = txl.alloc_local((8,), txl.f32)
     bv = txl.alloc_local((8,), txl.f32)
     braw = txl.alloc_local((4,), txl.u32)
-    txl.ptx.ld.global_.nc.v4.f32(
-        x[0], x[1], x[2], x[3], logits.ptr_to([t * NUM_EXPERTS + lane * 8])
-    )
+    txl.ptx.ld.global_.nc.v4.f32(x[0], x[1], x[2], x[3], logits.ptr_to([t * NUM_EXPERTS + lane * 8]))
     txl.ptx.ld.global_.nc.v4.f32(
         x[4], x[5], x[6], x[7], logits.ptr_to([t * NUM_EXPERTS + lane * 8 + 4])
     )
@@ -291,9 +281,7 @@ def emit_route_token(
     for g in range(8):
         og = txl.local_scalar(txl.f32)
         shfl_idx(og, gs, txl.int32(g * 4))
-        txl.assign(
-            rank, rank + txl.cast(txl.Or(og > gs, txl.And(og == gs, txl.int32(g) < my_g)), "int32")
-        )
+        txl.assign(rank, rank + txl.cast(txl.Or(og > gs, txl.And(og == gs, txl.int32(g) < my_g)), "int32"))
     keep = rank < 4
     for j in range(8):
         txl.assign(bv[j], txl.Select(keep, bv[j], txl.float32(NEG_INF)))
@@ -449,7 +437,9 @@ def build_kernel(num_ctas):
         aux_role = roles.role("aux", warps=[2, 3], register_scope=control_regs)
         # Math owns complete warpgroups. Keep the register target at each role
         # entry so ptxas retains the math allocation for both G and F.
-        math_role = roles.role("math", warps=range(MATH_WARP0, NWARPS), regs=REGS_MATH)
+        math_role = roles.role(
+            "math", warps=range(MATH_WARP0, NWARPS), regs=REGS_MATH
+        )
 
         txl.ptx.barrier.cluster.arrive.relaxed.aligned()
         txl.ptx.barrier.cluster.wait.acquire.aligned()
@@ -559,9 +549,7 @@ def build_kernel(num_ctas):
             incl = i32(mtiles)
             for m in (1, 2, 4, 8, 16):
                 o = txl.local_scalar(txl.i32)
-                txl.ptx.shfl_sync.up.b32(
-                    o, incl, txl.uint32(m), txl.uint32(0), txl.uint32(0xFFFFFFFF)
-                )
+                txl.ptx.shfl_sync.up.b32(o, incl, txl.uint32(m), txl.uint32(0), txl.uint32(0xFFFFFFFF))
                 txl.assign(incl, incl + txl.Select(lane >= m, o, txl.int32(0)))
             excl = i32(incl - mtiles)
             txl.ptx.st.shared.s32(s_ecnt.ptr_to([lane]), tot)
@@ -938,17 +926,13 @@ def build_kernel(num_ctas):
                 bpack0 = u32(
                     txl.bitwise_or(
                         ue8m0_pack4(txl.reinterpret("float32", raw[0])),
-                        txl.shift_left(
-                            ue8m0_pack4(txl.reinterpret("float32", raw[2])), txl.uint32(8)
-                        ),
+                        txl.shift_left(ue8m0_pack4(txl.reinterpret("float32", raw[2])), txl.uint32(8)),
                     )
                 )
                 bpack1 = u32(
                     txl.bitwise_or(
                         ue8m0_pack4(txl.reinterpret("float32", raw[1])),
-                        txl.shift_left(
-                            ue8m0_pack4(txl.reinterpret("float32", raw[3])), txl.uint32(8)
-                        ),
+                        txl.shift_left(ue8m0_pack4(txl.reinterpret("float32", raw[3])), txl.uint32(8)),
                     )
                 )
                 # Each v4 fills one TMEM lane's four 32-row scale columns.
@@ -958,17 +942,11 @@ def build_kernel(num_ctas):
                 second_lower = txl.Select(split_g1, bpack0, bpack1)
                 txl.ptx.st.shared.v4.u32(
                     sfb_tile.ptr_to([sstate.stage, lane * 4]),
-                    bpack0,
-                    bpack0,
-                    first_upper,
-                    first_upper,
+                    bpack0, bpack0, first_upper, first_upper,
                 )
                 txl.ptx.st.shared.v4.u32(
                     sfb_tile.ptr_to([sstate.stage, 128 + lane * 4]),
-                    second_lower,
-                    second_lower,
-                    bpack1,
-                    bpack1,
+                    second_lower, second_lower, bpack1, bpack1,
                 )
                 txl.cuda.warp_sync()
                 txl.ptx.fence.proxy.async_.shared__cta()
@@ -1014,13 +992,9 @@ def build_kernel(num_ctas):
                         txl.ptx.ld.shared.s32(mp1, s_mpre.ptr_to([lane + 1]))
                         bal = txl.local_scalar(txl.u32)
                         txl.ptx.vote_sync.ballot.b32(
-                            bal,
-                            txl.ptx.pred(txl.cast(mp1 <= mtg, "uint32")),
-                            txl.uint32(0xFFFFFFFF),
+                            bal, txl.ptx.pred(txl.cast(mp1 <= mtg, "uint32")), txl.uint32(0xFFFFFFFF)
                         )
-                        e = i32(
-                            txl.min(txl.cast(txl.popcount(bal), "int32"), txl.int32(NUM_LOCAL - 1))
-                        )
+                        e = i32(txl.min(txl.cast(txl.popcount(bal), "int32"), txl.int32(NUM_LOCAL - 1)))
                         mp0 = txl.local_scalar(txl.i32)
                         txl.ptx.ld.shared.s32(mp0, s_mpre.ptr_to([e]))
                         ecnt = txl.local_scalar(txl.i32)
@@ -1030,9 +1004,7 @@ def build_kernel(num_ctas):
                         mt = i32(mtg - mp0)
                         row0 = i32(eoff + mt * BMP)
                         valid = i32(txl.max(txl.min(ecnt - mt * BMP, txl.int32(BMP)), txl.int32(0)))
-                        nkb = i32(
-                            txl.Select(kind == 0, txl.int32(KB1 // KPACK), txl.int32(KB2 // KPACK))
-                        )
+                        nkb = i32(txl.Select(kind == 0, txl.int32(KB1 // KPACK), txl.int32(KB2 // KPACK)))
                         half = i32(txl.cast(txl.And(valid > 0, valid <= BM), "int32"))
 
                         txl.cuda.mbarrier_wait(task_empty.ptr_to([tstate.stage]), tstate.phase ^ 1)
@@ -1159,9 +1131,7 @@ def build_kernel(num_ctas):
                                         SF_DESC_BASE, sfa_smem + sf_stage * txl.uint32(BM * 4)
                                     ),
                                 )
-                                txl.ptx[UTCCP](
-                                    tmem_base + txl.uint32(SFA_TMEM_COL), desc_sf, pred=el
-                                )
+                                txl.ptx[UTCCP](tmem_base + txl.uint32(SFA_TMEM_COL), desc_sf, pred=el)
                                 txl.assign(
                                     desc_sf,
                                     with_smem_addr(
@@ -1176,22 +1146,16 @@ def build_kernel(num_ctas):
                                             tmem_base + txl.uint32(SFB_TMEM_COL), desc_sf, pred=el
                                         )
                                     with txl.Else():
-                                        txl.ptx[UTCCP](
-                                            tmem_base + txl.uint32(SFB_TMEM_COL), desc_sf, pred=el
-                                        )
+                                        txl.ptx[UTCCP](tmem_base + txl.uint32(SFB_TMEM_COL), desc_sf, pred=el)
                                         txl.assign(
                                             desc_sf,
                                             with_smem_addr(
                                                 SF_DESC_BASE,
-                                                sfb_smem
-                                                + sf_stage * txl.uint32(BN * 4)
-                                                + txl.uint32(128 * 4),
+                                                sfb_smem + sf_stage * txl.uint32(BN * 4) + txl.uint32(128 * 4),
                                             ),
                                         )
                                         txl.ptx[UTCCP](
-                                            tmem_base + txl.uint32(SFB_TMEM_COL + 4),
-                                            desc_sf,
-                                            pred=el,
+                                            tmem_base + txl.uint32(SFB_TMEM_COL + 4), desc_sf, pred=el
                                         )
                                 txl.ptx.tcgen05.fence__before_thread_sync()
                                 txl.cuda.warp_sync()
@@ -1212,9 +1176,7 @@ def build_kernel(num_ctas):
                                         major="k", mma_k=32
                                     )
                                     for ki in range(4):
-                                        accumulate = txl.Or(
-                                            kb > 0, txl.Or(txl.int32(sub) > 0, ki > 0)
-                                        )
+                                        accumulate = txl.Or(kb > 0, txl.Or(txl.int32(sub) > 0, ki > 0))
                                         with txl.If(half != 0):
                                             with txl.Then():
                                                 txl.ptx[MMA](
@@ -1240,9 +1202,7 @@ def build_kernel(num_ctas):
                                                 )
                                     txl.ptx.tcgen05.fence__before_thread_sync()
                                     txl.cuda.warp_sync()
-                                    txl.ptx[COMMIT](
-                                        empty_bar.ptr_to([slot]), txl.uint16(3), pred=el
-                                    )
+                                    txl.ptx[COMMIT](empty_bar.ptr_to([slot]), txl.uint16(3), pred=el)
                                     if sub == KPACK - 1:
                                         txl.ptx[COMMIT](
                                             tfull_bar.ptr_to([0]),
@@ -1339,18 +1299,14 @@ def build_kernel(num_ctas):
                     txl.ptx.ld.shared.f32(oam, s_amax.ptr_to([other]))
                     txl.assign(amax, txl.max(amax, oam))
                 inv = f32(
-                    txl.Select(
-                        amax > txl.float32(0.0), txl.float32(FP8_MAX) / amax, txl.float32(0.0)
-                    )
+                    txl.Select(amax > txl.float32(0.0), txl.float32(FP8_MAX) / amax, txl.float32(0.0))
                 )
                 q = txl.alloc_local((16,), txl.u32)
                 for j in range(nval // 4):
                     lo16 = txl.local_scalar(txl.u16)
                     hi16 = txl.local_scalar(txl.u16)
                     txl.ptx.cvt.rn.satfinite.e4m3x2.f32(lo16, h[4 * j + 1] * inv, h[4 * j] * inv)
-                    txl.ptx.cvt.rn.satfinite.e4m3x2.f32(
-                        hi16, h[4 * j + 3] * inv, h[4 * j + 2] * inv
-                    )
+                    txl.ptx.cvt.rn.satfinite.e4m3x2.f32(hi16, h[4 * j + 3] * inv, h[4 * j + 2] * inv)
                     txl.assign(
                         q[j],
                         txl.bitwise_or(
@@ -1460,9 +1416,7 @@ def build_kernel(num_ctas):
                             with txl.Else():
                                 tk_d = iket_range("math-wait-done")
                                 dv = txl.local_scalar(txl.u32)
-                                txl.ptx.ld.acquire.gpu.global_.b32(
-                                    dv, done.ptr_to([e * MAXMT + mt])
-                                )
+                                txl.ptx.ld.acquire.gpu.global_.b32(dv, done.ptr_to([e * MAXMT + mt]))
                                 with txl.While(dv < txl.uint32(PAIR * NT1)):
                                     txl.ptx.ld.acquire.gpu.global_.b32(
                                         dv, done.ptr_to([e * MAXMT + mt])
@@ -1698,13 +1652,9 @@ def build_kernel(num_ctas):
                     txl.assign(cpos[j], txl.int32(-1))
                 for k in range(8):
                     rk = i32(
-                        txl.cast(
-                            txl.popcount(txl.bitwise_and(bal, txl.uint32((1 << k) - 1))), "int32"
-                        )
+                        txl.cast(txl.popcount(txl.bitwise_and(bal, txl.uint32((1 << k) - 1))), "int32")
                     )
-                    vk = txl.bitwise_and(
-                        txl.shift_right(bal, txl.uint32(k)), txl.uint32(1)
-                    ) != txl.uint32(0)
+                    vk = txl.bitwise_and(txl.shift_right(bal, txl.uint32(k)), txl.uint32(1)) != txl.uint32(0)
                     for j in range(8):
                         txl.assign(
                             cpos[j],
@@ -1740,15 +1690,12 @@ def build_kernel(num_ctas):
                                             txl.ptx.cvt.rn.bf16x2.e4m3x2(
                                                 lo2,
                                                 txl.cast(
-                                                    txl.bitwise_and(raw4, txl.uint32(0xFFFF)),
-                                                    "uint16",
+                                                    txl.bitwise_and(raw4, txl.uint32(0xFFFF)), "uint16"
                                                 ),
                                             )
                                             txl.ptx.cvt.rn.bf16x2.e4m3x2(
                                                 hi2,
-                                                txl.cast(
-                                                    txl.shift_right(raw4, txl.uint32(16)), "uint16"
-                                                ),
+                                                txl.cast(txl.shift_right(raw4, txl.uint32(16)), "uint16"),
                                             )
                                             txl.ptx.add.rn.bf16x2(
                                                 bacc2[g, h, 2 * q4], bacc2[g, h, 2 * q4], lo2

@@ -227,9 +227,7 @@ def make_kernel(
         # both call mma_shared_layout(dtype, SWIZZLE_128B_ATOM, shape) with
         # align=1024.
         q_smem = smem.alloc(
-            (SMEM_PIPE_DEPTH_Q, BLK_M * cta_group, HEAD_DIM // cta_group),
-            txl.f16,
-            swizzle=txl.SW128B,
+            (SMEM_PIPE_DEPTH_Q, BLK_M * cta_group, HEAD_DIM // cta_group), txl.f16, swizzle=txl.SW128B
         )
         # K and V share one ring: the loader alternates load_k / load_v into
         # successive stages. In the 2-CTA schedule K and V are [128, 64] per
@@ -308,15 +306,12 @@ def make_kernel(
             lo, hi = desc
             packed = txl.alloc_local((1,), "uint64")
             low = (
-                lo[0]
-                if isinstance(off16, int) and off16 == 0
-                else lo[0] + txl.Cast("uint32", off16)
+                lo[0] if isinstance(off16, int) and off16 == 0 else lo[0] + txl.Cast("uint32", off16)
             )
             txl.assign(
                 packed[0],
                 txl.bitwise_or(
-                    txl.shift_left(txl.Cast("uint64", hi[0]), txl.uint64(32)),
-                    txl.Cast("uint64", low),
+                    txl.shift_left(txl.Cast("uint64", hi[0]), txl.uint64(32)), txl.Cast("uint64", low)
                 ),
             )
             return packed[0]
@@ -355,9 +350,7 @@ def make_kernel(
                 desc_lo = txl.alloc_local((1,), "uint32")
                 desc_hi = txl.alloc_local((1,), "uint32")
                 txl.assign(desc_lo[0], txl.uniform(txl.Cast("uint32", desc_value[0])))
-                txl.assign(
-                    desc_hi[0], txl.Cast("uint32", txl.shift_right(desc_value[0], txl.uint64(32)))
-                )
+                txl.assign(desc_hi[0], txl.Cast("uint32", txl.shift_right(desc_value[0], txl.uint64(32))))
 
                 if operand == "q":
 
@@ -874,9 +867,7 @@ def make_kernel(
                             with txl.If(elected()), txl.Then():
                                 txl.ptx[mma_f16](
                                     txl.Cast("uint32", (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N),
-                                    txl.Cast(
-                                        "uint32", i_q * MMA_N + MMA_N // 2 + ki * (MMA_K // 2)
-                                    ),
+                                    txl.Cast("uint32", i_q * MMA_N + MMA_N // 2 + ki * (MMA_K // 2)),
                                     desc_at(vd, kv_stage * KV_STAGE16 + mnoff(ki)),
                                     txl.uint32(id_pv),
                                     *mma_keep_lanes,
@@ -1024,15 +1015,13 @@ def make_kernel(
                         k_keep = txl.max(col_limit - s * CHUNK_SIZE, 0)
                         mask_inv = txl.local_scalar("uint32")
                         txl.assign(
-                            mask_inv,
-                            shl_u32_clamp(txl.uint32(0xFFFFFFFF), txl.Cast("uint32", k_keep)),
+                            mask_inv, shl_u32_clamp(txl.uint32(0xFFFFFFFF), txl.Cast("uint32", k_keep))
                         )
                         for i in range(CHUNK_SIZE):
                             if i < ncol - s * CHUNK_SIZE:
                                 c = s * CHUNK_SIZE + i
                                 in_bound = txl.bitwise_and(
-                                    txl.bitwise_not(mask_inv),
-                                    txl.shift_left(txl.uint32(1), txl.uint32(i)),
+                                    txl.bitwise_not(mask_inv), txl.shift_left(txl.uint32(1), txl.uint32(i))
                                 )
                                 txl.ptx.mov.b32(
                                     s_chunk[c],
@@ -1293,9 +1282,7 @@ def make_kernel(
                                     acc_scale,
                                     sScale.ptr_to([ACC_SCALE_BASE + tid_in_wg + i_q * BLK_M]),
                                 )
-                                txl.assign(
-                                    should_rescale, txl.Select(acc_scale < txl.float32(1.0), 1, 0)
-                                )
+                                txl.assign(should_rescale, txl.Select(acc_scale < txl.float32(1.0), 1, 0))
                             with txl.Else():
                                 txl.assign(should_rescale, 0)
                         # Materialize the collective before divergence.

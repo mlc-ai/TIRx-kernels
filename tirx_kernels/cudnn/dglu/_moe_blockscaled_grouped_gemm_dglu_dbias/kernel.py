@@ -57,9 +57,7 @@ def _warp_uniform(value):
     TIRx was running 4.25x as much per-thread.
     """
     uniform = txl.local_scalar("int32")
-    txl.ptx["shfl_sync.idx.b32"](
-        uniform, value, txl.uint32(0), txl.uint32(31), txl.uint32(0xFFFFFFFF)
-    )
+    txl.ptx["shfl_sync.idx.b32"](uniform, value, txl.uint32(0), txl.uint32(31), txl.uint32(0xFFFFFFFF))
     return uniform
 
 
@@ -123,9 +121,7 @@ def _arithmetic(vectorized, packed):
     def binary(mnemonic, out, left, right):
         if vectorized:
             txl.ptx[f"{mnemonic}.rn.f32x2"](
-                packed,
-                txl.cuda.make_float2(left[0], left[1]),
-                txl.cuda.make_float2(right[0], right[1]),
+                packed, txl.cuda.make_float2(left[0], left[1]), txl.cuda.make_float2(right[0], right[1])
             )
             txl.ptx["mov.b64"](out[0], out[1], packed)
         else:
@@ -388,8 +384,7 @@ def _descriptor_base(ldo, sdo, swizzle):
 
 def _descriptor_with_address(base, shared_address):
     address_field = txl.cast(
-        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)),
-        "uint64",
+        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)), "uint64"
     )
     return txl.bitwise_or(txl.uint64(base), address_field)
 
@@ -910,9 +905,7 @@ def _make_kernel(
                 with txl.If(_elected()):
                     with txl.Then():
                         with txl.unroll(0, c_stages) as stage:
-                            txl.ptx.mbarrier.init.shared.b64(
-                                c_pipe.full.ptr_to([stage]), txl.uint32(1)
-                            )
+                            txl.ptx.mbarrier.init.shared.b64(c_pipe.full.ptr_to([stage]), txl.uint32(1))
                 with txl.If(_elected()):
                     with txl.Then():
                         with txl.unroll(0, c_stages) as stage:
@@ -945,9 +938,7 @@ def _make_kernel(
                             # `internal_init` builds this pipeline with
                             # `defer_sync=True`, so it is published by the second
                             # epoch alongside the TMEM barrier.
-                            txl.ptx.mbarrier.init.shared.b64(
-                                sched_pipe.full.ptr_to([0]), txl.uint32(1)
-                            )
+                            txl.ptx.mbarrier.init.shared.b64(sched_pipe.full.ptr_to([0]), txl.uint32(1))
                             txl.ptx.mbarrier.init.shared.b64(
                                 sched_pipe.empty.ptr_to([0]), txl.uint32(32 * cluster_size)
                             )
@@ -961,9 +952,7 @@ def _make_kernel(
         txl.assign(smem_base, txl.cuda.cvta_generic_to_shared(smem.ptr_to([0])))
         cluster_smem_base_u64 = txl.local_scalar("uint64")
         txl.ptx.cvta.to.shared__cluster.u64(cluster_smem_base_u64, smem.ptr_to([0]))
-        cluster_smem_base = txl.local_scalar(
-            "uint32", init=txl.cast(cluster_smem_base_u64, "uint32")
-        )
+        cluster_smem_base = txl.local_scalar("uint32", init=txl.cast(cluster_smem_base_u64, "uint32"))
         a_descriptor = txl.local_scalar(
             "uint64", init=_descriptor_with_address(a_desc_base, smem_base + offsets["sA"])
         )
@@ -1034,9 +1023,7 @@ def _make_kernel(
             tokens = txl.local_scalar("int32", init=upper)
             with txl.If(expert > txl.int32(0)), txl.Then():
                 lower = txl.local_scalar("int32")
-                txl.ptx.ld.global_.b32(
-                    lower, named["padded_offsets"].ptr_to([expert - txl.int32(1)])
-                )
+                txl.ptx.ld.global_.b32(lower, named["padded_offsets"].ptr_to([expert - txl.int32(1)]))
                 txl.assign(tokens, tokens - lower)
             return tokens
 
@@ -1064,9 +1051,7 @@ def _make_kernel(
                 with txl.If(initialized == txl.uint32(0)), txl.Then():
                     txl.assign(expert_tile_end, expert_m_tiles(txl.int32(0)) * n_tile_count)
                     txl.assign(initialized, txl.uint32(1))
-                with txl.While(
-                    txl.And(work_linear >= expert_tile_end, current_expert < txl.int32(L))
-                ):
+                with txl.While(txl.And(work_linear >= expert_tile_end, current_expert < txl.int32(L))):
                     txl.assign(current_expert, current_expert + txl.int32(1))
                     txl.assign(expert_tile_start, expert_tile_end)
                     with txl.If(current_expert < txl.int32(L)), txl.Then():
@@ -1261,9 +1246,7 @@ def _make_kernel(
             take_tile_info(info_cons, slots)
             with txl.While(tile_expert >= txl.int32(0)):
                 row_base = expert_row_base(tile_expert)
-                a_row = txl.local_scalar(
-                    "int32", init=row_base + tile_m_idx * txl.int32(cta_tile_m)
-                )
+                a_row = txl.local_scalar("int32", init=row_base + tile_m_idx * txl.int32(cta_tile_m))
                 if cluster_n > 1:
                     txl.assign(a_row, a_row + cluster_y * txl.int32(a_cluster_piece))
                 # The CTA pair splits B's N extent, so each CTA takes its own
@@ -1375,11 +1358,9 @@ def _make_kernel(
                         b_destination = (
                             cluster_smem_base
                             + txl.uint32(offsets["sB"])
-                            + txl.cast(ab_prod.stage, "uint32")
-                            * txl.uint32(derived["b_stage_bytes"])
+                            + txl.cast(ab_prod.stage, "uint32") * txl.uint32(derived["b_stage_bytes"])
                             + txl.uint32(block * b_block_bytes)
-                            + txl.cast(cluster_m_coord, "uint32")
-                            * txl.uint32(b_block_bytes // b_split)
+                            + txl.cast(cluster_m_coord, "uint32") * txl.uint32(b_block_bytes // b_split)
                             if (b_split > 1 or b_tma_copies > 1)
                             else b_slot
                         )
@@ -1442,8 +1423,7 @@ def _make_kernel(
                     sfb_quotient = sfb_linear // 256
                     sfb_coord_0 = txl.int32(sfb_linear % 256)
                     sfb_coord_1 = txl.local_scalar(
-                        "int32",
-                        init=counter * txl.int32(sf_k_box) + txl.int32(sfb_quotient % sf_k_box),
+                        "int32", init=counter * txl.int32(sf_k_box) + txl.int32(sfb_quotient % sf_k_box)
                     )
                     # The row-group coordinate is built from the *tile* index,
                     # not from the column base: `n_base` already carries the
@@ -1452,8 +1432,7 @@ def _make_kernel(
                     # of the scale-factor tensor for every tile past the first.
                     sfb_row = txl.local_scalar(
                         "int32",
-                        init=tile_n_idx * txl.int32(sfb_n_box)
-                        + txl.int32(sfb_quotient // sf_k_box),
+                        init=tile_n_idx * txl.int32(sfb_n_box) + txl.int32(sfb_quotient // sf_k_box),
                     )
                     sfb_destination = (
                         cluster_smem_base
@@ -1536,9 +1515,7 @@ def _make_kernel(
                     acc_column = txl.local_scalar("uint32", init=txl.uint32(0))
                     if derived["overlapping_accum"]:
                         with txl.If(acc_prod.phase == txl.uint32(0)), txl.Then():
-                            txl.assign(
-                                acc_column, txl.uint32(cta_tile_n - derived["num_sf_tmem_cols"])
-                            )
+                            txl.assign(acc_column, txl.uint32(cta_tile_n - derived["num_sf_tmem_cols"]))
                     counter = txl.local_scalar("int32", init=txl.int32(0))
                     with txl.While(counter < txl.int32(k_tiles)):
                         _wait_plain_if_needed(
@@ -1621,8 +1598,7 @@ def _make_kernel(
                             runtime_desc = txl.bitwise_or(
                                 runtime_desc,
                                 txl.bitwise_and(
-                                    txl.shift_right(sfa_address, txl.uint32(1)),
-                                    txl.uint32(0x60000000),
+                                    txl.shift_right(sfa_address, txl.uint32(1)), txl.uint32(0x60000000)
                                 ),
                             )
                             runtime_desc = txl.bitwise_or(
@@ -1799,8 +1775,7 @@ def _make_kernel(
                 """
                 rest_k = _ceil_div(groups_per_row, 4)
                 return (
-                    ((row // txl.int32(128)) * txl.int32(rest_k) + group // txl.int32(4))
-                    * txl.int32(512)
+                    ((row // txl.int32(128)) * txl.int32(rest_k) + group // txl.int32(4)) * txl.int32(512)
                     + (row % txl.int32(32)) * txl.int32(16)
                     + ((row % txl.int32(128)) // txl.int32(32)) * txl.int32(4)
                     + group % txl.int32(4)
@@ -2083,19 +2058,14 @@ def _make_kernel(
                 sub = txl.local_scalar("int32", init=epi_lane % txl.int32(4))
                 # `group ^ swizzle` for each of the eight constant swizzles.
                 twisted = [
-                    txl.local_scalar("int32", init=group ^ txl.int32(swizzle))
-                    for swizzle in range(8)
+                    txl.local_scalar("int32", init=group ^ txl.int32(swizzle)) for swizzle in range(8)
                 ]
                 for n in range(32):
                     for column, fragment in ((n, rC1), (32 + n, rC2)):
                         slot = txl.local_scalar(
                             "int32",
                             init=warp_base
-                            + (
-                                txl.int32(column * 32)
-                                + twisted[(column >> 1) & 7] * txl.int32(4)
-                                + sub
-                            )
+                            + (txl.int32(column * 32) + twisted[(column >> 1) & 7] * txl.int32(4) + sub)
                             * txl.int32(4),
                         )
                         txl.ptx.st.shared.b32(smem.ptr_to([slot]), fragment[n])
@@ -2122,9 +2092,7 @@ def _make_kernel(
                 )
                 for side in range(2):
                     column = txl.local_scalar("int32", init=column_a + txl.int32(side))
-                    column_base = txl.local_scalar(
-                        "int32", init=warp_base + column * txl.int32(128)
-                    )
+                    column_base = txl.local_scalar("int32", init=warp_base + column * txl.int32(128))
                     for chunk in range(8):
                         base = txl.local_scalar(
                             "int32", init=column_base | (txl.int32(chunk * 16) ^ swizzle)
@@ -2165,8 +2133,7 @@ def _make_kernel(
                             smem.ptr_to(
                                 [
                                     offsets["sDbias"]
-                                    + (txl.int32(other * 64) + epi_lane * txl.int32(2))
-                                    * txl.int32(4)
+                                    + (txl.int32(other * 64) + epi_lane * txl.int32(2)) * txl.int32(4)
                                 ]
                             ),
                         )
@@ -2273,17 +2240,11 @@ def _make_kernel(
                     # and the combine into one `LOP3` where the mask, the add
                     # and the move were three.
                     tmem_lane = txl.local_scalar("uint32")
-                    txl.ptx["shl.b32"](
-                        tmem_lane, txl.cast(txl.thread_id(), "uint32"), txl.uint32(16)
-                    )
+                    txl.ptx["shl.b32"](tmem_lane, txl.cast(txl.thread_id(), "uint32"), txl.uint32(16))
                     txl.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
                         *[rAcc[i] for i in range(32)],
                         (tmem_lane & txl.uint32(0xE00000))
-                        | (
-                            tmem_base
-                            + acc_column
-                            + txl.cast(real_subtile * txl.int32(32), "uint32")
-                        ),
+                        | (tmem_base + acc_column + txl.cast(real_subtile * txl.int32(32), "uint32")),
                     )
 
                     if derived["overlapping_accum"]:
@@ -2311,9 +2272,7 @@ def _make_kernel(
                                         "uint32",
                                     ),
                                 )
-                                txl.ptx["mbarrier.arrive.shared::cluster.b64"](
-                                    peer_bar, txl.uint32(1)
-                                )
+                                txl.ptx["mbarrier.arrive.shared::cluster.b64"](peer_bar, txl.uint32(1))
                             acc_cons.advance()
 
                     # Two C stages per accumulator subtile: gate then up.
@@ -2325,9 +2284,7 @@ def _make_kernel(
                         # Each thread owns one row of the 128x32 subtile, so
                         # its slice starts at row * 32 * c_bits/8 bytes.
                         raw = txl.alloc_local((c_words,), "uint32")
-                        c_row = txl.local_scalar(
-                            "int32", init=txl.thread_id() * txl.int32(c_row_bytes)
-                        )
+                        c_row = txl.local_scalar("int32", init=txl.thread_id() * txl.int32(c_row_bytes))
                         for word in range(0, c_words, 4):
                             # The descriptor swizzled this box on the way in, so
                             # the read walks the same permutation.
@@ -2460,13 +2417,9 @@ def _make_kernel(
                             # clamped operand -- a C-matrix element that has
                             # already survived quantization -- cannot be.
                             for half in range(2):
-                                txl.ptx["min.f32"](
-                                    y_gate[half], gate[half], txl.float32(glu_clamp_max)
-                                )
+                                txl.ptx["min.f32"](y_gate[half], gate[half], txl.float32(glu_clamp_max))
                                 txl.ptx["min.f32"](y_up[half], up[half], txl.float32(glu_clamp_max))
-                                txl.ptx["max.f32"](
-                                    y_up[half], y_up[half], txl.float32(glu_clamp_min)
-                                )
+                                txl.ptx["max.f32"](y_up[half], y_up[half], txl.float32(glu_clamp_min))
                             ops["scaled"](work, y_gate, geglu_alpha)
                             _sigmoid(ops, sig, work, situ_tmp["c"])
                             grad = situ_tmp["d"]
@@ -2553,9 +2506,7 @@ def _make_kernel(
                         # Mirror of the C load: this thread owns one row of the
                         # 128x32 subtile.
                         base = offsets[region] + slot * txl.int32(derived["d_stage_bytes"])
-                        d_row = txl.local_scalar(
-                            "int32", init=txl.thread_id() * txl.int32(d_row_bytes)
-                        )
+                        d_row = txl.local_scalar("int32", init=txl.thread_id() * txl.int32(d_row_bytes))
                         for word in range(0, d_words, 4):
                             # Written through the same permutation the store
                             # descriptor reads back.
@@ -2593,8 +2544,7 @@ def _make_kernel(
                                 column = txl.local_scalar(
                                     "int32",
                                     init=d_tile_base
-                                    + (real_subtile * txl.int32(2) + txl.int32(half))
-                                    * txl.int32(32),
+                                    + (real_subtile * txl.int32(2) + txl.int32(half)) * txl.int32(32),
                                 )
                                 txl.ptx[
                                     "cp.async.bulk.tensor.3d.global.shared::cta.tile"
@@ -2605,10 +2555,7 @@ def _make_kernel(
                                     txl.cast(d_row_coord, "int32"),
                                     txl.int32(0),
                                     smem.ptr_to(
-                                        [
-                                            offsets[region]
-                                            + slot * txl.int32(derived["d_stage_bytes"])
-                                        ]
+                                        [offsets[region] + slot * txl.int32(derived["d_stage_bytes"])]
                                     ),
                                     txl.uint64(0),
                                 )
@@ -2676,10 +2623,7 @@ def _make_kernel(
                                 smem.ptr_to([offsets["sAmax"] + epi_warp * txl.int32(4)]), warp_max
                             )
                         txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
-                        with (
-                            txl.If(txl.And(epi_warp == txl.int32(0), epi_lane == txl.int32(0))),
-                            txl.Then(),
-                        ):
+                        with txl.If(txl.And(epi_warp == txl.int32(0), epi_lane == txl.int32(0))), txl.Then():
                             txl.ptx.ld.shared.b32(block_max, smem.ptr_to([offsets["sAmax"]]))
                             for other in range(1, 4):
                                 txl.ptx.ld.shared.b32(
@@ -2717,9 +2661,7 @@ def _make_kernel(
                     # issuing the free.
                     peer_dealloc = txl.local_scalar("uint32")
                     own_dealloc = txl.local_scalar("uint32")
-                    txl.assign(
-                        own_dealloc, txl.cuda.cvta_generic_to_shared(tmem_dealloc.ptr_to([0]))
-                    )
+                    txl.assign(own_dealloc, txl.cuda.cvta_generic_to_shared(tmem_dealloc.ptr_to([0])))
                     txl.ptx["mapa.shared::cluster.u32"](
                         peer_dealloc, own_dealloc, txl.cast(cluster_rank ^ txl.int32(1), "uint32")
                     )

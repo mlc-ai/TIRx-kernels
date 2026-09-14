@@ -344,8 +344,7 @@ def get_kernel(
                             local_sf = txl.local_scalar("int32", init=sf_idx_in_row)
                             with txl.While(local_sf < pad_cols):
                                 st_global_u8(
-                                    txl.address_of(sf_out[sf_offset(row_idx2, local_sf)]),
-                                    txl.uint8(0),
+                                    txl.address_of(sf_out[sf_offset(row_idx2, local_sf)]), txl.uint8(0)
                                 )
                                 txl.assign(local_sf, local_sf + nsb)
                         with txl.Else():

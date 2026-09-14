@@ -278,9 +278,7 @@ def _load_tensormap(payload, src_map):
 def _store_tensormap(dst, payload):
     target = txl.reinterpret("uint64", dst)
     for word in range(16):
-        txl.ptx.st.global_.b64(
-            txl.reinterpret("handle", target + txl.uint64(word * 8)), payload[word]
-        )
+        txl.ptx.st.global_.b64(txl.reinterpret("handle", target + txl.uint64(word * 8)), payload[word])
 
 
 def _replace_tensormap_address(desc, address):
@@ -480,11 +478,7 @@ def _shfl_idx_f32(value, source_lane, clamp):
 def _shfl_up_f32(value, delta):
     shuffled = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.up.b32(
-        shuffled,
-        txl.reinterpret("uint32", value),
-        txl.uint32(delta),
-        txl.uint32(0),
-        txl.uint32(0xFFFFFFFF),
+        shuffled, txl.reinterpret("uint32", value), txl.uint32(delta), txl.uint32(0), txl.uint32(0xFFFFFFFF)
     )
     return txl.reinterpret("float32", shuffled)
 
@@ -518,10 +512,7 @@ def _ffma2(a0, a1, b0, b1, c0, c1):
     out0 = txl.local_scalar("float32")
     out1 = txl.local_scalar("float32")
     txl.ptx.fma.rn.f32x2(
-        packed,
-        txl.cuda.make_float2(a0, a1),
-        txl.cuda.make_float2(b0, b1),
-        txl.cuda.make_float2(c0, c1),
+        packed, txl.cuda.make_float2(a0, a1), txl.cuda.make_float2(b0, b1), txl.cuda.make_float2(c0, c1)
     )
     txl.ptx.mov.b64(out0, out1, packed)
     return out0, out1
@@ -618,9 +609,7 @@ def _swizzle_xor_128b(row, column):
 
 def _swizzle_lin_128b(linear):
     # 128-byte XOR swizzle over a linear 64-element-row bf16/f16 index
-    return txl.bitwise_xor(
-        linear, txl.bitwise_and(txl.shift_right(linear, txl.int32(3)), txl.int32(0x38))
-    )
+    return txl.bitwise_xor(linear, txl.bitwise_and(txl.shift_right(linear, txl.int32(3)), txl.int32(0x38)))
 
 
 def _io_tile_byte(base, stage_bytes, stage, row, column):
@@ -692,9 +681,7 @@ def _ldmatrix_x1(pointer, *, trans):
 
 
 def _stmatrix_x4(pointer, words):
-    txl.ptx.stmatrix.sync.aligned.m8n8.x4.shared.b16(
-        pointer, words[0], words[1], words[2], words[3]
-    )
+    txl.ptx.stmatrix.sync.aligned.m8n8.x4.shared.b16(pointer, words[0], words[1], words[2], words[3])
 
 
 def _tinv_row_ptr(arena, tinv_byte_base, d, tidx_in_group):
@@ -1057,9 +1044,7 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out,
                 else:
                     for field in range(8):
                         value = txl.local_scalar("int32")
-                        txl.ptx.ld.global_.s32(
-                            value, work_item_staging.ptr_to([source * 8 + field])
-                        )
+                        txl.ptx.ld.global_.s32(value, work_item_staging.ptr_to([source * 8 + field]))
                         txl.ptx.st.global_.s32(work_items.ptr_to([destination * 8 + field]), value)
 
             with txl.If(item_count > 4096), txl.Then():
@@ -1070,9 +1055,7 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out,
             with txl.If(item_count <= 4096), txl.Then():
                 with txl.If(thread == 0), txl.Then():
                     txl.ptx.st.shared.v2.u32(
-                        order_arena.ptr_to([32_768]),
-                        txl.uint32(2_147_483_647),
-                        txl.uint32(0x80000000),
+                        order_arena.ptr_to([32_768]), txl.uint32(2_147_483_647), txl.uint32(0x80000000)
                     )
                 padded_count = txl.local_scalar("int32", init=txl.int32(1))
                 with txl.While(padded_count < item_count):
@@ -1096,9 +1079,7 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out,
                                 txl.ptx.ld.global_.s32(
                                     cstart, work_item_staging.ptr_to([item * 8 + 4])
                                 )
-                                txl.ptx.ld.global_.s32(
-                                    cend, work_item_staging.ptr_to([item * 8 + 5])
-                                )
+                                txl.ptx.ld.global_.s32(cend, work_item_staging.ptr_to([item * 8 + 5]))
                                 txl.assign(key, cend - cstart)
                         txl.ptx.st.shared.s32(order_arena.ptr_to([item * 4]), key)
                         txl.ptx.st.shared.s32(order_arena.ptr_to([16_384 + item * 4]), item)
@@ -1126,10 +1107,7 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out,
                             for element in range(4):
                                 item = thread + element * 1024
                                 partner = txl.bitwise_xor(item, distance)
-                                with (
-                                    txl.If(txl.And(item < padded_count, partner > item)),
-                                    txl.Then(),
-                                ):
+                                with txl.If(txl.And(item < padded_count, partner > item)), txl.Then():
                                     key_i = txl.local_scalar("int32")
                                     key_j = txl.local_scalar("int32")
                                     txl.ptx.ld.shared.s32(key_i, order_arena.ptr_to([item * 4]))
@@ -2304,10 +2282,7 @@ def _make_main(
                     do_stage = txl.local_scalar("int32", init=do_cursor.stage)
                     _wait_barrier(arena, _BAR_DO_READY, do_stage, do_cursor.phase)
                     do_cursor.advance()
-                    do_values = [
-                        txl.alloc_local((32,), "float32"),
-                        txl.alloc_local((32,), "float32"),
-                    ]
+                    do_values = [txl.alloc_local((32,), "float32"), txl.alloc_local((32,), "float32")]
                     for sub in range(2):
                         for matrix_row in range(4):
                             words = load_col_fragment(_DO_BASE, do_stage, sub, matrix_row)
@@ -2381,10 +2356,7 @@ def _make_main(
                     _wait_barrier(arena, _BAR_V_READY, v_stage, v_cursor.phase)
                     v_cursor.advance()
                     with txl.If(chunk >= first_state_chunk), txl.Then():
-                        v_words = [
-                            txl.alloc_local((16,), "uint32"),
-                            txl.alloc_local((16,), "uint32"),
-                        ]
+                        v_words = [txl.alloc_local((16,), "uint32"), txl.alloc_local((16,), "uint32")]
                         for sub in range(2):
                             for matrix_row in range(4):
                                 words = load_col_fragment(_V_U_BASE, v_stage, sub, matrix_row)
@@ -2802,10 +2774,7 @@ def _make_main(
                     dk_stage = txl.local_scalar("int32", init=dk_cursor.stage)
                     _wait_barrier(arena, _BAR_DK_STG_DONE, dk_stage, dk_cursor.phase)
                     dk_cursor.advance()
-                    state_part = [
-                        txl.alloc_local((32,), "float32"),
-                        txl.alloc_local((32,), "float32"),
-                    ]
+                    state_part = [txl.alloc_local((32,), "float32"), txl.alloc_local((32,), "float32")]
                     for sub in range(2):
                         for value in range(32):
                             txl.assign(state_part[sub][value], txl.float32(0.0))
@@ -3528,9 +3497,7 @@ def _make_main(
                             )
                     elif log_gate:
                         for column in range(2):
-                            txl.assign(
-                                gate_values[column], gate_values[column] * txl.float32(_RCP_LN2)
-                            )
+                            txl.assign(gate_values[column], gate_values[column] * txl.float32(_RCP_LN2))
                     else:
                         for column in range(2):
                             txl.assign(
@@ -3547,9 +3514,7 @@ def _make_main(
                                     gate_values[column],
                                 ),
                             )
-                    txl.assign(
-                        gate_values[1], gate_values[1] + _shfl_idx_f32(gate_values[0], 31, 31)
-                    )
+                    txl.assign(gate_values[1], gate_values[1] + _shfl_idx_f32(gate_values[0], 31, 31))
                     for column in range(2):
                         position = lane + column * 32
                         txl.ptx.st.shared.f32(
@@ -3572,19 +3537,15 @@ def _make_main(
                             with txl.If(token < batch_end), txl.Then():
                                 bits = txl.local_scalar("uint16")
                                 txl.ptx.ld.global_.b16(
-                                    bits,
-                                    beta.ptr_to([txl.cast(token, "int64") * n_heads_out + head]),
+                                    bits, beta.ptr_to([txl.cast(token, "int64") * n_heads_out + head])
                                 )
                                 raw = txl.local_scalar("float32")
                                 if io_dtype == "float16":
-                                    txl.assign(
-                                        raw, txl.cast(txl.reinterpret("float16", bits), "float32")
-                                    )
+                                    txl.assign(raw, txl.cast(txl.reinterpret("float16", bits), "float32"))
                                 else:
                                     txl.ptx.cvt.f32.bf16(raw, bits)
                                 rounded = _pack_io_pair(
-                                    _tanh(raw * txl.float32(0.5)) * txl.float32(0.5)
-                                    + txl.float32(0.5),
+                                    _tanh(raw * txl.float32(0.5)) * txl.float32(0.5) + txl.float32(0.5),
                                     txl.float32(0.0),
                                     io_dtype,
                                 )
@@ -3599,9 +3560,7 @@ def _make_main(
                         for column in range(2):
                             position = lane + column * 32
                             token = chunk_offset + position
-                            copy_bytes = txl.if_then_else(
-                                token < batch_end, txl.uint32(4), txl.uint32(0)
-                            )
+                            copy_bytes = txl.if_then_else(token < batch_end, txl.uint32(4), txl.uint32(0))
                             txl.ptx["cp.async.ca.shared.global"](
                                 arena.ptr_to([_BETA_BASE + beta_stage * 256 + position * 4]),
                                 beta.ptr_to([txl.cast(token, "int64") * n_heads_out + head]),

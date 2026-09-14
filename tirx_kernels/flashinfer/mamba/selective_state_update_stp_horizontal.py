@@ -115,9 +115,7 @@ def _philox4x32_horizontal(random_words, random_seed, random_offset, *, PHILOX_R
     k0 = txl.local_scalar("uint32", init=txl.cast(txl.reinterpret("uint64", random_seed), "uint32"))
     k1 = txl.local_scalar(
         "uint32",
-        init=txl.cast(
-            txl.shift_right(txl.reinterpret("uint64", random_seed), txl.uint64(32)), "uint32"
-        ),
+        init=txl.cast(txl.shift_right(txl.reinterpret("uint64", random_seed), txl.uint64(32)), "uint32"),
     )
     with txl.unroll(PHILOX_ROUNDS) as _round:
         old_c0 = txl.local_scalar("uint32", init=c0)
@@ -790,8 +788,7 @@ def get_kernel(**kwargs: Any):
                 d: txl.int32 = warp * 16 + row_group
                 gload_3 = txl.local_scalar("uint16")
                 txl.ptx.ld.global_.b16(
-                    gload_3,
-                    x.ptr_to([txl.cast(batch_i, "int64") * x_stride_batch + head * DIM + d]),
+                    gload_3, x.ptr_to([txl.cast(batch_i, "int64") * x_stride_batch + head * DIM + d])
                 )
                 bf16_f32_5 = txl.local_scalar("float32")
                 txl.ptx.cvt.f32.bf16(bf16_f32_5, txl.cast(gload_3, "uint16"))

@@ -489,9 +489,7 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                                 sum_q[0],
                             )
                         for delta_index in range(4):
-                            delta = _local_scalar(
-                                "int32", txl.shift_right(txl.int32(8), delta_index)
-                            )
+                            delta = _local_scalar("int32", txl.shift_right(txl.int32(8), delta_index))
                             txl.ptx["add.f32"](
                                 sum_q[0], sum_q[0], _shfl_bfly_f32(sum_q[0], delta[0])
                             )
@@ -604,9 +602,7 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                         )
                         txl.ptx.mov.b32(
                             r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
-                            txl.cuda.uint_as_float(
-                                txl.bitwise_and(word[0], txl.uint32(4294901760))
-                            ),
+                            txl.cuda.uint_as_float(txl.bitwise_and(word[0], txl.uint32(4294901760))),
                         )
             else:
                 _load_state_bf16x32(state, read_offset[0], r_h)
@@ -663,9 +659,7 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                 for delta_index in range(4):
                     delta = _local_scalar("int32", txl.shift_right(txl.int32(8), delta_index))
                     for row in range(ILP_ROWS):
-                        txl.ptx["add.f32"](
-                            sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0])
-                        )
+                        txl.ptx["add.f32"](sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0]))
                 v_base_input = _local_scalar(
                     "int64",
                     txl.cast(n[0], "int64") * v_batch_stride
@@ -768,9 +762,7 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                 for delta_index in range(4):
                     delta = _local_scalar("int32", txl.shift_right(txl.int32(8), delta_index))
                     for row in range(ILP_ROWS):
-                        txl.ptx["add.f32"](
-                            sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0])
-                        )
+                        txl.ptx["add.f32"](sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0]))
                 v_base_input = _local_scalar(
                     "int64",
                     txl.cast(n[0], "int64") * v_batch_stride
@@ -794,9 +786,7 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                         txl.ptx.ld.shared.b32(
                             _lds32_6, s_q.ptr_to([t[0] * (K + 8) + k_start[0] + pair * 2 + 1])
                         )
-                        txl.ptx.mov.b32(
-                            r_q_main[pair * 2 + 1], txl.reinterpret("float32", _lds32_6)
-                        )
+                        txl.ptx.mov.b32(r_q_main[pair * 2 + 1], txl.reinterpret("float32", _lds32_6))
                     for row in range(ILP_ROWS):
                         pair_value = _local_scalar(
                             "uint64",

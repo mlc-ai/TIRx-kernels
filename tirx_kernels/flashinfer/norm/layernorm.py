@@ -139,11 +139,7 @@ def _cvt_pair_f32_to_bf16(high, low):
 def _shfl_bfly_f32(value, lane_xor: int):
     out = txl.local_scalar(txl.u32)
     txl.ptx.shfl_sync.bfly.b32(
-        out,
-        txl.reinterpret(txl.u32, value),
-        txl.uint32(lane_xor),
-        txl.uint32(31),
-        txl.uint32(0xFFFFFFFF),
+        out, txl.reinterpret(txl.u32, value), txl.uint32(lane_xor), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
     return txl.reinterpret(txl.f32, out)
 
@@ -224,9 +220,7 @@ def _store_y(buffer, index, bits, words, value_offset, word_offset, VEC: int):
     elif VEC == 2:
         txl.ptx.st.global_.b32(buffer.ptr_to([index]), words[word_offset])
     elif VEC == 4:
-        txl.ptx.st.global_.v2.b32(
-            buffer.ptr_to([index]), words[word_offset], words[word_offset + 1]
-        )
+        txl.ptx.st.global_.v2.b32(buffer.ptr_to([index]), words[word_offset], words[word_offset + 1])
     else:
         txl.ptx.st.global_.v4.b32(
             buffer.ptr_to([index]),
@@ -400,9 +394,7 @@ def get_kernel(
         warp_sum = _butterfly_sum_f32(local_sum)
         if warps > 1:
             with txl.If(lane == 0), txl.Then():
-                txl.ptx.st.shared.b32(
-                    shared_raw.ptr_to([warp * 4]), txl.reinterpret(txl.u32, warp_sum)
-                )
+                txl.ptx.st.shared.b32(shared_raw.ptr_to([warp * 4]), txl.reinterpret(txl.u32, warp_sum))
             txl.ptx.bar.sync(txl.uint32(0))
             block_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
             with txl.If(lane < warps), txl.Then():
@@ -549,9 +541,7 @@ def get_kernel(
                 txl.assign(y_bits[value], _cvt_f32_to_bf16(y_f32[value]))
         else:
             for pair in range(packed_pairs):
-                txl.assign(
-                    y_words[pair], _cvt_pair_f32_to_bf16(y_f32[pair * 2 + 1], y_f32[pair * 2])
-                )
+                txl.assign(y_words[pair], _cvt_pair_f32_to_bf16(y_f32[pair * 2 + 1], y_f32[pair * 2]))
         for vb in range(vec_blocks):
             col = (tid + vb * threads) * vec
             y_offset = row * y_row_stride + txl.cast(col, txl.i64)

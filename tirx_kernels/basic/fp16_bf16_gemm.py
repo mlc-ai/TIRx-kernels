@@ -446,9 +446,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                         # the first accumulates unconditionally, and only phase 0
                         # asks the runtime flag (0 on the first k-tile of a
                         # tile => overwrite, 1 after).
-                        acc_pred = (
-                            txl.ptx.pred(1) if ki else txl.ptx.pred(txl.Cast("bool", accum[0]))
-                        )
+                        acc_pred = txl.ptx.pred(1) if ki else txl.ptx.pred(txl.Cast("bool", accum[0]))
                         txl.ptx[_MMA_F16_2SM](
                             txl.Cast("uint32", tmem_n),
                             desc_a_ki,

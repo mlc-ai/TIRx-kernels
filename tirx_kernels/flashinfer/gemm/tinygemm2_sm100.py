@@ -201,8 +201,7 @@ def _make_tinygemm2_kernel(stages: int, use_pdl: bool, grid_x: int, grid_y: int)
 
             def compute_iter():
                 stage_c = _materialize(
-                    txl.cast(warp, "uint32")
-                    + txl.uint32(4) * txl.cast(compute_state.stage, "uint32")
+                    txl.cast(warp, "uint32") + txl.uint32(4) * txl.cast(compute_state.stage, "uint32")
                 )
                 phase_c = _materialize(txl.cast(compute_state.phase, "uint32"))
                 weight_ready.wait(stage_c, phase_c)
@@ -269,12 +268,8 @@ def _make_tinygemm2_kernel(stages: int, use_pdl: bool, grid_x: int, grid_y: int)
                 bias_bits = txl.alloc_local([2], "uint16")
                 txl.ptx.ld.shared.b16(bias_bits[0], bias_smem.ptr_to([lane // 4]))
                 txl.ptx.ld.shared.b16(bias_bits[1], bias_smem.ptr_to([lane // 4 + 8]))
-                bias_lo = _materialize(
-                    txl.cast(txl.reinterpret("bfloat16", bias_bits[0]), "float32")
-                )
-                bias_hi = _materialize(
-                    txl.cast(txl.reinterpret("bfloat16", bias_bits[1]), "float32")
-                )
+                bias_lo = _materialize(txl.cast(txl.reinterpret("bfloat16", bias_bits[0]), "float32"))
+                bias_hi = _materialize(txl.cast(txl.reinterpret("bfloat16", bias_bits[1]), "float32"))
                 out_frag = txl.alloc_local((4,), "float32", align=4)
                 txl.ptx["add.ftz.f32"](out_frag[0], accum[0], bias_lo)
                 txl.ptx["add.ftz.f32"](out_frag[1], accum[1], bias_lo)

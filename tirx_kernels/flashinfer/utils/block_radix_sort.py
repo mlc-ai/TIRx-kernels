@@ -240,12 +240,8 @@ def _scan_warp_inclusive(out, incl, tx, value):
     lane = txl.local_scalar("int32", init=tx % WARP_THREADS)
     txl.assign(incl[0], value)
     with txl.unroll(5) as step:
-        peer = txl.local_scalar(
-            "uint32", init=shfl_up_u32(incl[0], txl.shift_left(txl.int32(1), step))
-        )
-        txl.assign(
-            incl[0], txl.Select(lane >= txl.shift_left(txl.int32(1), step), incl[0] + peer, incl[0])
-        )
+        peer = txl.local_scalar("uint32", init=shfl_up_u32(incl[0], txl.shift_left(txl.int32(1), step)))
+        txl.assign(incl[0], txl.Select(lane >= txl.shift_left(txl.int32(1), step), incl[0] + peer, incl[0]))
     txl.assign(out[0], incl[0] - value)
 
 
@@ -452,9 +448,7 @@ def emit_rank_keys(
     with txl.unroll(items_per_thread) as i:
         txl.assign(
             ranks[i],
-            txl.cast(
-                prefixes[i] + txl.cast(ld_shared_u16(counters16, slots[i]), "uint32"), "int32"
-            ),
+            txl.cast(prefixes[i] + txl.cast(ld_shared_u16(counters16, slots[i]), "uint32"), "int32"),
         )
 
 

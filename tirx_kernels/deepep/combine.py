@@ -531,9 +531,7 @@ def _build_reduce_epilogue_kernel(
                             with txl.unroll(4) as j:
                                 with txl.unroll(4) as w:
                                     word_u32 = txl.cast(values[j * 4 + w], "uint32")
-                                    lo = txl.cast(
-                                        txl.bitwise_and(word_u32, txl.uint32(0xFFFF)), "uint16"
-                                    )
+                                    lo = txl.cast(txl.bitwise_and(word_u32, txl.uint32(0xFFFF)), "uint16")
                                     hi = txl.cast(word_u32 >> txl.uint32(16), "uint16")
                                     e = j * 8 + w * 2
                                     txl.ptx.add.rn.f32.bf16(reduced[e], lo, reduced[e])

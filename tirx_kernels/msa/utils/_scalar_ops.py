@@ -72,11 +72,7 @@ def shfl_idx_i32(value, source_lane):
     """``shfl.sync.idx.b32 d, a, src, 31, -1``; a full-warp broadcast."""
     out = txl.local_scalar(txl.u32)
     txl.ptx.shfl_sync.idx.b32(
-        out,
-        txl.reinterpret(txl.u32, value),
-        txl.uint32(source_lane),
-        txl.uint32(31),
-        txl.uint32(0xFFFFFFFF),
+        out, txl.reinterpret(txl.u32, value), txl.uint32(source_lane), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
     return txl.reinterpret(txl.i32, out)
 

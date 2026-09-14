@@ -87,21 +87,21 @@ _TMEM_LD16 = "tcgen05.ld.sync.aligned.32x32b.x16.b32"
 _TMEM_LD32 = "tcgen05.ld.sync.aligned.32x32b.x32.b32"
 _TMEM_ST32 = "tcgen05.st.sync.aligned.32x32b.x32.b32"
 
-S_COL = 0
+S_COL = 0                                                                              
 N_SBUF = 4
-O_COL = 128
-TWO_PASS_MAX_BLOCKS = 1
-RESCALE_THRESHOLD = 8.0
+O_COL = 128                                                           
+TWO_PASS_MAX_BLOCKS = 1                                                               
+RESCALE_THRESHOLD = 8.0                                                                         
 TMEM_COLS = 512
-CHUNK_BYTES = 64 * 64 * 2
+CHUNK_BYTES = 64 * 64 * 2                                                 
 
 N_LOADER_WARPS = 4
 N_SOFTMAX_WARPS = 4
-WARPS = 10
+WARPS = 10                                                     
 
 
 SMEM_BUDGET = 227 * 1024
-SMEM_MISC = 6 * 1024
+SMEM_MISC = 6 * 1024                                                                                
 
 
 def _chunk_bytes(h_valid):
@@ -140,9 +140,9 @@ def _recv_plan(fp8, nstage, bpc, splits, h_valid=64):
 
 
 def _idesc(n, fp8, trans_b, m=64):
-    v = 1 << 4
+    v = 1 << 4           
     if not fp8:
-        v |= (1 << 7) | (1 << 10)
+        v |= (1 << 7) | (1 << 10)                
     if trans_b:
         v |= 1 << 16
     v |= (n >> 3) << 17
@@ -169,30 +169,14 @@ def _replace_smem_desc_addr(desc, smem_ptr):
 
 
 def make_kernel(
-    *,
-    fp8,
-    h_total,
-    h_valid,
-    groups,
-    q_tokens,
-    ktot,
-    splits,
-    bpc,
-    nstage,
-    swa_rows,
-    comp_rows,
-    n_items=None,
-    force_compact_exchange=False,
+    *, fp8, h_total, h_valid, groups, q_tokens, ktot, splits, bpc, nstage, swa_rows, comp_rows,
+    n_items=None, force_compact_exchange=False,
 ):
     small = h_valid <= 32
     BM = 32 if small else 64
-    import os
-
-    q_in_tmem = (
-        (not fp8)
-        and (not small)
-        and splits == 1
-        and (q_tokens > 64 or os.environ.get("MLA_FORCE_Q_TMEM") == "1")
+    import os                                                                     
+    q_in_tmem = (not fp8) and (not small) and splits == 1 and (
+        q_tokens > 64 or os.environ.get("MLA_FORCE_Q_TMEM") == "1"
     )
     S_BASE = 384 if q_in_tmem else S_COL
     S_STRIDE = 64 if q_in_tmem else (16 if small else 32)
@@ -204,7 +188,7 @@ def make_kernel(
     dt = "float8_e4m3fn" if fp8 else txl.bf16
     gt = txl.u8 if fp8 else txl.bf16
     tmap_dtype = "uint8" if fp8 else "bfloat16"
-    atom = 128 if fp8 else 64
+    atom = 128 if fp8 else 64                                         
     natom = D // atom
     row_bytes = D * esize
     stage_bytes = 64 * row_bytes
@@ -215,32 +199,33 @@ def make_kernel(
     pv_steps = BN // mma_k
     pstage16 = (BM * BN * esize) // 16
     half16 = (D // 2) * 64 * esize // 16
-    chunk_elems = 16 // esize
-    half_elems = D // 2
+    chunk_elems = 16 // esize                                   
+    half_elems = D // 2                                        
     chunks_per_thread = half_elems // chunk_elems
     kblk = (ktot + BN - 1) // BN
     C = splits
     ch_max = (8 + C - 1) // C
-
+                                                                                              
+                                                                             
     recv_where = _recv_plan(fp8, nstage, bpc, C, h_valid)
     if recv_where is None:
         raise ValueError("receive buffer does not fit in shared memory for this split")
     recv_kind, recv_bytes = recv_where
-    HGc = ((h_valid + 7) // 8) * 8
+    HGc = ((h_valid + 7) // 8) * 8                                  
     CHUNK = _chunk_bytes(h_valid)
     compact_exchange = force_compact_exchange or (
         fp8 and (h_total == 64 or (h_total == 128 and ktot >= 640))
     )
     XCHUNK = _exchange_chunk_bytes(compact_exchange, h_valid)
     staging_bytes = 8 * CHUNK
-
+                                                                                      
     two_pass = bpc <= min(TWO_PASS_MAX_BLOCKS, nstage)
     n_sbuf = N_SBUF if two_pass else 2
     q_rows = q_tokens * h_total
     if n_items is None:
         n_items = q_tokens * groups
     grid = n_items * C
-
+                                                                      
     idesc_qk = _idesc(128 if q_in_tmem else BN, fp8, False, BM)
     idesc_pv = _idesc(256, fp8, True, BM)
     mma_ws = _MMA_WS[fp8]
@@ -253,67 +238,23 @@ def make_kernel(
         if q_in_tmem:
             txl.call_packed(
                 "runtime.cuTensorMapEncodeTiled",
-                descriptor,
-                tmap_dtype,
-                4,
-                txl.handle_add_byte_offset(params["q"].data, 0),
-                64,
-                h_total,
-                D // 64,
-                q_tokens,
-                row_bytes,
-                64 * esize,
-                h_total * row_bytes,
-                64,
-                64,
-                D // 64,
-                1,
-                1,
-                1,
-                1,
-                1,
-                0,
-                3,
-                3,
-                0,
+                descriptor, tmap_dtype, 4, txl.handle_add_byte_offset(params["q"].data, 0),
+                64, h_total, D // 64, q_tokens,
+                row_bytes, 64 * esize, h_total * row_bytes,
+                64, 64, D // 64, 1,
+                1, 1, 1, 1, 0, 3, 3, 0,
             )
         else:
             txl.call_packed(
                 "runtime.cuTensorMapEncodeTiled",
-                descriptor,
-                tmap_dtype,
-                2,
-                txl.handle_add_byte_offset(params["q"].data, 0),
-                D,
-                q_rows,
-                row_bytes,
-                atom,
-                BM,
-                1,
-                1,
-                0,
-                3,
-                3,
-                0,
+                descriptor, tmap_dtype, 2, txl.handle_add_byte_offset(params["q"].data, 0),
+                D, q_rows, row_bytes, atom, BM, 1, 1, 0, 3, 3, 0,
             )
         out_desc = txl.stack_alloca("tensormap", 1)
         txl.call_packed(
             "runtime.cuTensorMapEncodeTiled",
-            out_desc,
-            "bfloat16",
-            2,
-            txl.handle_add_byte_offset(params["out"].data, 0),
-            D,
-            q_rows,
-            D * 2,
-            64,
-            h_valid,
-            1,
-            1,
-            0,
-            3,
-            0,
-            0,
+            out_desc, "bfloat16", 2, txl.handle_add_byte_offset(params["out"].data, 0),
+            D, q_rows, D * 2, 64, h_valid, 1, 1, 0, 3, 0, 0,
         )
         return (descriptor, out_desc)
 
@@ -349,9 +290,12 @@ def make_kernel(
         def cvta(ptr):
             return txl.cuda.cvta_generic_to_shared(ptr)
 
+                                                                                 
         smem = txl.smem_pool()
         pool = smem.pool
-
+                                                                               
+                                                                          
+                                 
         k_tile = smem.alloc((nstage, 64, D), dt, swizzle=txl.SW128B)
         if q_in_tmem:
             kv_end = pool.offset
@@ -363,7 +307,7 @@ def make_kernel(
             kv_end = pool.offset
         recv = None
         pool.move_base_to(0)
-
+                                                                                         
         staging = pool.alloc((staging_bytes // 2,), "uint16", align=1024)
         if recv_kind == "alias":
             pool.move_base_to(kv_end - recv_bytes)
@@ -375,9 +319,11 @@ def make_kernel(
         maskbuf = pool.alloc((nstage, 4), "uint16", align=16)
         rowbuf = pool.alloc((2, 128), "float32", align=16)
         if q_in_tmem:
+                                                                            
+                                                                           
             score_exchange = pool.alloc((4, 32 * 32), "float32", align=16)
         lbuf = pool.alloc((128,), "float32", align=16)
-        stats_all = pool.alloc((C, BM, 2), "float32", align=16)
+        stats_all = pool.alloc((C, BM, 2), "float32", align=16)                              
         tmem_base = pool.alloc((4,), "uint32", align=16)
         q_ready = txl.TMABar(pool, 1)
         q_tmem_ready = txl.TCGen05Bar(pool, 1)
@@ -417,14 +363,17 @@ def make_kernel(
                     done, addr, txl.Cast("uint32", parity)
                 )
 
+                                                                                  
         len_t = txl.local_scalar("int32")
         txl.ptx.ld.global_.s32(len_t, lens.ptr_to([tok]))
         kblk_valid = txl.min(txl.int32(kblk), (len_t + (BN - 1)) // BN)
         first_blk = rank * bpc
-        n_blk = txl.local_scalar(
-            "int32", init=txl.max(txl.min(kblk_valid - first_blk, txl.int32(bpc)), 0)
-        )
+        n_blk = txl.local_scalar("int32", init=txl.max(txl.min(kblk_valid - first_blk, txl.int32(bpc)), 0))
 
+                                                                                
+                                                                                       
+                                                                                      
+                                                                        
         def init_barriers():
             """Warp 0 (elected lane): every mbarrier plus the tensormap prefetch."""
             bar_init(q_ready, 0, 1)
@@ -467,7 +416,8 @@ def make_kernel(
             iket_end(t_ps)
 
         def cluster_arrive():
-
+                                                                                              
+                                                        
             if C > 1:
                 txl.ptx.barrier.cluster.arrive.relaxed.aligned()
 
@@ -475,17 +425,18 @@ def make_kernel(
             if C > 1:
                 txl.ptx.barrier.cluster.wait.acquire.aligned()
 
+                                                                                              
+                                                                                      
         e_warp = txl.bitwise_and(warp, txl.int32(3))
         e_head = lane if small else 32 * txl.bitwise_and(e_warp, 1) + lane
         sink_own = txl.local_scalar("float32")
 
         def preload_sinks():
-            txl.ptx.ld.global_.f32(
-                sink_own, sinks.ptr_to([txl.min(grp * 64 + e_head, txl.int32(h_total - 1))])
-            )
+            txl.ptx.ld.global_.f32(sink_own, sinks.ptr_to([txl.min(grp * 64 + e_head, txl.int32(h_total - 1))]))
 
+                                                                               
         def loader():
-            lw = warp
+            lw = warp                                               
             t_pi = iket_range("pro-init")
             with txl.If(warp == 0), txl.Then():
                 with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
@@ -497,12 +448,8 @@ def make_kernel(
                         txl.ptx[_TMA_4D](
                             cvta(q_tile.ptr_to(0, 0)),
                             txl.reinterpret(txl.handle().ty, txl.address_of(q_tmap)),
-                            txl.int32(0),
-                            grp * 64,
-                            txl.int32(0),
-                            tok,
-                            bar_addr(q_ready, 0),
-                            txl.uint64(_Q_HINT),
+                            txl.int32(0), grp * 64, txl.int32(0), tok,
+                            bar_addr(q_ready, 0), txl.uint64(_Q_HINT),
                         )
                     else:
                         for a in range(natom):
@@ -539,48 +486,45 @@ def make_kernel(
             with txl.serial(n_blk, unroll=False) as k:
                 t_idx = iket_range("ld-idx")
                 gblk = first_blk + k
-                col = gblk * BN + 16 * lw + lane
+                col = gblk * BN + 16 * lw + lane                                
                 idx = txl.local_scalar("int32", init=idx_next)
-                load_idx(k + 1)
+                load_idx(k + 1)                                                                
                 valid = txl.And(txl.And(idx >= 0, col < len_t), lane < 16)
                 m = txl.local_scalar("uint32")
                 txl.ptx.vote_sync.ballot.b32(m, txl.ptx.pred(valid), txl.uint32(0xFFFFFFFF))
-
+                                                                            
                 idx_q = [txl.local_scalar("int32") for _ in range(4)]
                 for rq in range(4):
                     txl.ptx.shfl_sync.idx.b32(
-                        idx_q[rq],
-                        idx,
-                        txl.Cast("uint32", rq * 4 + txl.shift_right(lane, txl.int32(3))),
-                        txl.uint32(0x1F),
-                        txl.uint32(0xFFFFFFFF),
+                        idx_q[rq], idx, txl.Cast("uint32", rq * 4 + txl.shift_right(lane, txl.int32(3))),
+                        txl.uint32(0x1F), txl.uint32(0xFFFFFFFF),
                     )
                 stage = ring.stage
                 iket_end(t_idx)
                 t_we = iket_range("ld-wait-empty")
                 if q_in_tmem:
+                                                                              
+                                                                          
                     with txl.If(k == 2), txl.Then():
                         hot_wait(q_tmem_ready, 0, 0)
                         txl.ptx["fence.proxy.async.shared::cta"]()
                 with txl.If(k >= nstage), txl.Then():
                     hot_wait(k_empty, stage, txl.bitwise_xor((k // nstage) & 1, 1))
-
+                                                                                                 
+                                                            
                     txl.ptx["fence.proxy.async.shared::cta"]()
                 iket_end(t_we)
                 t_gi = iket_range("ld-gather-issue")
                 with txl.If(lane == 0), txl.Then():
                     txl.ptx.st.shared.u16(maskbuf.ptr_to([stage, lw]), txl.Cast("uint16", m))
-                    txl.ptx["mbarrier.arrive.shared.b64"](
-                        bar_addr(mask_ready, stage), txl.uint32(1)
-                    )
+                    txl.ptx["mbarrier.arrive.shared.b64"](bar_addr(mask_ready, stage), txl.uint32(1))
                 kview = k_tile[stage]
 
                 def gather_from(pool_buf, pool_rows):
                     for rq in range(4):
                         row = 16 * lw + rq * 4 + txl.shift_right(lane, txl.int32(3))
                         src_row = txl.Cast(
-                            "int64",
-                            txl.min(txl.max(idx_q[rq], txl.int32(0)), txl.int32(pool_rows - 1)),
+                            "int64", txl.min(txl.max(idx_q[rq], txl.int32(0)), txl.int32(pool_rows - 1))
                         )
                         for a in range(natom):
                             col_e = a * atom + sub * chunk_elems
@@ -601,9 +545,15 @@ def make_kernel(
                 ring.advance()
             cluster_wait()
             if C > 1:
+                                                                                                 
+                                                                                                    
                 with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
                     t_an = iket_range("ld-announce")
                     if recv_kind == "alias":
+                                                                                  
+                                                                                     
+                                                                                  
+                                                          
                         hot_wait(q_ready, 0, 0)
                     with txl.If(n_blk > 0), txl.Then():
                         last = n_blk - 1
@@ -611,17 +561,17 @@ def make_kernel(
                             hot_wait(s_ready, last, 0)
                         else:
                             hot_wait(s_ready, last % n_sbuf, (last // n_sbuf) & 1)
-
+                                                                                                  
+                                                                                                 
                     txl.ptx["fence.proxy.async.shared::cta"]()
                     for r in range(C):
                         with txl.If(txl.And(r != rank, warp == r % N_LOADER_WARPS)), txl.Then():
                             ra = txl.local_scalar("uint32")
-                            txl.ptx["mapa.shared::cluster.u32"](
-                                ra, bar_addr(peer_ready, 0), txl.uint32(r)
-                            )
+                            txl.ptx["mapa.shared::cluster.u32"](ra, bar_addr(peer_ready, 0), txl.uint32(r))
                             txl.ptx["mbarrier.arrive.release.cluster.shared::cluster.b64"](ra)
                     iket_end(t_an)
 
+                                                                              
         def qk_issuer():
             t_pi = iket_range("pro-init")
             alloc_tmem()
@@ -645,9 +595,7 @@ def make_kernel(
                     txl.cuda.tcgen05.encode_matrix_descriptor(
                         txl.address_of(q_cp_desc),
                         txl.reinterpret(txl.handle().ty, txl.uint64(0)),
-                        1,
-                        64,
-                        3,
+                        1, 64, 3,
                     )
                     for qi in range(16):
                         q_src = txl.ptr_byte_offset(
@@ -673,7 +621,7 @@ def make_kernel(
                             hot_wait(s_free, sbuf, txl.bitwise_xor((k // n_sbuf) & 1, 1))
                     iket_end(t_wk)
                     t_qk = iket_range("mm-qk")
-
+                                                                                        
                     txl.ptx["fence.proxy.async.shared::cta"]()
                     txl.ptx["tcgen05.fence::after_thread_sync"]()
                     s_col = txl.uint32(S_BASE) + txl.Cast("uint32", sbuf) * txl.uint32(S_STRIDE)
@@ -704,6 +652,7 @@ def make_kernel(
                     sb.advance()
             cluster_wait()
             if C > 1:
+                                                                                                  
                 t_sp = iket_range("qk-stats-publish")
                 txl.ptx["bar.sync"](txl.uint32(11), txl.uint32(32 + (32 if small else 64)))
                 txl.ptx["fence.proxy.async.shared::cta"]()
@@ -711,21 +660,17 @@ def make_kernel(
                     for dest in range(C):
                         with txl.If(dest != rank), txl.Then():
                             rb = txl.local_scalar("uint32")
-                            txl.ptx["mapa.shared::cluster.u32"](
-                                rb, bar_addr(stats_full, 0), txl.uint32(dest)
-                            )
+                            txl.ptx["mapa.shared::cluster.u32"](rb, bar_addr(stats_full, 0), txl.uint32(dest))
                             rs = txl.local_scalar("uint32")
                             txl.ptx["mapa.shared::cluster.u32"](
                                 rs, cvta(stats_all.ptr_to([rank, 0, 0])), txl.uint32(dest)
                             )
                             txl.ptx[_BULK_S2C](
-                                rs,
-                                cvta(stats_all.ptr_to([rank, 0, 0])),
-                                txl.uint32(stats_bytes),
-                                rb,
+                                rs, cvta(stats_all.ptr_to([rank, 0, 0])), txl.uint32(stats_bytes), rb,
                             )
                 iket_end(t_sp)
 
+                                                                              
         def pv_issuer():
             role_sync()
             cluster_arrive()
@@ -763,16 +708,21 @@ def make_kernel(
                                 txl.uint64(0),
                             )
                         if two_pass:
+                                                                                                
+                                                                                                 
                             with txl.If(k == n_blk - 1), txl.Then():
                                 txl.ptx[_COMMIT](bar_addr(pv_half, half))
                     txl.ptx[_COMMIT](bar_addr(k_empty, stage))
-
+                                                                                            
+                                                                                           
+                                                                                   
                     txl.ptx[_COMMIT](bar_addr(p_free, sbuf))
                     iket_end(t_pv)
                     ring.advance()
                     sb.advance()
             cluster_wait()
 
+                                                                                
         def load_s(sbuf, dst):
             s_col = txl.uint32(S_BASE) + txl.Cast("uint32", sbuf) * txl.uint32(S_STRIDE)
             if q_in_tmem:
@@ -799,10 +749,8 @@ def make_kernel(
                     off = i * 32 * 4 + lane * 4
                     txl.ptx["st.shared.v4.u32"](
                         score_exchange.ptr_to([txl.bitwise_xor(w, 2), off]),
-                        peer_words[4 * i],
-                        peer_words[4 * i + 1],
-                        peer_words[4 * i + 2],
-                        peer_words[4 * i + 3],
+                        peer_words[4 * i], peer_words[4 * i + 1],
+                        peer_words[4 * i + 2], peer_words[4 * i + 3],
                     )
                 txl.ptx["bar.sync"](
                     txl.uint32(8) + txl.Cast("uint32", txl.bitwise_and(w, 1)), txl.uint32(64)
@@ -812,22 +760,15 @@ def make_kernel(
                 for i in range(8):
                     off = i * 32 * 4 + lane * 4
                     txl.ptx["ld.shared.v4.u32"](
-                        incoming_words[0],
-                        incoming_words[1],
-                        incoming_words[2],
-                        incoming_words[3],
+                        incoming_words[0], incoming_words[1], incoming_words[2], incoming_words[3],
                         score_exchange.ptr_to([w, off]),
                     )
                     for j in range(4):
                         txl.assign(dst[4 * i + j], dst[4 * i + j] + incoming[j])
             elif small:
-                txl.ptx[_TMEM_LD16](
-                    *[dst[i] for i in range(16)], txl.cuda.get_tmem_addr(s_col, 0, 0)
-                )
+                txl.ptx[_TMEM_LD16](*[dst[i] for i in range(16)], txl.cuda.get_tmem_addr(s_col, 0, 0))
             else:
-                txl.ptx[_TMEM_LD32](
-                    *[dst[i] for i in range(32)], txl.cuda.get_tmem_addr(s_col, 0, 0)
-                )
+                txl.ptx[_TMEM_LD32](*[dst[i] for i in range(32)], txl.cuda.get_tmem_addr(s_col, 0, 0))
 
         def scaled_masked(s, x, stage, shalf):
             """x[j] = valid ? s[j] * scale_log2 : -inf; returns the row max over the 32 slots."""
@@ -837,27 +778,42 @@ def make_kernel(
             else:
                 txl.ptx.ld.shared.u32(mask, maskbuf.ptr_to([stage, shalf * 2]))
             if h_total == 64 and q_tokens <= 64:
-                mloc = [txl.local_scalar("float32", init=txl.float32(NEG_INF)) for _ in range(4)]
+                                                                             
+                                                                      
+                                                                            
+                                                                              
+                                                        
+                mloc = [
+                    txl.local_scalar("float32", init=txl.float32(NEG_INF))
+                    for _ in range(4)
+                ]
                 for base in range(0, score_elems, 8):
                     for j in range(base, base + 8):
-                        vj = txl.bitwise_and(
-                            txl.shift_right(mask, txl.uint32(j)), txl.uint32(1)
-                        ) != txl.uint32(0)
+                        vj = (
+                            txl.bitwise_and(
+                                txl.shift_right(mask, txl.uint32(j)), txl.uint32(1)
+                            )
+                            != txl.uint32(0)
+                        )
                         txl.assign(
-                            x[j], txl.if_then_else(vj, s[j] * scale_log2, txl.float32(NEG_INF))
+                            x[j],
+                            txl.if_then_else(
+                                vj, s[j] * scale_log2, txl.float32(NEG_INF)
+                            ),
                         )
                     for chain in range(4):
                         txl.ptx.max.f32(
-                            mloc[chain], mloc[chain], x[base + 2 * chain], x[base + 2 * chain + 1]
+                            mloc[chain],
+                            mloc[chain],
+                            x[base + 2 * chain],
+                            x[base + 2 * chain + 1],
                         )
                 m012 = txl.local_scalar("float32")
                 txl.ptx.max.f32(m012, mloc[0], mloc[1], mloc[2])
                 return txl.max(m012, mloc[3])
             mloc = txl.local_scalar("float32", init=txl.float32(NEG_INF))
             for j in range(score_elems):
-                vj = txl.bitwise_and(
-                    txl.shift_right(mask, txl.uint32(j)), txl.uint32(1)
-                ) != txl.uint32(0)
+                vj = txl.bitwise_and(txl.shift_right(mask, txl.uint32(j)), txl.uint32(1)) != txl.uint32(0)
                 txl.assign(x[j], txl.if_then_else(vj, s[j] * scale_log2, txl.float32(NEG_INF)))
                 txl.assign(mloc, txl.max(mloc, x[j]))
             return mloc
@@ -873,9 +829,7 @@ def make_kernel(
                 for i in range(score_elems // 4):
                     txl.assign(
                         pw[i],
-                        txl.cuda.fp8x4_e4m3_from_float4(
-                            e[4 * i], e[4 * i + 1], e[4 * i + 2], e[4 * i + 3]
-                        ),
+                        txl.cuda.fp8x4_e4m3_from_float4(e[4 * i], e[4 * i + 1], e[4 * i + 2], e[4 * i + 3]),
                     )
             else:
                 for i in range(score_elems // 2):
@@ -888,11 +842,9 @@ def make_kernel(
             for i in range(score_elems // p_chunk):
                 txl.ptx["st.shared.v4.u32"](
                     cvta(p_view.ptr_to(head, score_elems * shalf + i * p_chunk)),
-                    pw[4 * i],
-                    pw[4 * i + 1],
-                    pw[4 * i + 2],
-                    pw[4 * i + 3],
+                    pw[4 * i], pw[4 * i + 1], pw[4 * i + 2], pw[4 * i + 3],
                 )
+
 
         def softmax():
             preload_sinks()
@@ -903,7 +855,7 @@ def make_kernel(
             shalf = w if small else txl.shift_right(w, 1)
             m_run = txl.local_scalar("float32", init=txl.float32(NEG_INF))
             l_run = txl.local_scalar("float32", init=txl.float32(0.0))
-            ptid = w * 32 + lane
+            ptid = w * 32 + lane                                       
             pw = txl.alloc_local((score_elems * esize // 4,), "uint32")
 
             def reduce_max(buf_idx, own):
@@ -920,15 +872,11 @@ def make_kernel(
                     txl.uint32(8) + txl.Cast("uint32", txl.bitwise_and(w, 1)), txl.uint32(64)
                 )
                 peer = txl.local_scalar("float32")
-                txl.ptx.ld.shared.f32(
-                    peer, rowbuf.ptr_to([buf_idx, txl.bitwise_xor(w, 2) * 32 + lane])
-                )
+                txl.ptx.ld.shared.f32(peer, rowbuf.ptr_to([buf_idx, txl.bitwise_xor(w, 2) * 32 + lane]))
                 return txl.max(own, peer)
-
             if two_pass:
-                xs = [
-                    txl.alloc_local((score_elems,), "float32") for _ in range(TWO_PASS_MAX_BLOCKS)
-                ]
+                                                                                       
+                xs = [txl.alloc_local((score_elems,), "float32") for _ in range(TWO_PASS_MAX_BLOCKS)]
                 mloc = txl.local_scalar("float32", init=txl.float32(NEG_INF))
                 for k in range(TWO_PASS_MAX_BLOCKS):
                     with txl.If(k < n_blk), txl.Then():
@@ -945,7 +893,7 @@ def make_kernel(
                         txl.assign(mloc, txl.max(mloc, mk))
                         iket_end(t_math)
                 txl.assign(m_run, reduce_max(txl.int32(0), mloc))
-
+                                                                                            
                 for k in range(TWO_PASS_MAX_BLOCKS):
                     with txl.If(k < n_blk), txl.Then():
                         t_ps = iket_range("sm-pstore")
@@ -961,9 +909,7 @@ def make_kernel(
                             txl.ptx["fence.proxy.async.shared::cta"]()
                         store_p(k % 2, head, shalf, pw)
                         txl.ptx["fence.proxy.async.shared::cta"]()
-                        txl.ptx["mbarrier.arrive.shared.b64"](
-                            bar_addr(p_ready, k % 2), txl.uint32(1)
-                        )
+                        txl.ptx["mbarrier.arrive.shared.b64"](bar_addr(p_ready, k % 2), txl.uint32(1))
                         iket_end(t_ps)
             else:
                 ring = txl.PipelineState(nstage, phase=0)
@@ -986,7 +932,7 @@ def make_kernel(
                     mloc = scaled_masked(s, x, stage, shalf)
                     kb = txl.bitwise_and(k, 1)
                     m_blk = reduce_max(kb, mloc)
-
+                                                                                          
                     need = txl.local_scalar("uint32")
                     txl.ptx.vote_sync.any.pred(
                         need, m_blk - m_run > txl.float32(RESCALE_THRESHOLD), txl.uint32(0xFFFFFFFF)
@@ -995,8 +941,7 @@ def make_kernel(
                         "float32",
                         init=txl.if_then_else(
                             txl.Or(need != txl.uint32(0), m_run == txl.float32(NEG_INF)),
-                            txl.max(m_run, m_blk),
-                            m_run,
+                            txl.max(m_run, m_blk), m_run,
                         ),
                     )
                     alpha = txl.local_scalar("float32", init=txl.float32(1.0))
@@ -1020,6 +965,7 @@ def make_kernel(
                     iket_end(t_ps)
                     t_wpv = iket_range("sm-wait-pv-rescale")
                     with txl.If(txl.And(k > 0, need != txl.uint32(0))), txl.Then():
+                                                                             
                         hot_wait(p_free, (k - 1) % 2, ((k - 1) // 2) & 1)
                         with txl.If(txl.uint32(1) != txl.uint32(0)), txl.Then():
                             txl.ptx["tcgen05.fence::after_thread_sync"]()
@@ -1034,16 +980,14 @@ def make_kernel(
                             txl.ptx["tcgen05.wait::st.sync.aligned"]()
                             txl.ptx["tcgen05.fence::before_thread_sync"]()
                     txl.ptx["fence.proxy.async.shared::cta"]()
-                    txl.ptx["mbarrier.arrive.shared.b64"](
-                        bar_addr(p_ready, txl.bitwise_and(k, 1)), txl.uint32(1)
-                    )
+                    txl.ptx["mbarrier.arrive.shared.b64"](bar_addr(p_ready, txl.bitwise_and(k, 1)), txl.uint32(1))
                     iket_end(t_wpv)
                     ring.advance()
                     sb.advance()
             t_tail = iket_range("sm-wait-pv-last")
             with txl.If(n_blk > 0), txl.Then():
                 if two_pass:
-                    hot_wait(pv_half, 0, 0)
+                    hot_wait(pv_half, 0, 0)                                            
                 else:
                     last = n_blk - 1
                     with txl.If(n_blk >= 2), txl.Then():
@@ -1068,17 +1012,20 @@ def make_kernel(
                 peer_l = txl.local_scalar("float32")
                 txl.ptx.ld.shared.f32(peer_l, lbuf.ptr_to([txl.bitwise_xor(w, 2) * 32 + lane]))
                 l_tot = txl.local_scalar("float32", init=l_run + peer_l)
-
+                                                                                            
             cluster_wait()
             with txl.If(w == 0 if small else shalf == 0), txl.Then():
                 txl.ptx.st.shared.f32(stats_all.ptr_to([rank, head, 0]), m_run)
                 txl.ptx.st.shared.f32(stats_all.ptr_to([rank, head, 1]), l_tot)
                 if C > 1:
+                                                                                                  
                     txl.ptx["bar.arrive"](txl.uint32(11), txl.uint32(32 + (32 if small else 64)))
             if two_pass and not small:
+                                                                                                 
                 txl.ptx["bar.arrive"](txl.uint32(3), txl.uint32(256))
             iket_end(t_stats)
 
+                                                                                      
         def epilogue():
             """Stage bf16 partials per chunk and bulk-copy them into the owners' receive windows;
             owners combine the C partials of each owned chunk in the TMEM row layout (own partial
@@ -1097,14 +1044,10 @@ def make_kernel(
             zero_o = n_blk == 0
             hsw = txl.bitwise_and(head, txl.int32(7))
             pid = ew if small else txl.shift_right(warp, txl.int32(1))
-            is_leader = (
-                lane == 0 if small else txl.And(txl.bitwise_and(warp, txl.int32(1)) == 0, lane == 0)
-            )
+            is_leader = lane == 0 if small else txl.And(txl.bitwise_and(warp, txl.int32(1)) == 0, lane == 0)
 
             def pair_sync():
-                txl.ptx["bar.sync"](
-                    txl.uint32(4) + txl.Cast("uint32", pid), txl.uint32(32 if small else 64)
-                )
+                txl.ptx["bar.sync"](txl.uint32(4) + txl.Cast("uint32", pid), txl.uint32(32 if small else 64))
 
             def o_col(c):
                 return O_BASE + (c % 2) * 64 + (c // 4) * 128
@@ -1112,10 +1055,12 @@ def make_kernel(
             oa = txl.alloc_local((32,), "float32")
             ob = txl.alloc_local((32,), "float32")
             pk = txl.alloc_local((32,), "uint32")
-            regs = (oa, ob)
+            regs = (oa, ob)                                                         
 
             def fetch(c):
                 if two_pass:
+                                                                                                 
+                                                                                                   
                     with txl.If(n_blk > 0), txl.Then():
                         hot_wait(pv_half, c // 4, 0)
                     txl.ptx["tcgen05.fence::after_thread_sync"]()
@@ -1124,20 +1069,14 @@ def make_kernel(
                     txl.ptx["tcgen05.fence::after_thread_sync"]()
                 if small:
                     base = txl.uint32(O_BASE) + txl.Cast("uint32", c // 4) * txl.uint32(64)
-                    txl.ptx[_TMEM_LD32](
-                        *[oa[i] for i in range(32)], txl.cuda.get_tmem_addr(base, 0, 0)
-                    )
-                    txl.ptx[_TMEM_LD32](
-                        *[ob[i] for i in range(32)], txl.cuda.get_tmem_addr(base, 0, 32)
-                    )
+                    txl.ptx[_TMEM_LD32](*[oa[i] for i in range(32)], txl.cuda.get_tmem_addr(base, 0, 0))
+                    txl.ptx[_TMEM_LD32](*[ob[i] for i in range(32)], txl.cuda.get_tmem_addr(base, 0, 32))
                 else:
                     txl.ptx[_TMEM_LD32](
-                        *[oa[i] for i in range(32)],
-                        txl.cuda.get_tmem_addr(txl.uint32(0), 0, o_col(c)),
+                        *[oa[i] for i in range(32)], txl.cuda.get_tmem_addr(txl.uint32(0), 0, o_col(c))
                     )
                     txl.ptx[_TMEM_LD32](
-                        *[ob[i] for i in range(32)],
-                        txl.cuda.get_tmem_addr(txl.uint32(0), 0, o_col(c) + 32),
+                        *[ob[i] for i in range(32)], txl.cuda.get_tmem_addr(txl.uint32(0), 0, o_col(c) + 32)
                     )
                 txl.ptx["tcgen05.wait::ld.sync.aligned"]()
 
@@ -1168,15 +1107,8 @@ def make_kernel(
             def stage_piece(c, i):
                 piece = txl.bitwise_xor(txl.int32(i), hsw)
                 txl.ptx["st.shared.v4.u32"](
-                    cvta(
-                        txl.ptr_byte_offset(
-                            staging.ptr_to([0]), c * CHUNK + head * 128 + piece * 16, "uint16"
-                        )
-                    ),
-                    pk[4 * i],
-                    pk[4 * i + 1],
-                    pk[4 * i + 2],
-                    pk[4 * i + 3],
+                    cvta(txl.ptr_byte_offset(staging.ptr_to([0]), c * CHUNK + head * 128 + piece * 16, "uint16")),
+                    pk[4 * i], pk[4 * i + 1], pk[4 * i + 2], pk[4 * i + 3],
                 )
 
             def stage_exchange(c):
@@ -1192,15 +1124,12 @@ def make_kernel(
                                 ),
                             )
                         txl.ptx["st.shared.v4.u32"](
-                            cvta(
-                                txl.ptr_byte_offset(
-                                    staging.ptr_to([0]), c * CHUNK + (i * HGc + head) * 16, "uint16"
-                                )
-                            ),
-                            pk[0],
-                            pk[1],
-                            pk[2],
-                            pk[3],
+                            cvta(txl.ptr_byte_offset(
+                                staging.ptr_to([0]),
+                                c * CHUNK + (i * HGc + head) * 16,
+                                "uint16",
+                            )),
+                            pk[0], pk[1], pk[2], pk[3],
                         )
                 else:
                     for i in range(8):
@@ -1231,18 +1160,14 @@ def make_kernel(
                 l_all = txl.local_scalar("float32", init=txl.float32(0.0))
                 for r in range(C):
                     txl.ptx["ex2.approx.ftz.f32"](fr[r], mr[r] - m_all)
-                    txl.assign(
-                        fr[r],
-                        txl.if_then_else(mr[r] == txl.float32(NEG_INF), txl.float32(0.0), fr[r]),
-                    )
+                    txl.assign(fr[r], txl.if_then_else(mr[r] == txl.float32(NEG_INF), txl.float32(0.0), fr[r]))
                     txl.assign(l_all, l_all + lr[r] * fr[r])
                 sink_e = txl.local_scalar("float32")
                 txl.ptx["ex2.approx.ftz.f32"](sink_e, sink_v * txl.float32(LOG2E) - m_all)
                 inv = txl.local_scalar(
                     "float32",
                     init=txl.if_then_else(
-                        m_all == txl.float32(NEG_INF),
-                        txl.float32(0.0),
+                        m_all == txl.float32(NEG_INF), txl.float32(0.0),
                         txl.cuda.fdividef(bmm2_scale, l_all + sink_e),
                     ),
                 )
@@ -1254,9 +1179,8 @@ def make_kernel(
                     txl.assign(v, txl.if_then_else(r_dyn == r, vals[r], v))
                 return v
 
-            cbase = (
-                ew if small else txl.if_then_else(is_smx, txl.int32(0), txl.int32(4)) + 2 * shalf
-            )
+                                                                                           
+            cbase = ew if small else txl.if_then_else(is_smx, txl.int32(0), txl.int32(4)) + 2 * shalf
             cnext = cbase + (4 if small else 1)
 
             if C == 1:
@@ -1307,17 +1231,11 @@ def make_kernel(
                     txl.cuda.mbarrier_wait_acquire_cluster(txl.address_of(peer_ready.buf[0]), 0)
                     src_idx = rank - txl.if_then_else(rank > dest, txl.int32(1), txl.int32(0))
                     rb = txl.local_scalar("uint32")
-                    txl.ptx["mapa.shared::cluster.u32"](
-                        rb, bar_addr(recv_full, slot), txl.Cast("uint32", dest)
-                    )
+                    txl.ptx["mapa.shared::cluster.u32"](rb, bar_addr(recv_full, slot), txl.Cast("uint32", dest))
                     raddr = txl.local_scalar("uint32")
                     txl.ptx["mapa.shared::cluster.u32"](
                         raddr,
-                        cvta(
-                            txl.ptr_byte_offset(
-                                recv.ptr_to([0]), (slot * (C - 1) + src_idx) * XCHUNK, "uint16"
-                            )
-                        ),
+                        cvta(txl.ptr_byte_offset(recv.ptr_to([0]), (slot * (C - 1) + src_idx) * XCHUNK, "uint16")),
                         txl.Cast("uint32", dest),
                     )
                     txl.ptx[_BULK_S2C](
@@ -1341,9 +1259,7 @@ def make_kernel(
                     clear_if_empty()
                     scale_regs(select_rank(scales, rank))
                     for si in range(C - 1):
-                        r_dyn = txl.int32(si) + txl.if_then_else(
-                            txl.int32(si) >= rank, txl.int32(1), txl.int32(0)
-                        )
+                        r_dyn = txl.int32(si) + txl.if_then_else(txl.int32(si) >= rank, txl.int32(1), txl.int32(0))
                         sc_r = select_rank(scales, r_dyn)
                         txl.ptx.mov.b64(sc2[si], sc_r, sc_r)
                 t_wr = iket_range("ep-wait-recv")
@@ -1356,17 +1272,13 @@ def make_kernel(
                             words = [txl.alloc_local((4,), "uint32") for _ in range(C - 1)]
                             for si in range(C - 1):
                                 txl.ptx["ld.shared.v4.u32"](
-                                    words[si][0],
-                                    words[si][1],
-                                    words[si][2],
-                                    words[si][3],
-                                    cvta(
-                                        txl.ptr_byte_offset(
-                                            recv.ptr_to([0]),
-                                            (slot * (C - 1) + si) * XCHUNK + (i * HGc + head) * 16,
-                                            "uint16",
-                                        )
-                                    ),
+                                    words[si][0], words[si][1], words[si][2], words[si][3],
+                                    cvta(txl.ptr_byte_offset(
+                                        recv.ptr_to([0]),
+                                        (slot * (C - 1) + si) * XCHUNK
+                                        + (i * HGc + head) * 16,
+                                        "uint16",
+                                    )),
                                 )
                             for si in range(C - 1):
                                 for q in range(4):
@@ -1397,19 +1309,13 @@ def make_kernel(
                             words = [txl.alloc_local((4,), "uint32") for _ in range(C - 1)]
                             for si in range(C - 1):
                                 txl.ptx["ld.shared.v4.u32"](
-                                    words[si][0],
-                                    words[si][1],
-                                    words[si][2],
-                                    words[si][3],
-                                    cvta(
-                                        txl.ptr_byte_offset(
-                                            recv.ptr_to([0]),
-                                            (slot * (C - 1) + si) * XCHUNK
-                                            + head * 128
-                                            + piece * 16,
-                                            "uint16",
-                                        )
-                                    ),
+                                    words[si][0], words[si][1], words[si][2], words[si][3],
+                                    cvta(txl.ptr_byte_offset(
+                                        recv.ptr_to([0]),
+                                        (slot * (C - 1) + si) * XCHUNK
+                                        + head * 128 + piece * 16,
+                                        "uint16",
+                                    )),
                                 )
                             for si in range(C - 1):
                                 for q in range(4):
@@ -1437,6 +1343,7 @@ def make_kernel(
             own_b = (cbase % C) == rank
             own_n = (cnext % C) == rank
             if small and 4 % C == 0:
+                                                                                  
                 with txl.If(own_b):
                     with txl.Then():
                         reduce_chunk(cbase)
@@ -1445,6 +1352,7 @@ def make_kernel(
                         send_chunk(cbase)
                         send_chunk(cnext)
             else:
+                                                                                      
                 with txl.If(own_b):
                     with txl.Then():
                         send_chunk(cnext)
@@ -1476,6 +1384,7 @@ def make_kernel(
         with r_pv:
             pv_issuer()
         if two_pass:
+                                                                                           
             with txl.If(txl.And(warp >= N_LOADER_WARPS, warp < 8)), txl.Then():
                 epilogue()
             if not small:
@@ -1485,13 +1394,13 @@ def make_kernel(
                     iket_end(t_cb)
                     epilogue()
         else:
-            with (
-                txl.If(txl.And(warp >= N_LOADER_WARPS, warp < 8) if small else warp < 8),
-                txl.Then(),
-            ):
+                                                                                               
+                                                   
+            with txl.If(txl.And(warp >= N_LOADER_WARPS, warp < 8) if small else warp < 8), txl.Then():
                 t_cb = iket_range("cta-bar")
                 txl.ptx["bar.sync"](txl.uint32(3), txl.uint32(128 if small else 256))
-
+                                                                                                  
+                                                                                          
                 txl.ptx["fence.proxy.async.shared::cta"]()
                 iket_end(t_cb)
                 epilogue()
@@ -1509,13 +1418,18 @@ def make_kernel(
     return mla_dsv4_splitk
 
 
-T_BASE = 7.3
-T_BLOCK_SWA = 0.4
-T_BLOCK_COMP = 1.8
-T_STORE = 0.9
-T_XCHG_BASE, T_XCHG_PER_SPLIT = 0.5, 0.6
+                                                                                  
 
 
+                                                                                 
+T_BASE = 7.3                                                                              
+T_BLOCK_SWA = 0.4                                                    
+T_BLOCK_COMP = 1.8                                                          
+T_STORE = 0.9                                                                             
+T_XCHG_BASE, T_XCHG_PER_SPLIT = 0.5, 0.6                                                     
+                                                                                            
+                                                                                             
+                                                     
 GPC_SMS = (16,) * 8
 
 
@@ -1533,7 +1447,7 @@ def _choose_split(kblk, q_tokens, groups, fp8=False, nstage=2, swa_blocks=2):
         ctas = q_tokens * groups * c
         cap = _wave_capacity(c)
         waves = (ctas + cap - 1) // cap
-
+                                                                                          
         n_swa = min(bpc, swa_blocks) if c == 1 else 0
         extra = bpc - 1
         extra_swa = max(0, min(extra, n_swa - 1))
@@ -1554,18 +1468,8 @@ def _compile(cfg):
     kern = _KERNELS.get(cfg)
     if kern is None:
         keys = (
-            "fp8",
-            "h_total",
-            "h_valid",
-            "groups",
-            "q_tokens",
-            "ktot",
-            "splits",
-            "bpc",
-            "nstage",
-            "swa_rows",
-            "comp_rows",
-            "n_items",
+            "fp8", "h_total", "h_valid", "groups", "q_tokens", "ktot", "splits", "bpc", "nstage",
+            "swa_rows", "comp_rows", "n_items",
         )
         kernel = make_kernel(**dict(zip(keys, cfg)))
         target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
@@ -1577,14 +1481,11 @@ def _compile(cfg):
 
 def _num_sms():
     import os
-
     if os.environ.get("MLA_SMS"):
         return int(os.environ["MLA_SMS"])
     try:
-        return int(
-            torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-        )
-    except Exception:
+        return int(torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count)
+    except Exception:                                                       
         return 152
 
 
@@ -1619,17 +1520,17 @@ def plan(h_total, q_tokens, ktot, fp8, prefill=False):
         tail = _tail_plan(q_tokens * groups, kblk, fp8, nstage, h_valid)
     else:
         splits, bpc, cost = _choose_split(kblk, q_tokens, groups, fp8, nstage)
-        if fp8:
+        if fp8:                                                                            
             s3, b3, c3 = _choose_split(kblk, q_tokens, groups, fp8, 3)
             if c3 < cost:
                 splits, bpc, nstage = s3, b3, 3
-    import os
-
+    import os                                                                       
     if os.environ.get("MLA_SPLITS"):
         splits = int(os.environ["MLA_SPLITS"])
         bpc = (kblk + splits - 1) // splits
     return dict(
-        groups=groups, h_valid=h_valid, splits=splits, bpc=bpc, nstage=nstage, kblk=kblk, tail=tail
+        groups=groups, h_valid=h_valid, splits=splits, bpc=bpc,
+        nstage=nstage, kblk=kblk, tail=tail,
     )
 
 
@@ -1656,49 +1557,19 @@ def _multishape_setup(data, Q, Kt):
     launches = []
     if p["tail"] is None:
         cfg = (
-            fp8,
-            h_total,
-            p["h_valid"],
-            p["groups"],
-            q_tokens,
-            ktot,
-            p["splits"],
-            p["bpc"],
-            main_nstage,
-            swa_rows,
-            comp_rows,
-            items,
+            fp8, h_total, p["h_valid"], p["groups"], q_tokens, ktot,
+            p["splits"], p["bpc"], main_nstage, swa_rows, comp_rows, items,
         )
         launches.append((_compile(cfg), 0))
     else:
         items_main, c_tail, bpc_tail = p["tail"]
         cfg_main = (
-            fp8,
-            h_total,
-            p["h_valid"],
-            p["groups"],
-            q_tokens,
-            ktot,
-            1,
-            p["kblk"],
-            main_nstage,
-            swa_rows,
-            comp_rows,
-            items_main,
+            fp8, h_total, p["h_valid"], p["groups"], q_tokens, ktot,
+            1, p["kblk"], main_nstage, swa_rows, comp_rows, items_main,
         )
         cfg_tail = (
-            fp8,
-            h_total,
-            p["h_valid"],
-            p["groups"],
-            q_tokens,
-            ktot,
-            c_tail,
-            bpc_tail,
-            p["nstage"],
-            swa_rows,
-            comp_rows,
-            items - items_main,
+            fp8, h_total, p["h_valid"], p["groups"], q_tokens, ktot,
+            c_tail, bpc_tail, p["nstage"], swa_rows, comp_rows, items - items_main,
         )
         launches.append((_compile(cfg_main), 0))
         launches.append((_compile(cfg_tail), items_main))
@@ -1709,20 +1580,16 @@ def _multishape_setup(data, Q, Kt):
         return t.view(-1)
 
     args = (
-        flat(q),
-        flat(swa),
-        flat(comp_flat),
-        indices.view(-1),
-        lens.contiguous(),
-        sinks.to(torch.float32).contiguous(),
-        out.view(-1),
-        float(data["bmm1_scale"]) * LOG2E,
-        float(data["bmm2_scale"]),
+        flat(q), flat(swa), flat(comp_flat), indices.view(-1), lens.contiguous(),
+        sinks.to(torch.float32).contiguous(), out.view(-1),
+        float(data["bmm1_scale"]) * LOG2E, float(data["bmm2_scale"]),
     )
 
+                                                                               
+                                                                             
+                                                                
     tail_stream = torch.cuda.Stream() if len(launches) == 2 else None
     import os
-
     tail_first = os.environ.get("MLA_TAIL_FIRST", "0") == "1"
 
     def run():
@@ -1767,18 +1634,23 @@ def _make_h128_bf16_prefill():
     B_TOPK = 64
     D_QK = 512
     D_V = 512
-    SWA_COLS = 128
-    NUM_UNITS = 5
-    UNIT_ELEMS = 64 * 256
+    SWA_COLS = 128                                               
+    NUM_UNITS = 5                                                               
+    UNIT_ELEMS = 64 * 256                          
     LOG_2_E = math.log2(math.e)
     BF16_BYTES = 2
 
     KERNEL_NAME = "mla_dsv4_sparse_prefill_pkt_quad_static_dual_issuer_maskfirst"
 
-    LAUNCH_TAGS = ("blockIdx.x", "clusterCtaIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
+    LAUNCH_TAGS = (
+        "blockIdx.x",
+        "clusterCtaIdx.x",
+        "threadIdx.x",
+        "tirx.use_dyn_shared_memory",
+    )
 
-    _Q_CACHE_HINT = 0x12F0000000000000
-    _KV_CACHE_HINT = 0x14F0000000000000
+    _Q_CACHE_HINT = 0x12F0000000000000               
+    _KV_CACHE_HINT = 0x14F0000000000000              
 
     _TMA_GATHER4 = (
         "cp.async.bulk.tensor.2d.shared::cluster.global.tile::gather4"
@@ -1793,17 +1665,19 @@ def _make_h128_bf16_prefill():
         "tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64"
     )
     _COMMIT_ONE = "tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.b64"
-    _IDESC_QK = 0x08200490
-    _IDESC_PV = 0x08410490
+    _IDESC_QK = 0x08200490                                                      
+    _IDESC_PV = 0x08410490                           
 
-    TMEM_O = 0
-    TMEM_Q = 256
-    TMEM_S0 = 384
+                                                 
+    TMEM_O = 0                                                      
+    TMEM_Q = 256                                                                       
+    TMEM_S0 = 384                                    
     TMEM_S1 = 448
 
-    SPIN_WAITS = True
+    SPIN_WAITS = True                                                    
     POLY_EX2_DEG2 = (1.0017247200012207, 0.657636284828186, 0.3371894359588623)
     FP32_ROUND_INT = float(2**23 + 2**22)
+
 
     def _add_smem_desc_offset(dst, desc, offset):
         desc_lo = txl.alloc_local((1,), "uint32")
@@ -1811,6 +1685,7 @@ def _make_h128_bf16_prefill():
         txl.ptx.mov.b64(desc_lo[0], desc_hi[0], desc)
         txl.ptx.add.u32(desc_lo[0], desc_lo[0], txl.cast(offset, "uint32"))
         txl.ptx.mov.b64(dst, desc_lo[0], desc_hi[0])
+
 
     def make_kernel(s_q, topk, swa_rows, comp_rows):
         if topk % B_TOPK != 0 or topk < SWA_COLS:
@@ -1833,49 +1708,22 @@ def _make_h128_bf16_prefill():
             def pool_map(buf, rows):
                 return encode(
                     txl.handle_add_byte_offset(buf.data, 0),
-                    2,
-                    D_QK,
-                    rows,
-                    D_QK * BF16_BYTES,
-                    64,
-                    1,
-                    1,
-                    1,
-                    0,
-                    3,
-                    3,
-                    0,
+                    2, D_QK, rows, D_QK * BF16_BYTES, 64, 1, 1, 1, 0, 3, 3, 0,
                 )
 
             swa_tma = pool_map(swa, swa_rows)
             comp_tma = pool_map(comp, comp_rows)
-
+                                                                                     
+                                                                                                    
+                                                                                            
             q_tma = encode(
                 txl.handle_add_byte_offset(q.data, 0),
                 5,
-                64,
-                B_H,
-                2,
-                4,
-                s_q,
-                D_QK * BF16_BYTES,
-                256 * BF16_BYTES,
-                64 * BF16_BYTES,
-                B_H * D_QK * BF16_BYTES,
-                64,
-                B_H // 2,
-                2,
-                2,
-                1,
-                1,
-                1,
-                1,
-                1,
-                1,
-                0,
-                3,
-                3,
-                0,
+                64, B_H, 2, 4, s_q,
+                D_QK * BF16_BYTES, 256 * BF16_BYTES, 64 * BF16_BYTES, B_H * D_QK * BF16_BYTES,
+                64, B_H // 2, 2, 2, 1,
+                1, 1, 1, 1, 1,
+                0, 3, 3, 0,
             )
             return swa_tma, comp_tma, q_tma
 
@@ -1920,15 +1768,15 @@ def _make_h128_bf16_prefill():
 
             smem = txl.smem_pool()
             pool = smem.pool
-
+                                                                                                  
             ring_smem = smem.alloc((NUM_UNITS * 64, 256), "bfloat16", swizzle=txl.SW128B).buf
-            s_smem_gemm = smem.alloc((2, 64, 64), "bfloat16", align=1024)
-            p_exchange = pool.alloc((2, 4, 1024), "uint32", align=128)
-            rowwise_max_buf = pool.alloc((2, 128), "float32")
-            m_buf = pool.alloc((2, 64), "float32")
-            rowwise_li_buf = pool.alloc((2, 128), "float32")
-            rowwise_ref_buf = pool.alloc((2, 128), "float32")
-            rowwise_real_buf = pool.alloc((2, 128), "float32")
+            s_smem_gemm = smem.alloc((2, 64, 64), "bfloat16", align=1024)            
+            p_exchange = pool.alloc((2, 4, 1024), "uint32", align=128)                  
+            rowwise_max_buf = pool.alloc((2, 128), "float32")                                  
+            m_buf = pool.alloc((2, 64), "float32")                                            
+            rowwise_li_buf = pool.alloc((2, 128), "float32")                                       
+            rowwise_ref_buf = pool.alloc((2, 128), "float32")                                    
+            rowwise_real_buf = pool.alloc((2, 128), "float32")                                   
             rowwise_scale_buf = pool.alloc((64,), "float32")
             is_k_valid = pool.alloc((4, 8), "int8", align=16)
 
@@ -2068,9 +1916,7 @@ def _make_h128_bf16_prefill():
                         regular = cluster - 6
                         with txl.If(schedule_round == 0):
                             with txl.Then():
-                                txl.assign(
-                                    token, txl.if_then_else(regular < 6, 64 + regular, regular - 6)
-                                )
+                                txl.assign(token, txl.if_then_else(regular < 6, 64 + regular, regular - 6))
                             with txl.Else():
                                 with txl.If(schedule_round == 1):
                                     with txl.Then():
@@ -2079,9 +1925,7 @@ def _make_h128_bf16_prefill():
                                             txl.if_then_else(
                                                 regular < 6,
                                                 70 + regular,
-                                                txl.if_then_else(
-                                                    regular < 47, 76 + regular, 100 + regular
-                                                ),
+                                                txl.if_then_else(regular < 47, 76 + regular, 100 + regular),
                                             ),
                                         )
                                     with txl.Else():
@@ -2101,15 +1945,10 @@ def _make_h128_bf16_prefill():
                                                                             token,
                                                                             99
                                                                             + regular
-                                                                            + txl.Cast(
-                                                                                "int32",
-                                                                                regular >= 29,
-                                                                            ),
+                                                                            + txl.Cast("int32", regular >= 29),
                                                                         )
                                                                     with txl.Else():
-                                                                        txl.assign(
-                                                                            token, 123 + regular
-                                                                        )
+                                                                        txl.assign(token, 123 + regular)
                                             with txl.Else():
                                                 with txl.If(schedule_round == 3):
                                                     with txl.Then():
@@ -2168,27 +2007,20 @@ def _make_h128_bf16_prefill():
                                     (li_full, 64),
                                     (li_empty, 128),
                                     (clc_response_ready, 1),
+                                                                                                  
+                                                                                  
                                     (clc_empty, 779),
                                 ):
                                     with txl.unroll(1) as i:
                                         txl.ptx["mbarrier.init.shared.b64"](
-                                            txl.cuda.cvta_generic_to_shared(
-                                                txl.address_of(init_bar.buf[i])
-                                            ),
+                                            txl.cuda.cvta_generic_to_shared(txl.address_of(init_bar.buf[i])),
                                             txl.uint32(arrive_count),
                                         )
                                 with txl.unroll(2) as sb:
-                                    for bar, count in (
-                                        (umma_ready, 1),
-                                        (p_empty, 256),
-                                        (so_full, 256),
-                                        (softmax_ready, 1),
-                                        (m_ready, 128),
-                                    ):
+                                    for bar, count in ((umma_ready, 1), (p_empty, 256), (so_full, 256),
+                                                       (softmax_ready, 1), (m_ready, 128)):
                                         txl.ptx["mbarrier.init.shared.b64"](
-                                            txl.cuda.cvta_generic_to_shared(
-                                                txl.address_of(bar.buf[sb])
-                                            ),
+                                            txl.cuda.cvta_generic_to_shared(txl.address_of(bar.buf[sb])),
                                             txl.uint32(count),
                                         )
                                 txl.ptx["fence.mbarrier_init.release.cluster"]()
@@ -2196,48 +2028,32 @@ def _make_h128_bf16_prefill():
                         with txl.If(warp_idx == 2):
                             with txl.Then():
                                 txl.ptx["tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32"](
-                                    txl.cuda.cvta_generic_to_shared(
-                                        txl.address_of(tmem_start_addr[0])
-                                    ),
+                                    txl.cuda.cvta_generic_to_shared(txl.address_of(tmem_start_addr[0])),
                                     txl.uint32(512),
                                 )
                                 allocated_tmem_addr = txl.local_scalar("uint32")
-                                txl.ptx.ld.shared.u32(
-                                    allocated_tmem_addr, tmem_start_addr.ptr_to([0])
-                                )
-                                txl.cuda.trap_when_assert_failed(
-                                    allocated_tmem_addr == txl.uint32(0)
-                                )
-                                txl.ptx[
-                                    "tcgen05.relinquish_alloc_permit.cta_group::2.sync.aligned"
-                                ]()
+                                txl.ptx.ld.shared.u32(allocated_tmem_addr, tmem_start_addr.ptr_to([0]))
+                                txl.cuda.trap_when_assert_failed(allocated_tmem_addr == txl.uint32(0))
+                                txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::2.sync.aligned"]()
                             with txl.Else():
                                 with txl.If(warp_idx == 3), txl.Then():
                                     with txl.If(txl.cuda.elect_sync()), txl.Then():
                                         with txl.unroll(NUM_UNITS) as unit:
                                             txl.ptx["mbarrier.init.shared.b64"](
-                                                txl.cuda.cvta_generic_to_shared(
-                                                    txl.address_of(k_ready.buf[unit])
-                                                ),
+                                                txl.cuda.cvta_generic_to_shared(txl.address_of(k_ready.buf[unit])),
                                                 txl.uint32(1),
                                             )
                                             txl.ptx["mbarrier.init.shared.b64"](
-                                                txl.cuda.cvta_generic_to_shared(
-                                                    txl.address_of(k_empty.buf[unit])
-                                                ),
+                                                txl.cuda.cvta_generic_to_shared(txl.address_of(k_empty.buf[unit])),
                                                 txl.uint32(1),
                                             )
                                         with txl.unroll(4) as init_stage:
                                             txl.ptx["mbarrier.init.shared.b64"](
-                                                txl.cuda.cvta_generic_to_shared(
-                                                    txl.address_of(valid_full.buf[init_stage])
-                                                ),
+                                                txl.cuda.cvta_generic_to_shared(txl.address_of(valid_full.buf[init_stage])),
                                                 txl.uint32(4),
                                             )
                                             txl.ptx["mbarrier.init.shared.b64"](
-                                                txl.cuda.cvta_generic_to_shared(
-                                                    txl.address_of(valid_empty.buf[init_stage])
-                                                ),
+                                                txl.cuda.cvta_generic_to_shared(txl.address_of(valid_empty.buf[init_stage])),
                                                 txl.uint32(128),
                                             )
                                         txl.ptx["fence.mbarrier_init.release.cluster"]()
@@ -2245,13 +2061,12 @@ def _make_h128_bf16_prefill():
 
             initialize_protocol()
 
+                                                                                            
             def store_output(output_epoch, s_q_idx):
                 """Scale O (TMEM) by the per-head softmax denominator and store bf16 to global."""
                 txl.cuda.mbarrier_wait(txl.address_of(li_full.buf[0]), output_epoch)
                 output_scale = txl.local_scalar("float32")
-                txl.ptx.ld.shared.f32(
-                    output_scale, rowwise_scale_buf.ptr_to([idx_in_warpgroup % 64])
-                )
+                txl.ptx.ld.shared.f32(output_scale, rowwise_scale_buf.ptr_to([idx_in_warpgroup % 64]))
                 txl.ptx["mbarrier.arrive.shared.b64"](
                     txl.cuda.cvta_generic_to_shared(txl.address_of(li_empty.buf[0])), txl.uint32(1)
                 )
@@ -2272,29 +2087,21 @@ def _make_h128_bf16_prefill():
                     txl.ptx["tcgen05.wait::ld.sync.aligned"]()
                     with txl.If(epi_k == 7), txl.Then():
                         txl.ptx["tcgen05.fence::before_thread_sync"]()
-                        txl.ptx["mbarrier.arrive.shared::cluster.b64"](
-                            leader_bar(t_out_empty.buf[0])
-                        )
+                        txl.ptx["mbarrier.arrive.shared::cluster.b64"](leader_bar(t_out_empty.buf[0]))
                     for f in range(16):
                         packed_values = txl.local_scalar("uint64")
                         packed_scale = txl.local_scalar("uint64")
-                        txl.ptx.mov.b64(
-                            packed_values, output_storage[f * 2], output_storage[f * 2 + 1]
-                        )
+                        txl.ptx.mov.b64(packed_values, output_storage[f * 2], output_storage[f * 2 + 1])
                         txl.ptx.mov.b64(packed_scale, output_scale, output_scale)
                         txl.ptx["mul.rz.ftz.f32x2"](packed_values, packed_values, packed_scale)
-                        txl.ptx.mov.b64(
-                            output_storage[f * 2], output_storage[f * 2 + 1], packed_values
-                        )
+                        txl.ptx.mov.b64(output_storage[f * 2], output_storage[f * 2 + 1], packed_values)
                     for f in range(16):
                         txl.ptx.cvt.rn.bf16x2.f32(
                             bf16_storage[f], output_storage[f * 2 + 1], output_storage[f * 2]
                         )
                     for f in range(2):
                         txl.ptx["st.global.L1::no_allocate.v8.b32"](
-                            txl.ptr_byte_offset(
-                                out_row, (epi_k * 32 + f * 16) * BF16_BYTES, "uint32"
-                            ),
+                            txl.ptr_byte_offset(out_row, (epi_k * 32 + f * 16) * BF16_BYTES, "uint32"),
                             bf16_storage[f * 8],
                             bf16_storage[f * 8 + 1],
                             bf16_storage[f * 8 + 2],
@@ -2324,35 +2131,29 @@ def _make_h128_bf16_prefill():
                     with txl.If(cta_idx == 0), txl.Then():
                         with txl.If(warp_idx == 0), txl.Then():
                             with txl.If(txl.cuda.elect_sync()), txl.Then():
+                                                                                                
+                                                                                                
+                                                                                                  
+                                                                                              
+                                                                                            
+                                                                                      
                                 qo_tq_tok = iket_range("qo-wait-tqready")
                                 with txl.If(last_valid != 0), txl.Then():
-                                    txl.cuda.mbarrier_wait(
-                                        txl.address_of(tq_ready.buf[0]), previous_epoch
-                                    )
+                                    txl.cuda.mbarrier_wait(txl.address_of(tq_ready.buf[0]), previous_epoch)
                                 txl.cuda.iket.range_end(qo_tq_tok[0])
                                 for unit in (unit_lo, unit_hi):
                                     txl.ptx["mbarrier.arrive.expect_tx.shared.b64"](
-                                        txl.cuda.cvta_generic_to_shared(
-                                            txl.address_of(k_ready.buf[unit])
-                                        ),
+                                        txl.cuda.cvta_generic_to_shared(txl.address_of(k_ready.buf[unit])),
                                         txl.uint32(65536),
                                     )
                                 qo_qw_tok = iket_range("qo-wait-q")
-                                txl.cuda.mbarrier_wait(
-                                    txl.address_of(k_ready.buf[unit_lo]), phase_lo
-                                )
-                                txl.cuda.mbarrier_wait(
-                                    txl.address_of(k_ready.buf[unit_hi]), phase_hi
-                                )
+                                txl.cuda.mbarrier_wait(txl.address_of(k_ready.buf[unit_lo]), phase_lo)
+                                txl.cuda.mbarrier_wait(txl.address_of(k_ready.buf[unit_hi]), phase_hi)
                                 txl.cuda.iket.range_end(qo_qw_tok[0])
                                 txl.ptx["tcgen05.fence::after_thread_sync"]()
                                 cp_desc = txl.local_scalar("uint64")
                                 txl.cuda.tcgen05.encode_matrix_descriptor(
-                                    cp_desc.source.data,
-                                    txl.reinterpret(txl.handle().ty, txl.uint64(0)),
-                                    1,
-                                    64,
-                                    3,
+                                    cp_desc.source.data, txl.reinterpret(txl.handle().ty, txl.uint64(0)), 1, 64, 3
                                 )
                                 for unit_sel, unit in ((0, unit_lo), (1, unit_hi)):
                                     for p_local in range(2):
@@ -2366,16 +2167,12 @@ def _make_h128_bf16_prefill():
                                             txl.ptx["tcgen05.cp.cta_group::2.128x256b"](
                                                 txl.Cast("uint32", TMEM_Q + p_glob * 32 + kq * 8),
                                                 txl.bitwise_or(
-                                                    txl.bitwise_and(
-                                                        cp_desc, txl.bitwise_not(txl.uint64(16383))
-                                                    ),
+                                                    txl.bitwise_and(cp_desc, txl.bitwise_not(txl.uint64(16383))),
                                                     txl.Cast(
                                                         "uint64",
                                                         txl.bitwise_and(
                                                             txl.shift_right(
-                                                                txl.cuda.cvta_generic_to_shared(
-                                                                    ring_ptr(src_byte)
-                                                                ),
+                                                                txl.cuda.cvta_generic_to_shared(ring_ptr(src_byte)),
                                                                 txl.uint32(4),
                                                             ),
                                                             txl.uint32(16383),
@@ -2383,21 +2180,18 @@ def _make_h128_bf16_prefill():
                                                     ),
                                                 ),
                                             )
-
+                                                                                                  
                                 for unit in (unit_lo, unit_hi):
                                     txl.ptx[_COMMIT_MC](
-                                        txl.cuda.cvta_generic_to_shared(
-                                            txl.address_of(k_empty.buf[unit])
-                                        ),
+                                        txl.cuda.cvta_generic_to_shared(txl.address_of(k_empty.buf[unit])),
                                         txl.Cast("uint16", 3),
                                     )
                                 txl.ptx[_COMMIT_MC](
-                                    txl.cuda.cvta_generic_to_shared(
-                                        txl.address_of(q_consumed.buf[0])
-                                    ),
+                                    txl.cuda.cvta_generic_to_shared(txl.address_of(q_consumed.buf[0])),
                                     txl.Cast("uint16", 3),
                                 )
-
+                                                                               
+                                            
                     ring_linear = txl.local_scalar("int32", init=ring.stage + n_blocks)
                     txl.assign(
                         ring.phase,
@@ -2417,11 +2211,10 @@ def _make_h128_bf16_prefill():
                 txl.ptx["tcgen05.fence::before_thread_sync"]()
                 txl.ptx["bar.sync"](txl.uint32(0), txl.uint32(128))
                 with txl.If(warp_idx == 0), txl.Then():
-                    txl.ptx["tcgen05.dealloc.cta_group::2.sync.aligned.b32"](
-                        txl.uint32(0), txl.uint32(512)
-                    )
+                    txl.ptx["tcgen05.dealloc.cta_group::2.sync.aligned.b32"](txl.uint32(0), txl.uint32(512))
                 txl.cuda.iket.range_end(q_o_token[0])
 
+                                                                                            
             def kv_gather():
                 kv_gather_token = iket_range("kv-gather")
                 wg1_warp_idx = thread_idx // 32 - 4
@@ -2431,19 +2224,13 @@ def _make_h128_bf16_prefill():
                     mask_pipe = txl.PipelineState(4, phase=0)
                     cur_indices = txl.alloc_local((16,), "int32")
                     nxt_indices = txl.alloc_local((16,), "int32")
-                    cur_u32 = txl.decl_buffer(
-                        (16,), "int32", data=cur_indices.data, scope="local"
-                    ).view("uint32")
-                    nxt_u32 = txl.decl_buffer(
-                        (16,), "int32", data=nxt_indices.data, scope="local"
-                    ).view("uint32")
+                    cur_u32 = txl.decl_buffer((16,), "int32", data=cur_indices.data, scope="local").view("uint32")
+                    nxt_u32 = txl.decl_buffer((16,), "int32", data=nxt_indices.data, scope="local").view("uint32")
 
                     def load_indices(dst_u32, s_q_idx, k):
                         """The 16 rows this warp gathers: {8w..8w+7} and {32+8w..32+8w+7}."""
                         with txl.unroll(2) as local_row:
-                            row_base = (
-                                s_q_idx * topk + k * B_TOPK + local_row * 32 + wg1_warp_idx * 8
-                            )
+                            row_base = s_q_idx * topk + k * B_TOPK + local_row * 32 + wg1_warp_idx * 8
                             txl.ptx["ld.global.nc.L1::no_allocate.L2::evict_first.L2::256B.v8.u32"](
                                 *[dst_u32[local_row * 8 + i] for i in range(8)],
                                 txl.address_of(indices[row_base]),
@@ -2455,20 +2242,17 @@ def _make_h128_bf16_prefill():
                         txl.ptx.ld.global_.s32(wg1_topk_len, topk_lens.ptr_to([wg1_s_q_idx]))
                         wg1_num_k_blocks = txl.max((wg1_topk_len + B_TOPK - 1) // B_TOPK, 1)
                         load_indices(cur_u32, wg1_s_q_idx, 0)
-
+                                                                                    
                         for unit_sel in range(2):
                             with txl.If(wg1_warp_idx == 0), txl.Then():
                                 txl.cuda.mbarrier_wait(
-                                    txl.address_of(k_empty.buf[ring.stage]),
-                                    txl.bitwise_xor(ring.phase, 1),
+                                    txl.address_of(k_empty.buf[ring.stage]), txl.bitwise_xor(ring.phase, 1)
                                 )
                                 txl.ptx[_TMA_Q_5D](
                                     txl.cuda.cvta_generic_to_shared(
                                         ring_ptr(ring.stage * (UNIT_ELEMS * BF16_BYTES))
                                     ),
-                                    txl.reinterpret(
-                                        txl.handle().ty, txl.address_of(q_tma_tensormap)
-                                    ),
+                                    txl.reinterpret(txl.handle().ty, txl.address_of(q_tma_tensormap)),
                                     0,
                                     cta_idx * 64,
                                     0,
@@ -2479,12 +2263,11 @@ def _make_h128_bf16_prefill():
                                 )
                             ring.advance()
                         with txl.serial(wg1_num_k_blocks, unroll=False) as k:
+                                                                                           
                             with txl.If(k + 1 < wg1_num_k_blocks), txl.Then():
                                 load_indices(nxt_u32, wg1_s_q_idx, k + 1)
-
-                            pool_rows = txl.if_then_else(
-                                k < swa_blocks, txl.int32(swa_rows), txl.int32(comp_rows)
-                            )
+                                                                                         
+                            pool_rows = txl.if_then_else(k < swa_blocks, txl.int32(swa_rows), txl.int32(comp_rows))
                             gt_mask_tok = iket_range("gt-mask")
                             txl.cuda.mbarrier_wait(
                                 txl.address_of(valid_empty.buf[mask_pipe.stage]),
@@ -2496,33 +2279,24 @@ def _make_h128_bf16_prefill():
                                 for j in range(8):
                                     idx = cur_indices[local_row * 8 + j]
                                     valid = txl.bitwise_and(
-                                        txl.bitwise_and(idx >= 0, idx < pool_rows),
-                                        pos0 + j < wg1_topk_len,
+                                        txl.bitwise_and(idx >= 0, idx < pool_rows), pos0 + j < wg1_topk_len
                                     )
                                     terms.append(txl.Select(valid, txl.int32(1 << j), txl.int32(0)))
                                 while len(terms) > 1:
-                                    terms = [
-                                        txl.bitwise_or(terms[j], terms[j + 1])
-                                        for j in range(0, len(terms), 2)
-                                    ]
+                                    terms = [txl.bitwise_or(terms[j], terms[j + 1]) for j in range(0, len(terms), 2)]
                                 txl.ptx.st.shared.b8(
-                                    is_k_valid.ptr_to(
-                                        [mask_pipe.stage, local_row * 4 + wg1_warp_idx]
-                                    ),
+                                    is_k_valid.ptr_to([mask_pipe.stage, local_row * 4 + wg1_warp_idx]),
                                     txl.reinterpret("uint8", txl.Cast("int8", terms[0])),
                                 )
                             txl.ptx["mbarrier.arrive.shared.b64"](
-                                txl.cuda.cvta_generic_to_shared(
-                                    txl.address_of(valid_full.buf[mask_pipe.stage])
-                                ),
+                                txl.cuda.cvta_generic_to_shared(txl.address_of(valid_full.buf[mask_pipe.stage])),
                                 txl.uint32(1),
                             )
                             txl.cuda.iket.range_end(gt_mask_tok[0])
                             mask_pipe.advance()
                             gt_wait_tok = iket_range("gt-wait-empty")
                             txl.cuda.mbarrier_wait(
-                                txl.address_of(k_empty.buf[ring.stage]),
-                                txl.bitwise_xor(ring.phase, 1),
+                                txl.address_of(k_empty.buf[ring.stage]), txl.bitwise_xor(ring.phase, 1)
                             )
                             txl.cuda.iket.range_end(gt_wait_tok[0])
                             gt_issue_tok = iket_range("gt-issue")
@@ -2540,12 +2314,8 @@ def _make_h128_bf16_prefill():
                                             + col_atom * 4096
                                         ) * BF16_BYTES
                                         txl.ptx[_TMA_GATHER4](
-                                            txl.cuda.cvta_generic_to_shared(
-                                                ring_ptr(kv_dst_offset)
-                                            ),
-                                            txl.reinterpret(
-                                                txl.handle().ty, txl.address_of(tensor_map)
-                                            ),
+                                            txl.cuda.cvta_generic_to_shared(ring_ptr(kv_dst_offset)),
+                                            txl.reinterpret(txl.handle().ty, txl.address_of(tensor_map)),
                                             src_col + col_atom * 64,
                                             cur_indices[row_group * 4],
                                             cur_indices[row_group * 4 + 1],
@@ -2568,6 +2338,7 @@ def _make_h128_bf16_prefill():
                         jobs.advance()
                 txl.cuda.iket.range_end(kv_gather_token[0])
 
+                                                                                                                        
             def qk_issuer():
                 """Leader warp 8: stream the QK^T MMAs over the continuous block sequence.
 
@@ -2587,15 +2358,11 @@ def _make_h128_bf16_prefill():
                         mm_wp_tok = iket_range("mm-wait-pempty")
                         hot_wait(
                             p_empty.buf[s_buf],
-                            txl.bitwise_xor(
-                                txl.bitwise_and(txl.shift_right(qk_blk.stage, 1), 1), 1
-                            ),
+                            txl.bitwise_xor(txl.bitwise_and(txl.shift_right(qk_blk.stage, 1), 1), 1),
                         )
                         txl.cuda.iket.range_end(mm_wp_tok[0])
                         txl.ptx["mbarrier.arrive.expect_tx.shared.b64"](
-                            txl.cuda.cvta_generic_to_shared(
-                                txl.address_of(k_ready.buf[qk_ring.stage])
-                            ),
+                            txl.cuda.cvta_generic_to_shared(txl.address_of(k_ready.buf[qk_ring.stage])),
                             txl.uint32(65536),
                         )
                         mm_wk_tok = iket_range("mm-wait-kready")
@@ -2620,14 +2387,8 @@ def _make_h128_bf16_prefill():
                                 txl.Cast("uint32", ki * 8 + TMEM_Q),
                                 descB_off,
                                 txl.uint32(_IDESC_QK),
-                                txl.uint32(0),
-                                txl.uint32(0),
-                                txl.uint32(0),
-                                txl.uint32(0),
-                                txl.uint32(0),
-                                txl.uint32(0),
-                                txl.uint32(0),
-                                txl.uint32(0),
+                                txl.uint32(0), txl.uint32(0), txl.uint32(0), txl.uint32(0),
+                                txl.uint32(0), txl.uint32(0), txl.uint32(0), txl.uint32(0),
                                 txl.Or(ki != 0, txl.bool(False)),
                             )
                         txl.ptx[_COMMIT_MC](
@@ -2635,17 +2396,16 @@ def _make_h128_bf16_prefill():
                             txl.Cast("uint16", 3),
                         )
                         with txl.If(is_last), txl.Then():
-                            txl.ptx[_COMMIT_ONE](
-                                txl.cuda.cvta_generic_to_shared(txl.address_of(tq_ready.buf[0]))
-                            )
+                            txl.ptx[_COMMIT_ONE](txl.cuda.cvta_generic_to_shared(txl.address_of(tq_ready.buf[0])))
                         txl.cuda.iket.range_end(mm_qk_tok[0])
                         qk_ring.advance()
                         qk_blk.advance()
 
+
                     with txl.While(jobs.valid != 0):
                         qk_s_q_idx = scheduled_q_idx(jobs.block_idx)
                         n_blocks = num_blocks_of(qk_s_q_idx)
-
+                                                                  
                         for _ in range(2):
                             qk_ring.advance()
                         mm_wq_tok = iket_range("mm-wait-qconsumed")
@@ -2673,13 +2433,10 @@ def _make_h128_bf16_prefill():
                     def issue_pv(is_first):
                         pbuf = txl.bitwise_and(pv_blk.stage, 1)
                         mm_ws_tok = iket_range("mm-wait-sofull")
-                        hot_wait(
-                            so_full.buf[pbuf], txl.bitwise_and(txl.shift_right(pv_blk.stage, 1), 1)
-                        )
+                        hot_wait(so_full.buf[pbuf], txl.bitwise_and(txl.shift_right(pv_blk.stage, 1), 1))
                         with txl.If(is_first), txl.Then():
                             txl.cuda.mbarrier_wait(
-                                txl.address_of(t_out_empty.buf[0]),
-                                txl.bitwise_xor(jobs.epoch.phase, 1),
+                                txl.address_of(t_out_empty.buf[0]), txl.bitwise_xor(jobs.epoch.phase, 1)
                             )
                         txl.cuda.iket.range_end(mm_ws_tok[0])
                         mm_pv_tok = iket_range("mm-pv-issue")
@@ -2689,11 +2446,7 @@ def _make_h128_bf16_prefill():
                         )
                         descA_local = txl.local_scalar("uint64")
                         txl.cuda.tcgen05.encode_matrix_descriptor(
-                            txl.address_of(descA_local),
-                            txl.address_of(s_smem_gemm[pbuf, 0, 0]),
-                            64,
-                            8,
-                            0,
+                            txl.address_of(descA_local), txl.address_of(s_smem_gemm[pbuf, 0, 0]), 64, 8, 0
                         )
                         descB_local = txl.local_scalar("uint64")
                         txl.cuda.tcgen05.encode_matrix_descriptor(
@@ -2714,31 +2467,22 @@ def _make_h128_bf16_prefill():
                                     descA_off,
                                     descB_off,
                                     txl.uint32(_IDESC_PV),
-                                    txl.uint32(0),
-                                    txl.uint32(0),
-                                    txl.uint32(0),
-                                    txl.uint32(0),
-                                    txl.uint32(0),
-                                    txl.uint32(0),
-                                    txl.uint32(0),
-                                    txl.uint32(0),
+                                    txl.uint32(0), txl.uint32(0), txl.uint32(0), txl.uint32(0),
+                                    txl.uint32(0), txl.uint32(0), txl.uint32(0), txl.uint32(0),
                                     txl.Or(ki != 0, txl.Cast("bool", o_accumulate)),
                                 )
                         txl.ptx[_COMMIT_MC](
-                            txl.cuda.cvta_generic_to_shared(
-                                txl.address_of(softmax_ready.buf[pbuf])
-                            ),
+                            txl.cuda.cvta_generic_to_shared(txl.address_of(softmax_ready.buf[pbuf])),
                             txl.Cast("uint16", 3),
                         )
                         txl.ptx[_COMMIT_MC](
-                            txl.cuda.cvta_generic_to_shared(
-                                txl.address_of(k_empty.buf[pv_ring.stage])
-                            ),
+                            txl.cuda.cvta_generic_to_shared(txl.address_of(k_empty.buf[pv_ring.stage])),
                             txl.Cast("uint16", 3),
                         )
                         txl.cuda.iket.range_end(mm_pv_tok[0])
                         pv_ring.advance()
                         pv_blk.advance()
+
 
                     with txl.While(jobs.valid != 0):
                         pv_s_q_idx = scheduled_q_idx(jobs.block_idx)
@@ -2771,6 +2515,7 @@ def _make_h128_bf16_prefill():
                             jobs.advance()
                 txl.cuda.iket.range_end(clc_token[0])
 
+                                                                                         
             def softmax(sel: txl.constexpr):
                 """Softmax warpgroup ``sel`` handles blocks k with k % 2 == sel (S/P buffer sel).
 
@@ -2786,7 +2531,9 @@ def _make_h128_bf16_prefill():
                 pair_bar = txl.Cast("uint32", 2 + 2 * sel + txl.bitwise_and(local_warp_idx, 1))
                 head_in_half = idx_in_warpgroup % 64
                 jobs = CLCJobScheduler()
-
+                                                                                        
+                                                                                         
+                                                                                              
                 valid_ring = txl.RingState(4, phase=0, stage=sel, stride=2)
                 sblk = txl.PipelineState(1, phase=0)
                 c0 = txl.local_scalar("int32", init=txl.int32(0))
@@ -2794,14 +2541,10 @@ def _make_h128_bf16_prefill():
                     wg3_s_q_idx = scheduled_q_idx(jobs.block_idx)
                     wg3_num_k_blocks = num_blocks_of(wg3_s_q_idx)
                     k_first = txl.bitwise_and(c0 + sel, 1)
-                    m_ref = txl.local_scalar(
-                        "float32", init=txl.float32(-1000000000000000019884624838656.0)
-                    )
+                    m_ref = txl.local_scalar("float32", init=txl.float32(-1000000000000000019884624838656.0))
                     li = txl.local_scalar("float32", init=txl.float32(0.0))
                     real_mi = txl.local_scalar("float32", init=txl.float32("-inf"))
-                    scale_pair = txl.local_scalar(
-                        "uint64", init=txl.cuda.make_float2(scale_log2, scale_log2)
-                    )
+                    scale_pair = txl.local_scalar("uint64", init=txl.cuda.make_float2(scale_log2, scale_log2))
                     my_blocks = (wg3_num_k_blocks - k_first + 1) // 2
                     with txl.serial(my_blocks, unroll=False) as kk:
                         k = kk * 2 + k_first
@@ -2815,13 +2558,10 @@ def _make_h128_bf16_prefill():
                         txl.cuda.iket.range_end(sm_wait_tok[0])
                         sm_math_tok = iket_range("sm-math")
                         txl.ptx["tcgen05.fence::after_thread_sync"]()
-                        peer_col = txl.if_then_else(
-                            local_warp_idx < 2, txl.uint32(32), txl.uint32(0)
-                        )
+                        peer_col = txl.if_then_else(local_warp_idx < 2, txl.uint32(32), txl.uint32(0))
                         own_col = txl.uint32(32) - peer_col
                         txl.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
-                            *[p_peer[i] for i in range(32)],
-                            txl.cuda.get_tmem_addr(s_col, 0, peer_col),
+                            *[p_peer[i] for i in range(32)], txl.cuda.get_tmem_addr(s_col, 0, peer_col)
                         )
                         txl.ptx["tcgen05.wait::ld.sync.aligned"]()
                         txl.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
@@ -2832,45 +2572,27 @@ def _make_h128_bf16_prefill():
                             p_peer_offset = exchange_i * 4
                             txl.ptx["st.shared.v4.u32"](
                                 txl.cuda.cvta_generic_to_shared(
-                                    txl.address_of(
-                                        p_exchange[
-                                            sel, txl.bitwise_xor(local_warp_idx, 2), exchange_offset
-                                        ]
-                                    )
+                                    txl.address_of(p_exchange[sel, txl.bitwise_xor(local_warp_idx, 2), exchange_offset])
                                 ),
-                                p_peer[p_peer_offset],
-                                p_peer[p_peer_offset + 1],
-                                p_peer[p_peer_offset + 2],
-                                p_peer[p_peer_offset + 3],
+                                p_peer[p_peer_offset], p_peer[p_peer_offset + 1],
+                                p_peer[p_peer_offset + 2], p_peer[p_peer_offset + 3],
                             )
                         valid_word_offset = txl.if_then_else(local_warp_idx >= 2, 1, 0)
                         buffer_18 = txl.decl_buffer(
-                            (4, 2),
-                            "uint32",
-                            data=is_k_valid.data,
-                            elem_offset=is_k_valid_word_offset,
-                            scope="shared.dyn",
-                            align=16,
+                            (4, 2), "uint32", data=is_k_valid.data, elem_offset=is_k_valid_word_offset,
+                            scope="shared.dyn", align=16,
                         )
                         is_k_valid_u32 = txl.local_scalar("uint32")
-                        txl.ptx.ld.shared.u32(
-                            is_k_valid_u32, buffer_18.ptr_to([v_stage, valid_word_offset])
-                        )
+                        txl.ptx.ld.shared.u32(is_k_valid_u32, buffer_18.ptr_to([v_stage, valid_word_offset]))
                         txl.ptx["tcgen05.wait::ld.sync.aligned"]()
                         txl.ptx["tcgen05.fence::before_thread_sync"]()
                         txl.ptx["mbarrier.arrive.shared::cluster.b64"](leader_bar(p_empty.buf[sel]))
                         with txl.If(is_k_valid_u32 != txl.uint32(4294967295)), txl.Then():
                             with txl.unroll(32) as p_i:
                                 invalid_p_predicate = txl.bitwise_and(
-                                    txl.shift_right(is_k_valid_u32, txl.Cast("uint32", p_i)),
-                                    txl.uint32(1),
+                                    txl.shift_right(is_k_valid_u32, txl.Cast("uint32", p_i)), txl.uint32(1)
                                 ) == txl.uint32(0)
-                                txl.ptx.mov.b32(
-                                    p[p_i],
-                                    txl.if_then_else(
-                                        invalid_p_predicate, txl.uint32(4286578688), p[p_i]
-                                    ),
-                                )
+                                txl.ptx.mov.b32(p[p_i], txl.if_then_else(invalid_p_predicate, txl.uint32(4286578688), p[p_i]))
                         sum_pair0 = txl.local_scalar("uint64")
                         sum_pair1 = txl.local_scalar("uint64")
                         mx = txl.alloc_local((8,), "float32")
@@ -2879,95 +2601,61 @@ def _make_h128_bf16_prefill():
                             exchange_offset: txl.int32 = exchange_i * 32 * 4 + lane_idx * 4
                             p_exchange_tmp = txl.alloc_local((4,), "uint32")
                             txl.ptx["ld.shared.v4.u32"](
-                                p_exchange_tmp[0],
-                                p_exchange_tmp[1],
-                                p_exchange_tmp[2],
-                                p_exchange_tmp[3],
-                                txl.cuda.cvta_generic_to_shared(
-                                    txl.address_of(p_exchange[sel, local_warp_idx, exchange_offset])
-                                ),
+                                p_exchange_tmp[0], p_exchange_tmp[1], p_exchange_tmp[2], p_exchange_tmp[3],
+                                txl.cuda.cvta_generic_to_shared(txl.address_of(p_exchange[sel, local_warp_idx, exchange_offset])),
                             )
                             p_pair0 = txl.cuda.make_float2(
-                                txl.cuda.uint_as_float(p[exchange_i * 4]),
-                                txl.cuda.uint_as_float(p[exchange_i * 4 + 1]),
+                                txl.cuda.uint_as_float(p[exchange_i * 4]), txl.cuda.uint_as_float(p[exchange_i * 4 + 1])
                             )
                             peer_pair0 = txl.cuda.make_float2(
-                                txl.cuda.uint_as_float(p_exchange_tmp[0]),
-                                txl.cuda.uint_as_float(p_exchange_tmp[1]),
+                                txl.cuda.uint_as_float(p_exchange_tmp[0]), txl.cuda.uint_as_float(p_exchange_tmp[1])
                             )
                             txl.ptx["add.rn.f32x2"](sum_pair0, p_pair0, peer_pair0)
-                            txl.ptx.mov.b32(
-                                p[exchange_i * 4],
-                                txl.cuda.float_as_uint(txl.cuda.float2_x(sum_pair0)),
-                            )
-                            txl.ptx.mov.b32(
-                                p[exchange_i * 4 + 1],
-                                txl.cuda.float_as_uint(txl.cuda.float2_y(sum_pair0)),
-                            )
+                            txl.ptx.mov.b32(p[exchange_i * 4], txl.cuda.float_as_uint(txl.cuda.float2_x(sum_pair0)))
+                            txl.ptx.mov.b32(p[exchange_i * 4 + 1], txl.cuda.float_as_uint(txl.cuda.float2_y(sum_pair0)))
                             p_pair1 = txl.cuda.make_float2(
-                                txl.cuda.uint_as_float(p[exchange_i * 4 + 2]),
-                                txl.cuda.uint_as_float(p[exchange_i * 4 + 3]),
+                                txl.cuda.uint_as_float(p[exchange_i * 4 + 2]), txl.cuda.uint_as_float(p[exchange_i * 4 + 3])
                             )
                             peer_pair1 = txl.cuda.make_float2(
-                                txl.cuda.uint_as_float(p_exchange_tmp[2]),
-                                txl.cuda.uint_as_float(p_exchange_tmp[3]),
+                                txl.cuda.uint_as_float(p_exchange_tmp[2]), txl.cuda.uint_as_float(p_exchange_tmp[3])
                             )
                             txl.ptx["add.rn.f32x2"](sum_pair1, p_pair1, peer_pair1)
-                            txl.ptx.mov.b32(
-                                p[exchange_i * 4 + 2],
-                                txl.cuda.float_as_uint(txl.cuda.float2_x(sum_pair1)),
-                            )
-                            txl.ptx.mov.b32(
-                                p[exchange_i * 4 + 3],
-                                txl.cuda.float_as_uint(txl.cuda.float2_y(sum_pair1)),
-                            )
+                            txl.ptx.mov.b32(p[exchange_i * 4 + 2], txl.cuda.float_as_uint(txl.cuda.float2_x(sum_pair1)))
+                            txl.ptx.mov.b32(p[exchange_i * 4 + 3], txl.cuda.float_as_uint(txl.cuda.float2_y(sum_pair1)))
                             txl.assign(
                                 mx[exchange_i],
                                 txl.max(
-                                    txl.max(
-                                        txl.cuda.float2_x(sum_pair0), txl.cuda.float2_y(sum_pair0)
-                                    ),
-                                    txl.max(
-                                        txl.cuda.float2_x(sum_pair1), txl.cuda.float2_y(sum_pair1)
-                                    ),
+                                    txl.max(txl.cuda.float2_x(sum_pair0), txl.cuda.float2_y(sum_pair0)),
+                                    txl.max(txl.cuda.float2_x(sum_pair1), txl.cuda.float2_y(sum_pair1)),
                                 ),
                             )
-
+                                                                                    
+                                                                                      
+                                                                 
                         for width in (4, 2, 1):
                             for i in range(width):
                                 txl.assign(mx[i], txl.max(mx[i], mx[i + width]))
                         cur_pi_max = txl.local_scalar("float32", init=mx[0] * scale_log2)
-                        txl.ptx.st.shared.f32(
-                            rowwise_max_buf.ptr_to([sel, idx_in_warpgroup]), cur_pi_max
-                        )
+                        txl.ptx.st.shared.f32(rowwise_max_buf.ptr_to([sel, idx_in_warpgroup]), cur_pi_max)
                         txl.ptx["bar.sync"](pair_bar, txl.uint32(64))
                         peer_pi_max = txl.local_scalar("float32")
-                        txl.ptx.ld.shared.f32(
-                            peer_pi_max,
-                            rowwise_max_buf.ptr_to([sel, txl.bitwise_xor(idx_in_warpgroup, 64)]),
-                        )
+                        txl.ptx.ld.shared.f32(peer_pi_max, rowwise_max_buf.ptr_to([sel, txl.bitwise_xor(idx_in_warpgroup, 64)]))
                         txl.assign(cur_pi_max, txl.max(cur_pi_max, peer_pi_max))
                         txl.assign(real_mi, txl.max(real_mi, cur_pi_max))
-
-                        m_prev = txl.local_scalar(
-                            "float32", init=txl.float32(-1000000000000000019884624838656.0)
-                        )
+                                                                                     
+                        m_prev = txl.local_scalar("float32", init=txl.float32(-1000000000000000019884624838656.0))
                         sm_wm_tok = iket_range("sm-wait-m")
-
+                                                                                      
+                                                                                             
+                                                                                           
+                                                                                    
                         with txl.If(c0 + k > 0), txl.Then():
-                            hot_wait(
-                                m_ready.buf[other],
-                                txl.bitwise_xor(sblk.phase, 1) if sel == 0 else sblk.phase,
-                            )
+                            hot_wait(m_ready.buf[other], txl.bitwise_xor(sblk.phase, 1) if sel == 0 else sblk.phase)
                             with txl.If(k > 0), txl.Then():
                                 txl.ptx.ld.shared.f32(m_prev, m_buf.ptr_to([other, head_in_half]))
                         txl.cuda.iket.range_end(sm_wm_tok[0])
                         should_scale_o = txl.local_scalar("uint32")
-                        txl.ptx.vote_sync.any.pred(
-                            should_scale_o,
-                            cur_pi_max - m_prev > txl.float32(6.0),
-                            txl.uint32(4294967295),
-                        )
+                        txl.ptx.vote_sync.any.pred(should_scale_o, cur_pi_max - m_prev > txl.float32(6.0), txl.uint32(4294967295))
                         new_max = txl.local_scalar("float32")
                         scale_for_old = txl.local_scalar("float32")
                         with txl.If(should_scale_o == txl.uint32(0)):
@@ -2977,92 +2665,61 @@ def _make_h128_bf16_prefill():
                             with txl.Else():
                                 txl.assign(new_max, txl.max(cur_pi_max, m_prev))
                                 txl.ptx["ex2.approx.ftz.f32"](scale_for_old, m_prev - new_max)
-
+                                                                                            
                         with txl.If(idx_in_warpgroup < 64), txl.Then():
                             txl.ptx.st.shared.f32(m_buf.ptr_to([sel, head_in_half]), new_max)
                         txl.ptx["mbarrier.arrive.shared.b64"](
-                            txl.cuda.cvta_generic_to_shared(txl.address_of(m_ready.buf[sel])),
-                            txl.uint32(1),
+                            txl.cuda.cvta_generic_to_shared(txl.address_of(m_ready.buf[sel])), txl.uint32(1)
                         )
-
+                                                                      
                         li_scale = txl.local_scalar("float32")
                         txl.ptx["ex2.approx.ftz.f32"](li_scale, m_ref - new_max)
                         txl.assign(m_ref, new_max)
                         s_frag = txl.alloc_local((32,), "bfloat16")
                         s_pack = s_frag.view("uint32")
-                        cur_sum_pair = txl.local_scalar(
-                            "uint64", init=txl.cuda.make_float2(txl.float32(0.0), txl.float32(0.0))
-                        )
+                        cur_sum_pair = txl.local_scalar("uint64", init=txl.cuda.make_float2(txl.float32(0.0), txl.float32(0.0)))
                         neg_new_max_pair = txl.local_scalar(
-                            "uint64",
-                            init=txl.cuda.make_float2(
-                                new_max * txl.float32(-1.0), new_max * txl.float32(-1.0)
-                            ),
+                            "uint64", init=txl.cuda.make_float2(new_max * txl.float32(-1.0), new_max * txl.float32(-1.0))
                         )
                         fma_pair = txl.local_scalar("uint64")
                         s_vals = txl.alloc_local((2,), "float32")
                         for s_i in range(16):
-                            p_pair = txl.cuda.make_float2(
-                                txl.cuda.uint_as_float(p[s_i * 2]),
-                                txl.cuda.uint_as_float(p[s_i * 2 + 1]),
-                            )
+                            p_pair = txl.cuda.make_float2(txl.cuda.uint_as_float(p[s_i * 2]), txl.cuda.uint_as_float(p[s_i * 2 + 1]))
                             txl.ptx["fma.rn.f32x2"](fma_pair, p_pair, scale_pair, neg_new_max_pair)
-
+                                                                                         
                             if s_i % 4 == 3:
-                                ex2_emulation_2(
-                                    s_vals,
-                                    0,
-                                    txl.cuda.float2_x(fma_pair),
-                                    txl.cuda.float2_y(fma_pair),
-                                )
+                                ex2_emulation_2(s_vals, 0, txl.cuda.float2_x(fma_pair), txl.cuda.float2_y(fma_pair))
                             else:
-                                txl.ptx["ex2.approx.ftz.f32"](
-                                    s_vals[0], txl.cuda.float2_x(fma_pair)
-                                )
-                                txl.ptx["ex2.approx.ftz.f32"](
-                                    s_vals[1], txl.cuda.float2_y(fma_pair)
-                                )
+                                txl.ptx["ex2.approx.ftz.f32"](s_vals[0], txl.cuda.float2_x(fma_pair))
+                                txl.ptx["ex2.approx.ftz.f32"](s_vals[1], txl.cuda.float2_y(fma_pair))
                             s_pair = txl.cuda.make_float2(s_vals[0], s_vals[1])
                             txl.ptx["add.rn.f32x2"](cur_sum_pair, cur_sum_pair, s_pair)
-                            txl.ptx.mov.b32(
-                                s_pack[s_i], txl.cuda.float22bfloat162_rn(s_vals[0], s_vals[1])
-                            )
+                            txl.ptx.mov.b32(s_pack[s_i], txl.cuda.float22bfloat162_rn(s_vals[0], s_vals[1]))
                         cur_sum = txl.cuda.float2_x(cur_sum_pair) + txl.cuda.float2_y(cur_sum_pair)
                         li_tmp = txl.local_scalar("float32")
                         txl.ptx["fma.rn.f32"](li_tmp, li, li_scale, cur_sum)
                         txl.assign(li, li_tmp)
                         txl.cuda.iket.range_end(sm_math_tok[0])
                         sm_wpv_tok = iket_range("sm-wait-pvdone")
-
+                                                                                                         
                         hot_wait(softmax_ready.buf[sel], txl.bitwise_xor(sblk.phase, 1))
                         txl.cuda.iket.range_end(sm_wpv_tok[0])
                         sm_post_tok = iket_range("sm-pstore-rescale")
                         txl.ptx["fence.proxy.async.shared::cta"]()
-                        s_base: txl.int32 = (
-                            idx_in_warpgroup // 64 * 2048 + idx_in_warpgroup % 64 * 8
-                        )
+                        s_base: txl.int32 = idx_in_warpgroup // 64 * 2048 + idx_in_warpgroup % 64 * 8
                         r_words = s_frag.view("uint32")
                         for f in range(4):
                             s_ptr = txl.ptr_byte_offset(
-                                txl.address_of(s_smem_gemm[sel, 0, 0]),
-                                (s_base + f * 512) * BF16_BYTES,
-                                "bfloat16",
+                                txl.address_of(s_smem_gemm[sel, 0, 0]), (s_base + f * 512) * BF16_BYTES, "bfloat16"
                             )
                             txl.ptx["st.shared.v4.u32"](
                                 txl.cuda.cvta_generic_to_shared(s_ptr),
-                                r_words[f * 4],
-                                r_words[f * 4 + 1],
-                                r_words[f * 4 + 2],
-                                r_words[f * 4 + 3],
+                                r_words[f * 4], r_words[f * 4 + 1], r_words[f * 4 + 2], r_words[f * 4 + 3],
                             )
-                        with (
-                            txl.If(txl.bitwise_and(k > 0, should_scale_o != txl.uint32(0))),
-                            txl.Then(),
-                        ):
-                            hot_wait(
-                                softmax_ready.buf[other],
-                                txl.bitwise_xor(sblk.phase, 1) if sel == 0 else sblk.phase,
-                            )
+                        with txl.If(txl.bitwise_and(k > 0, should_scale_o != txl.uint32(0))), txl.Then():
+                                                                                              
+                                                                                           
+                            hot_wait(softmax_ready.buf[other], txl.bitwise_xor(sblk.phase, 1) if sel == 0 else sblk.phase)
                             txl.ptx["tcgen05.fence::after_thread_sync"]()
                             o_rescale = txl.alloc_local((32,), "float32")
                             with txl.unroll(8) as chunk_idx:
@@ -3074,14 +2731,10 @@ def _make_h128_bf16_prefill():
                                 for f in range(16):
                                     buffer_23 = txl.local_scalar("uint64")
                                     buffer_24 = txl.local_scalar("uint64")
-                                    txl.ptx.mov.b64(
-                                        buffer_23, o_rescale[f * 2], o_rescale[f * 2 + 1]
-                                    )
+                                    txl.ptx.mov.b64(buffer_23, o_rescale[f * 2], o_rescale[f * 2 + 1])
                                     txl.ptx.mov.b64(buffer_24, scale_for_old, scale_for_old)
                                     txl.ptx["mul.rz.ftz.f32x2"](buffer_23, buffer_23, buffer_24)
-                                    txl.ptx.mov.b64(
-                                        o_rescale[f * 2], o_rescale[f * 2 + 1], buffer_23
-                                    )
+                                    txl.ptx.mov.b64(o_rescale[f * 2], o_rescale[f * 2 + 1], buffer_23)
                                 txl.ptx["tcgen05.st.sync.aligned.32x32b.x32.b32"](
                                     txl.cuda.get_tmem_addr(txl.uint32(TMEM_O), 0, chunk_idx * 32),
                                     *[o_rescale[i] for i in range(32)],
@@ -3091,19 +2744,14 @@ def _make_h128_bf16_prefill():
                         txl.ptx["fence.proxy.async.shared::cta"]()
                         txl.ptx["mbarrier.arrive.shared::cluster.b64"](leader_bar(so_full.buf[sel]))
                         txl.ptx["mbarrier.arrive.shared.b64"](
-                            txl.cuda.cvta_generic_to_shared(
-                                txl.address_of(valid_empty.buf[v_stage])
-                            ),
-                            txl.uint32(1),
+                            txl.cuda.cvta_generic_to_shared(txl.address_of(valid_empty.buf[v_stage])), txl.uint32(1)
                         )
                         txl.cuda.iket.range_end(sm_post_tok[0])
                         valid_ring.advance()
                         sblk.advance()
-
-                    txl.cuda.mbarrier_wait(
-                        txl.address_of(li_empty.buf[0]), txl.bitwise_xor(jobs.epoch.phase, 1)
-                    )
-
+                                                                             
+                    txl.cuda.mbarrier_wait(txl.address_of(li_empty.buf[0]), txl.bitwise_xor(jobs.epoch.phase, 1))
+                                                                                         
                     txl.ptx.st.shared.f32(rowwise_li_buf.ptr_to([sel, idx_in_warpgroup]), li)
                     txl.ptx.st.shared.f32(rowwise_ref_buf.ptr_to([sel, idx_in_warpgroup]), m_ref)
                     txl.ptx.st.shared.f32(rowwise_real_buf.ptr_to([sel, idx_in_warpgroup]), real_mi)
@@ -3112,9 +2760,7 @@ def _make_h128_bf16_prefill():
                         with txl.If(idx_in_warpgroup < 64), txl.Then():
                             last_wg = txl.bitwise_and(c0 + wg3_num_k_blocks - 1, 1)
                             m_fin = txl.local_scalar("float32")
-                            txl.ptx.ld.shared.f32(
-                                m_fin, rowwise_ref_buf.ptr_to([last_wg, idx_in_warpgroup])
-                            )
+                            txl.ptx.ld.shared.f32(m_fin, rowwise_ref_buf.ptr_to([last_wg, idx_in_warpgroup]))
                             li_total = txl.local_scalar("float32", init=txl.float32(0.0))
                             real_total = txl.local_scalar("float32", init=txl.float32("-inf"))
                             for w in range(2):
@@ -3125,9 +2771,7 @@ def _make_h128_bf16_prefill():
                                     real_w = txl.local_scalar("float32")
                                     txl.ptx.ld.shared.f32(li_w, rowwise_li_buf.ptr_to([w, slot]))
                                     txl.ptx.ld.shared.f32(ref_w, rowwise_ref_buf.ptr_to([w, slot]))
-                                    txl.ptx.ld.shared.f32(
-                                        real_w, rowwise_real_buf.ptr_to([w, slot])
-                                    )
+                                    txl.ptx.ld.shared.f32(real_w, rowwise_real_buf.ptr_to([w, slot]))
                                     f_w = txl.local_scalar("float32")
                                     txl.ptx["ex2.approx.ftz.f32"](f_w, ref_w - m_fin)
                                     txl.assign(li_total, li_total + li_w * f_w)
@@ -3138,23 +2782,17 @@ def _make_h128_bf16_prefill():
                             attn_sink_log2 = attn_sink_value * txl.float32(LOG_2_E)
                             sink_exp = txl.local_scalar("float32")
                             txl.ptx["ex2.approx.ftz.f32"](sink_exp, attn_sink_log2 - m_fin)
-                            output_scale = txl.local_scalar(
-                                "float32", init=txl.cuda.fdividef(bmm2_scale, li_total + sink_exp)
-                            )
+                            output_scale = txl.local_scalar("float32", init=txl.cuda.fdividef(bmm2_scale, li_total + sink_exp))
                             txl.ptx.st.shared.f32(
                                 rowwise_scale_buf.ptr_to([idx_in_warpgroup]),
                                 txl.if_then_else(
-                                    txl.Or(
-                                        real_total == txl.float32("-inf"),
-                                        li_total == txl.float32(0.0),
-                                    ),
+                                    txl.Or(real_total == txl.float32("-inf"), li_total == txl.float32(0.0)),
                                     txl.float32(0.0),
                                     output_scale,
                                 ),
                             )
                             txl.ptx["mbarrier.arrive.shared.b64"](
-                                txl.cuda.cvta_generic_to_shared(txl.address_of(li_full.buf[0])),
-                                txl.uint32(1),
+                                txl.cuda.cvta_generic_to_shared(txl.address_of(li_full.buf[0])), txl.uint32(1)
                             )
                     txl.assign(c0, c0 + wg3_num_k_blocks)
                     jobs.advance()
@@ -3190,9 +2828,11 @@ def _make_h128_bf16_prefill():
 
             txl.cuda.cluster_sync()
 
-        return mla_dsv4_sparse_prefill_pkt_pingpong.func.with_attr(
-            "global_symbol", KERNEL_NAME
-        ).with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+        return (
+            mla_dsv4_sparse_prefill_pkt_pingpong.func.with_attr("global_symbol", KERNEL_NAME)
+            .with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+        )
+
 
     def _pool_rows(pool, name):
         if pool is None or pool.dim() != 4 or pool.shape[-1] != D_QK:
@@ -3200,6 +2840,7 @@ def _make_h128_bf16_prefill():
         if not pool.is_contiguous() or pool.dtype != torch.bfloat16:
             raise ValueError(f"{name} must be a contiguous bf16 pool")
         return pool.shape[0] * pool.shape[1] * pool.shape[2]
+
 
     def _tirx_args(case: dict[str, Any]) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
         """Bind one case to the kernel's argument list (the candidate's ``setup``)."""
@@ -3228,18 +2869,12 @@ def _make_h128_bf16_prefill():
         lens_c = lens.contiguous()
         sinks_f = sinks.to(torch.float32).contiguous()
         args = (
-            query,
-            swa_flat,
-            comp_flat,
-            indices.view(-1),
-            lens_c,
-            sinks_f,
-            out,
-            scale_log2,
-            bmm2_scale,
+            query, swa_flat, comp_flat, indices.view(-1), lens_c, sinks_f,
+            out, scale_log2, bmm2_scale,
         )
         keep = (query, swa, comp, swa_flat, comp_flat, indices, lens_c, sinks_f, out)
         return args, keep
+
 
     def setup(data, Q, Kt):
         """Compile and bind this row, returning the launch callable."""
@@ -3291,6 +2926,7 @@ def _candidate_setup(data, Q, Kt):
     if _use_h128_bf16_prefill(data):
         return _H128_BF16_PREFILL_SETUP(data, Q, Kt)
     return _multishape_setup(data, Q, Kt)
+
 
 
 # ---------------------------------------------------------------------------
@@ -3346,2077 +2982,105 @@ _ROW_KEYS = (
 )
 
 _ROWS = (
-    (
-        "decode_h64_swa512_swa128_bf16_hnd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa512_topk4x_c1024_k512_bf16_hnd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        64,
-        1024,
-        54,
-        1,
-        64,
-        512,
-        640,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa512_topk128x_c128_k132_bf16_hnd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        2,
-        128,
-        204,
-        1,
-        2,
-        132,
-        260,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa512_swa128_bf16_nhd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa512_topk4x_c1024_k512_bf16_nhd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        64,
-        1024,
-        54,
-        64,
-        1,
-        512,
-        640,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa512_topk128x_c128_k132_bf16_nhd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        2,
-        128,
-        204,
-        2,
-        1,
-        132,
-        260,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa512_swa128_fp8_hnd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa512_topk4x_c1024_k512_fp8_hnd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        64,
-        1024,
-        54,
-        1,
-        64,
-        512,
-        640,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa512_topk128x_c128_k132_fp8_hnd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        2,
-        128,
-        204,
-        1,
-        2,
-        132,
-        260,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa512_swa128_fp8_nhd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa512_topk4x_c1024_k512_fp8_nhd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        64,
-        1024,
-        54,
-        64,
-        1,
-        512,
-        640,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa512_topk128x_c128_k132_fp8_nhd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        2,
-        128,
-        204,
-        2,
-        1,
-        132,
-        260,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa1024_swa128_bf16_hnd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa1024_topk4x_c2048_k512_bf16_hnd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        1,
-        256,
-        64,
-        2048,
-        102,
-        1,
-        64,
-        512,
-        640,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa1024_topk128x_c256_k260_bf16_hnd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        1,
-        256,
-        2,
-        256,
-        396,
-        1,
-        2,
-        260,
-        388,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa1024_swa128_bf16_nhd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa1024_topk4x_c2048_k512_bf16_nhd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        256,
-        1,
-        64,
-        2048,
-        102,
-        64,
-        1,
-        512,
-        640,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa1024_topk128x_c256_k260_bf16_nhd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        256,
-        1,
-        2,
-        256,
-        396,
-        2,
-        1,
-        260,
-        388,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa1024_swa128_fp8_hnd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa1024_topk4x_c2048_k512_fp8_hnd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        1,
-        256,
-        64,
-        2048,
-        102,
-        1,
-        64,
-        512,
-        640,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa1024_topk128x_c256_k260_fp8_hnd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        1,
-        256,
-        2,
-        256,
-        396,
-        1,
-        2,
-        260,
-        388,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa1024_swa128_fp8_nhd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa1024_topk4x_c2048_k512_fp8_nhd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        256,
-        1,
-        64,
-        2048,
-        102,
-        64,
-        1,
-        512,
-        640,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h64_swa1024_topk128x_c256_k260_fp8_nhd",
-        64,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        256,
-        1,
-        2,
-        256,
-        396,
-        2,
-        1,
-        260,
-        388,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa512_swa128_bf16_hnd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa512_topk4x_c1024_k1024_bf16_hnd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        64,
-        1024,
-        54,
-        1,
-        64,
-        1024,
-        1152,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa512_topk128x_c128_k132_bf16_hnd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        2,
-        128,
-        204,
-        1,
-        2,
-        132,
-        260,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa512_swa128_bf16_nhd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa512_topk4x_c1024_k1024_bf16_nhd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        64,
-        1024,
-        54,
-        64,
-        1,
-        1024,
-        1152,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa512_topk128x_c128_k132_bf16_nhd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        2,
-        128,
-        204,
-        2,
-        1,
-        132,
-        260,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa512_swa128_fp8_hnd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa512_topk4x_c1024_k1024_fp8_hnd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        64,
-        1024,
-        54,
-        1,
-        64,
-        1024,
-        1152,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa512_topk128x_c128_k132_fp8_hnd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        2,
-        128,
-        204,
-        1,
-        2,
-        132,
-        260,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa512_swa128_fp8_nhd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa512_topk4x_c1024_k1024_fp8_nhd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        64,
-        1024,
-        54,
-        64,
-        1,
-        1024,
-        1152,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa512_topk128x_c128_k132_fp8_nhd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        2,
-        128,
-        204,
-        2,
-        1,
-        132,
-        260,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa1024_swa128_bf16_hnd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa1024_topk4x_c2048_k1024_bf16_hnd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        1,
-        256,
-        64,
-        2048,
-        102,
-        1,
-        64,
-        1024,
-        1152,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa1024_topk128x_c256_k260_bf16_hnd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        1,
-        256,
-        2,
-        256,
-        396,
-        1,
-        2,
-        260,
-        388,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa1024_swa128_bf16_nhd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa1024_topk4x_c2048_k1024_bf16_nhd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        256,
-        1,
-        64,
-        2048,
-        102,
-        64,
-        1,
-        1024,
-        1152,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa1024_topk128x_c256_k260_bf16_nhd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        256,
-        1,
-        2,
-        256,
-        396,
-        2,
-        1,
-        260,
-        388,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa1024_swa128_fp8_hnd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa1024_topk4x_c2048_k1024_fp8_hnd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        1,
-        256,
-        64,
-        2048,
-        102,
-        1,
-        64,
-        1024,
-        1152,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa1024_topk128x_c256_k260_fp8_hnd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        1,
-        256,
-        2,
-        256,
-        396,
-        1,
-        2,
-        260,
-        388,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa1024_swa128_fp8_nhd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa1024_topk4x_c2048_k1024_fp8_nhd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        256,
-        1,
-        64,
-        2048,
-        102,
-        64,
-        1,
-        1024,
-        1152,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h128_swa1024_topk128x_c256_k260_fp8_nhd",
-        128,
-        3,
-        12,
-        5,
-        256,
-        1024,
-        18,
-        256,
-        1,
-        2,
-        256,
-        396,
-        2,
-        1,
-        260,
-        388,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h8_swa512_swa128_bf16_hnd",
-        8,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h8_swa512_topk4x_c1024_k64_bf16_hnd",
-        8,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        64,
-        1024,
-        54,
-        1,
-        64,
-        64,
-        192,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h8_swa512_topk128x_c128_k132_bf16_hnd",
-        8,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        2,
-        128,
-        204,
-        1,
-        2,
-        132,
-        260,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h8_swa512_swa128_bf16_nhd",
-        8,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h8_swa512_topk4x_c1024_k64_bf16_nhd",
-        8,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        64,
-        1024,
-        54,
-        64,
-        1,
-        64,
-        192,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h8_swa512_topk128x_c128_k132_bf16_nhd",
-        8,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        2,
-        128,
-        204,
-        2,
-        1,
-        132,
-        260,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h8_swa512_swa128_fp8_hnd",
-        8,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h8_swa512_topk4x_c1024_k64_fp8_hnd",
-        8,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        64,
-        1024,
-        54,
-        1,
-        64,
-        64,
-        192,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h8_swa512_topk128x_c128_k132_fp8_hnd",
-        8,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        2,
-        128,
-        204,
-        1,
-        2,
-        132,
-        260,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h8_swa512_swa128_fp8_nhd",
-        8,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h8_swa512_topk4x_c1024_k64_fp8_nhd",
-        8,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        64,
-        1024,
-        54,
-        64,
-        1,
-        64,
-        192,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h8_swa512_topk128x_c128_k132_fp8_nhd",
-        8,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        2,
-        128,
-        204,
-        2,
-        1,
-        132,
-        260,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h16_swa512_swa128_bf16_hnd",
-        16,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h16_swa512_topk4x_c1024_k128_bf16_hnd",
-        16,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        64,
-        1024,
-        54,
-        1,
-        64,
-        128,
-        256,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h16_swa512_topk128x_c128_k132_bf16_hnd",
-        16,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        2,
-        128,
-        204,
-        1,
-        2,
-        132,
-        260,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h16_swa512_swa128_bf16_nhd",
-        16,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h16_swa512_topk4x_c1024_k128_bf16_nhd",
-        16,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        64,
-        1024,
-        54,
-        64,
-        1,
-        128,
-        256,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h16_swa512_topk128x_c128_k132_bf16_nhd",
-        16,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        2,
-        128,
-        204,
-        2,
-        1,
-        132,
-        260,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h16_swa512_swa128_fp8_hnd",
-        16,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h16_swa512_topk4x_c1024_k128_fp8_hnd",
-        16,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        64,
-        1024,
-        54,
-        1,
-        64,
-        128,
-        256,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h16_swa512_topk128x_c128_k132_fp8_hnd",
-        16,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        2,
-        128,
-        204,
-        1,
-        2,
-        132,
-        260,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h16_swa512_swa128_fp8_nhd",
-        16,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h16_swa512_topk4x_c1024_k128_fp8_nhd",
-        16,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        64,
-        1024,
-        54,
-        64,
-        1,
-        128,
-        256,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h16_swa512_topk128x_c128_k132_fp8_nhd",
-        16,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        2,
-        128,
-        204,
-        2,
-        1,
-        132,
-        260,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h32_swa512_swa128_bf16_hnd",
-        32,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h32_swa512_topk4x_c1024_k256_bf16_hnd",
-        32,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        64,
-        1024,
-        54,
-        1,
-        64,
-        256,
-        384,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h32_swa512_topk128x_c128_k132_bf16_hnd",
-        32,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        2,
-        128,
-        204,
-        1,
-        2,
-        132,
-        260,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h32_swa512_swa128_bf16_nhd",
-        32,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h32_swa512_topk4x_c1024_k256_bf16_nhd",
-        32,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        64,
-        1024,
-        54,
-        64,
-        1,
-        256,
-        384,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h32_swa512_topk128x_c128_k132_bf16_nhd",
-        32,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        2,
-        128,
-        204,
-        2,
-        1,
-        132,
-        260,
-        "bfloat16",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h32_swa512_swa128_fp8_hnd",
-        32,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h32_swa512_topk4x_c1024_k256_fp8_hnd",
-        32,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        64,
-        1024,
-        54,
-        1,
-        64,
-        256,
-        384,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h32_swa512_topk128x_c128_k132_fp8_hnd",
-        32,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        1,
-        256,
-        2,
-        128,
-        204,
-        1,
-        2,
-        132,
-        260,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "decode_h32_swa512_swa128_fp8_nhd",
-        32,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h32_swa512_topk4x_c1024_k256_fp8_nhd",
-        32,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        64,
-        1024,
-        54,
-        64,
-        1,
-        256,
-        384,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "decode_h32_swa512_topk128x_c128_k132_fp8_nhd",
-        32,
-        3,
-        12,
-        5,
-        256,
-        512,
-        12,
-        256,
-        1,
-        2,
-        128,
-        204,
-        2,
-        1,
-        132,
-        260,
-        "float8_e4m3fn",
-        "NHD",
-        "varlen",
-    ),
-    (
-        "guard_seqlens_h64_swa128_swa128_bf16_hnd",
-        64,
-        1,
-        64,
-        128,
-        256,
-        128,
-        1,
-        1,
-        256,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        128,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "guard_denseq_h64_swa512_topk4x_c1024_k512_bf16_hnd",
-        64,
-        2,
-        10,
-        5,
-        256,
-        512,
-        6,
-        1,
-        256,
-        64,
-        1024,
-        34,
-        1,
-        64,
-        512,
-        640,
-        "bfloat16",
-        "HND",
-        "dense",
-    ),
-    (
-        "prefill_h64_swa4096_topk4x_c4096_k512_bf16_hnd",
-        64,
-        2,
-        386,
-        257,
-        256,
-        4096,
-        34,
-        1,
-        256,
-        64,
-        4096,
-        130,
-        1,
-        64,
-        512,
-        640,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "prefill_h64_swa4096_topk4x_c4096_k512_fp8_hnd",
-        64,
-        2,
-        386,
-        257,
-        256,
-        4096,
-        34,
-        1,
-        256,
-        64,
-        4096,
-        130,
-        1,
-        64,
-        512,
-        640,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "prefill_h128_swa4096_topk4x_c4096_k1024_bf16_hnd",
-        128,
-        2,
-        386,
-        257,
-        256,
-        4096,
-        34,
-        1,
-        256,
-        64,
-        4096,
-        130,
-        1,
-        64,
-        1024,
-        1152,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "prefill_h128_swa4096_topk4x_c4096_k1024_fp8_hnd",
-        128,
-        2,
-        386,
-        257,
-        256,
-        4096,
-        34,
-        1,
-        256,
-        64,
-        4096,
-        130,
-        1,
-        64,
-        1024,
-        1152,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "prefill_h64_swa16384_topk4x_c16384_k512_bf16_hnd",
-        64,
-        2,
-        386,
-        257,
-        256,
-        16384,
-        130,
-        1,
-        256,
-        64,
-        16384,
-        514,
-        1,
-        64,
-        512,
-        640,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "prefill_h64_swa16384_topk4x_c16384_k512_fp8_hnd",
-        64,
-        2,
-        386,
-        257,
-        256,
-        16384,
-        130,
-        1,
-        256,
-        64,
-        16384,
-        514,
-        1,
-        64,
-        512,
-        640,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
-    (
-        "prefill_h128_swa16384_topk4x_c16384_k1024_bf16_hnd",
-        128,
-        2,
-        386,
-        257,
-        256,
-        16384,
-        130,
-        1,
-        256,
-        64,
-        16384,
-        514,
-        1,
-        64,
-        1024,
-        1152,
-        "bfloat16",
-        "HND",
-        "varlen",
-    ),
-    (
-        "prefill_h128_swa16384_topk4x_c16384_k1024_fp8_hnd",
-        128,
-        2,
-        386,
-        257,
-        256,
-        16384,
-        130,
-        1,
-        256,
-        64,
-        16384,
-        514,
-        1,
-        64,
-        1024,
-        1152,
-        "float8_e4m3fn",
-        "HND",
-        "varlen",
-    ),
+    ("decode_h64_swa512_swa128_bf16_hnd", 64, 3, 12, 5, 256, 512, 12, 1, 256, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "HND", "varlen"),
+    ("decode_h64_swa512_topk4x_c1024_k512_bf16_hnd", 64, 3, 12, 5, 256, 512, 12, 1, 256, 64, 1024, 54, 1, 64, 512, 640, "bfloat16", "HND", "varlen"),
+    ("decode_h64_swa512_topk128x_c128_k132_bf16_hnd", 64, 3, 12, 5, 256, 512, 12, 1, 256, 2, 128, 204, 1, 2, 132, 260, "bfloat16", "HND", "varlen"),
+    ("decode_h64_swa512_swa128_bf16_nhd", 64, 3, 12, 5, 256, 512, 12, 256, 1, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "NHD", "varlen"),
+    ("decode_h64_swa512_topk4x_c1024_k512_bf16_nhd", 64, 3, 12, 5, 256, 512, 12, 256, 1, 64, 1024, 54, 64, 1, 512, 640, "bfloat16", "NHD", "varlen"),
+    ("decode_h64_swa512_topk128x_c128_k132_bf16_nhd", 64, 3, 12, 5, 256, 512, 12, 256, 1, 2, 128, 204, 2, 1, 132, 260, "bfloat16", "NHD", "varlen"),
+    ("decode_h64_swa512_swa128_fp8_hnd", 64, 3, 12, 5, 256, 512, 12, 1, 256, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h64_swa512_topk4x_c1024_k512_fp8_hnd", 64, 3, 12, 5, 256, 512, 12, 1, 256, 64, 1024, 54, 1, 64, 512, 640, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h64_swa512_topk128x_c128_k132_fp8_hnd", 64, 3, 12, 5, 256, 512, 12, 1, 256, 2, 128, 204, 1, 2, 132, 260, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h64_swa512_swa128_fp8_nhd", 64, 3, 12, 5, 256, 512, 12, 256, 1, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h64_swa512_topk4x_c1024_k512_fp8_nhd", 64, 3, 12, 5, 256, 512, 12, 256, 1, 64, 1024, 54, 64, 1, 512, 640, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h64_swa512_topk128x_c128_k132_fp8_nhd", 64, 3, 12, 5, 256, 512, 12, 256, 1, 2, 128, 204, 2, 1, 132, 260, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h64_swa1024_swa128_bf16_hnd", 64, 3, 12, 5, 256, 1024, 18, 1, 256, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "HND", "varlen"),
+    ("decode_h64_swa1024_topk4x_c2048_k512_bf16_hnd", 64, 3, 12, 5, 256, 1024, 18, 1, 256, 64, 2048, 102, 1, 64, 512, 640, "bfloat16", "HND", "varlen"),
+    ("decode_h64_swa1024_topk128x_c256_k260_bf16_hnd", 64, 3, 12, 5, 256, 1024, 18, 1, 256, 2, 256, 396, 1, 2, 260, 388, "bfloat16", "HND", "varlen"),
+    ("decode_h64_swa1024_swa128_bf16_nhd", 64, 3, 12, 5, 256, 1024, 18, 256, 1, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "NHD", "varlen"),
+    ("decode_h64_swa1024_topk4x_c2048_k512_bf16_nhd", 64, 3, 12, 5, 256, 1024, 18, 256, 1, 64, 2048, 102, 64, 1, 512, 640, "bfloat16", "NHD", "varlen"),
+    ("decode_h64_swa1024_topk128x_c256_k260_bf16_nhd", 64, 3, 12, 5, 256, 1024, 18, 256, 1, 2, 256, 396, 2, 1, 260, 388, "bfloat16", "NHD", "varlen"),
+    ("decode_h64_swa1024_swa128_fp8_hnd", 64, 3, 12, 5, 256, 1024, 18, 1, 256, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h64_swa1024_topk4x_c2048_k512_fp8_hnd", 64, 3, 12, 5, 256, 1024, 18, 1, 256, 64, 2048, 102, 1, 64, 512, 640, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h64_swa1024_topk128x_c256_k260_fp8_hnd", 64, 3, 12, 5, 256, 1024, 18, 1, 256, 2, 256, 396, 1, 2, 260, 388, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h64_swa1024_swa128_fp8_nhd", 64, 3, 12, 5, 256, 1024, 18, 256, 1, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h64_swa1024_topk4x_c2048_k512_fp8_nhd", 64, 3, 12, 5, 256, 1024, 18, 256, 1, 64, 2048, 102, 64, 1, 512, 640, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h64_swa1024_topk128x_c256_k260_fp8_nhd", 64, 3, 12, 5, 256, 1024, 18, 256, 1, 2, 256, 396, 2, 1, 260, 388, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h128_swa512_swa128_bf16_hnd", 128, 3, 12, 5, 256, 512, 12, 1, 256, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "HND", "varlen"),
+    ("decode_h128_swa512_topk4x_c1024_k1024_bf16_hnd", 128, 3, 12, 5, 256, 512, 12, 1, 256, 64, 1024, 54, 1, 64, 1024, 1152, "bfloat16", "HND", "varlen"),
+    ("decode_h128_swa512_topk128x_c128_k132_bf16_hnd", 128, 3, 12, 5, 256, 512, 12, 1, 256, 2, 128, 204, 1, 2, 132, 260, "bfloat16", "HND", "varlen"),
+    ("decode_h128_swa512_swa128_bf16_nhd", 128, 3, 12, 5, 256, 512, 12, 256, 1, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "NHD", "varlen"),
+    ("decode_h128_swa512_topk4x_c1024_k1024_bf16_nhd", 128, 3, 12, 5, 256, 512, 12, 256, 1, 64, 1024, 54, 64, 1, 1024, 1152, "bfloat16", "NHD", "varlen"),
+    ("decode_h128_swa512_topk128x_c128_k132_bf16_nhd", 128, 3, 12, 5, 256, 512, 12, 256, 1, 2, 128, 204, 2, 1, 132, 260, "bfloat16", "NHD", "varlen"),
+    ("decode_h128_swa512_swa128_fp8_hnd", 128, 3, 12, 5, 256, 512, 12, 1, 256, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h128_swa512_topk4x_c1024_k1024_fp8_hnd", 128, 3, 12, 5, 256, 512, 12, 1, 256, 64, 1024, 54, 1, 64, 1024, 1152, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h128_swa512_topk128x_c128_k132_fp8_hnd", 128, 3, 12, 5, 256, 512, 12, 1, 256, 2, 128, 204, 1, 2, 132, 260, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h128_swa512_swa128_fp8_nhd", 128, 3, 12, 5, 256, 512, 12, 256, 1, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h128_swa512_topk4x_c1024_k1024_fp8_nhd", 128, 3, 12, 5, 256, 512, 12, 256, 1, 64, 1024, 54, 64, 1, 1024, 1152, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h128_swa512_topk128x_c128_k132_fp8_nhd", 128, 3, 12, 5, 256, 512, 12, 256, 1, 2, 128, 204, 2, 1, 132, 260, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h128_swa1024_swa128_bf16_hnd", 128, 3, 12, 5, 256, 1024, 18, 1, 256, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "HND", "varlen"),
+    ("decode_h128_swa1024_topk4x_c2048_k1024_bf16_hnd", 128, 3, 12, 5, 256, 1024, 18, 1, 256, 64, 2048, 102, 1, 64, 1024, 1152, "bfloat16", "HND", "varlen"),
+    ("decode_h128_swa1024_topk128x_c256_k260_bf16_hnd", 128, 3, 12, 5, 256, 1024, 18, 1, 256, 2, 256, 396, 1, 2, 260, 388, "bfloat16", "HND", "varlen"),
+    ("decode_h128_swa1024_swa128_bf16_nhd", 128, 3, 12, 5, 256, 1024, 18, 256, 1, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "NHD", "varlen"),
+    ("decode_h128_swa1024_topk4x_c2048_k1024_bf16_nhd", 128, 3, 12, 5, 256, 1024, 18, 256, 1, 64, 2048, 102, 64, 1, 1024, 1152, "bfloat16", "NHD", "varlen"),
+    ("decode_h128_swa1024_topk128x_c256_k260_bf16_nhd", 128, 3, 12, 5, 256, 1024, 18, 256, 1, 2, 256, 396, 2, 1, 260, 388, "bfloat16", "NHD", "varlen"),
+    ("decode_h128_swa1024_swa128_fp8_hnd", 128, 3, 12, 5, 256, 1024, 18, 1, 256, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h128_swa1024_topk4x_c2048_k1024_fp8_hnd", 128, 3, 12, 5, 256, 1024, 18, 1, 256, 64, 2048, 102, 1, 64, 1024, 1152, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h128_swa1024_topk128x_c256_k260_fp8_hnd", 128, 3, 12, 5, 256, 1024, 18, 1, 256, 2, 256, 396, 1, 2, 260, 388, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h128_swa1024_swa128_fp8_nhd", 128, 3, 12, 5, 256, 1024, 18, 256, 1, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h128_swa1024_topk4x_c2048_k1024_fp8_nhd", 128, 3, 12, 5, 256, 1024, 18, 256, 1, 64, 2048, 102, 64, 1, 1024, 1152, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h128_swa1024_topk128x_c256_k260_fp8_nhd", 128, 3, 12, 5, 256, 1024, 18, 256, 1, 2, 256, 396, 2, 1, 260, 388, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h8_swa512_swa128_bf16_hnd", 8, 3, 12, 5, 256, 512, 12, 1, 256, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "HND", "varlen"),
+    ("decode_h8_swa512_topk4x_c1024_k64_bf16_hnd", 8, 3, 12, 5, 256, 512, 12, 1, 256, 64, 1024, 54, 1, 64, 64, 192, "bfloat16", "HND", "varlen"),
+    ("decode_h8_swa512_topk128x_c128_k132_bf16_hnd", 8, 3, 12, 5, 256, 512, 12, 1, 256, 2, 128, 204, 1, 2, 132, 260, "bfloat16", "HND", "varlen"),
+    ("decode_h8_swa512_swa128_bf16_nhd", 8, 3, 12, 5, 256, 512, 12, 256, 1, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "NHD", "varlen"),
+    ("decode_h8_swa512_topk4x_c1024_k64_bf16_nhd", 8, 3, 12, 5, 256, 512, 12, 256, 1, 64, 1024, 54, 64, 1, 64, 192, "bfloat16", "NHD", "varlen"),
+    ("decode_h8_swa512_topk128x_c128_k132_bf16_nhd", 8, 3, 12, 5, 256, 512, 12, 256, 1, 2, 128, 204, 2, 1, 132, 260, "bfloat16", "NHD", "varlen"),
+    ("decode_h8_swa512_swa128_fp8_hnd", 8, 3, 12, 5, 256, 512, 12, 1, 256, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h8_swa512_topk4x_c1024_k64_fp8_hnd", 8, 3, 12, 5, 256, 512, 12, 1, 256, 64, 1024, 54, 1, 64, 64, 192, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h8_swa512_topk128x_c128_k132_fp8_hnd", 8, 3, 12, 5, 256, 512, 12, 1, 256, 2, 128, 204, 1, 2, 132, 260, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h8_swa512_swa128_fp8_nhd", 8, 3, 12, 5, 256, 512, 12, 256, 1, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h8_swa512_topk4x_c1024_k64_fp8_nhd", 8, 3, 12, 5, 256, 512, 12, 256, 1, 64, 1024, 54, 64, 1, 64, 192, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h8_swa512_topk128x_c128_k132_fp8_nhd", 8, 3, 12, 5, 256, 512, 12, 256, 1, 2, 128, 204, 2, 1, 132, 260, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h16_swa512_swa128_bf16_hnd", 16, 3, 12, 5, 256, 512, 12, 1, 256, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "HND", "varlen"),
+    ("decode_h16_swa512_topk4x_c1024_k128_bf16_hnd", 16, 3, 12, 5, 256, 512, 12, 1, 256, 64, 1024, 54, 1, 64, 128, 256, "bfloat16", "HND", "varlen"),
+    ("decode_h16_swa512_topk128x_c128_k132_bf16_hnd", 16, 3, 12, 5, 256, 512, 12, 1, 256, 2, 128, 204, 1, 2, 132, 260, "bfloat16", "HND", "varlen"),
+    ("decode_h16_swa512_swa128_bf16_nhd", 16, 3, 12, 5, 256, 512, 12, 256, 1, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "NHD", "varlen"),
+    ("decode_h16_swa512_topk4x_c1024_k128_bf16_nhd", 16, 3, 12, 5, 256, 512, 12, 256, 1, 64, 1024, 54, 64, 1, 128, 256, "bfloat16", "NHD", "varlen"),
+    ("decode_h16_swa512_topk128x_c128_k132_bf16_nhd", 16, 3, 12, 5, 256, 512, 12, 256, 1, 2, 128, 204, 2, 1, 132, 260, "bfloat16", "NHD", "varlen"),
+    ("decode_h16_swa512_swa128_fp8_hnd", 16, 3, 12, 5, 256, 512, 12, 1, 256, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h16_swa512_topk4x_c1024_k128_fp8_hnd", 16, 3, 12, 5, 256, 512, 12, 1, 256, 64, 1024, 54, 1, 64, 128, 256, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h16_swa512_topk128x_c128_k132_fp8_hnd", 16, 3, 12, 5, 256, 512, 12, 1, 256, 2, 128, 204, 1, 2, 132, 260, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h16_swa512_swa128_fp8_nhd", 16, 3, 12, 5, 256, 512, 12, 256, 1, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h16_swa512_topk4x_c1024_k128_fp8_nhd", 16, 3, 12, 5, 256, 512, 12, 256, 1, 64, 1024, 54, 64, 1, 128, 256, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h16_swa512_topk128x_c128_k132_fp8_nhd", 16, 3, 12, 5, 256, 512, 12, 256, 1, 2, 128, 204, 2, 1, 132, 260, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h32_swa512_swa128_bf16_hnd", 32, 3, 12, 5, 256, 512, 12, 1, 256, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "HND", "varlen"),
+    ("decode_h32_swa512_topk4x_c1024_k256_bf16_hnd", 32, 3, 12, 5, 256, 512, 12, 1, 256, 64, 1024, 54, 1, 64, 256, 384, "bfloat16", "HND", "varlen"),
+    ("decode_h32_swa512_topk128x_c128_k132_bf16_hnd", 32, 3, 12, 5, 256, 512, 12, 1, 256, 2, 128, 204, 1, 2, 132, 260, "bfloat16", "HND", "varlen"),
+    ("decode_h32_swa512_swa128_bf16_nhd", 32, 3, 12, 5, 256, 512, 12, 256, 1, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "NHD", "varlen"),
+    ("decode_h32_swa512_topk4x_c1024_k256_bf16_nhd", 32, 3, 12, 5, 256, 512, 12, 256, 1, 64, 1024, 54, 64, 1, 256, 384, "bfloat16", "NHD", "varlen"),
+    ("decode_h32_swa512_topk128x_c128_k132_bf16_nhd", 32, 3, 12, 5, 256, 512, 12, 256, 1, 2, 128, 204, 2, 1, 132, 260, "bfloat16", "NHD", "varlen"),
+    ("decode_h32_swa512_swa128_fp8_hnd", 32, 3, 12, 5, 256, 512, 12, 1, 256, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h32_swa512_topk4x_c1024_k256_fp8_hnd", 32, 3, 12, 5, 256, 512, 12, 1, 256, 64, 1024, 54, 1, 64, 256, 384, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h32_swa512_topk128x_c128_k132_fp8_hnd", 32, 3, 12, 5, 256, 512, 12, 1, 256, 2, 128, 204, 1, 2, 132, 260, "float8_e4m3fn", "HND", "varlen"),
+    ("decode_h32_swa512_swa128_fp8_nhd", 32, 3, 12, 5, 256, 512, 12, 256, 1, 0, 0, 0, 0, 0, 0, 128, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h32_swa512_topk4x_c1024_k256_fp8_nhd", 32, 3, 12, 5, 256, 512, 12, 256, 1, 64, 1024, 54, 64, 1, 256, 384, "float8_e4m3fn", "NHD", "varlen"),
+    ("decode_h32_swa512_topk128x_c128_k132_fp8_nhd", 32, 3, 12, 5, 256, 512, 12, 256, 1, 2, 128, 204, 2, 1, 132, 260, "float8_e4m3fn", "NHD", "varlen"),
+    ("guard_seqlens_h64_swa128_swa128_bf16_hnd", 64, 1, 64, 128, 256, 128, 1, 1, 256, 0, 0, 0, 0, 0, 0, 128, "bfloat16", "HND", "varlen"),
+    ("guard_denseq_h64_swa512_topk4x_c1024_k512_bf16_hnd", 64, 2, 10, 5, 256, 512, 6, 1, 256, 64, 1024, 34, 1, 64, 512, 640, "bfloat16", "HND", "dense"),
+    ("prefill_h64_swa4096_topk4x_c4096_k512_bf16_hnd", 64, 2, 386, 257, 256, 4096, 34, 1, 256, 64, 4096, 130, 1, 64, 512, 640, "bfloat16", "HND", "varlen"),
+    ("prefill_h64_swa4096_topk4x_c4096_k512_fp8_hnd", 64, 2, 386, 257, 256, 4096, 34, 1, 256, 64, 4096, 130, 1, 64, 512, 640, "float8_e4m3fn", "HND", "varlen"),
+    ("prefill_h128_swa4096_topk4x_c4096_k1024_bf16_hnd", 128, 2, 386, 257, 256, 4096, 34, 1, 256, 64, 4096, 130, 1, 64, 1024, 1152, "bfloat16", "HND", "varlen"),
+    ("prefill_h128_swa4096_topk4x_c4096_k1024_fp8_hnd", 128, 2, 386, 257, 256, 4096, 34, 1, 256, 64, 4096, 130, 1, 64, 1024, 1152, "float8_e4m3fn", "HND", "varlen"),
+    ("prefill_h64_swa16384_topk4x_c16384_k512_bf16_hnd", 64, 2, 386, 257, 256, 16384, 130, 1, 256, 64, 16384, 514, 1, 64, 512, 640, "bfloat16", "HND", "varlen"),
+    ("prefill_h64_swa16384_topk4x_c16384_k512_fp8_hnd", 64, 2, 386, 257, 256, 16384, 130, 1, 256, 64, 16384, 514, 1, 64, 512, 640, "float8_e4m3fn", "HND", "varlen"),
+    ("prefill_h128_swa16384_topk4x_c16384_k1024_bf16_hnd", 128, 2, 386, 257, 256, 16384, 130, 1, 256, 64, 16384, 514, 1, 64, 1024, 1152, "bfloat16", "HND", "varlen"),
+    ("prefill_h128_swa16384_topk4x_c16384_k1024_fp8_hnd", 128, 2, 386, 257, 256, 16384, 130, 1, 256, 64, 16384, 514, 1, 64, 1024, 1152, "float8_e4m3fn", "HND", "varlen"),
 )
 
-CONFIGS = [{"label": row[0], "seed": SEED_BASE, **dict(zip(_ROW_KEYS, row[1:]))} for row in _ROWS]
+CONFIGS = [
+    {"label": row[0], "seed": SEED_BASE, **dict(zip(_ROW_KEYS, row[1:]))} for row in _ROWS
+]
 
 _CONFIG_KEYS = set(_ROW_KEYS) | {"seed"}
 _BY_LABEL = {config["label"]: config for config in CONFIGS}
@@ -5464,18 +3128,8 @@ def get_kernel(**config: Any):
     items = q_tokens * p["groups"]
     main_nstage = 3 if (not fp8 and q_tokens > 64 and p["h_valid"] == 64) else p["nstage"]
     cfg = (
-        fp8,
-        h_total,
-        p["h_valid"],
-        p["groups"],
-        q_tokens,
-        ktot,
-        p["splits"],
-        p["bpc"],
-        main_nstage,
-        swa_rows,
-        comp_rows,
-        items,
+        fp8, h_total, p["h_valid"], p["groups"], q_tokens, ktot,
+        p["splits"], p["bpc"], main_nstage, swa_rows, comp_rows, items,
     )
     return make_kernel(*cfg)
 
@@ -5561,10 +3215,8 @@ def prepare_data(**config: Any) -> dict[str, Any]:
         pages_per_seq = (int(seq_lens.max()) + page_size - 1) // page_size
         block_table = randperm(num_seqs * pages_per_seq).view(num_seqs, pages_per_seq)
         cache = (
-            (randn((num_seqs * pages_per_seq, 1, page_size, HEAD_DIM)) * KV_RANDOM_SCALE)
-            .add_(value_offset)
-            .clamp_(-1.0, 1.0)
-        )
+            randn((num_seqs * pages_per_seq, 1, page_size, HEAD_DIM)) * KV_RANDOM_SCALE
+        ).add_(value_offset).clamp_(-1.0, 1.0)
         return seq_lens.to(torch.int32), block_table, cache
 
     _, q_lens = _query_lengths(resolved)
@@ -5581,7 +3233,9 @@ def prepare_data(**config: Any) -> dict[str, Any]:
         query = query.view(num_seqs, max_q_len, num_heads, HEAD_DIM)
     sinks = randn((num_heads,), torch.float32) * SINK_STD
 
-    seq_lens, swa_table, swa_kv_cache = pool(int(resolved["swa_seq_len"]), swa_page, SWA_KV_OFFSET)
+    seq_lens, swa_table, swa_kv_cache = pool(
+        int(resolved["swa_seq_len"]), swa_page, SWA_KV_OFFSET
+    )
     swa_columns = torch.arange(SWA_TOPK, device=device)
     compressed_kv_cache = None
     if comp_page:
@@ -5596,7 +3250,9 @@ def prepare_data(**config: Any) -> dict[str, Any]:
             token = int(seq_lens[b]) - q_lens[b] + q_idx
             num_valid = min(SWA_TOPK, token + 1)
             logical = torch.full_like(swa_columns, -1)
-            logical[:num_valid] = torch.arange(token - num_valid + 1, token + 1, device=device)
+            logical[:num_valid] = torch.arange(
+                token - num_valid + 1, token + 1, device=device
+            )
             row = [_flat_indices(logical, swa_table[b], swa_page)]
             active = SWA_TOPK
             if comp_page:
@@ -5608,7 +3264,9 @@ def prepare_data(**config: Any) -> dict[str, Any]:
                 if comp_page == 2:
                     active += min(c_len, comp_topk)
                 else:
-                    active += min(max(comp_topk - (comp_topk // 16) * b - q_idx, 1), comp_topk)
+                    active += min(
+                        max(comp_topk - (comp_topk // 16) * b - q_idx, 1), comp_topk
+                    )
             index_rows.append(torch.cat(row))
             lens.append(active)
     sparse_indices = torch.stack(index_rows).contiguous()
@@ -5662,7 +3320,9 @@ def _reference_output(case: dict[str, Any]) -> torch.Tensor:
     topk = indices.shape[1]
     head_dim = query.shape[2]
     columns = torch.arange(topk, device=query.device)
-    active = (indices >= 0) & (columns[None, :] < case["sparse_topk_lens"].to(torch.int64)[:, None])
+    active = (indices >= 0) & (
+        columns[None, :] < case["sparse_topk_lens"].to(torch.int64)[:, None]
+    )
 
     swa_rows = case["swa_kv_cache"].reshape(-1, head_dim).float()
     rows = swa_rows[indices[:, :SWA_TOPK].clamp_min(0)]
@@ -5808,7 +3468,11 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **config: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    **config: Any,
 ) -> dict[str, Any]:
     values = dict(config)
     protocol = {name: values.pop(name) for name in ("rounds", "cooldown_s") if name in values}

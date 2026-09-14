@@ -170,11 +170,7 @@ def _shfl_bfly_f32(value, lane_xor):
     """``shfl.sync.bfly.b32`` with clamp 31 and the full member mask."""
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out,
-        txl.reinterpret("uint32", value),
-        txl.uint32(lane_xor),
-        txl.uint32(31),
-        txl.uint32(0xFFFFFFFF),
+        out, txl.reinterpret("uint32", value), txl.uint32(lane_xor), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
     return txl.reinterpret("float32", out)
 
@@ -477,9 +473,7 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
         v_offset = txl.local_scalar("int32")
         k_lane = txl.local_scalar("int32")
         v_lane = txl.local_scalar("int32")
-        txl.assign(
-            tidx, txl.cast(txl.bitwise_and(txl.cast(tidx_axis, "uint32"), txl.uint32(31)), "int32")
-        )
+        txl.assign(tidx, txl.cast(txl.bitwise_and(txl.cast(tidx_axis, "uint32"), txl.uint32(31)), "int32"))
         txl.assign(v_tile_idx, bidx % NUM_V_TILES)
         txl.assign(bh, bidx // NUM_V_TILES)
         txl.assign(value_head_idx, bh % NUM_VALUE_HEADS)
@@ -563,9 +557,7 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
         h_K_offset = txl.local_scalar("int32")
         A_log_val = txl.local_scalar("float32")
         txl.assign(h_K_offset, query_head_idx * HEAD_DIM)
-        txl.assign(
-            A_log_val, _exp2(_mul(_load_f32(a_log, gidx(query_head_idx)), txl.float32(LOG2_E)))
-        )
+        txl.assign(A_log_val, _exp2(_mul(_load_f32(a_log, gidx(query_head_idx)), txl.float32(LOG2_E))))
 
         # --- loop-invariant lower-bound gate constants (recurrent_kda.py:124-127)
         # Both live inside compute_gate_value's per-i loop in the source and are
@@ -737,9 +729,7 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
                 v_val = txl.local_scalar("float32")
                 delta = txl.local_scalar("float32")
                 out_val = txl.local_scalar("float32")
-                txl.assign(
-                    pred, _reduce_k_group(_dot8(h_reg, j * 8, k_reg, DOT_REDUCTION_SCHEDULE))
-                )
+                txl.assign(pred, _reduce_k_group(_dot8(h_reg, j * 8, k_reg, DOT_REDUCTION_SCHEDULE)))
                 txl.assign(v_idx, v_offset + v_lane + V_LANES * j)
                 txl.assign(v_val, _shfl_idx_f32(v_loaded, v_lane + V_LANES * j))
                 txl.assign(delta, _mul(_sub(v_val, pred), beta_val))

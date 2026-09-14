@@ -480,24 +480,18 @@ def get_kernel(**kwargs: Any):
         def replace_smem_desc_addr(desc, smem_ptr):
             shared_addr = txl.cuda.cvta_generic_to_shared(smem_ptr)
             start_addr = txl.Cast(
-                "uint64",
-                txl.bitwise_and(txl.shift_right(shared_addr, txl.uint32(4)), txl.uint32(0x3FFF)),
+                "uint64", txl.bitwise_and(txl.shift_right(shared_addr, txl.uint32(4)), txl.uint32(0x3FFF))
             )
-            return txl.bitwise_or(
-                txl.bitwise_and(desc, txl.bitwise_not(txl.uint64(0x3FFF))), start_addr
-            )
+            return txl.bitwise_or(txl.bitwise_and(desc, txl.bitwise_not(txl.uint64(0x3FFF))), start_addr)
 
         def recompute_fp4_smem_desc(smem_ptr):
             # ldo=0, sdo=32, 64B swizzle.  This is the exact uniform descriptor
             # form produced by the former ``smem_desc="recompute"`` dispatch.
             shared_addr = txl.cuda.cvta_generic_to_shared(smem_ptr)
             start_addr = txl.Cast(
-                "uint64",
-                txl.bitwise_and(txl.shift_right(shared_addr, txl.uint32(4)), txl.uint32(0x3FFF)),
+                "uint64", txl.bitwise_and(txl.shift_right(shared_addr, txl.uint32(4)), txl.uint32(0x3FFF))
             )
-            return txl.bitwise_or(
-                txl.shift_left(txl.uint64(0x80004020), txl.uint64(32)), start_addr
-            )
+            return txl.bitwise_or(txl.shift_left(txl.uint64(0x80004020), txl.uint64(32)), start_addr)
 
         def emit_sf_transpose(buf, dst, lane, stage_idx, elem_base):
             # DeepGEMM's st.shared.v4 SF transpose, out-of-place into staging
@@ -532,10 +526,7 @@ def get_kernel(**kwargs: Any):
             align=swizzle_alignment,
         )
         smem_kv = pool.alloc(
-            (num_kv_stages, block_kv, head_dim // 2),
-            txl.u8,
-            swizzle=txl.SW64B,
-            align=swizzle_alignment,
+            (num_kv_stages, block_kv, head_dim // 2), txl.u8, swizzle=txl.SW64B, align=swizzle_alignment
         )
         smem_sf_q = pool.alloc((num_q_stages, num_sfq), txl.u32, align=16)
         smem_sf_q_t = pool.alloc((num_q_stages, num_sfq), txl.u32, align=16)
@@ -596,8 +587,7 @@ def get_kernel(**kwargs: Any):
                 row_idx = txl.local_scalar(
                     "uint32",
                     init=txl.min(
-                        q_idx * txl.uint32(block_q) + txl.uint32(schedule_i),
-                        seq_len - txl.uint32(1),
+                        q_idx * txl.uint32(block_q) + txl.uint32(schedule_i), seq_len - txl.uint32(1)
                     ),
                 )
                 row_start = txl.local_scalar("int32")
@@ -605,22 +595,17 @@ def get_kernel(**kwargs: Any):
                 txl.ptx.ld.global_.s32(
                     row_start, cu_seq_len_k_start.ptr_to([txl.Cast("int32", row_idx)])
                 )
-                txl.ptx.ld.global_.s32(
-                    row_end, cu_seq_len_k_end.ptr_to([txl.Cast("int32", row_idx)])
-                )
+                txl.ptx.ld.global_.s32(row_end, cu_seq_len_k_end.ptr_to([txl.Cast("int32", row_idx)]))
                 txl.ptx.mov.b32(
                     seq_k_start[schedule_i], txl.min(txl.Cast("uint32", row_start), seq_len_kv)
                 )
-                txl.ptx.mov.b32(
-                    seq_k_end[schedule_i], txl.min(txl.Cast("uint32", row_end), seq_len_kv)
-                )
+                txl.ptx.mov.b32(seq_k_end[schedule_i], txl.min(txl.Cast("uint32", row_end), seq_len_kv))
                 txl.assign(schedule_start, txl.min(schedule_start, seq_k_start[schedule_i]))
                 txl.assign(schedule_end, txl.max(schedule_end, seq_k_end[schedule_i]))
             txl.assign(schedule_start, schedule_start // txl.uint32(4) * txl.uint32(4))
             num_kv_blocks = txl.local_scalar(
                 "uint32",
-                init=(schedule_end - schedule_start + txl.uint32(block_kv - 1))
-                // txl.uint32(block_kv),
+                init=(schedule_end - schedule_start + txl.uint32(block_kv - 1)) // txl.uint32(block_kv),
             )
             txl.ptx.mov.b32(schedule_result[0], schedule_start)
             txl.ptx.mov.b32(schedule_result[1], num_kv_blocks)
@@ -663,9 +648,7 @@ def get_kernel(**kwargs: Any):
                     q_pipe.empty.wait(q_state.stage, q_state.phase ^ txl.uint32(1))
                     # u32 row base -- the copy_async(tma) gmem-layout grouping now
                     # handles unsigned shape extents (no int32 cast needed).
-                    q_row0 = txl.local_scalar(
-                        "uint32", init=q_idx * txl.uint32(block_q * num_heads)
-                    )
+                    q_row0 = txl.local_scalar("uint32", init=q_idx * txl.uint32(block_q * num_heads))
                     txl.ptx[TMA_G2S_2D](
                         smem_q[q_state.stage].ptr_to(0, 0),
                         txl.address_of(q_map),
@@ -769,11 +752,7 @@ def get_kernel(**kwargs: Any):
             smem_q_fp4 = smem_q.buf.view("float4_e2m1fn")
             desc_sf = txl.local_scalar("uint64")
             txl.cuda.tcgen05.encode_matrix_descriptor(
-                txl.address_of(desc_sf),
-                txl.reinterpret("handle", txl.uint64(0)),
-                ldo=0,
-                sdo=8,
-                swizzle=0,
+                txl.address_of(desc_sf), txl.reinterpret("handle", txl.uint64(0)), ldo=0, sdo=8, swizzle=0
             )
             q_state = txl.RingState(num_q_stages)
             kv_state = txl.RingState(num_kv_stages)
@@ -950,8 +929,7 @@ def get_kernel(**kwargs: Any):
                     kv_idx = txl.local_scalar("uint32", init=txl.uint32(0))
                     with txl.While(kv_idx < num_kv_blocks):
                         kv_offset = txl.local_scalar(
-                            "uint32",
-                            init=kv_start + kv_idx * txl.uint32(block_kv) + math_thread_idx,
+                            "uint32", init=kv_start + kv_idx * txl.uint32(block_kv) + math_thread_idx
                         )
                         tmem_pipe.full.wait(tmem_state.stage, tmem_state.phase)
                         for q_inner_i in range(block_q):
@@ -991,14 +969,11 @@ def get_kernel(**kwargs: Any):
                                 q_offset = txl.local_scalar(
                                     "uint64",
                                     init=txl.Cast(
-                                        "uint64",
-                                        q_idx * txl.uint32(block_q) + txl.uint32(q_inner_i),
+                                        "uint64", q_idx * txl.uint32(block_q) + txl.uint32(q_inner_i)
                                     )
                                     * txl.Cast("uint64", logits_stride),
                                 )
-                                row_k_start = txl.local_scalar(
-                                    "uint32", init=seq_k_start[q_inner_i]
-                                )
+                                row_k_start = txl.local_scalar("uint32", init=seq_k_start[q_inner_i])
                                 row_k_end = txl.local_scalar("uint32", init=seq_k_end[q_inner_i])
                                 # Range-guarded store: if-converts to a predicated @P STG
                                 # for this kernel (unlike fp8's clamp-to-padding variant).
@@ -1023,8 +998,7 @@ def get_kernel(**kwargs: Any):
                                 q_offset_bf16 = txl.local_scalar(
                                     "uint64",
                                     init=txl.Cast(
-                                        "uint64",
-                                        q_idx * txl.uint32(block_q) + txl.uint32(q_inner_i),
+                                        "uint64", q_idx * txl.uint32(block_q) + txl.uint32(q_inner_i)
                                     )
                                     * txl.Cast("uint64", logits_stride),
                                 )

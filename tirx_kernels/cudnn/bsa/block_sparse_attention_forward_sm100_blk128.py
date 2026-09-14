@@ -452,14 +452,9 @@ def _apply_mask128(values, block_size):
             mask = txl.local_scalar("uint32")
             txl.ptx.shr.u32(mask, txl.uint32(0xFFFFFFFF), txl.cast(shift, "uint32"))
             with txl.unroll(32) as bit:
-                live = (
-                    txl.bitwise_and(mask, txl.shift_left(txl.uint32(1), txl.cast(bit, "uint32")))
-                    != 0
-                )
+                live = txl.bitwise_and(mask, txl.shift_left(txl.uint32(1), txl.cast(bit, "uint32"))) != 0
                 index = quarter * 32 + bit
-                txl.assign(
-                    values[index], txl.if_then_else(live, values[index], txl.float32(_NEG_INF))
-                )
+                txl.assign(values[index], txl.if_then_else(live, values[index], txl.float32(_NEG_INF)))
 
 
 def _wait(barrier, stage, phase):
@@ -675,9 +670,7 @@ def _make_kernel(**config):
         del q, k, v, out
         q_map, k_map, v_map, o_map = host
         _cluster_x, _cluster_y, _cluster_z = txl.cta_id_in_cluster([1, 1, 1])
-        initial_q_block, initial_head, initial_batch = txl.cta_id(
-            [q_blocks, scheduled_heads, batch]
-        )
+        initial_q_block, initial_head, initial_batch = txl.cta_id([q_blocks, scheduled_heads, batch])
         q_block = txl.local_scalar("int32", init=initial_q_block)
         head = txl.local_scalar("int32", init=initial_head)
         batch_idx = txl.local_scalar("int32", init=initial_batch)
@@ -1134,9 +1127,7 @@ def _make_kernel(**config):
                                     ),
                                 )
                             else:
-                                txl.assign(
-                                    block_size, txl.if_then_else(logical < raw_count, 128, 0)
-                                )
+                                txl.assign(block_size, txl.if_then_else(logical < raw_count, 128, 0))
                             _apply_mask128(score, block_size)
                         elif has_sizes:
                             _apply_mask128(score, _load_i32(block_sizes, sparse_id(logical)))
@@ -1383,9 +1374,7 @@ def _make_kernel(**config):
                                 scale = _ld_shared_f32(stats_smem, score_stage * 128 + tid128)
                                 ballot = txl.local_scalar("uint32")
                                 txl.ptx.vote_sync.ballot.b32(
-                                    ballot,
-                                    txl.ptx.pred(scale < txl.float32(1.0)),
-                                    txl.uint32(0xFFFFFFFF),
+                                    ballot, txl.ptx.pred(scale < txl.float32(1.0)), txl.uint32(0xFFFFFFFF)
                                 )
                                 with txl.If(ballot != 0), txl.Then():
                                     rescale_o(score_stage, scale)
@@ -1414,8 +1403,7 @@ def _make_kernel(**config):
                         maximum = txl.local_scalar("float32")
                         txl.ptx.max.f32(maximum, rm0, rm1)
                         txl.assign(
-                            safe_max,
-                            txl.if_then_else(maximum != txl.float32(_NEG_INF), maximum, 0.0),
+                            safe_max, txl.if_then_else(maximum != txl.float32(_NEG_INF), maximum, 0.0)
                         )
                         scale0 = txl.local_scalar("float32")
                         scale1 = txl.local_scalar("float32")

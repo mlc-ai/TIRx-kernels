@@ -1009,9 +1009,7 @@ def _build_kernel():
                 txl.ptx.fma.rn.ftz.f32(final_sum, final_sum0, combine[0], prod1)
                 rcp_sum = txl.local_scalar("float32")
                 txl.ptx.rcp.approx.ftz.f32(rcp_sum, final_sum)
-                sum_positive = txl.local_scalar(
-                    "int32", init=txl.cast(final_sum > _f32(0.0), "int32")
-                )
+                sum_positive = txl.local_scalar("int32", init=txl.cast(final_sum > _f32(0.0), "int32"))
                 inv_sum = txl.local_scalar(
                     "float32", init=txl.if_then_else(sum_positive != _i32(0), rcp_sum, _f32(0.0))
                 )

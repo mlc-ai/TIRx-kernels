@@ -113,20 +113,14 @@ def _shfl_bfly(value, lane_xor):
     """``shfl.sync.bfly.b32``, clamp 31 and full member mask."""
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out,
-        txl.reinterpret("uint32", value),
-        txl.uint32(lane_xor),
-        txl.uint32(31),
-        txl.uint32(0xFFFFFFFF),
+        out, txl.reinterpret("uint32", value), txl.uint32(lane_xor), txl.uint32(31), txl.uint32(0xFFFFFFFF)
     )
     return txl.reinterpret("float32", out)
 
 
 def _swz(byte_off):
     """Exact SW128B byte transform shared by the T=5/T=6 gram kernels."""
-    return txl.bitwise_xor(
-        byte_off, txl.shift_left(txl.bitwise_and(txl.shift_right(byte_off, 7), 7), 4)
-    )
+    return txl.bitwise_xor(byte_off, txl.shift_left(txl.bitwise_and(txl.shift_right(byte_off, 7), 7), 4))
 
 
 def _st_shared_f32(region, byte_off, value):

@@ -553,9 +553,7 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                                 txl.ptr_byte_offset(
                                     smem_b_mma[0].ptr_to(0, 0),
                                     stage_idx[0] * txl.uint32(block_n * block_k * 4)
-                                    + txl.cast(
-                                        b_atom * (block_n * block_swizzled_bk * 4), "uint32"
-                                    ),
+                                    + txl.cast(b_atom * (block_n * block_swizzled_bk * 4), "uint32"),
                                     "float32",
                                 ),
                                 txl.address_of(b_map),
@@ -583,16 +581,10 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                     cast_pipe.full.wait(cast_stage_idx[0], txl.cast(mma_cast_state.phase, "uint32"))
                     # TMEM A columns and the swizzled B matrix descriptor match
                     # the former tcgen05 tile dispatch exactly.
-                    a_col = local(
-                        "int32", txl.cast(cast_stage_idx[0] * txl.uint32(block_k), "int32")
-                    )
+                    a_col = local("int32", txl.cast(cast_stage_idx[0] * txl.uint32(block_k), "int32"))
                     desc_b = txl.local_scalar("uint64")
                     txl.cuda.tcgen05.encode_matrix_descriptor(
-                        txl.address_of(desc_b),
-                        smem_b_mma[0].ptr_to(0, 0),
-                        ldo=256,
-                        sdo=64,
-                        swizzle=3,
+                        txl.address_of(desc_b), smem_b_mma[0].ptr_to(0, 0), ldo=256, sdo=64, swizzle=3
                     )
                     with txl.unroll(block_k // umma_k) as ki:
                         with txl.If(txl.cuda.elect_sync()), txl.Then():
@@ -618,9 +610,7 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                                 # unconditionally. The original's Python
                                 # conditional expression is what the TVMScript
                                 # parser rewrites into exactly this select.
-                                txl.ptx.pred(
-                                    txl.if_then_else(ki == 0, s != txl.uint32(0), txl.bool(True))
-                                ),
+                                txl.ptx.pred(txl.if_then_else(ki == 0, s != txl.uint32(0), txl.bool(True))),
                             )
                     with txl.If(txl.cuda.elect_sync()), txl.Then():
                         cast_pipe.empty.arrive(cast_stage_idx[0])
@@ -760,9 +750,7 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                                         "uint32",
                                     )
                                     + stage_idx[0] * txl.uint32(block_k)
-                                    + txl.cast(
-                                        lane_idx % txl.int32(8) * txl.int32(block_k), "uint32"
-                                    )
+                                    + txl.cast(lane_idx % txl.int32(8) * txl.int32(block_k), "uint32")
                                     // txl.uint32(block_k)
                                 )
                                 & txl.uint32(7)
@@ -779,9 +767,7 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                         a_bf16_words[reg_base[0] + 2],
                         a_bf16_words[reg_base[0] + 4],
                         a_bf16_words[reg_base[0] + 6],
-                        txl.ptr_byte_offset(
-                            smem_a_mma[0].ptr_to(0, 0), smem_off[0] * 2, "bfloat16"
-                        ),
+                        txl.ptr_byte_offset(smem_a_mma[0].ptr_to(0, 0), smem_off[0] * 2, "bfloat16"),
                     )
                 cast_pipe.empty.wait(cast_stage_idx[0], txl.cast(cast_tmem_state.phase, "uint32"))
 

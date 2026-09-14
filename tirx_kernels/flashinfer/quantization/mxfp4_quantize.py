@@ -220,9 +220,7 @@ def _load_block_4t(words, in_global, row_idx, col_idx, thread_in_sf, *, k):
     """Issue one 128-bit input load for a 4T/SF thread."""
     elem_idx = col_idx * MXFP4_SF_VEC_SIZE + thread_in_sf * 8
     in_off = txl.cast(row_idx, "int64") * k + elem_idx
-    txl.ptx.ld.global_.v4.b32(
-        words[0], words[1], words[2], words[3], txl.address_of(in_global[in_off])
-    )
+    txl.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], txl.address_of(in_global[in_off]))
 
 
 def _float_to_ue8m0_nonnegative(value):
@@ -276,13 +274,9 @@ def _reduce_absmax_4t_packed(words, dtype):
     """Reduce a four-thread absmax while it remains packed FP16x2/BF16x2."""
     packed = absmax_4([words[i] for i in range(4)], dtype)
     shuffled = txl.local_scalar("uint32")
-    txl.ptx.shfl_sync.bfly.b32(
-        shuffled, packed, txl.uint32(1), txl.uint32(31), txl.uint32(0xFFFFFFFF)
-    )
+    txl.ptx.shfl_sync.bfly.b32(shuffled, packed, txl.uint32(1), txl.uint32(31), txl.uint32(0xFFFFFFFF))
     packed = hmax2(packed, shuffled, dtype)
-    txl.ptx.shfl_sync.bfly.b32(
-        shuffled, packed, txl.uint32(2), txl.uint32(31), txl.uint32(0xFFFFFFFF)
-    )
+    txl.ptx.shfl_sync.bfly.b32(shuffled, packed, txl.uint32(2), txl.uint32(31), txl.uint32(0xFFFFFFFF))
     return hmax2(packed, shuffled, dtype)
 
 
@@ -744,8 +738,7 @@ def get_kernel(
                         with txl.While(sc_tail < pad_cols):
                             with txl.If(thread_in_sf == 0), txl.Then():
                                 st_global_u8(
-                                    txl.address_of(sf_out[sf_offset(row_idx, sc_tail)]),
-                                    txl.uint8(0),
+                                    txl.address_of(sf_out[sf_offset(row_idx, sc_tail)]), txl.uint8(0)
                                 )
                             txl.assign(sc_tail, sc_tail + col_units_per_block)
                 txl.assign(row_idx, row_idx + grid_x)
@@ -793,9 +786,7 @@ def get_kernel(
                                         sf_idx_in_row * 16
                                     )
                                     st_global_u64(txl.address_of(out_global[out_off]), packed64_0)
-                                    st_global_u64(
-                                        txl.address_of(out_global[out_off + 8]), packed64_1
-                                    )
+                                    st_global_u64(txl.address_of(out_global[out_off + 8]), packed64_1)
                                 _st_scale_4t(
                                     txl.address_of(sf_out[sf_offset(row_idx2, sf_idx_in_row)]),
                                     scale_ue8m0_u32,

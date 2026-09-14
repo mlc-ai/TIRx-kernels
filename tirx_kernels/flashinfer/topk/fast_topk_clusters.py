@@ -391,9 +391,7 @@ def get_kernel(
         txl.tvm_storage_sync("shared")
         bin_ = txl.local_scalar("int32", init=txl.cast(R.ld_shared_u32(scal, THR), "int32"))
         with txl.If(bin_ < RADIX - 1), txl.Then():
-            txl.assign(
-                k_rem, k_rem - txl.cast(R.ld_shared_u32(hist, 2 * RADIX + bin_ + 1), "int32")
-            )
+            txl.assign(k_rem, k_rem - txl.cast(R.ld_shared_u32(hist, 2 * RADIX + bin_ + 1), "int32"))
 
     def _classify(
         hist,
@@ -419,13 +417,9 @@ def get_kernel(
         and the source keeps it in a register too.
         """
         if is32:
-            digit = txl.bitwise_and(
-                txl.cast(txl.shift_right(bits, txl.uint32(shift)), "int32"), 0xFF
-            )
+            digit = txl.bitwise_and(txl.cast(txl.shift_right(bits, txl.uint32(shift)), "int32"), 0xFF)
         else:
-            digit = txl.bitwise_and(
-                txl.cast(txl.shift_right(bits, txl.uint16(shift)), "int32"), 0xFF
-            )
+            digit = txl.bitwise_and(txl.cast(txl.shift_right(bits, txl.uint16(shift)), "int32"), 0xFF)
         d = txl.local_scalar("int32", init=digit)
         with txl.If(d > bin_):
             with txl.Then():
@@ -433,9 +427,7 @@ def get_kernel(
                 # commented out at :195-197; the writeback's `offs < TopK` is what
                 # bounds the global store. Reproduce, do not repair.
                 slot = R.atom_shared_add_u32(scal, FINAL, txl.uint32(1))
-                R.st_shared_u32(
-                    topk_inds, txl.cast(slot, "int32"), txl.reinterpret("uint32", index)
-                )
+                R.st_shared_u32(topk_inds, txl.cast(slot, "int32"), txl.reinterpret("uint32", index))
             with txl.Else():
                 with txl.If(d == bin_), txl.Then():
                     if not last:
@@ -452,9 +444,7 @@ def get_kernel(
                         with txl.If(slot < num_cached):
                             with txl.Then():
                                 R.st_shared_u32(
-                                    cidx,
-                                    phase * num_cached + slot,
-                                    txl.reinterpret("uint32", index),
+                                    cidx, phase * num_cached + slot, txl.reinterpret("uint32", index)
                                 )
                                 R.st_shared_u32(
                                     cbits, phase * num_cached + slot, txl.cast(bits, "uint32")
@@ -477,13 +467,11 @@ def get_kernel(
                         with txl.If(keep == 1), txl.Then():
                             if is32:
                                 nb = txl.bitwise_and(
-                                    txl.cast(txl.shift_right(bits, txl.uint32(shift - 8)), "int32"),
-                                    0xFF,
+                                    txl.cast(txl.shift_right(bits, txl.uint32(shift - 8)), "int32"), 0xFF
                                 )
                             else:
                                 nb = txl.bitwise_and(
-                                    txl.cast(txl.shift_right(bits, txl.uint16(shift - 8)), "int32"),
-                                    0xFF,
+                                    txl.cast(txl.shift_right(bits, txl.uint16(shift - 8)), "int32"), 0xFF
                                 )
                             R.atom_shared_add_u32(hist, (phase ^ 1) * RADIX + nb, txl.uint32(1))
                     else:
@@ -575,9 +563,7 @@ def get_kernel(
                 R.ld_shared_u32(cached_bits, (phase ^ 1) * num_cached + i),
                 txl.local_scalar(
                     "int32",
-                    init=txl.cast(
-                        R.ld_shared_u32(cached_idx, (phase ^ 1) * num_cached + i), "int32"
-                    ),
+                    init=txl.cast(R.ld_shared_u32(cached_idx, (phase ^ 1) * num_cached + i), "int32"),
                 ),
                 bin_t,
                 phase,
@@ -759,9 +745,7 @@ def get_kernel(
                 vbase = (rank * BLOCK_THREADS + tid) * 4
                 # Snapshotted: as a loop bound it is re-evaluated every trip.
                 vec_end = txl.local_scalar("int32", init=(row_len // 4) * 4)
-                with txl.serial(
-                    vbase, vec_end, step=BLOCK_THREADS * nc * 4, unroll=vec_unroll
-                ) as i:
+                with txl.serial(vbase, vec_end, step=BLOCK_THREADS * nc * 4, unroll=vec_unroll) as i:
                     w = _ld_vec4(logits, logit_base + i, is32)
                     with txl.unroll(4) as j:
                         if is32:

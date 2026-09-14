@@ -623,8 +623,7 @@ def _build_kernel():
                     with txl.If(pair == _i32(0)), txl.Then():
                         other_stage = _i32(1) - stage
                         _mbar_arrive(
-                            _bar(smem, _MBAR_P_STORE_TURN)
-                            + txl.cast(other_stage, "uint32") * _u32(8)
+                            _bar(smem, _MBAR_P_STORE_TURN) + txl.cast(other_stage, "uint32") * _u32(8)
                         )
                         _flip(p_store_phase)
                     _mbar_arrive(_bar(smem, _MBAR_P_FULL) + txl.cast(stage, "uint32") * _u32(8))
@@ -677,17 +676,14 @@ def _build_kernel():
                         ) + selected_position
                         logical_page = txl.local_scalar("int32")
                         kv_len = txl.local_scalar("int32")
-                        txl.ptx.ld.global_.nc.b32(
-                            logical_page, q2k_indices.ptr_to([selected_index])
-                        )
+                        txl.ptx.ld.global_.nc.b32(logical_page, q2k_indices.ptr_to([selected_index]))
                         txl.ptx.ld.global_.nc.b32(kv_len, kv_lens.ptr_to([batch]))
                         valid = txl.local_scalar("int32", init=_i32(0))
                         physical_page = txl.local_scalar("int32", init=_i32(0))
                         with txl.If(logical_page >= _i32(0)), txl.Then():
                             block_start = logical_page * _i32(PAGE_SIZE)
                             txl.assign(
-                                valid,
-                                txl.max(_i32(0), txl.min(_i32(PAGE_SIZE), kv_len - block_start)),
+                                valid, txl.max(_i32(0), txl.min(_i32(PAGE_SIZE), kv_len - block_start))
                             )
                             query_position = kv_len - seqlen_q + query_in_batch
                             txl.assign(

@@ -149,8 +149,7 @@ def _descriptor_base(ldo, sdo, swizzle):
 
 def _descriptor_with_address(base, shared_address):
     address_field = txl.cast(
-        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x7FFF)),
-        "uint64",
+        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x7FFF)), "uint64"
     )
     return txl.bitwise_or(txl.uint64(base), address_field)
 
@@ -315,9 +314,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
         c_map = txl.stack_alloca("tensormap", 1)
 
         def encode(descriptor, dtype, rank, data, *fields):
-            txl.call_packed(
-                "runtime.cuTensorMapEncodeTiled", descriptor, dtype, rank, data, *fields
-            )
+            txl.call_packed("runtime.cuTensorMapEncodeTiled", descriptor, dtype, rank, data, *fields)
 
         encode(
             a_map,
@@ -561,9 +558,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
                 with txl.Then():
                     with txl.If(_elected()):
                         with txl.Then():
-                            txl.ptx.mbarrier.init.shared.b64(
-                                tmem_dealloc.ptr_to([0]), txl.uint32(32)
-                            )
+                            txl.ptx.mbarrier.init.shared.b64(tmem_dealloc.ptr_to([0]), txl.uint32(32))
             txl.ptx.fence.mbarrier_init.release.cluster()
         txl.ptx.fence.mbarrier_init.release.cluster()
         if cluster_size > 1:
@@ -587,8 +582,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
             txl.assign(
                 a_mcast_mask,
                 txl.bitwise_or(
-                    a_mcast_mask,
-                    txl.uint32(1) << txl.cast(cluster_x + cluster_m * peer_n, "uint32"),
+                    a_mcast_mask, txl.uint32(1) << txl.cast(cluster_x + cluster_m * peer_n, "uint32")
                 ),
             )
         b_mcast_mask = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -597,8 +591,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
             txl.assign(
                 b_mcast_mask,
                 txl.bitwise_or(
-                    b_mcast_mask,
-                    txl.uint32(1) << txl.cast(peer_x + cluster_m * cluster_y, "uint32"),
+                    b_mcast_mask, txl.uint32(1) << txl.cast(peer_x + cluster_m * cluster_y, "uint32")
                 ),
             )
         sfb_mcast_mask = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -606,8 +599,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
             txl.assign(
                 sfb_mcast_mask,
                 txl.bitwise_or(
-                    sfb_mcast_mask,
-                    txl.uint32(1) << txl.cast(peer_x + cluster_m * cluster_y, "uint32"),
+                    sfb_mcast_mask, txl.uint32(1) << txl.cast(peer_x + cluster_m * cluster_y, "uint32")
                 ),
             )
         ab_consumer_mask = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -658,8 +650,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
         def cta2_tma_barrier(stage):
             # Bit 24 is the CTA-in-pair selector; CTA2 completions target rank 0.
             return txl.bitwise_and(
-                txl.cuda.cvta_generic_to_shared(ab_pipe.full.ptr_to([stage])),
-                txl.uint32(0xFEFFFFF8),
+                txl.cuda.cvta_generic_to_shared(ab_pipe.full.ptr_to([stage])), txl.uint32(0xFEFFFFF8)
             )
 
         def prefetch_inputs(tile_m_idx, tile_n_idx, future_k):
@@ -1027,14 +1018,10 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
             def runtime_descriptor(sfa_addr, sfb_addr):
                 desc = txl.bitwise_and(txl.uint32(instr_desc), txl.uint32(0x9FFFFFCF))
                 desc = txl.bitwise_or(
-                    desc,
-                    txl.bitwise_and(
-                        txl.shift_right(sfa_addr, txl.uint32(1)), txl.uint32(0x60000000)
-                    ),
+                    desc, txl.bitwise_and(txl.shift_right(sfa_addr, txl.uint32(1)), txl.uint32(0x60000000))
                 )
                 return txl.bitwise_or(
-                    desc,
-                    txl.bitwise_and(txl.shift_right(sfb_addr, txl.uint32(26)), txl.uint32(0x30)),
+                    desc, txl.bitwise_and(txl.shift_right(sfb_addr, txl.uint32(26)), txl.uint32(0x30))
                 )
 
             with txl.While(work < cluster_work):
@@ -1385,8 +1372,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
                     + vector * 16
                 )
                 swizzled = txl.bitwise_xor(
-                    unswizzled,
-                    txl.bitwise_and(txl.shift_right(unswizzled, txl.uint32(3)), txl.uint32(48)),
+                    unswizzled, txl.bitwise_and(txl.shift_right(unswizzled, txl.uint32(3)), txl.uint32(48))
                 )
                 return txl.cast(swizzled - smem_base, "int32")
 
@@ -1423,9 +1409,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
                     output_stage = executed_subtiles % c_stages
                     if not swap:
                         for vector in range(4):
-                            txl.assign(
-                                offsets[vector], row_major_output_offset(output_stage, vector)
-                            )
+                            txl.assign(offsets[vector], row_major_output_offset(output_stage, vector))
                         for vector in range(4):
                             txl.ptx.st.shared.v4.b32(
                                 smem.ptr_to([offsets[vector]]),
@@ -1441,9 +1425,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
                             txl.bitwise_and(thread, txl.int32(40)),
                         )
                         raw_address = txl.bitwise_or(
-                            txl.bitwise_or(
-                                txl.bitwise_and(thread << 7, txl.int32(896)), temporary << 1
-                            ),
+                            txl.bitwise_or(txl.bitwise_and(thread << 7, txl.int32(896)), temporary << 1),
                             txl.bitwise_and(thread << 6, txl.int32(1024)),
                         )
                         first_unswizzled = (
@@ -1548,9 +1530,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
             txl.ptx.cp.async_.bulk.wait_group.read(0)
             with txl.If(warp == 0):
                 with txl.Then():
-                    txl.ptx[
-                        f"tcgen05.relinquish_alloc_permit.cta_group::{cta_group}.sync.aligned"
-                    ]()
+                    txl.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{cta_group}.sync.aligned"]()
             with txl.If(warp == 0):
                 with txl.Then():
                     if cta_group == 2:
@@ -1571,12 +1551,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
     kernel.__annotations__ = {
         "a": txl.gptr[txl.u8, (kernel_m * K_dim // 2,)],
         "b": txl.gptr[txl.u8, (kernel_n * K_dim // 2,)],
-        "sfa": txl.gptr[
-            txl.u8, (_ceil_div(kernel_m, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)
-        ],
-        "sfb": txl.gptr[
-            txl.u8, (_ceil_div(kernel_n, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)
-        ],
+        "sfa": txl.gptr[txl.u8, (_ceil_div(kernel_m, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)],
+        "sfb": txl.gptr[txl.u8, (_ceil_div(kernel_n, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)],
         "c": txl.gptr[txl.u8, (kernel_m * kernel_n * 2,)],
         "alpha_ptr": txl.gptr[txl.f32, (1,)],
     }

@@ -48,8 +48,7 @@ def _descriptor_with_address(base, shared_address):
         txl.shift_left(txl.uint64(base >> 32), txl.uint64(32)), txl.uint64(base & 0xFFFFFFFF)
     )
     address_field = txl.cast(
-        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)),
-        "uint64",
+        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)), "uint64"
     )
     return txl.bitwise_or(base_value, address_field)
 
@@ -96,10 +95,7 @@ def _ffma2(a0, a1, b0, b1, c0, c1):
     out0 = txl.local_scalar("float32")
     out1 = txl.local_scalar("float32")
     txl.ptx.fma.rn.f32x2(
-        packed,
-        txl.cuda.make_float2(a0, a1),
-        txl.cuda.make_float2(b0, b1),
-        txl.cuda.make_float2(c0, c1),
+        packed, txl.cuda.make_float2(a0, a1), txl.cuda.make_float2(b0, b1), txl.cuda.make_float2(c0, c1)
     )
     txl.ptx.mov.b64(out0, out1, packed)
     return out0, out1
@@ -654,8 +650,7 @@ def _make_kernel(tokens, k_dim, num_heads, w_out_in):
                         row_scale_pair, txl.float32(0.0), row_amax * txl.float32(1.0 / 448.0)
                     )
                     row_scale = txl.cast(
-                        txl.bitwise_and(txl.cast(row_scale_pair, "uint32"), txl.uint32(0xFF)),
-                        "uint8",
+                        txl.bitwise_and(txl.cast(row_scale_pair, "uint32"), txl.uint32(0xFF)), "uint8"
                     )
                     inv_row = _e8m0_inverse(row_scale)
                     token = token_base + tok0 + row
@@ -700,9 +695,9 @@ def _make_kernel(tokens, k_dim, num_heads, w_out_in):
         "out_fp8_col": txl.gptr[txl.u8, (tokens * num_heads * _HEAD_DIM,)],
         "out_scales_col": txl.gptr[txl.u8, ((tokens // _BLOCK) * num_heads * _HEAD_DIM,)],
     }
-    return txl.kernel(
-        warps=14, arch="sm_100a", grid=[1, 1, num_clusters], host_prelude=host_prelude
-    )(kernel)
+    return txl.kernel(warps=14, arch="sm_100a", grid=[1, 1, num_clusters], host_prelude=host_prelude)(
+        kernel
+    )
 
 
 def get_kernel(tokens, k_dim, num_heads, w_out_in):

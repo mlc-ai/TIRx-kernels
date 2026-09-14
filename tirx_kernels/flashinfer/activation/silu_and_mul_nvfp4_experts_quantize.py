@@ -167,8 +167,7 @@ def _hmax(dtype):
 
 def _unpack_lo_f32(word, dtype):
     return txl.cast(
-        txl.reinterpret(dtype, txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")),
-        "float32",
+        txl.reinterpret(dtype, txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")), "float32"
     )
 
 
@@ -232,9 +231,7 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
 
         m_rows = txl.truncdiv(num_rows, num_experts)
         padded_m = (m_rows + 127) // 128 * 128
-        cols_per_row = txl.local_scalar(
-            "int32", init=txl.truncdiv(num_cols, txl.int32(ELTS_PER_THREAD))
-        )
+        cols_per_row = txl.local_scalar("int32", init=txl.truncdiv(num_cols, txl.int32(ELTS_PER_THREAD)))
         use_mask = txl.reinterpret("uint64", txl.address_of(mask[0])) != txl.uint64(0)
         actual_cols = txl.local_scalar("int32", init=cols_per_row)
         with txl.If(use_silu_and_mul != 0), txl.Then():

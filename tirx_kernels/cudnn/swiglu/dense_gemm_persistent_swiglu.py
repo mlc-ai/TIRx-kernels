@@ -87,8 +87,7 @@ def _descriptor_with_address(base, shared_address):
         txl.shift_left(txl.uint64(base >> 32), txl.uint64(32)), txl.uint64(base & 0xFFFFFFFF)
     )
     address_field = txl.cast(
-        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)),
-        "uint64",
+        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)), "uint64"
     )
     return txl.bitwise_or(base_value, address_field)
 
@@ -523,9 +522,7 @@ def _make_kernel(
         c_map = txl.stack_alloca("tensormap", 1)
 
         def encode(descriptor, dtype, rank, data, *fields):
-            txl.call_packed(
-                "runtime.cuTensorMapEncodeTiled", descriptor, dtype, rank, data, *fields
-            )
+            txl.call_packed("runtime.cuTensorMapEncodeTiled", descriptor, dtype, rank, data, *fields)
 
         ab_bytes = ab_bits // 8
         a_contiguous_bytes = (M if a_major == "m" else K_dim) * ab_bytes
@@ -736,8 +733,7 @@ def _make_kernel(
             txl.assign(
                 a_mcast_mask,
                 txl.bitwise_or(
-                    a_mcast_mask,
-                    txl.uint32(1) << txl.cast(cluster_x + cluster_m * peer_n, "uint32"),
+                    a_mcast_mask, txl.uint32(1) << txl.cast(cluster_x + cluster_m * peer_n, "uint32")
                 ),
             )
         b_mcast_mask = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -746,8 +742,7 @@ def _make_kernel(
             txl.assign(
                 b_mcast_mask,
                 txl.bitwise_or(
-                    b_mcast_mask,
-                    txl.uint32(1) << txl.cast(peer_x + cluster_m * cluster_y, "uint32"),
+                    b_mcast_mask, txl.uint32(1) << txl.cast(peer_x + cluster_m * cluster_y, "uint32")
                 ),
             )
         ab_consumer_mask = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -1008,9 +1003,7 @@ def _make_kernel(
                                 with txl.If(_elected()):
                                     with txl.Then():
                                         mma_operands = (
-                                            txl.cast(
-                                                tmem_base + acc_state.stage * n_tile, "uint32"
-                                            ),
+                                            txl.cast(tmem_base + acc_state.stage * n_tile, "uint32"),
                                             a_descriptor
                                             + txl.cast(
                                                 mma_state.stage * (a_stage_bytes // 16) + a_kphase,
@@ -1186,8 +1179,7 @@ def _make_kernel(
                     txl.assign(gate_values[index], gate_values[index] * alpha)
                 for index in range(epi_n):
                     txl.ptx.ex2.approx.ftz.f32(
-                        gate_reciprocals[index],
-                        gate_values[index] * txl.float32(-1.4426950408889634),
+                        gate_reciprocals[index], gate_values[index] * txl.float32(-1.4426950408889634)
                     )
                 for index in range(epi_n):
                     txl.assign(gate_reciprocals[index], txl.float32(1.0) + gate_reciprocals[index])
@@ -1246,9 +1238,7 @@ def _make_kernel(
                 swizzle_mask = {32: 16, 64: 48, 128: 112}[row_bytes]
                 swizzled = txl.bitwise_xor(
                     unswizzled,
-                    txl.bitwise_and(
-                        txl.shift_right(unswizzled, txl.uint32(3)), txl.uint32(swizzle_mask)
-                    ),
+                    txl.bitwise_and(txl.shift_right(unswizzled, txl.uint32(3)), txl.uint32(swizzle_mask)),
                 )
                 return txl.cast(swizzled - smem_base, "int32")
 
@@ -1271,9 +1261,7 @@ def _make_kernel(
                         unswizzled = scalar_base + (index % 8) * 128 + (index // 8) * 1024
                         swizzled = txl.bitwise_xor(
                             unswizzled,
-                            txl.bitwise_and(
-                                txl.shift_right(unswizzled, txl.uint32(2)), txl.uint32(96)
-                            ),
+                            txl.bitwise_and(txl.shift_right(unswizzled, txl.uint32(2)), txl.uint32(96)),
                         )
                         txl.ptx.st.shared.b32(
                             smem.ptr_to([txl.cast(swizzled - smem_base, "int32")]), words[index]
@@ -1285,24 +1273,18 @@ def _make_kernel(
                         txl.bitwise_and(thread, txl.int32(40)),
                     )
                     raw_address = txl.bitwise_or(
-                        txl.bitwise_or(
-                            txl.bitwise_and(thread << 7, txl.int32(896)), temporary << 1
-                        ),
+                        txl.bitwise_or(txl.bitwise_and(thread << 7, txl.int32(896)), temporary << 1),
                         txl.bitwise_and(thread << 6, txl.int32(1024)),
                     )
                     first_unswizzled = smem_base + region_offset + stage * stage_bytes + raw_address
                     first_swizzled = txl.bitwise_xor(
                         first_unswizzled,
-                        txl.bitwise_and(
-                            txl.shift_right(first_unswizzled, txl.uint32(3)), txl.uint32(112)
-                        ),
+                        txl.bitwise_and(txl.shift_right(first_unswizzled, txl.uint32(3)), txl.uint32(112)),
                     )
                     second_unswizzled = first_unswizzled + 32
                     second_swizzled = txl.bitwise_xor(
                         second_unswizzled,
-                        txl.bitwise_and(
-                            txl.shift_right(second_unswizzled, txl.uint32(3)), txl.uint32(112)
-                        ),
+                        txl.bitwise_and(txl.shift_right(second_unswizzled, txl.uint32(3)), txl.uint32(112)),
                     )
                     txl.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
                         smem.ptr_to([txl.cast(first_swizzled - smem_base, "int32")]),
@@ -1350,9 +1332,7 @@ def _make_kernel(
                     unswizzled = scalar_base + (index % 16) * 128 + (index // 16) * 2048
                     swizzled = txl.bitwise_xor(
                         unswizzled,
-                        txl.bitwise_and(
-                            txl.shift_right(unswizzled, txl.uint32(3)), txl.uint32(112)
-                        ),
+                        txl.bitwise_and(txl.shift_right(unswizzled, txl.uint32(3)), txl.uint32(112)),
                     )
                     txl.ptx.st.shared.b16(
                         smem.ptr_to([txl.cast(swizzled - smem_base, "int32")]), halves[index]
@@ -1418,9 +1398,7 @@ def _make_kernel(
                             ".bulk_group.L2::cache_hint"
                         ](
                             txl.address_of(map_ptr),
-                            txl.cast(
-                                tile_m_idx * cta_m + row_copy * (cta_m // (bits // 8)), "int32"
-                            ),
+                            txl.cast(tile_m_idx * cta_m + row_copy * (cta_m // (bits // 8)), "int32"),
                             txl.cast(n_coord, "int32"),
                             txl.cast(batch_idx, "int32"),
                             smem.ptr_to([region_offset + stage * stage_bytes + row_copy * 4096]),

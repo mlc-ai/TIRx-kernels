@@ -620,37 +620,25 @@ def _make_flashkda_decode_t5_gram(spec: dict[str, Any]):
                     target1 = target0 + 1
                     with txl.If(source_token < NUM_TOKENS), txl.Then():
                         beta_source = _load_smem_f32(s_beta, source_token)
-                        with (
-                            txl.If(txl.And(source_token < target0, target0 < NUM_TOKENS)),
-                            txl.Then(),
-                        ):
+                        with txl.If(txl.And(source_token < target0, target0 < NUM_TOKENS)), txl.Then():
                             _store_smem_f32(
                                 s_l,
                                 target0 * NUM_TOKENS + source_token,
                                 _mul(beta_source, gram_k_acc[0]),
                             )
-                        with (
-                            txl.If(txl.And(source_token < target1, target1 < NUM_TOKENS)),
-                            txl.Then(),
-                        ):
+                        with txl.If(txl.And(source_token < target1, target1 < NUM_TOKENS)), txl.Then():
                             _store_smem_f32(
                                 s_l,
                                 target1 * NUM_TOKENS + source_token,
                                 _mul(beta_source, gram_k_acc[1]),
                             )
-                        with (
-                            txl.If(txl.And(source_token <= target0, target0 < NUM_TOKENS)),
-                            txl.Then(),
-                        ):
+                        with txl.If(txl.And(source_token <= target0, target0 < NUM_TOKENS)), txl.Then():
                             _store_smem_f32(
                                 s_r,
                                 target0 * NUM_TOKENS + source_token,
                                 _mul(beta_source, gram_q_acc[0]),
                             )
-                        with (
-                            txl.If(txl.And(source_token <= target1, target1 < NUM_TOKENS)),
-                            txl.Then(),
-                        ):
+                        with txl.If(txl.And(source_token <= target1, target1 < NUM_TOKENS)), txl.Then():
                             _store_smem_f32(
                                 s_r,
                                 target1 * NUM_TOKENS + source_token,
@@ -674,8 +662,7 @@ def _make_flashkda_decode_t5_gram(spec: dict[str, Any]):
                 # tile_row_base + row_l is the global row of `state` (:414-415).
                 row_l = owned_row_base + row_local
                 pack = _load_u32x4(
-                    state,
-                    head_base + txl.cast((tile_row_base + row_l) * HEAD_DIM + k_start, "int64"),
+                    state, head_base + txl.cast((tile_row_base + row_l) * HEAD_DIM + k_start, "int64")
                 )
                 for pr in range(4):
                     txl.ptx.mov.b32(hist[row_local * 8 + 2 * pr], _widen_lo(pack[pr]))

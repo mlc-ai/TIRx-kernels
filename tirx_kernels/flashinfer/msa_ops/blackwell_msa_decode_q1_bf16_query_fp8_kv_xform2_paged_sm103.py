@@ -372,8 +372,7 @@ def _build_kernel():
                         _f32(_NEG_INF),
                     )
                     txl.ptx.st.shared.b32(
-                        bar(_SMEM_ROW_SUM) + txl.cast(row_base + lane, "uint32") * _u32(4),
-                        _f32(0.0),
+                        bar(_SMEM_ROW_SUM) + txl.cast(row_base + lane, "uint32") * _u32(4), _f32(0.0)
                     )
 
                 pair = txl.local_scalar("int32", init=_i32(0))
@@ -427,9 +426,9 @@ def _build_kernel():
                     new_max_lane = txl.local_scalar("float32", init=_f32(_NEG_INF))
                     acc_scale_lane = txl.local_scalar("float32", init=_f32(1.0))
                     with txl.If(lane < 16), txl.Then():
-                        state_addr = bar(_SMEM_ROW_MAX) + txl.cast(
-                            row_base + lane, "uint32"
-                        ) * _u32(4)
+                        state_addr = bar(_SMEM_ROW_MAX) + txl.cast(row_base + lane, "uint32") * _u32(
+                            4
+                        )
                         old_max = _load_shared_f32(state_addr)
                         txl.assign(new_max_lane, _max_f32(old_max, tile_max_lane))
                         txl.ptx.st.shared.b32(state_addr, new_max_lane)
@@ -484,9 +483,7 @@ def _build_kernel():
                             shuffled = _shfl_xor_f32(exp_values[h], delta)
                             txl.ptx.add.rn.f32(exp_values[h], exp_values[h], shuffled)
                         with txl.If(lane == h), txl.Then():
-                            sum_addr = bar(_SMEM_ROW_SUM) + txl.cast(row_base + h, "uint32") * _u32(
-                                4
-                            )
+                            sum_addr = bar(_SMEM_ROW_SUM) + txl.cast(row_base + h, "uint32") * _u32(4)
                             old_sum = _load_shared_f32(sum_addr)
                             new_sum = txl.local_scalar("float32")
                             txl.ptx.fma.rn.f32(new_sum, old_sum, acc_scale[h], exp_values[h])
@@ -624,8 +621,7 @@ def _build_kernel():
                     reciprocal = txl.local_scalar("float32")
                     txl.ptx.rcp.approx.ftz.f32(reciprocal, final_sum[h])
                     txl.assign(
-                        inv_sum[h],
-                        txl.if_then_else(final_sum[h] > _f32(0.0), reciprocal, _f32(0.0)),
+                        inv_sum[h], txl.if_then_else(final_sum[h] > _f32(0.0), reciprocal, _f32(0.0))
                     )
 
                 out0 = txl.alloc_local((16,), "float32")
@@ -671,13 +667,10 @@ def _build_kernel():
                 a_lo = txl.local_scalar(
                     "uint32",
                     init=txl.uniform(
-                        ((bar(_SMEM_KV) >> 4) & _u32(0x3FFF))
-                        + txl.cast(stage, "uint32") * _u32(2048)
+                        ((bar(_SMEM_KV) >> 4) & _u32(0x3FFF)) + txl.cast(stage, "uint32") * _u32(2048)
                     ),
                 )
-                b_lo = txl.local_scalar(
-                    "uint32", init=txl.uniform((bar(_SMEM_QT) >> 4) & _u32(0x3FFF))
-                )
+                b_lo = txl.local_scalar("uint32", init=txl.uniform((bar(_SMEM_QT) >> 4) & _u32(0x3FFF)))
                 leader = txl.local_scalar("uint32", init=txl.cuda.elect_sync())
                 for site in range(8):
                     txl.ptx[_MMA_F16](
@@ -835,9 +828,7 @@ def _build_kernel():
                 completion = bar(_MBAR_KV_SRC_FULL) + txl.cast(stage, "uint32") * _u32(8)
                 _mbar_expect_tx(completion, _SMEM_KV_FP8_STAGE_BYTES)
                 dst = bar(_SMEM_KV_FP8) + txl.cast(stage, "uint32") * _u32(_SMEM_KV_FP8_STAGE_BYTES)
-                txl.ptx[_TMA_G2S_3D](
-                    dst, txl.address_of(tmap), _i32(0), _i32(0), page_head, completion
-                )
+                txl.ptx[_TMA_G2S_3D](dst, txl.address_of(tmap), _i32(0), _i32(0), page_head, completion)
                 txl.ptx[_TMA_G2S_3D](
                     dst + _u32(8192), txl.address_of(tmap), _i32(0), _i32(64), page_head, completion
                 )
@@ -875,9 +866,7 @@ def _build_kernel():
                     with txl.While(ni_p < TOPK):
                         stage = txl.local_scalar("int32", init=ni_p % _i32(4))
                         _, page_head_v = page_info(request_p, kv_head_p, _i32(15) - ni_p)
-                        _mbar_wait(
-                            bar(_MBAR_KV_EMPTY) + txl.cast(stage, "uint32") * _u32(8), _i32(0)
-                        )
+                        _mbar_wait(bar(_MBAR_KV_EMPTY) + txl.cast(stage, "uint32") * _u32(8), _i32(0))
                         issue_fp8_page(v_map, stage, page_head_v)
                         next_ni = txl.local_scalar("int32", init=ni_p + _i32(4))
                         with txl.If(next_ni < TOPK), txl.Then():

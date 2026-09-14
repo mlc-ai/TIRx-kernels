@@ -725,10 +725,7 @@ def _build_producer_kernel():
                 txl.ptx.tcgen05.wait__ld.sync.aligned()
                 dequant_scale = txl.local_scalar("float32", init=_f32(0.0))
                 quant_scale = txl.local_scalar("float32", init=_f32(0.0))
-                with (
-                    txl.If(txl.And(row_abs_max > _f32(0.0), row_abs_max == row_abs_max)),
-                    txl.Then(),
-                ):
+                with txl.If(txl.And(row_abs_max > _f32(0.0), row_abs_max == row_abs_max)), txl.Then():
                     scaled_abs = txl.local_scalar("float32")
                     txl.ptx.mul.ftz.f32(scaled_abs, row_abs_max, inv_sum)
                     txl.ptx.mul.ftz.f32(dequant_scale, scaled_abs, _f32(1.0 / 448.0))
@@ -1044,9 +1041,9 @@ def _build_reducer_kernel():
         lane_lse = txl.local_scalar("float32", init=_f32(_NEG_INF))
         lane_scale = txl.local_scalar("float32", init=_f32(0.0))
         with txl.If(txl.And(row_valid != _i32(0), lane_in_row < _i32(4))), txl.Then():
-            split_row = txl.cast(lane_in_row, "int64") * txl.cast(
-                total_rows_out, "int64"
-            ) + txl.cast(row, "int64")
+            split_row = txl.cast(lane_in_row, "int64") * txl.cast(total_rows_out, "int64") + txl.cast(
+                row, "int64"
+            )
             txl.ptx.ld.global_.nc.b32(lane_lse, partial_lse.ptr_to([split_row]))
             txl.ptx.ld.global_.nc.b32(lane_scale, partial_scale.ptr_to([split_row]))
         lse_max = txl.local_scalar("float32", init=lane_lse)
@@ -1106,8 +1103,7 @@ def _build_reducer_kernel():
             values = txl.alloc_local((16,), "float32")
             for split in range(4):
                 base = (
-                    txl.cast(split, "int64") * txl.cast(total_rows_out, "int64")
-                    + txl.cast(row, "int64")
+                    txl.cast(split, "int64") * txl.cast(total_rows_out, "int64") + txl.cast(row, "int64")
                 ) * _i64(HEAD_DIM) + txl.cast(col, "int64")
                 raw = txl.alloc_local((2,), "uint64")
                 txl.ptx.ld.global_.nc.b64(raw[0], partial_o.ptr_to([base]))
