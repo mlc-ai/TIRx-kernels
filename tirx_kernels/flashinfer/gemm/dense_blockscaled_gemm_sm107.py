@@ -47,6 +47,7 @@ from functools import cache
 from pathlib import Path
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.flashinfer.utils.source_checkout import flashinfer_source_root
 
 KERNEL_META = {
     "name": "dense_blockscaled_gemm_sm107",
@@ -65,7 +66,6 @@ KERNEL_META = {
     ),
 }
 
-_SOURCE_ROOT = Path("/root-vol/aarch64-ws/kernel-libs/vr200/flashinfer")
 _CUTLASS_ROOT = Path(__file__).resolve().parents[3] / ".reference-deps" / "cutlass-v4.8.0dev"
 _CUTLASS_PARENT_RELATIVE = Path(
     "examples/python/CuTeDSL/cute/blackwell/kernel/blockscaled_gemm/"
@@ -1766,17 +1766,18 @@ def _install_cutlass_parent():
 
 @cache
 def _source_runner(out_dtype, sf_mode):
-    source = _SOURCE_ROOT / "flashinfer/gemm/kernels/dense_blockscaled_gemm_sm107.py"
+    root = flashinfer_source_root()
+    source = root / "flashinfer/gemm/kernels/dense_blockscaled_gemm_sm107.py"
     if not source.is_file():
         raise RuntimeError(f"FlashInfer source is unavailable: {source}")
     _install_cutlass_parent()
     loaded = sys.modules.get("flashinfer")
     loaded_file = Path(getattr(loaded, "__file__", "")).resolve() if loaded else None
-    if loaded_file is not None and _SOURCE_ROOT not in loaded_file.parents:
+    if loaded_file is not None and root not in loaded_file.parents:
         for name in tuple(sys.modules):
             if name == "flashinfer" or name.startswith("flashinfer."):
                 del sys.modules[name]
-    source_root = str(_SOURCE_ROOT)
+    source_root = str(root)
     if source_root not in sys.path:
         sys.path.insert(0, source_root)
     import torch

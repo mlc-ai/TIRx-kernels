@@ -17,7 +17,7 @@ it.
 
 ## Source identity
 
-- source: `/home/bohanhou/kernel-libs/cudnn-frontend/python/cudnn/gemm/cutedsl/grouped/dglu/moe_grouped_gemm_dglu_dbias.py`
+- source: `python/cudnn/gemm/cutedsl/grouped/dglu/moe_grouped_gemm_dglu_dbias.py` in the cudnn-frontend checkout
 - commit: `aded9909c3c2a897fdbc7b5fd79fa53bc915f4f5` (`1.25.0.dev-250-gaded9909`)
 - sha256: `d448b5c9ddd4514f96340aa1a620894a48e884f4216c56715119d56c37bd9e38`, **2284 lines**
 - entry: `MoEGroupedGemmDgluDbiasBf16Kernel.__call__` -> optional `helper_kernel`, then `kernel`

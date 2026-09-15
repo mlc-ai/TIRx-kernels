@@ -987,19 +987,14 @@ def _build_tensor_maps(M, N, K_dim, A, B, SFA, SFB):
 def _fastcu_source_root() -> Path:
     override = os.environ.get("FASTCU_PATH")
     repo_root = Path(__file__).resolve().parents[2]
-    candidates = (
-        (Path(override),)
-        if override
-        else (
-            repo_root / ".reference-deps" / "fast-cu",
-            Path("/root-vol/aarch64-ws/kernel-libs/gb300/fast.cu"),
-        )
-    )
+    candidates = (Path(override),) if override else (repo_root / ".reference-deps" / "fast-cu",)
     for root in candidates:
         if (root / _SOURCE_RELATIVE).is_file():
             return root
     tried = ", ".join(str(root) for root in candidates)
-    raise RuntimeError(f"fast.cu source is unavailable; tried: {tried}")
+    raise RuntimeError(
+        f"fast.cu source is unavailable; set FASTCU_PATH to a checkout (tried: {tried})"
+    )
 
 
 @functools.lru_cache(maxsize=1)

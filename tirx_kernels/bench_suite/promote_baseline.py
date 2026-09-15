@@ -26,8 +26,12 @@ def _result_key(row: dict) -> tuple[str, str]:
 
 
 def slim_baseline_row(row: dict) -> dict:
-    """Compatibility entry point that preserves the complete row evidence."""
-    return copy.deepcopy(row)
+    """Copy a row, dropping the client-local log path that is meaningless once committed."""
+    out = copy.deepcopy(row)
+    remote = out.get("remote")
+    if isinstance(remote, dict):
+        remote.pop("log", None)
+    return out
 
 
 def slim_baseline_doc(doc: dict) -> dict:

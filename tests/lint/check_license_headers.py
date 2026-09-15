@@ -229,6 +229,7 @@ PORT_DIR_EXCEPTIONS = {
     "tirx_kernels/deepep/utils/_buffer.py",
     "tirx_kernels/deepep/utils/_runtime.py",
     "tirx_kernels/flashinfer/utils/_flashkda_bench.py",
+    "tirx_kernels/flashinfer/utils/source_checkout.py",
     "tirx_kernels/flashmla/utils/_flashmla_bench.py",
     "tirx_kernels/flashmla/utils/_trtllm_gen_bench.py",
     "tirx_kernels/msa/utils/_msa_bench.py",

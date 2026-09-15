@@ -14,7 +14,7 @@ element mappings. No first-class layout object is part of this sketch.
   `MaskedBatchedMatmulCuteDSLRubin` ->
   `Sm107BlockScaledPersistentDenseGemmKernel.kernel`.
 - Source:
-  `/root-vol/aarch64-ws/kernel-libs/vr200/flashinfer/flashinfer/gemm/kernels/grouped_gemm_masked_rubin.py`
+  `flashinfer/gemm/kernels/grouped_gemm_masked_rubin.py` in the FlashInfer checkout
   (`sha256=729ead8b8e3cfc66b0ec57e4b452f571c95f185758444a9ed697b11e60005639`).
 - Scheduler source:
   `grouped_gemm_masked_blackwell.py:103-418`.

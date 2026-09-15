@@ -5,7 +5,7 @@
 
 """DeepEP V2 elastic dispatch (single-domain NVLink path) ported to TIRx.
 
-Source: /home/bohanhou/kernel-libs/deepep
+Source: DeepEP checkout at the pinned revision
   - deep_ep/include/deep_ep/impls/dispatch.cuh (`dispatch_impl`, direct path)
   - deep_ep/include/deep_ep/impls/dispatch_copy_epilogue.cuh
     (`dispatch_copy_epilogue_impl`)

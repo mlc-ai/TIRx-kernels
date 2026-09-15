@@ -45,6 +45,7 @@ from functools import cache
 from pathlib import Path
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.flashinfer.utils.source_checkout import flashinfer_source_root
 
 KERNEL_META = {
     "name": "grouped_gemm_masked_rubin",
@@ -63,7 +64,6 @@ KERNEL_META = {
     ),
 }
 
-_SOURCE_ROOT = Path("/root-vol/aarch64-ws/kernel-libs/vr200/flashinfer")
 _CUTLASS_ROOT = Path(__file__).resolve().parents[3] / ".reference-deps" / "cutlass-v4.8.0dev"
 _CUTLASS_PARENT_RELATIVE = Path(
     "examples/python/CuTeDSL/cute/blackwell/kernel/blockscaled_gemm/"
@@ -2096,7 +2096,7 @@ def get_kernel(
     ).func
 
 
-_SOURCE_BENCHMARK = _SOURCE_ROOT / "benchmarks" / "bench_cute_dsl_blockscaled_gemm.py"
+_SOURCE_BENCHMARK_RELATIVE = Path("benchmarks/bench_cute_dsl_blockscaled_gemm.py")
 
 
 def _physical_u8(torch, tensor):
@@ -2109,14 +2109,17 @@ def _torch_dtype(torch, dtype):
 
 @cache
 def _source_benchmark():
-    source = _SOURCE_ROOT / "flashinfer/gemm/kernels/grouped_gemm_masked_rubin.py"
-    if not source.is_file():
-        raise RuntimeError(f"FlashInfer source is unavailable: {source}")
-    source_root = str(_SOURCE_ROOT)
+    root = flashinfer_source_root()
+    source = root / "flashinfer/gemm/kernels/grouped_gemm_masked_rubin.py"
+    benchmark = root / _SOURCE_BENCHMARK_RELATIVE
+    for required in (source, benchmark):
+        if not required.is_file():
+            raise RuntimeError(f"FlashInfer source is unavailable: {required}")
+    source_root = str(root)
     if source_root not in sys.path:
         sys.path.insert(0, source_root)
     name = "_tirx_grouped_gemm_masked_rubin_benchmark"
-    spec = importlib.util.spec_from_file_location(name, _SOURCE_BENCHMARK)
+    spec = importlib.util.spec_from_file_location(name, benchmark)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
