@@ -402,18 +402,14 @@ def get_kernel(**config):
                         for item in range(2):
                             q_row = q_block * txl.int32(64) + lane * txl.int32(2) + txl.int32(item)
                             dst = OFF_SLSE + pair_slot * 256 + lane * txl.int32(8) + item * 4
-                            with txl.If(q_row < txl.int32(seqlen_q)):
-                                with txl.Then():
-                                    txl.ptx["cp.async.ca.shared.global"](
-                                        arena.ptr_to([dst]),
-                                        workspace.ptr_to(
-                                            [txl.int64(sum_plane) + bh_q + txl.cast(q_row, "int64")]
-                                        ),
-                                        4,
-                                        4,
-                                    )
-                                with txl.Else():
-                                    txl.ptx.st.shared.b32(arena.ptr_to([dst]), txl.uint32(0))
+                            txl.ptx["cp.async.ca.shared.global"](
+                                arena.ptr_to([dst]),
+                                workspace.ptr_to(
+                                    [txl.int64(sum_plane) + bh_q + txl.cast(q_row, "int64")]
+                                ),
+                                4,
+                                txl.Select(q_row < txl.int32(seqlen_q), txl.uint32(4), txl.uint32(0)),
+                            )
                     txl.ptx["cp.async.mbarrier.arrive.noinc.shared.b64"](
                         lse_pipe.full.buf.ptr_to([lse_stage])
                     )
@@ -445,16 +441,12 @@ def get_kernel(**config):
                         for item in range(2):
                             q_row = q_block * txl.int32(64) + lane * txl.int32(2) + txl.int32(item)
                             dst = OFF_SSUM + pair_slot * 256 + lane * txl.int32(8) + item * 4
-                            with txl.If(q_row < txl.int32(seqlen_q)):
-                                with txl.Then():
-                                    txl.ptx["cp.async.ca.shared.global"](
-                                        arena.ptr_to([dst]),
-                                        workspace.ptr_to([bh_q + txl.cast(q_row, "int64")]),
-                                        4,
-                                        4,
-                                    )
-                                with txl.Else():
-                                    txl.ptx.st.shared.b32(arena.ptr_to([dst]), txl.uint32(0))
+                            txl.ptx["cp.async.ca.shared.global"](
+                                arena.ptr_to([dst]),
+                                workspace.ptr_to([bh_q + txl.cast(q_row, "int64")]),
+                                4,
+                                txl.Select(q_row < txl.int32(seqlen_q), txl.uint32(4), txl.uint32(0)),
+                            )
                     txl.ptx["cp.async.mbarrier.arrive.noinc.shared.b64"](
                         sum_pipe.full.buf.ptr_to([sum_stage])
                     )

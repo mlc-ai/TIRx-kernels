@@ -494,8 +494,8 @@ def get_kernel(**kwargs: Any):
             return txl.bitwise_or(txl.shift_left(txl.uint64(0x80004020), txl.uint64(32)), start_addr)
 
         def emit_sf_transpose(buf, dst, lane, stage_idx, elem_base):
-            # DeepGEMM's st.shared.v4 SF transpose, out-of-place into staging
-            # (no in-place WAR warp_sync; elect.sync covers the cross-lane barrier).
+            # Out-of-place st.shared.v4 transpose; callers synchronize the
+            # writing warp before publishing staging to an async reader.
             # ptx destinations are declared registers the instruction writes into.
             v = txl.alloc_local([4], "uint32")
             for i in range(4):
@@ -879,6 +879,7 @@ def get_kernel(**kwargs: Any):
                     emit_sf_transpose(
                         smem_sf_kv, smem_sf_kv_t, lane_idx, kv_state.stage, num_utccp_aligned_elems
                     )
+                    txl.cuda.warp_sync()
                     txl.ptx.fence.proxy.async_.shared__cta()
                     with txl.If(txl.cuda.elect_sync()), txl.Then():
                         sf_ready.arrive(kv_state.stage)

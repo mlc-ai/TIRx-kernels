@@ -1474,7 +1474,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
                         )
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx.bar.sync(txl.uint32(1), txl.uint32(128))
-                    with txl.If(warp == 0):
+                    with txl.If(txl.And(warp == 0, lane == 0)):
                         with txl.Then():
                             if swap:
                                 for row_copy in range(2):

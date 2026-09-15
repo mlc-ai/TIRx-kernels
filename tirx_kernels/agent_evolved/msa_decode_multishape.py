@@ -5356,7 +5356,8 @@ def make_kernel_q1d(cfg):
                             zchunk()
 
         def warp_arrive(bar, idx):
-            """elect.sync converges the warp after every lane's prior work; one lane arrives for all."""
+            """Join every lane's prior accesses before one lane publishes them."""
+            txl.cuda.warp_sync()
             with txl.If(elected()), txl.Then():
                 bar.arrive(idx, count=32)
 
@@ -6462,6 +6463,7 @@ def make_kernel_q4d(cfg):
                 txl.ptx.st.shared.v4.b32(ptr, words[c], words[c + 1], words[c + 2], words[c + 3])
 
         def warp_arrive(bar, idx):
+            txl.cuda.warp_sync()
             with txl.If(elected()), txl.Then():
                 bar.arrive(idx, count=32)
 

@@ -1421,7 +1421,7 @@ def _make_kernel(
                     stage_outputs(ab12_stage0, ab12_stage1, c_stage)
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx.bar.sync(txl.uint32(1), txl.uint32(128))
-                    with txl.If(warp == 0):
+                    with txl.If((warp == 0) & (lane == 0)):
                         with txl.Then():
                             ab12_n = tile_n_idx * n_tile + subtile * epi_n
                             c_n = tile_n_idx * (n_tile // 2) + (subtile // 2) * epi_n

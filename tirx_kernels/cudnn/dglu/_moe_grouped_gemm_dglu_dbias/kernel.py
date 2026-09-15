@@ -1679,6 +1679,7 @@ def _make_kernel(
                         # instructions, and with only two C stages the producer
                         # has no slack to absorb that.
                         txl.ptx["fence.proxy.async.shared::cta"]()
+                        txl.cuda.warp_sync()
                         with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
                             txl.ptx.mbarrier.arrive.shared.b64(c_pipe.empty.ptr_to([c_cons.stage]))
                         c_cons.advance()
@@ -1877,7 +1878,7 @@ def _make_kernel(
                     txl.ptx["fence.proxy.async.shared::cta"]()
                     txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
 
-                    with txl.If(warp == txl.int32(0)), txl.Then():
+                    with txl.If((warp == txl.int32(0)) & (txl.lane_id() == 0)), txl.Then():
                         # The two D subtiles of one accumulator subtile land in
                         # adjacent halves of the 2N region, which is why the
                         # column index is 2 * real_subtile + {0, 1}.
