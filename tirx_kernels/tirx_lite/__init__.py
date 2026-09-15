@@ -280,13 +280,10 @@ def alloc_buffer(
     shape,
     dtype="float32",
     data=None,
-    strides=None,
     elem_offset=None,
     byte_offset=None,
     scope="global",
     align=-1,
-    offset_factor=0,
-    allocated_addr=None,
     annotations=None,
 ):
     """Allocate an ordinary tensor using TIRx's default layout.
@@ -296,12 +293,6 @@ def alloc_buffer(
     contracts, so callers must spell them with raw columns and
     ``txl.cuda.get_tmem_addr`` rather than creating a ``scope="tmem"`` buffer.
     """
-    if strides is not None:
-        raise ValueError(
-            "tirx-lite does not support explicit strides: buffer addressing uses the "
-            "default layout. Declare the physical buffer shape and compute pointer "
-            "offsets explicitly instead."
-        )
     if scope == "tmem":
         raise ValueError(
             'tirx-lite does not support scope="tmem" buffers; use raw tcgen05 column '
@@ -315,8 +306,6 @@ def alloc_buffer(
         byte_offset=byte_offset,
         scope=scope,
         align=align,
-        offset_factor=offset_factor,
-        allocated_addr=allocated_addr,
         annotations=annotations,
     )
 
