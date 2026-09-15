@@ -29,6 +29,9 @@ def zero(out: txl.gptr(txl.f32)):
 - `txl.cta_id`, `txl.warp_id`, `txl.lane_id`, and `txl.thread_id` are the entry-owned
   coordinates. `txl.specialize()` defines named warp roles when the schedule is
   warp-specialized.
+- `txl.decl_buffer` and `txl.alloc_buffer` use the default layout and reject
+  explicit `strides` (including empty lists). Declare the physical buffer shape
+  and calculate pointer offsets explicitly for padded or strided accesses.
 - Shared memory is owned by `txl.smem_pool()`. PTX and CUDA instructions are
   spelled through `txl.ptx` and `txl.cuda`; higher-level reusable instruction
   sequences live under `txl.idioms`.
