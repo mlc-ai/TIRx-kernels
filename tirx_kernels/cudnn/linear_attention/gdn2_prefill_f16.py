@@ -1490,6 +1490,7 @@ def _make_main(
                                 arena.ptr_to(
                                     [checkpoint_base + cp_stage * 32768 + value_coord * 256]
                                 ),
+                                pred=txl.cast(_elected(), "bool"),
                             )
                         txl.ptx.cp.async_.bulk.commit_group()
                         txl.ptx.cp.async_.bulk.wait_group.read(0)
@@ -1608,6 +1609,7 @@ def _make_main(
                                         arena.ptr_to(
                                             [checkpoint_base + cp_stage * 32768 + value_coord * 256]
                                         ),
+                                        pred=txl.cast(_elected(), "bool"),
                                     )
                                 txl.ptx.cp.async_.bulk.commit_group()
                                 txl.assign(did_checkpoint, txl.int32(1))
@@ -1626,6 +1628,7 @@ def _make_main(
                                     head,
                                     output_chunk * _BT,
                                     arena.ptr_to([o_base + o_stage * 4096 + value_coord * 32]),
+                                    pred=txl.cast(_elected(), "bool"),
                                 )
                             txl.ptx.cp.async_.bulk.commit_group()
                             txl.assign(did_o, txl.int32(1))
@@ -1659,6 +1662,7 @@ def _make_main(
                             head,
                             last_chunk * _BT,
                             arena.ptr_to([o_base + o_stage * 4096 + value_coord * 32]),
+                            pred=txl.cast(_elected(), "bool"),
                         )
                     txl.ptx.cp.async_.bulk.commit_group()
                     txl.ptx.cp.async_.bulk.wait_group.read(0)

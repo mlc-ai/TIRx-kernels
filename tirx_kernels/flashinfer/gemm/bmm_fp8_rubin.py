@@ -801,7 +801,7 @@ def _make_bmm_kernel(B: int, M: int, N: int, K_dim: int, ab_dtype: str, c_dtype:
                         )
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx.bar.sync(txl.uint32(1), txl.uint32(128))
-                    with txl.If(warp == 0):
+                    with txl.If(txl.And(warp == 0, lane == 0)):
                         with txl.Then():
                             txl.ptx[
                                 "cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"

@@ -1500,21 +1500,14 @@ def make_kernel(HQ: int, HV: int):
                 bdst = [txl.address_of(s_beta[st_bp.stage, lane_a + 32 * i]) for i in range(2)]
                 with txl.If(is_last):
                     with txl.Then():
-                        # The pre-store is LOAD-BEARING, not defensive. The
-                        # copy below is predicated with `pred=`, which is
-                        # whole-instruction @p predication and NOT the ISA's
-                        # ignore-src: an out-of-range lane executes nothing at
-                        # all and its destination keeps whatever was there, so
-                        # the zero has to be written here. (The alternative is
-                        # the ignore-src spelling, which zero-fills and needs
-                        # no pre-store; orig uses this one.) txl.ptx requires the
-                        # trailing src-size operand precisely so that choice is
-                        # visible -- src_size == cp_size means a full copy, no
-                        # zero-fill.
+                        # The async arrival publishes copies, not generic
+                        # pre-stores. Zero-fill invalid rows through the same
+                        # cp.async completion as valid beta loads.
                         for i in range(2):
-                            txl.ptx.st.shared.f32(bdst[i], txl.float32(0.0))
-                        for i in range(2):
-                            txl.ptx[CP_ASYNC](bdst[i], bsrc[i], 4, 4, pred=valid[i])
+                            txl.ptx[CP_ASYNC](
+                                bdst[i], bsrc[i], 4,
+                                txl.Select(valid[i] != 0, txl.uint32(4), txl.uint32(0)),
+                            )
                     with txl.Else():
                         for i in range(2):
                             txl.ptx[CP_ASYNC](bdst[i], bsrc[i], 4, 4)

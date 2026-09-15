@@ -1507,7 +1507,7 @@ def _make_kernel(
                     )
                 txl.ptx.fence.proxy.async_.shared__cta()
                 txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
-                with txl.If(warp == 0):
+                with txl.If((warp == 0) & (lane == 0)):
                     with txl.Then():
                         if c_major == "n":
                             txl.ptx[

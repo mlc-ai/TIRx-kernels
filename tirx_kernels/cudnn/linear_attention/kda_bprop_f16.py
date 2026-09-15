@@ -1653,8 +1653,9 @@ def _make_main(
             dv_store = txl.PipelineState(2, phase=0)
 
             def store_pending(pend_token, pend_writes, head, desc_dq, desc_dk, desc_dv, desc_dgate):
+                issue_store = txl.And(pend_writes, _elected() != 0)
                 _wait_barrier(arena, 696, dq_store.stage, dq_store.phase)
-                with txl.If(pend_writes), txl.Then():
+                with txl.If(issue_store), txl.Then():
                     for d_coord in (0, 64):
                         txl.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"](
                             desc_dq,
@@ -1665,7 +1666,7 @@ def _make_main(
                         )
                     txl.ptx.cp.async_.bulk.commit_group()
                 _wait_barrier(arena, 712, dk_store.stage, dk_store.phase)
-                with txl.If(pend_writes), txl.Then():
+                with txl.If(issue_store), txl.Then():
                     for d_coord in (0, 64):
                         txl.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"](
                             desc_dk,
@@ -1676,7 +1677,7 @@ def _make_main(
                         )
                     txl.ptx.cp.async_.bulk.commit_group()
                 _wait_barrier(arena, 760, dgate_store.stage, dgate_store.phase)
-                with txl.If(pend_writes), txl.Then():
+                with txl.If(issue_store), txl.Then():
                     for d_coord in (0, 32, 64, 96):
                         txl.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"](
                             desc_dgate,
@@ -1687,7 +1688,7 @@ def _make_main(
                         )
                     txl.ptx.cp.async_.bulk.commit_group()
                 _wait_barrier(arena, 728, dv_store.stage, dv_store.phase)
-                with txl.If(pend_writes), txl.Then():
+                with txl.If(issue_store), txl.Then():
                     for d_coord in (0, 64):
                         txl.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"](
                             desc_dv,

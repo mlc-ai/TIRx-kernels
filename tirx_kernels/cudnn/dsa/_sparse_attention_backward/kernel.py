@@ -1199,7 +1199,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
                     txl.ptx["fence.proxy.async.shared::cta"]()
                     txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
-                    with txl.If(rwarp == txl.int32(0)), txl.Then():
+                    with txl.If(txl.And(rwarp == txl.int32(0), lane == 0)), txl.Then():
                         for h in range(2):
                             txl.ptx[TMA_S2G](
                                 txl.address_of(desc_dq),
@@ -1252,7 +1252,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
                     txl.ptx["fence.proxy.async.shared::cta"]()
                     txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1]))
-                    with txl.If(rwarp == txl.int32(0)), txl.Then():
+                    with txl.If(txl.And(rwarp == txl.int32(0), lane == 0)), txl.Then():
                         txl.ptx[TMA_S2G](
                             txl.address_of(desc_dq),
                             txl.int32(512),
