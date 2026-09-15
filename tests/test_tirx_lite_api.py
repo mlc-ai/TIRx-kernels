@@ -6,6 +6,7 @@
 # NOTE: no `from __future__ import annotations` — tirx-lite kernels trace at
 # decoration time and need live annotation objects (PEP 563 breaks them).
 
+import pytest
 from tvm_ffi import structural_walk
 
 import tirx_kernels.tirx_lite as txl
@@ -247,6 +248,72 @@ def test_unsupported_tmem_buffer_scope_is_rejected():
 
     with pytest.raises(AttributeError, match="deliberately does not expose"):
         txl.TMEMPool
+
+
+@pytest.mark.parametrize("buffer_api", [txl.alloc_buffer, txl.decl_buffer])
+@pytest.mark.parametrize("removed", ["strides", "offset_factor", "allocated_addr"])
+def test_buffer_removed_options_are_rejected(buffer_api, removed):
+    with pytest.raises(TypeError, match=removed):
+        buffer_api((1,), txl.u32, **{removed: None})
+
+
+def test_alloc_buffer_preserves_defaults_and_positional_options():
+    def build(out):
+        region = txl.alloc_buffer((2,), scope="local")
+        assert region.dtype == "float32"
+        view = txl.alloc_buffer((1,), txl.f32, region.data, 1, None, "local", 16)
+        assert int(view.elem_offset) == 1
+        assert view.scope() == "local"
+        assert view.data_alignment == 16
+        txl.assign(view[0], txl.float32(1))
+        txl.ptx.st.global_.f32(out.ptr_to([0]), view[0])
+
+    _tir(build)
+
+
+def test_decl_buffer_preserves_defaults_and_positional_options():
+    def build(out):
+        region = txl.decl_buffer((2,), scope="local")
+        assert region.dtype == "float32"
+        view = txl.decl_buffer((1,), txl.f32, region.data, 1, None, "local", 16)
+        assert int(view.elem_offset) == 1
+        assert view.scope() == "local"
+        assert view.data_alignment == 16
+        txl.assign(view[0], txl.float32(1))
+        txl.ptx.st.global_.f32(out.ptr_to([0]), view[0])
+
+    _tir(build)
+
+
+def test_decl_buffer_strided_shared_alias_is_rejected():
+    # The original #8 shape must fail while tracing, before CUDA can be emitted.
+    with pytest.raises(TypeError, match="strides"):
+
+        @txl.kernel(warps=4, arch="sm_100a", grid=1)
+        def probe():
+            smem = txl.smem_pool()
+            region = smem.pool.alloc((2, 4, 512), "uint32", align=128)
+            txl.decl_buffer(
+                (2, 4, 32),
+                txl.f32,
+                data=region.data,
+                elem_offset=int(region.elem_offset),
+                strides=(2048, 512, 1),
+                scope="shared.dyn",
+                align=16,
+            )
+
+
+def test_default_buffer_strides_preserve_layout():
+    def build(out):
+        region = txl.alloc_buffer((2, 4, 512), txl.f32, scope="local")
+        view = txl.decl_buffer((2, 4, 512), txl.f32, data=region.data, scope="local")
+        ir.assert_structural_equal(view.layout, region.layout)
+        assert not view.strides
+        txl.assign(view[0, 2, 7], txl.float32(1))
+        txl.ptx.st.global_.f32(out.ptr_to([0]), view[0, 2, 7])
+
+    assert "512" in _tir(build)
 
 
 def test_parser_and_raw_builder_entry_points_are_rejected():

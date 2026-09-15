@@ -280,13 +280,10 @@ def alloc_buffer(
     shape,
     dtype="float32",
     data=None,
-    strides=None,
     elem_offset=None,
     byte_offset=None,
     scope="global",
     align=-1,
-    offset_factor=0,
-    allocated_addr=None,
     annotations=None,
 ):
     """Allocate an ordinary tensor using TIRx's default layout.
@@ -305,13 +302,10 @@ def alloc_buffer(
         shape,
         dtype,
         data=data,
-        strides=strides,
         elem_offset=elem_offset,
         byte_offset=byte_offset,
         scope=scope,
         align=align,
-        offset_factor=offset_factor,
-        allocated_addr=allocated_addr,
         annotations=annotations,
     )
 
@@ -320,13 +314,10 @@ def decl_buffer(
     shape,
     dtype="float32",
     data=None,
-    strides=None,
     elem_offset=None,
     byte_offset=None,
     scope="global",
     align=0,
-    offset_factor=0,
-    allocated_addr=None,
 ):
     """Declare an ordinary tensor using TIRx's default layout."""
     if scope == "tmem":
@@ -338,13 +329,10 @@ def decl_buffer(
         shape,
         dtype,
         data=data,
-        strides=strides,
         elem_offset=elem_offset,
         byte_offset=byte_offset,
         scope=scope,
         align=align,
-        offset_factor=offset_factor,
-        allocated_addr=allocated_addr,
     )
 
 
