@@ -316,7 +316,6 @@ _ = (bench, dtype_bytes, PATTERNS)  # wired up with the config matrix and harnes
 # to build `StableSortTopKByValue<DType, int32_t>` itself.  Precedent for the
 # mechanism: `tirx_kernels/basic/nvfp4_gemm.py`.
 # ---------------------------------------------------------------------------
-_FLASHINFER_DATA_FALLBACK = "/home/bohanhou/flashinfer/flashinfer/data"
 _REFERENCE_EXT = None
 
 
@@ -325,16 +324,18 @@ def flashinfer_data_dir() -> str:
 
     The headers this reference compiles against ship inside the flashinfer
     package rather than the wheel's include path, so resolve them from the
-    imported package instead of a machine-specific absolute path.
+    imported package.
     """
     import os
 
     try:
         import flashinfer
-    except ImportError:
-        return _FLASHINFER_DATA_FALLBACK
+    except ImportError as error:
+        raise RuntimeError("flashinfer is required to build the reference") from error
     candidate = os.path.join(os.path.dirname(flashinfer.__file__), "data")
-    return candidate if os.path.isdir(candidate) else _FLASHINFER_DATA_FALLBACK
+    if not os.path.isdir(candidate):
+        raise RuntimeError(f"flashinfer/data is missing from the installed package: {candidate}")
+    return candidate
 
 
 _REF_DECL = r"""

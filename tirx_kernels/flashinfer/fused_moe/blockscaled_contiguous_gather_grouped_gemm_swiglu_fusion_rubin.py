@@ -32,9 +32,9 @@ Upstream source:
 import importlib
 import sys
 from functools import cache
-from pathlib import Path
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.flashinfer.utils.source_checkout import flashinfer_source_root
 
 KERNEL_META = {
     "name": "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin",
@@ -53,7 +53,6 @@ KERNEL_META = {
     ),
 }
 
-_SOURCE_ROOT = Path("/root-vol/aarch64-ws/kernel-libs/vr200/flashinfer")
 _TRY_WAIT_TICKS = 10_000_000
 _TILE_M = 128
 _TILE_N = 128
@@ -1196,13 +1195,14 @@ def get_kernel(**raw_config):
 
 @cache
 def _source_module():
+    root = flashinfer_source_root()
     source = (
-        _SOURCE_ROOT / "flashinfer/fused_moe/cute_dsl/rubin/"
+        root / "flashinfer/fused_moe/cute_dsl/rubin/"
         "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion.py"
     )
     if not source.is_file():
         raise RuntimeError(f"FlashInfer source is unavailable: {source}")
-    source_root = str(_SOURCE_ROOT)
+    source_root = str(root)
     if source_root not in sys.path:
         sys.path.insert(0, source_root)
     return importlib.import_module(

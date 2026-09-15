@@ -5,7 +5,7 @@
 
 """DeepEP V2 elastic combine (single-domain NVLink path) ported to TIRx.
 
-Source: /home/bohanhou/DeepEP
+Source: DeepEP checkout at the pinned revision
   - deep_ep/include/deep_ep/impls/combine.cuh (`combine_impl`, direct path)
   - deep_ep/include/deep_ep/impls/combine_reduce_epilogue.cuh
     (`combine_reduce_epilogue_impl`)

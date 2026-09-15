@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.flashinfer.utils.source_checkout import flashinfer_source_root
 
 KERNEL_META = {
     "name": "bmm_fp8_rubin",
@@ -81,7 +82,6 @@ _SMEM_CAPACITY = 335_872
 # query on the 200-SM sm_107a part, so the persistent grid stays a static
 # specialization fact: 100 two-CTA clusters and 40 four-CTA clusters.
 _MAX_ACTIVE_CLUSTERS = {2: 100, 4: 40}
-_SOURCE_ROOT = Path("/root-vol/aarch64-ws/kernel-libs/vr200/flashinfer")
 
 # (mma_tiler, mma_instruction, cluster_mn, raster)
 TACTICS = (
@@ -934,16 +934,17 @@ def _tirx_launch(executable, data):
 
 @cache
 def _source_bmm_op():
-    source = _SOURCE_ROOT / "flashinfer/gemm/kernels/bmm_fp8_rubin.py"
+    root = flashinfer_source_root()
+    source = root / "flashinfer/gemm/kernels/bmm_fp8_rubin.py"
     if not source.is_file():
         raise RuntimeError(f"FlashInfer source is unavailable: {source}")
     loaded = sys.modules.get("flashinfer")
     loaded_file = Path(getattr(loaded, "__file__", "")).resolve() if loaded is not None else None
-    if loaded_file is not None and _SOURCE_ROOT not in loaded_file.parents:
+    if loaded_file is not None and root not in loaded_file.parents:
         for name in tuple(sys.modules):
             if name == "flashinfer" or name.startswith("flashinfer."):
                 del sys.modules[name]
-    source_root = str(_SOURCE_ROOT)
+    source_root = str(root)
     if source_root not in sys.path:
         sys.path.insert(0, source_root)
     module = importlib.import_module("flashinfer.gemm.kernels.bmm_fp8_wrapper")
