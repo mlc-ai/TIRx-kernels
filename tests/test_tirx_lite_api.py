@@ -244,25 +244,37 @@ def test_unsupported_tmem_buffer_scope_is_rejected():
     with pytest.raises(ValueError, match='scope="tmem"'):
         txl.alloc_buffer((1,), txl.u32, scope="tmem")
     with pytest.raises(ValueError, match='scope="tmem"'):
-        txl.decl_buffer((1,), txl.u32, scope="tmem")
+        txl.decl_buffer((1,), txl.u32, data=tirx.Var("ptr", "handle"), scope="tmem")
 
     with pytest.raises(AttributeError, match="deliberately does not expose"):
         txl.TMEMPool
 
 
-@pytest.mark.parametrize("declare", [txl.decl_buffer, txl.alloc_buffer])
 @pytest.mark.parametrize("strides", [(2048, 512, 1), (128, 32, 1), (), []])
-def test_explicit_buffer_strides_are_rejected(declare, strides):
+def test_explicit_alloc_buffer_strides_are_rejected(strides):
     # Reject even dense/empty explicit strides at the API boundary, before tracing.
     with pytest.raises(ValueError, match="does not support explicit strides"):
-        declare((2, 4, 32), txl.f32, strides=strides, scope="shared.dyn")
+        txl.alloc_buffer((2, 4, 32), txl.f32, strides=strides, scope="shared.dyn")
     with pytest.raises(ValueError, match="does not support explicit strides"):
-        declare((2, 4, 32), txl.f32, None, strides)
+        txl.alloc_buffer((2, 4, 32), txl.f32, None, strides)
+
+
+@pytest.mark.parametrize("removed", ["strides", "offset_factor", "allocated_addr"])
+def test_decl_buffer_removed_options_are_rejected(removed):
+    with pytest.raises(TypeError, match=removed):
+        txl.decl_buffer((1,), txl.u32, data=tirx.Var("ptr", "handle"), **{removed: None})
+
+
+def test_decl_buffer_requires_existing_storage():
+    with pytest.raises(TypeError, match="data"):
+        txl.decl_buffer((1,), txl.u32)
+    with pytest.raises(ValueError, match="use alloc_buffer"):
+        txl.decl_buffer((1,), txl.u32, data=None)
 
 
 def test_decl_buffer_strided_shared_alias_is_rejected():
     # The original #8 shape must fail while tracing, before CUDA can be emitted.
-    with pytest.raises(ValueError, match="compute pointer offsets explicitly"):
+    with pytest.raises(TypeError, match="strides"):
 
         @txl.kernel(warps=4, arch="sm_100a", grid=1)
         def probe():
@@ -282,7 +294,7 @@ def test_decl_buffer_strided_shared_alias_is_rejected():
 def test_default_buffer_strides_preserve_layout():
     def build(out):
         region = txl.alloc_buffer((2, 4, 512), txl.f32, scope="local")
-        view = txl.decl_buffer((2, 4, 512), txl.f32, data=region.data, strides=None, scope="local")
+        view = txl.decl_buffer((2, 4, 512), txl.f32, data=region.data, scope="local")
         ir.assert_structural_equal(view.layout, region.layout)
         assert not view.strides
         txl.assign(view[0, 2, 7], txl.float32(1))

@@ -323,23 +323,21 @@ def alloc_buffer(
 
 def decl_buffer(
     shape,
-    dtype="float32",
-    data=None,
-    strides=None,
+    dtype,
+    *,
+    data,
+    scope="global",
     elem_offset=None,
     byte_offset=None,
-    scope="global",
     align=0,
-    offset_factor=0,
-    allocated_addr=None,
 ):
-    """Declare an ordinary tensor using TIRx's default layout."""
-    if strides is not None:
-        raise ValueError(
-            "tirx-lite does not support explicit strides: buffer addressing uses the "
-            "default layout. Declare the physical buffer shape and compute pointer "
-            "offsets explicitly instead."
-        )
+    """Declare a default-layout view of existing memory.
+
+    Specify at most one of ``elem_offset`` (in elements of ``dtype``) and
+    ``byte_offset`` (in bytes). Use ``alloc_buffer`` to allocate new storage.
+    """
+    if data is None:
+        raise ValueError("decl_buffer requires existing data; use alloc_buffer for new storage")
     if scope == "tmem":
         raise ValueError(
             'tirx-lite does not support scope="tmem" buffers; use raw tcgen05 column '
@@ -353,8 +351,6 @@ def decl_buffer(
         byte_offset=byte_offset,
         scope=scope,
         align=align,
-        offset_factor=offset_factor,
-        allocated_addr=allocated_addr,
     )
 
 
