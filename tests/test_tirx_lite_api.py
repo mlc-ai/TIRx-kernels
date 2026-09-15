@@ -244,7 +244,7 @@ def test_unsupported_tmem_buffer_scope_is_rejected():
     with pytest.raises(ValueError, match='scope="tmem"'):
         txl.alloc_buffer((1,), txl.u32, scope="tmem")
     with pytest.raises(ValueError, match='scope="tmem"'):
-        txl.decl_buffer((1,), txl.u32, data=tirx.Var("ptr", "handle"), scope="tmem")
+        txl.decl_buffer((1,), txl.u32, scope="tmem")
 
     with pytest.raises(AttributeError, match="deliberately does not expose"):
         txl.TMEMPool
@@ -265,11 +265,18 @@ def test_decl_buffer_removed_options_are_rejected(removed):
         txl.decl_buffer((1,), txl.u32, data=tirx.Var("ptr", "handle"), **{removed: None})
 
 
-def test_decl_buffer_requires_existing_storage():
-    with pytest.raises(TypeError, match="data"):
-        txl.decl_buffer((1,), txl.u32)
-    with pytest.raises(ValueError, match="use alloc_buffer"):
-        txl.decl_buffer((1,), txl.u32, data=None)
+def test_decl_buffer_preserves_defaults_and_positional_options():
+    def build(out):
+        region = txl.decl_buffer((2,), scope="local")
+        assert region.dtype == "float32"
+        view = txl.decl_buffer((1,), txl.f32, region.data, 1, None, "local", 16)
+        assert int(view.elem_offset) == 1
+        assert view.scope() == "local"
+        assert view.data_alignment == 16
+        txl.assign(view[0], txl.float32(1))
+        txl.ptx.st.global_.f32(out.ptr_to([0]), view[0])
+
+    _tir(build)
 
 
 def test_decl_buffer_strided_shared_alias_is_rejected():
