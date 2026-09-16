@@ -1627,6 +1627,7 @@ def _make_main(
                 txl.cast(tmem_base, "uint32"), txl.uint32(512)
             )
         with epilogue:
+            store_leader = txl.local_scalar("uint32", init=txl.cuda.elect_sync())
             rhs_row = lane % 8 + txl.if_then_else(lane // 16 != 0, 8, 0)
             rhs_col = txl.if_then_else((lane // 8) % 2 != 0, 8, 0)
             lhs_row = lane % 8 + txl.if_then_else((lane // 8) % 2 != 0, 8, 0)
@@ -1653,7 +1654,7 @@ def _make_main(
             dv_store = txl.PipelineState(2, phase=0)
 
             def store_pending(pend_token, pend_writes, head, desc_dq, desc_dk, desc_dv, desc_dgate):
-                issue_store = txl.And(pend_writes, _elected() != 0)
+                issue_store = txl.And(pend_writes, store_leader != txl.uint32(0))
                 _wait_barrier(arena, 696, dq_store.stage, dq_store.phase)
                 with txl.If(issue_store), txl.Then():
                     for d_coord in (0, 64):

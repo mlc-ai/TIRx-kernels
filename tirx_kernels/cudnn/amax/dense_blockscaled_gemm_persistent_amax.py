@@ -1507,7 +1507,7 @@ def _make_kernel(
                     )
                 txl.ptx.fence.proxy.async_.shared__cta()
                 txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
-                with txl.If((warp == 0) & (lane == 0)):
+                with txl.If(warp == 0):
                     with txl.Then():
                         if c_major == "n":
                             txl.ptx[
@@ -1520,6 +1520,7 @@ def _make_kernel(
                                 txl.cast(batch_idx, "int32"),
                                 smem.ptr_to([c_offset + c_stage_index * c_stage_bytes]),
                                 txl.uint64(tma_cache_hint),
+                                pred=txl.cast(lane == 0, "bool"),
                             )
                         else:
                             for row_copy in range(c_bits // 8):
@@ -1538,6 +1539,7 @@ def _make_kernel(
                                         [c_offset + c_stage_index * c_stage_bytes + row_copy * 4096]
                                     ),
                                     txl.uint64(tma_cache_hint),
+                                    pred=txl.cast(lane == 0, "bool"),
                                 )
                         txl.ptx.cp.async_.bulk.commit_group()
                         txl.ptx.cp.async_.bulk.wait_group.read(c_stages - 1)
