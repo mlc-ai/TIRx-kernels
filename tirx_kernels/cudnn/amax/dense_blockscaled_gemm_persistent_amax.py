@@ -1520,6 +1520,7 @@ def _make_kernel(
                                 txl.cast(batch_idx, "int32"),
                                 smem.ptr_to([c_offset + c_stage_index * c_stage_bytes]),
                                 txl.uint64(tma_cache_hint),
+                                pred=txl.cast(lane == 0, "bool"),
                             )
                         else:
                             for row_copy in range(c_bits // 8):
@@ -1538,6 +1539,7 @@ def _make_kernel(
                                         [c_offset + c_stage_index * c_stage_bytes + row_copy * 4096]
                                     ),
                                     txl.uint64(tma_cache_hint),
+                                    pred=txl.cast(lane == 0, "bool"),
                                 )
                         txl.ptx.cp.async_.bulk.commit_group()
                         txl.ptx.cp.async_.bulk.wait_group.read(c_stages - 1)

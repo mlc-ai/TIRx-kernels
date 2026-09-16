@@ -1958,6 +1958,7 @@ def _make_kernel(**config):
                                         batch_idx,
                                         o_smem.ptr_to([source_offset]),
                                         _TMA_CACHE,
+                                        pred=txl.cast(lane == 0, "bool"),
                                     )
                                 else:
                                     txl.ptx[_TMA_S2G_4D](
@@ -1968,6 +1969,7 @@ def _make_kernel(**config):
                                         batch_idx,
                                         o_smem.ptr_to([source_offset]),
                                         _TMA_CACHE,
+                                        pred=txl.cast(lane == 0, "bool"),
                                     )
                             txl.ptx.cp.async_.bulk.commit_group()
                         for output_stage_static in range(2):
@@ -1988,6 +1990,7 @@ def _make_kernel(**config):
                                     batch_idx,
                                     o_smem.ptr_to([source_offset]),
                                     _TMA_CACHE,
+                                    pred=txl.cast(lane == 0, "bool"),
                                 )
                             else:
                                 txl.ptx[_TMA_S2G_4D](
@@ -1998,6 +2001,7 @@ def _make_kernel(**config):
                                     batch_idx,
                                     o_smem.ptr_to([source_offset]),
                                     _TMA_CACHE,
+                                    pred=txl.cast(lane == 0, "bool"),
                                 )
                         txl.ptx.cp.async_.bulk.commit_group()
                         txl.ptx.cp.async_.bulk.wait_group.read(0)

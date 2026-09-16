@@ -4127,6 +4127,9 @@ def get_kernel(
             # stores into the symmetric combine-token buffer.  Combine reads
             # those stores through TMA's async global proxy.
             txl.ptx.fence.proxy.async_.global_()
+            # Combine also reuses the shared pool previously read by MMA and
+            # written by dispatch, crossing the async/generic proxy boundary.
+            tma_store_fence()
             txl.assign(
                 combine_token_idx, sm_idx * kernel_config.num_epilogue_warps + epilogue_warp_idx
             )

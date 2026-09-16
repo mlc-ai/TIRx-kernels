@@ -304,7 +304,7 @@ def make_union_kernel(*, total_q, hq, hkv, topk, mask_words, paged, max_pages, k
         union_ready = txl.MBarrier(smem, 2)
         union_ready.init(32)
         union_free = txl.MBarrier(smem, 2)
-        union_free.init(256 + 32)
+        union_free.init(256 + 32 + 32)
 
         txl.ptx.fence.proxy.async_.shared__cta()
         txl.ptx.fence.mbarrier_init.release.cluster()
@@ -927,6 +927,7 @@ def make_union_kernel(*, total_q, hq, hkv, topk, mask_words, paged, max_pages, k
                             tmem_epoch.advance()
                             txl.assign(gstep_m, gstep_m + 1)
                         q_epoch.advance()
+                        union_free.arrive(slot_m)
                     txl.assign(it_m, it_m + 1)
 
             with r_store:

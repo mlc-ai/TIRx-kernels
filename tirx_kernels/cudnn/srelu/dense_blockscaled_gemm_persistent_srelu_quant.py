@@ -2869,7 +2869,7 @@ def _make_kernel(
                     )
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx.bar.sync(txl.uint32(1), txl.uint32(128))
-                    with txl.If(warp == 0):
+                    with txl.If((warp == 0) & (lane == 0)):
                         with txl.Then():
                             tma_store_output(c_map, c_offset, c_stage, c_stage_bytes, subtile)
                             txl.ptx.cp.async_.bulk.commit_group()
@@ -2890,7 +2890,7 @@ def _make_kernel(
                     )
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx.bar.sync(txl.uint32(1), txl.uint32(128))
-                    with txl.If(warp == 0):
+                    with txl.If((warp == 0) & (lane == 0)):
                         with txl.Then():
                             tma_store_output(d_map, d_offset, d_stage, d_stage_bytes, subtile)
                             txl.ptx.cp.async_.bulk.commit_group()

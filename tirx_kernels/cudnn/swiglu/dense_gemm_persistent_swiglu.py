@@ -1423,29 +1423,37 @@ def _make_kernel(
                     txl.ptx.bar.sync(txl.uint32(1), txl.uint32(128))
                     with txl.If(warp == 0):
                         with txl.Then():
-                            ab12_n = tile_n_idx * n_tile + subtile * epi_n
-                            c_n = tile_n_idx * (n_tile // 2) + (subtile // 2) * epi_n
-                            tma_store_output(
-                                ab12_map,
-                                ab12_offset,
-                                ab12_stage0,
-                                ab12_stage_bytes,
-                                ab12_bits,
-                                N,
-                                ab12_n,
-                            )
-                            tma_store_output(
-                                ab12_map,
-                                ab12_offset,
-                                ab12_stage1,
-                                ab12_stage_bytes,
-                                ab12_bits,
-                                N,
-                                ab12_n + epi_n,
-                            )
-                            tma_store_output(
-                                c_map, c_offset, c_stage, c_stage_bytes, c_bits, N // 2, c_n
-                            )
+                            with txl.If(lane == 0):
+                                with txl.Then():
+                                    ab12_n = tile_n_idx * n_tile + subtile * epi_n
+                                    c_n = tile_n_idx * (n_tile // 2) + (subtile // 2) * epi_n
+                                    tma_store_output(
+                                        ab12_map,
+                                        ab12_offset,
+                                        ab12_stage0,
+                                        ab12_stage_bytes,
+                                        ab12_bits,
+                                        N,
+                                        ab12_n,
+                                    )
+                                    tma_store_output(
+                                        ab12_map,
+                                        ab12_offset,
+                                        ab12_stage1,
+                                        ab12_stage_bytes,
+                                        ab12_bits,
+                                        N,
+                                        ab12_n + epi_n,
+                                    )
+                                    tma_store_output(
+                                        c_map,
+                                        c_offset,
+                                        c_stage,
+                                        c_stage_bytes,
+                                        c_bits,
+                                        N // 2,
+                                        c_n,
+                                    )
                             txl.ptx.cp.async_.bulk.commit_group()
                             txl.ptx.cp.async_.bulk.wait_group.read(3)
                     txl.ptx.bar.sync(txl.uint32(1), txl.uint32(128))

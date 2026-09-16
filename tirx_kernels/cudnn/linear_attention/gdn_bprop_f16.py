@@ -3667,6 +3667,7 @@ def _make_main(
                                 txl.cast(head, "int32"),
                                 txl.cast(token, "int32"),
                                 arena.ptr_to([_DV_DY_BASE + byte_offset]),
+                                pred=txl.cast(_elected(), "bool"),
                             )
                         txl.ptx.cp.async_.bulk.commit_group()
 
@@ -3681,6 +3682,7 @@ def _make_main(
                                 txl.cast(head, "int32"),
                                 txl.cast(token, "int32"),
                                 arena.ptr_to([_DQ_BASE + byte_offset]),
+                                pred=txl.cast(_elected(), "bool"),
                             )
                         txl.ptx.cp.async_.bulk.commit_group()
 
@@ -3695,6 +3697,7 @@ def _make_main(
                                 txl.cast(head, "int32"),
                                 txl.cast(token, "int32"),
                                 arena.ptr_to([_DK_BASE + byte_offset]),
+                                pred=txl.cast(_elected(), "bool"),
                             )
                         txl.ptx.cp.async_.bulk.commit_group()
 
