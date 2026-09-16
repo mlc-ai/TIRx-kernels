@@ -407,6 +407,30 @@ def bind_cuda_assignment(
     return actual
 
 
+def bind_visible_cuda_assignment() -> tuple[tuple[int, ...], tuple[str, ...]]:
+    """Claim every CUDA device visible to this process and install the assignment.
+
+    `current_cuda_assignment` raises when nothing has been bound, and the
+    distributed-capable kernels read it even when they run single-process, so a
+    process that never claims its cards fails before it measures anything. The
+    bench worker and the bench CLI are the same measurement on the same kernels
+    and both need the claim; keeping it here is what stops the two paths from
+    drifting into two different ideas of what a process owns.
+
+    The visible set is the claim, rather than a fixed device 0. Under
+    `CUDA_VISIBLE_DEVICES` pointing at one card the two agree, which is the
+    worker's case; where more than one is visible, a fixed ordinal would hand a
+    multi-process configuration a single-device assignment it cannot run on.
+    """
+    import torch
+
+    count = torch.cuda.device_count()
+    if count < 1:
+        raise RuntimeError("no CUDA device is visible to this process")
+    indices = tuple(range(count))
+    return indices, bind_cuda_assignment(indices, physical_cuda_uuids(indices))
+
+
 def current_cuda_assignment() -> tuple[tuple[int, ...], tuple[str, ...]]:
     """Return the process-local physical claim installed after ASSIGN."""
     if _CUDA_ASSIGNMENT is None:

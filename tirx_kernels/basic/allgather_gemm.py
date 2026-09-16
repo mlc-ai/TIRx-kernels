@@ -255,12 +255,17 @@ class Semaphore:
         self.state = txl.alloc_buffer([1], "uint64", scope="local", align=8)
 
     def semaphore_wait(self, *coord):
-        with txl.While(1):
-            txl.ptx.ld.acquire.gpu.global_.b64(self.state[0], self.sem.ptr_to(list(coord)))
-            with txl.If(self.state[0] == self.cnt):
-                with txl.Then():
-                    txl.Break()
-            txl.cuda.nano_sleep(40)
+        # The semaphore is a declared synchronization word. One `ld` and then
+        # the wait is the same instruction sequence the hand-written loop
+        # spelled: load, test, and sleep only before a retry.
+        txl.cuda.wait_until(
+            self.state[0],
+            self.sem.ptr_to(list(coord)),
+            lambda value: value == self.cnt,
+            scope="gpu",
+            ptx_type="b64",
+            backoff_ns=40,
+        )
 
 
 class MPMCQueue:

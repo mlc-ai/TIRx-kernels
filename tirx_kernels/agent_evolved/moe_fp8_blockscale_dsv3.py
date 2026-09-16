@@ -222,18 +222,27 @@ def emit_grid_sync(ctr_ptr, cta, num_ctas, tid):
     """Sense-reversing grid barrier over all CTAs (all threads of the CTA participate)."""
     txl.ptx.bar.sync(txl.uint32(0))
     with txl.If(tid == 0), txl.Then():
+        # The counter is a declared synchronization word: the wait is spelled
+        # `txl.cuda.wait_until`, which emits the loop the raw spelling did and
+        # names the address as the barrier's. The arrival stays in raw PTX, and
+        # the wait needs no seeding read because it tests `dst` before its
+        # first load. The wait states the condition the barrier completes on -- the
+        # sense bit having flipped against the value this CTA's own arrival
+        # returned -- so the checker can tell which arrival released it.
         old = txl.local_scalar(txl.u32)
         with txl.If(cta == 0):
             with txl.Then():
-                txl.ptx.atom.release.gpu.global_.add.u32(
-                    old, ctr_ptr, txl.uint32(0x80000000 - (num_ctas - 1))
-                )
+                txl.ptx.atom.release.gpu.global_.add.u32(old, ctr_ptr, txl.uint32(0x80000000 - (num_ctas - 1)))
             with txl.Else():
                 txl.ptx.atom.release.gpu.global_.add.u32(old, ctr_ptr, txl.uint32(1))
         cur = txl.local_scalar(txl.u32)
-        txl.ptx.ld.acquire.gpu.global_.b32(cur, ctr_ptr)
-        with txl.While(txl.bitwise_and(txl.bitwise_xor(cur, old), txl.uint32(0x80000000)) == txl.uint32(0)):
-            txl.ptx.ld.acquire.gpu.global_.b32(cur, ctr_ptr)
+        txl.cuda.wait_until(
+            cur,
+            ctr_ptr,
+            txl.bitwise_and(txl.bitwise_xor(cur, old), txl.uint32(0x80000000)) != txl.uint32(0),
+            scope="gpu",
+            ptx_type="b32",
+        )
     txl.ptx.bar.sync(txl.uint32(0))
 
 
@@ -695,9 +704,13 @@ def build_kernel(num_ctas):
             """GEMM2 pair-tiles need all GEMM1 pair-tiles of their m-tile (both CTAs arrive per tile)."""
             with txl.If(lane == 0), txl.Then():
                 dv = txl.local_scalar(txl.u32)
-                txl.ptx.ld.acquire.gpu.global_.b32(dv, done.ptr_to([e * MAXMT + mt]))
-                with txl.While(dv < txl.uint32(PAIR * NT1)):
-                    txl.ptx.ld.acquire.gpu.global_.b32(dv, done.ptr_to([e * MAXMT + mt]))
+                txl.cuda.wait_until(
+                    dv,
+                    done.ptr_to([e * MAXMT + mt]),
+                    dv >= txl.uint32(PAIR * NT1),
+                    scope="gpu",
+                    ptx_type="b32",
+                )
             txl.cuda.warp_sync()
             txl.ptx.fence.proxy.async_.global_()
 
@@ -1335,9 +1348,7 @@ def build_kernel(num_ctas):
                     txl.ptx.st.global_.u8(a2h.ptr_to([wh * 4 + nt % 2]), sbyte)
                 txl.ptx.bar.sync(txl.uint32(1), txl.uint32((NWARPS - MATH_WARP0) * 32))
                 with txl.If(txl.And(mw == 0, lane == 0)), txl.Then():
-                    txl.ptx.red.release.gpu.global_.add.u32(
-                        done.ptr_to([e * MAXMT + mt]), txl.uint32(1)
-                    )
+                    txl.ptx.red.release.gpu.global_.add.u32(done.ptr_to([e * MAXMT + mt]), txl.uint32(1))
 
             def g2_mainloop(cols, sb_base, arow):
                 drain_tmem(cols)
@@ -1416,11 +1427,13 @@ def build_kernel(num_ctas):
                             with txl.Else():
                                 tk_d = iket_range("math-wait-done")
                                 dv = txl.local_scalar(txl.u32)
-                                txl.ptx.ld.acquire.gpu.global_.b32(dv, done.ptr_to([e * MAXMT + mt]))
-                                with txl.While(dv < txl.uint32(PAIR * NT1)):
-                                    txl.ptx.ld.acquire.gpu.global_.b32(
-                                        dv, done.ptr_to([e * MAXMT + mt])
-                                    )
+                                txl.cuda.wait_until(
+                                    dv,
+                                    done.ptr_to([e * MAXMT + mt]),
+                                    dv >= txl.uint32(PAIR * NT1),
+                                    scope="gpu",
+                                    ptx_type="b32",
+                                )
                                 iket_end(tk_d)
                                 wtok = f32(txl.float32(0.0))
                                 with txl.If(arow < row0 + valid), txl.Then():

@@ -242,11 +242,20 @@ def _load_i32(buffer, index):
     return out
 
 
+# The semaphore is a declared synchronization word: the wait is spelled
+# `txl.cuda.wait_until`, which emits the same loop the raw spelling did and tells
+# the checker that this address carries a protocol. The arrival stays in raw
+# PTX; the wait is what names the word.
 def _wait_eq_i32(buffer, index, expected, leader):
     with txl.If(leader), txl.Then():
         value = txl.local_scalar("int32", init=txl.int32(-1))
-        with txl.While(value != expected):
-            txl.ptx.ld.acquire.gpu.global_.b32(value, buffer.ptr_to([index]))
+        txl.cuda.wait_until(
+            value,
+            buffer.ptr_to([index]),
+            value == expected,
+            scope="gpu",
+            ptx_type="b32",
+        )
 
 
 def _release_inc_i32(buffer, index, leader):

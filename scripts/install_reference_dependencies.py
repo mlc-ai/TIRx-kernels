@@ -151,7 +151,14 @@ def materialize_source_links(source: dict[str, Any], checkout: Path) -> None:
 
 
 def import_paths(import_name: str) -> list[Path]:
-    spec = importlib.util.find_spec(import_name)
+    try:
+        spec = importlib.util.find_spec(import_name)
+    except ModuleNotFoundError:
+        # A dotted import name whose package is not installed yet: `find_spec`
+        # imports the parent first and raises rather than returning None. That
+        # is the ordinary state on a fresh environment -- the source is about
+        # to be installed -- and it means the same thing as no spec at all.
+        return []
     if spec is None:
         return []
     paths = []

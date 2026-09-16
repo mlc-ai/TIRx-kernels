@@ -1803,6 +1803,11 @@ def _make_kernel(
                                     )
                                 with txl.If(ready_to_publish):
                                     with txl.Then():
+                                        # The signal word is a declared
+                                        # synchronization word: the consumer
+                                        # kernel polls it, so the arrival says
+                                        # so rather than leaving the checker to
+                                        # infer a protocol from the spelling.
                                         previous = txl.local_scalar("int32")
                                         txl.ptx.atom.release.gpu.global_.add.s32(
                                             previous,
