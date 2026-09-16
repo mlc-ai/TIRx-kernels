@@ -45,10 +45,19 @@ M=128 operand, tokens the N=16 operand), with exact FP32 scale products and a
 SwiGLU/requantization epilogue.  Phase F performs a route-ordered packed
 BF16x2 finalization of one token per CTA after a sense-reversal barrier.
 
-Measured on GB200 through the locked evaluation harness against the packaged
-FlashInfer ``trtllm_fp8_block_scale_routed_moe`` baseline: 59.984 us versus
-112.537 us, a 1.8761x speedup, verdict STABLE over 22 correctness checks with
-``max_rms_ratio`` 9.038e-05.  See ``README.md`` for the recorded row.
+Measured on GB200 against the packaged FlashInfer
+``trtllm_fp8_block_scale_routed_moe`` baseline.  ``run_bench(timer="event")``
+reports 63.750 us versus 117.939 us, a 1.8500x speedup, reproduced at 1.8524x;
+that is the pair recorded in ``README.md`` because it is the one a reviewer can
+reproduce from this module.  The locked evaluation harness, which times with
+CUPTI and flushes L2 between iterations, scores the same kernel at 59.984 us
+versus 112.537 us (1.8761x), verdict STABLE over 22 correctness checks with
+``max_rms_ratio`` 9.038e-05.
+
+Note that ``run_bench`` defaults to the Proton timer, which reports a *higher*
+2.12x here: its per-kernel instrumentation costs the many-kernel baseline far
+more than this single-kernel candidate.  The event timer is the honest
+comparison of the two, so prefer it when re-measuring this row.
 """
 
 import ctypes
@@ -1800,9 +1809,17 @@ def _flashinfer_builder(case: dict[str, Any]):
     made with ``routed_scaling_factor=1.0``.  TRT-LLM wants [up; gate] and a
     multiple of four experts; the activation quantization stays inside the
     timed region, as the contract requires.
+
+    The baseline is autotuned, warmed up on a side stream and then captured
+    into a CUDA graph, so the timed callable is one ``graph.replay()``.  This
+    mirrors the evaluation harness, whose alphamoe baseline captures the whole
+    quantize-plus-expert operator in ``prepare()`` and times ``run_prepared``.
+    Timing an uncaptured baseline instead charges it per-launch CPU dispatch
+    that the harness does not, which inflates the reported speedup.
     """
 
     def build():
+        from flashinfer import autotune
         from flashinfer.fused_moe import trtllm_fp8_block_scale_routed_moe
 
         cfg: AlphaMoEConfig = case["config"]
@@ -1840,7 +1857,17 @@ def _flashinfer_builder(case: dict[str, Any]):
                 tune_max_num_tokens=NUM_TOKENS,
             )
 
-        return launch
+        with autotune(tuning_buckets=(max(1, case["hidden_states"].shape[0]),)):
+            launch()
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            launch()
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            launch()
+        return graph.replay
 
     return build
 
