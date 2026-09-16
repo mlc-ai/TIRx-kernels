@@ -38,6 +38,8 @@ contract and results.
   [`agent_evolved_kda_forward_b1_t8192`](tirx_kernels/agent_evolved/kda_forward_b1_t8192.py) ⟨+sm_110a⟩
 - **DeepSeek-V3 FP8 MoE:**
   [`agent_evolved_moe_fp8_blockscale_dsv3`](tirx_kernels/agent_evolved/moe_fp8_blockscale_dsv3.py) ⟨sm_100a⟩
+- **Qwen3-Next TP4 Alpha-MoE FP8:**
+  [`agent_evolved_alphamoe_fp8_blockscale_qwen3next`](tirx_kernels/agent_evolved/alphamoe_fp8_blockscale_qwen3next.py) ⟨sm_100a⟩
 - **KDA backward:**
   [`agent_evolved_kda_backward_packed`](tirx_kernels/agent_evolved/kda_backward_packed.py) ⟨sm_100a⟩
 - **KDA decode:**
