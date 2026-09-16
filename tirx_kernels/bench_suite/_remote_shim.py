@@ -245,11 +245,10 @@ def _bind_visible_device() -> dict:
     their own clear error.
     """
     try:
-        from tirx_kernels.runner import bind_cuda_assignment, physical_cuda_uuids
+        from tirx_kernels.runner import bind_visible_cuda_assignment
 
-        uuids = physical_cuda_uuids((0,))
-        bound = bind_cuda_assignment((0,), uuids)
-        return {"indices": [0], "uuids": list(bound)}
+        indices, uuids = bind_visible_cuda_assignment()
+        return {"indices": list(indices), "uuids": list(uuids)}
     except Exception as error:
         return {"error": f"{type(error).__name__}: {error}"}
 

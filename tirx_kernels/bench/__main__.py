@@ -25,6 +25,26 @@ def _find_bench_config(mod, label: str) -> dict:
     return matches[0]
 
 
+def _bind_visible_device():
+    """Claim this process's CUDA devices before any kernel reads the assignment.
+
+    The bench worker does the same thing before its GPU stage, and this CLI is
+    that measurement run on a local card; without the claim the
+    distributed-capable kernels raise "no CUDA assignment is active" and never
+    reach timing. A failure is reported rather than fatal, exactly as it is
+    there: a kernel that needs the assignment raises its own clear error, and
+    one that does not still runs.
+    """
+    try:
+        from tirx_kernels.runner import bind_visible_cuda_assignment
+
+        bind_visible_cuda_assignment()
+    except Exception as error:  # pragma: no cover - depends on the local card
+        print(
+            f"note: no CUDA assignment installed: {type(error).__name__}: {error}", file=sys.stderr
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run kernel benchmarks")
     parser.add_argument("--kernel", type=str, default=None, help="Run only this kernel")
@@ -88,6 +108,8 @@ def main():
 
     from tirx_kernels.registry import discover_kernels, load_kernel
     from tirx_kernels.runner import DEFAULT_BENCH_COOLDOWN_S, DEFAULT_BENCH_ROUNDS, run_kernel_bench
+
+    _bind_visible_device()
 
     if args.rounds is None:
         args.rounds = DEFAULT_BENCH_ROUNDS
