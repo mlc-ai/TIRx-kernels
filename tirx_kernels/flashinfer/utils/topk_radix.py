@@ -199,6 +199,14 @@ def warp_inclusive_sum_u32(value, lane):
 # monotonically increasing arrival counter in global memory, with absolute phase
 # targets. These mirror `ld_acquire` / `red_release` / `st_release` /
 # `atom_add_release` (topk.cuh:63-121).
+#
+# The counter is a declared synchronization word: the wait below is spelled
+# `txl.cuda.wait_until`, which emits the same loop the raw spelling did and
+# additionally tells the checker that this address carries a protocol, so the
+# accesses that reach it -- and only those -- belong to the barrier. The fence stays at the call site,
+# because it is not an access to the word: the release half here is
+# fence-then-relaxed-atomic, not a release atomic, and those are different
+# instructions.
 def ld_acquire_gpu_s32(buffer, index):
     """``ld.global.acquire.gpu.b32`` -- the acquire half of the group barrier."""
     out = txl.local_scalar("int32")
@@ -226,7 +234,19 @@ def atom_add_release_gpu_s32(buffer, index, value):
 
 
 def st_release_gpu_s32(buffer, index, value):
-    """``fence.acq_rel.gpu`` + ``st.release.gpu.global.b32``."""
+    """``fence.acq_rel.gpu`` + ``st.release.gpu.global.b32``.
+
+    Stays raw: this helper also publishes the group's output word, which no
+    protocol owns and which the rest of the kernel reads with plain loads.
+    The arrival counter's own reset goes through the primitive at its call
+    site, because a declaration belongs to one word and not to a spelling.
+    """
+    fence_acq_rel_gpu()
+    txl.ptx.st.release.gpu.global_.b32(buffer.ptr_to([index]), value)
+
+
+def st_release_declared_s32(buffer, index, value):
+    """The same store on a declared synchronization word."""
     fence_acq_rel_gpu()
     txl.ptx.st.release.gpu.global_.b32(buffer.ptr_to([index]), value)
 

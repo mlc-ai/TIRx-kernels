@@ -304,14 +304,18 @@ class GEMMMPMCQueue(MPMCQueue):
         with txl.If(self.head_r[0] < self.num_tot_tasks):
             with txl.Then():
                 txl.assign(self.masked_pos[0], self.head_r[0] & self.mask)
-                txl.ptx.ld.acquire.sys.global_.b32(
-                    fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
+                # The task-type slot is a declared synchronization word: the
+                # producer publishes a non-negative type into it and this
+                # consumer waits for that. One `ld` and then the wait is the
+                # same instruction sequence the loop spelled by hand.
+                txl.cuda.wait_until(
+                    fetched_task_type[0],
+                    self.task_types.ptr_to([self.masked_pos[0]]),
+                    lambda value: value >= txl.int32(0),
+                    scope="sys",
+                    ptx_type="b32",
+                    backoff_ns=40,
                 )
-                with txl.While(fetched_task_type[0] < 0):
-                    txl.cuda.nano_sleep(40)
-                    txl.ptx.ld.acquire.sys.global_.b32(
-                        fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
-                    )
                 txl.ptx.st.global_.s32(
                     self.task_types.ptr_to([self.masked_pos[0]]), txl.int32(-1)
                 )

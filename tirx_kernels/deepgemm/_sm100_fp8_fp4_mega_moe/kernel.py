@@ -66,6 +66,22 @@ def store_global_u32(address, value):
     return txl.ptx.st.global_.u32(address, value)
 
 
+# A workspace counter that a `wait_until` later polls is a declared
+# synchronization word, and the round that arms it has to reach the word the
+# way the protocol does. A plain store carries neither ordering nor atomicity,
+# so it joins no agreement: the waiter it releases has no edge back to the
+# arming warp, and the checker cannot tell that store from one the fast path
+# dropped. Scoping the store costs nothing here -- these run once per round,
+# ahead of a grid barrier -- and makes the arming a publication the protocol
+# can name.
+def store_relaxed_u32(address, value):
+    return txl.ptx.st.relaxed.gpu.global_.u32(address, value)
+
+
+def store_relaxed_u64(address, value):
+    return txl.ptx.st.relaxed.gpu.global_.u64(address, value)
+
+
 def store_global_u8(address, value):
     return txl.ptx.st.global_.u8(address, value)
 
@@ -76,12 +92,23 @@ def load_acq_sys_s32(dst, address):
     return txl.ptx.ld.acquire.sys.global_.s32(dst, address)
 
 
+# The grid-sync counter is a declared synchronization word: the wait below is
+# spelled `txl.cuda.wait_until`, which emits the loop the raw spelling did and
+# additionally tells the checker that this address carries a protocol, so the
+# accesses that reach it -- and only those -- belong to the barrier.
 def atomic_add_rel_u32(dst, address, value):
     return txl.ptx.atom.release.gpu.global_.add.u32(dst, address, value)
 
 
 def load_acq_u32(dst, address):
     return txl.ptx.ld.acquire.gpu.global_.b32(dst, address)
+
+
+def wait_acq_u32(dst, address, predicate):
+    """``ld.acquire.gpu.global.b32`` in a do-while, as the loop spelled it."""
+    return txl.cuda.wait_until(
+        dst, address, predicate, scope="gpu", ptx_type="b32"
+    )
 
 
 def grid_sync_done_u32(new_value, old_value):
@@ -1592,13 +1619,11 @@ def get_kernel(
                             workspace_grid_sync_count.ptr_to([counter_idx]),
                             txl.uint32(1),
                         )
-                load_acq_u32(grid_sync_new_value, workspace_grid_sync_count.ptr_to([counter_idx]))
-                with txl.While(
-                    grid_sync_done_u32(grid_sync_new_value, grid_sync_old_value) == txl.uint32(0)
-                ):
-                    load_acq_u32(
-                        grid_sync_new_value, workspace_grid_sync_count.ptr_to([counter_idx])
-                    )
+                wait_acq_u32(
+                    grid_sync_new_value,
+                    workspace_grid_sync_count.ptr_to([counter_idx]),
+                    lambda value: grid_sync_done_u32(value, grid_sync_old_value) != txl.uint32(0),
+                )
             txl.ptx.barrier.sync(txl.uint32(sync_barrier_idx), txl.uint32(sync_num_threads))
 
         def nvlink_barrier(
@@ -1738,14 +1763,14 @@ def get_kernel(
                 txl.assign(dispatch_expert_idx, expert_lane_idx * 32 + lane_idx)
                 txl.assign(scheduler_cached_status, txl.uint64(0))
                 with txl.If(dispatch_expert_idx < num_experts_per_rank), txl.Then():
-                    with txl.While(
+                    txl.cuda.wait_until(
+                        scheduler_cached_status,
+                        workspace_expert_recv_count_sum.ptr_to([dispatch_expert_idx]),
                         txl.cast(txl.shift_right(scheduler_cached_status, 32), "int32")
-                        != kernel_config.num_sms * num_processes
-                    ):
-                        txl.ptx.ld.volatile.global_.u64(
-                            scheduler_cached_status,
-                            workspace_expert_recv_count_sum.ptr_to([dispatch_expert_idx]),
-                        )
+                        == kernel_config.num_sms * num_processes,
+                        scope="sys",
+                        ptx_type="u64",
+                    )
                 txl.ptx.mov.b32(
                     stored_num_tokens_per_expert[expert_lane_idx],
                     txl.cast(txl.bitwise_and(scheduler_cached_status, txl.uint64(0xFFFFFFFF)), "uint32"),
@@ -1970,9 +1995,13 @@ def get_kernel(
                             (task_info_regs[4] + txl.uint32(1)) * txl.uint32(num_l1_clusters),
                         )
                         sched_l1_count = txl.local_scalar("uint32", init=txl.uint32(0))
-                        load_volatile_u32(sched_l1_count, workspace_l1_task_count.ptr_to([0]))
-                        with txl.While(sched_l1_count < sched_required_l1_tasks):
-                            load_volatile_u32(sched_l1_count, workspace_l1_task_count.ptr_to([0]))
+                        txl.cuda.wait_until(
+                            sched_l1_count,
+                            workspace_l1_task_count.ptr_to([0]),
+                            sched_l1_count >= sched_required_l1_tasks,
+                            scope="sys",
+                            ptx_type="u32",
+                        )
                         txl.assign(sched_task_valid, txl.int32(1))
 
         def producer_publish_task():
@@ -2128,17 +2157,21 @@ def get_kernel(
                 expected_ring_count,
                 (hidden // kernel_config.block_n * (pool_block_idx // num_ring_blocks)),
             )
-            load_acq_u32(current_ring_count, workspace_l2_empty_count.ptr_to([ring_block_idx]))
-            with txl.While(current_ring_count != txl.cast(expected_ring_count, "uint32")):
-                load_acq_u32(current_ring_count, workspace_l2_empty_count.ptr_to([ring_block_idx]))
+            wait_acq_u32(
+                current_ring_count,
+                workspace_l2_empty_count.ptr_to([ring_block_idx]),
+                current_ring_count == txl.cast(expected_ring_count, "uint32"),
+            )
 
         def load_a_wait_l1_full():
             txl.assign(
                 expected_ring_count, kernel_config.block_m * (pool_block_idx // num_ring_blocks + 1)
             )
-            load_acq_u32(current_ring_count, workspace_l1_full_count.ptr_to([block_idx]))
-            with txl.While(current_ring_count != txl.cast(expected_ring_count, "uint32")):
-                load_acq_u32(current_ring_count, workspace_l1_full_count.ptr_to([block_idx]))
+            wait_acq_u32(
+                current_ring_count,
+                workspace_l1_full_count.ptr_to([block_idx]),
+                current_ring_count == txl.cast(expected_ring_count, "uint32"),
+            )
 
         def load_a_wait_l2_full():
             txl.assign(
@@ -2150,9 +2183,11 @@ def get_kernel(
                     * (pool_block_idx // num_ring_blocks + 1)
                 ),
             )
-            load_acq_u32(current_ring_count, workspace_l2_full_count.ptr_to([block_idx]))
-            with txl.While(current_ring_count != txl.cast(expected_ring_count, "uint32")):
-                load_acq_u32(current_ring_count, workspace_l2_full_count.ptr_to([block_idx]))
+            wait_acq_u32(
+                current_ring_count,
+                workspace_l2_full_count.ptr_to([block_idx]),
+                current_ring_count == txl.cast(expected_ring_count, "uint32"),
+            )
 
         def sm90_tma_store_2d_copy_select(
             src_ptr, tensor_map, tensor_map_shared, block_phase_value, coord0, coord1
@@ -2763,14 +2798,11 @@ def get_kernel(
                     (pull_pool_block_idx // num_ring_blocks * num_l1_block_ns),
                 )
                 with txl.If(l1_empty_count_target > 0), txl.Then():
-                    load_acq_u32(
-                        current_ring_count, workspace_l1_empty_count.ptr_to([pull_ring_block_idx])
+                    wait_acq_u32(
+                        current_ring_count,
+                        workspace_l1_empty_count.ptr_to([pull_ring_block_idx]),
+                        current_ring_count >= txl.cast(l1_empty_count_target, "uint32"),
                     )
-                    with txl.While(current_ring_count < txl.cast(l1_empty_count_target, "uint32")):
-                        load_acq_u32(
-                            current_ring_count,
-                            workspace_l1_empty_count.ptr_to([pull_ring_block_idx]),
-                        )
                 with txl.If(txl.cuda.elect_sync()), txl.Then():
                     with txl.unroll(0, num_pull_chunks) as pull_chunk_idx:
                         txl.assign(
@@ -2913,7 +2945,7 @@ def get_kernel(
                     # SM 0: clear expert send count and schedule task counters
                     txl.assign(dispatch_expert_idx, role_thread_idx)
                     with txl.While(dispatch_expert_idx < num_experts):
-                        store_global_u64(
+                        store_relaxed_u64(
                             workspace_expert_send_count.ptr_to([dispatch_expert_idx]), txl.uint64(0)
                         )
                         txl.assign(
@@ -2921,14 +2953,14 @@ def get_kernel(
                             (dispatch_expert_idx + kernel_config.num_dispatch_threads),
                         )
                     with txl.If((role_warp_idx == 0) & txl.cuda.elect_sync() != 0), txl.Then():
-                        store_global_u32(workspace_l1_task_count.ptr_to([0]), txl.uint32(0))
-                        store_global_u32(workspace_l2_task_count.ptr_to([0]), txl.uint32(0))
-                        store_global_u32(workspace_shared_l1_task_count.ptr_to([0]), txl.uint32(0))
-                        store_global_u32(workspace_shared_l2_task_count.ptr_to([0]), txl.uint32(0))
+                        store_relaxed_u32(workspace_l1_task_count.ptr_to([0]), txl.uint32(0))
+                        store_relaxed_u32(workspace_l2_task_count.ptr_to([0]), txl.uint32(0))
+                        store_relaxed_u32(workspace_shared_l1_task_count.ptr_to([0]), txl.uint32(0))
+                        store_relaxed_u32(workspace_shared_l2_task_count.ptr_to([0]), txl.uint32(0))
                     txl.cuda.warp_sync()
                     txl.assign(dispatch_expert_idx, role_thread_idx)
                     with txl.While(dispatch_expert_idx < workspace_layout.num_shared_l2_pool_blocks):
-                        store_global_u32(
+                        store_relaxed_u32(
                             workspace_shared_l2_full_count.ptr_to([dispatch_expert_idx]),
                             txl.uint32(0),
                         )
@@ -2968,7 +3000,7 @@ def get_kernel(
                             txl.uint32(kernel_config.num_dispatch_threads),
                         )
                         with txl.If(role_thread_idx == 0), txl.Then():
-                            store_global_u64(
+                            store_relaxed_u64(
                                 workspace_expert_recv_count_sum.ptr_to([pull_local_expert_idx]),
                                 txl.uint64(0),
                             )
@@ -2986,7 +3018,7 @@ def get_kernel(
                             )
                         txl.assign(dispatch_dst_rank_idx, role_thread_idx)
                         with txl.While(dispatch_dst_rank_idx < txl.int32(num_processes)):
-                            store_global_u64(
+                            store_relaxed_u64(
                                 workspace_expert_recv_count.ptr_to(
                                     [dispatch_dst_rank_idx, pull_local_expert_idx]
                                 ),
@@ -3002,16 +3034,16 @@ def get_kernel(
                                 pull_ring_block_idx,
                                 (pull_pool_block_offset + dispatch_dst_slot_idx) % num_ring_blocks,
                             )
-                            store_global_u32(
+                            store_relaxed_u32(
                                 workspace_l1_full_count.ptr_to([pull_ring_block_idx]), txl.uint32(0)
                             )
-                            store_global_u32(
+                            store_relaxed_u32(
                                 workspace_l1_empty_count.ptr_to([pull_ring_block_idx]), txl.uint32(0)
                             )
-                            store_global_u32(
+                            store_relaxed_u32(
                                 workspace_l2_full_count.ptr_to([pull_ring_block_idx]), txl.uint32(0)
                             )
-                            store_global_u32(
+                            store_relaxed_u32(
                                 workspace_l2_empty_count.ptr_to([pull_ring_block_idx]), txl.uint32(0)
                             )
                             txl.assign(
@@ -3070,18 +3102,12 @@ def get_kernel(
                                             expected_ring_count,
                                             (shared_l2_shape_k // kernel_config.block_n * 2),
                                         )
-                                        load_acq_u32(
+                                        wait_acq_u32(
                                             current_ring_count,
                                             workspace_shared_l2_full_count.ptr_to([block_idx]),
-                                        )
-                                        with txl.While(
                                             current_ring_count
-                                            != txl.cast(expected_ring_count, "uint32")
-                                        ):
-                                            load_acq_u32(
-                                                current_ring_count,
-                                                workspace_shared_l2_full_count.ptr_to([block_idx]),
-                                            )
+                                            == txl.cast(expected_ring_count, "uint32"),
+                                        )
                 else:
                     with txl.If(block_phase == txl.int32(1)):
                         with txl.Then():

@@ -2821,13 +2821,15 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                         for gi_ in range(G):
                             fidx = seq * txl.int32(HV) + hq * txl.int32(G) + txl.int32(gi_)
                             flf = txl.local_scalar("int64", init=txl.int64(0))
-                            with txl.While(flf < tgt_f):
-                                txl.ptx.ld.acquire.gpu.global_.s64(flf, flags.ptr_to([fidx]))
+                            txl.cuda.wait_until(
+                                flf, flags.ptr_to([fidx]), flf >= tgt_f,
+                                scope="gpu",
+                            )
                             flb = txl.local_scalar("int64", init=txl.int64(0))
-                            with txl.While(flb < tgt_b):
-                                txl.ptx.ld.acquire.gpu.global_.s64(
-                                    flb, flags.ptr_to([num_chains + fidx])
-                                )
+                            txl.cuda.wait_until(
+                                flb, flags.ptr_to([num_chains + fidx]), flb >= tgt_b,
+                                scope="gpu",
+                            )
 
                         with txl.If(rows < txl.int32(CHUNK)), txl.Then():
                             tgt_1 = txl.local_scalar("int64", init=ep64 + txl.int64(1))
@@ -2836,13 +2838,14 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                             with txl.While((s2 < num_seqs) & (b2 < tok0 + txl.int32(CHUNK))):
                                 for gi_ in range(G):
                                     fl2 = txl.local_scalar("int64", init=txl.int64(0))
-                                    with txl.While(fl2 < tgt_1):
-                                        txl.ptx.ld.acquire.gpu.global_.s64(
-                                            fl2,
-                                            flags.ptr_to(
-                                                [s2 * txl.int32(HV) + hq * txl.int32(G) + txl.int32(gi_)]
-                                            ),
-                                        )
+                                    txl.cuda.wait_until(
+                                        fl2,
+                                        flags.ptr_to(
+                                            [s2 * txl.int32(HV) + hq * txl.int32(G) + txl.int32(gi_)]
+                                        ),
+                                        fl2 >= tgt_1,
+                                        scope="gpu",
+                                    )
                                 _, l2 = seq_len_of(s2)
                                 txl.assign(b2, b2 + l2)
                                 txl.assign(s2, s2 + txl.int32(1))
@@ -3757,10 +3760,15 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                         p_hs.empty.arrive(st_hs.stage)
                     st_hs.advance()
 
+
+
                 with txl.If(elected()), txl.Then():
                     txl.ptx[BULK_WAIT](0)
                     txl.ptx["fence.proxy.async.global"]()
-                    txl.ptx["st.release.gpu.global.s32"](flags.ptr_to([chain]), epoch)
+                    txl.ptx.st.release.gpu.global_.s32(flags.ptr_to([chain]), epoch)
+
+
+
 
         with cg:
             p1_compute()
@@ -4759,9 +4767,11 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
 
                     lphase("lw-flag")
                     with txl.If(elected()), txl.Then():
+                        # The epoch flag is a declared synchronization word.
                         fl = txl.local_scalar("int32", init=txl.int32(0))
-                        with txl.While(fl != epoch):
-                            txl.ptx.ld.acquire.gpu.global_.s32(fl, flags.ptr_to([work]))
+                        txl.cuda.wait_until(
+                            fl, flags.ptr_to([work]), fl == epoch, scope="gpu"
+                        )
                     txl.ptx["bar.warp.sync"](txl.uint32(0xFFFFFFFF))
                     txl.ptx["fence.proxy.async.global"]()
                     lphase_end()

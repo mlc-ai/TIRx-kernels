@@ -248,16 +248,23 @@ def _build_combine_kernel(num_sms: int, num_max_tokens_per_rank: int, num_ranks:
 
         # --- Software grid barrier (dispatch substitution 2) -----------------
         def grid_barrier(site):
+            # The counter is a declared synchronization word. It is addressed
+            # by byte offset into the workspace, so `ptx_type` states its
+            # width rather than respelling a known one.
             counter_ptr = _gptr(ws_u64, WS_PORT_SCRATCH + site * 8)
             with txl.If(thread_idx == 0), txl.Then():
                 c0 = txl.alloc_local([1], "uint64")
-                _ld_acquire_gpu_u64(c0[0], counter_ptr)
+                txl.ptx.ld.acquire.gpu.global_.u64(c0[0], counter_ptr)
                 target = (c0[0] // txl.uint64(num_sms) + txl.uint64(1)) * txl.uint64(num_sms)
                 txl.ptx.red.release.gpu.global_.add.u64(counter_ptr, txl.uint64(1))
                 now = txl.alloc_local([1], "uint64")
-                _ld_acquire_gpu_u64(now[0], counter_ptr)
-                with txl.While(now[0] < target):
-                    _ld_acquire_gpu_u64(now[0], counter_ptr)
+                txl.cuda.wait_until(
+                    now[0],
+                    counter_ptr,
+                    now[0] >= target,
+                    scope="gpu",
+                    ptx_type="u64",
+                )
             txl.ptx.bar.sync(txl.uint32(0), txl.uint32(NUM_THREADS))
 
         # Real received-token count from the GPU prefix (combine.cuh:45-46);
