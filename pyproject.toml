@@ -26,6 +26,9 @@ markers = ["gpu: requires a CUDA GPU"]
 [tool.setuptools.packages.find]
 include = ["tirx_kernels*"]
 
+[tool.setuptools.package-data]
+"tirx_kernels.tirx_lite" = ["README.md"]
+
 [tool.ruff]
 line-length = 100
 indent-width = 4
