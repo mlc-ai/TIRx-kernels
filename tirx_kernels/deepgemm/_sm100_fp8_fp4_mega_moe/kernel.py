@@ -66,22 +66,6 @@ def store_global_u32(address, value):
     return txl.ptx.st.global_.u32(address, value)
 
 
-# A workspace counter that a `wait_until` later polls is a declared
-# synchronization word, and the round that arms it has to reach the word the
-# way the protocol does. A plain store carries neither ordering nor atomicity,
-# so it joins no agreement: the waiter it releases has no edge back to the
-# arming warp, and the checker cannot tell that store from one the fast path
-# dropped. Scoping the store costs nothing here -- these run once per round,
-# ahead of a grid barrier -- and makes the arming a publication the protocol
-# can name.
-def store_relaxed_u32(address, value):
-    return txl.ptx.st.relaxed.gpu.global_.u32(address, value)
-
-
-def store_relaxed_u64(address, value):
-    return txl.ptx.st.relaxed.gpu.global_.u64(address, value)
-
-
 def store_global_u8(address, value):
     return txl.ptx.st.global_.u8(address, value)
 
@@ -2945,7 +2929,7 @@ def get_kernel(
                     # SM 0: clear expert send count and schedule task counters
                     txl.assign(dispatch_expert_idx, role_thread_idx)
                     with txl.While(dispatch_expert_idx < num_experts):
-                        store_relaxed_u64(
+                        store_global_u64(
                             workspace_expert_send_count.ptr_to([dispatch_expert_idx]), txl.uint64(0)
                         )
                         txl.assign(
@@ -2953,14 +2937,14 @@ def get_kernel(
                             (dispatch_expert_idx + kernel_config.num_dispatch_threads),
                         )
                     with txl.If((role_warp_idx == 0) & txl.cuda.elect_sync() != 0), txl.Then():
-                        store_relaxed_u32(workspace_l1_task_count.ptr_to([0]), txl.uint32(0))
-                        store_relaxed_u32(workspace_l2_task_count.ptr_to([0]), txl.uint32(0))
-                        store_relaxed_u32(workspace_shared_l1_task_count.ptr_to([0]), txl.uint32(0))
-                        store_relaxed_u32(workspace_shared_l2_task_count.ptr_to([0]), txl.uint32(0))
+                        store_global_u32(workspace_l1_task_count.ptr_to([0]), txl.uint32(0))
+                        store_global_u32(workspace_l2_task_count.ptr_to([0]), txl.uint32(0))
+                        store_global_u32(workspace_shared_l1_task_count.ptr_to([0]), txl.uint32(0))
+                        store_global_u32(workspace_shared_l2_task_count.ptr_to([0]), txl.uint32(0))
                     txl.cuda.warp_sync()
                     txl.assign(dispatch_expert_idx, role_thread_idx)
                     with txl.While(dispatch_expert_idx < workspace_layout.num_shared_l2_pool_blocks):
-                        store_relaxed_u32(
+                        store_global_u32(
                             workspace_shared_l2_full_count.ptr_to([dispatch_expert_idx]),
                             txl.uint32(0),
                         )
@@ -3000,7 +2984,7 @@ def get_kernel(
                             txl.uint32(kernel_config.num_dispatch_threads),
                         )
                         with txl.If(role_thread_idx == 0), txl.Then():
-                            store_relaxed_u64(
+                            store_global_u64(
                                 workspace_expert_recv_count_sum.ptr_to([pull_local_expert_idx]),
                                 txl.uint64(0),
                             )
@@ -3018,7 +3002,7 @@ def get_kernel(
                             )
                         txl.assign(dispatch_dst_rank_idx, role_thread_idx)
                         with txl.While(dispatch_dst_rank_idx < txl.int32(num_processes)):
-                            store_relaxed_u64(
+                            store_global_u64(
                                 workspace_expert_recv_count.ptr_to(
                                     [dispatch_dst_rank_idx, pull_local_expert_idx]
                                 ),
@@ -3034,16 +3018,16 @@ def get_kernel(
                                 pull_ring_block_idx,
                                 (pull_pool_block_offset + dispatch_dst_slot_idx) % num_ring_blocks,
                             )
-                            store_relaxed_u32(
+                            store_global_u32(
                                 workspace_l1_full_count.ptr_to([pull_ring_block_idx]), txl.uint32(0)
                             )
-                            store_relaxed_u32(
+                            store_global_u32(
                                 workspace_l1_empty_count.ptr_to([pull_ring_block_idx]), txl.uint32(0)
                             )
-                            store_relaxed_u32(
+                            store_global_u32(
                                 workspace_l2_full_count.ptr_to([pull_ring_block_idx]), txl.uint32(0)
                             )
-                            store_relaxed_u32(
+                            store_global_u32(
                                 workspace_l2_empty_count.ptr_to([pull_ring_block_idx]), txl.uint32(0)
                             )
                             txl.assign(
