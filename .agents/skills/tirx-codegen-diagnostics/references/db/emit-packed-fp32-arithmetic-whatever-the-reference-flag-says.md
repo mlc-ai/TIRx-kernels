@@ -70,6 +70,15 @@ ties its two results to one 64-bit register pair, and where a later consumer
 wants the halves apart that constraint can cost more moves than the pairing
 saves.
 
+Pairing and register budgets can interact even without reducing the reported
+stack frame. In a measured warp-specialized 64-row pipeline, paired independent
+FP32 promotions alone changed pure GPU time from 53.380 to 53.239 us; also
+raising the math role from 224 to 240 registers reduced it to 52.435 us, with
+bitwise identical output. A different redistribution (96 producer, 240 math,
+168 quantizer registers) reduced the stack to 248 bytes but ran at 53.052 us;
+the faster combination reported 512 bytes. Use timing and the affected code
+paths rather than the smallest stack figure to select the allocation.
+
 ## Verification
 
 Compare packed and scalar FP opcode counts on both sides, and check the stack

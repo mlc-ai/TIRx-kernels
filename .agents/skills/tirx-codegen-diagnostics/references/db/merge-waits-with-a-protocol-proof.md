@@ -66,6 +66,16 @@ Before editing, write the producer-consumer happens-before argument; the merge
 is sound only when one completion condition covers every producer's
 contribution.
 
+The same-thread coverage of `tcgen05.commit` can eliminate intermediate
+completion notifications when the consumer already waits for the entire batch.
+Keep a final commit covering every required MMA before the consumer's acquire
+wait and `fence::after_thread_sync`; drain its TMEM loads before first use.
+On a measured single-token pipeline, batching the four gate/up TMEM reads and
+the two down reads and retaining only the two final MMA notifications reduced
+pure GPU time from 6.638 to 6.549 us over five rounds. Output remained bitwise
+identical and Synccheck passed. Omitting a redundant explicit fence before the
+commit gave no additional measured benefit, so the narrower change was kept.
+
 ## Boundary
 
 Do not merge visibility domains, permit ring overwrite, remove a release
