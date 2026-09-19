@@ -38,16 +38,17 @@ parity. Those two are the fp8 H=128 prefill shapes at 0.88x; the shipped kernel
 is bf16-only, so the dispatch cannot cover them, and the evolution run measured
 them at 0.914x as well.
 
-The only numerical approximation is a packed-f32x2 minimax quadratic that
-replaces some native `ex2.approx.ftz.f32` evaluations in the softmax; its
-worst-case relative error is about 1.7e-3, below bf16's own rounding step, and
-the rows are gated at atol=8e-4, rtol=2e-2 against an fp32 oracle.
+The FP8 path scales softmax weights by 448 before E4M3 conversion, retains
+FP32 softmax statistics and PV accumulators, and exchanges split-K partials in
+BF16. The common P scale is retained in both partial outputs and sums, including
+the attention sink in the denominator, and cancels at normalization. The BF16
+prefill specialization also uses a packed-FP32 quadratic approximation for some
+exponentials (worst-case relative error about 1.7e-3).
 
-Two members of that evolution run's frontier that once claimed 2.88x were
-removed before this port: they replaced `softmax(QK^T)` with uniform weights and
-never read the query, so their output was query-independent and passed only by
-overfitting the packaged inputs' amplitude. This kernel is exact attention; it
-holds its oracle at three seeds and at 4x and 16x query amplitude.
+Correctness uses an independent FP32 attention oracle. Dedicated numerical
+regressions cover partial sums above E4M3's range, subnormal softmax weights,
+rising block maxima, masked/empty rows, and repeated launches.
+
 """
 
 import math
@@ -63,6 +64,14 @@ D = 512
 BN = 64
 LOG2E = math.log2(math.e)
 NEG_INF = float("-inf")
+# E4M3 P uses its full finite range; sums remain FP32 at this scale.
+FP8_P_SCALE = 448.0
+FP8_P_LOG2_SCALE = math.log2(FP8_P_SCALE)
+# Keep a tiny online-max lag to avoid rescaling O for insignificant changes.
+# 448 * 2**0.00625 < 450, well inside 448's round-to-nearest interval (to 464).
+# This bounds the top-weight rounding error at 0.44%; smaller weights retain
+# at least the dynamic range obtained by updating the max eagerly.
+FP8_RESCALE_THRESHOLD = 0.00625
 
 _Q_HINT = 0x12F0000000000000
 
@@ -107,11 +116,6 @@ SMEM_MISC = 6 * 1024
 def _chunk_bytes(h_valid):
     """One output chunk: the valid heads (rounded up to 8) x 64 dims, bf16, 128-B rows."""
     return ((h_valid + 7) // 8) * 8 * 128
-
-
-def _exchange_chunk_bytes(compact, h_valid):
-    """One peer partial; compact exchange uses 64 B/head, otherwise 128 B/head."""
-    return ((h_valid + 7) // 8) * 8 * (64 if compact else 128)
 
 
 def _recv_plan(fp8, nstage, bpc, splits, h_valid=64):
@@ -170,11 +174,13 @@ def _replace_smem_desc_addr(desc, smem_ptr):
 
 def make_kernel(
     *, fp8, h_total, h_valid, groups, q_tokens, ktot, splits, bpc, nstage, swa_rows, comp_rows,
-    n_items=None, force_compact_exchange=False,
+    n_items=None,
 ):
+    direct_output = fp8 and q_tokens <= 64 and splits > 1
+    short_split_decode = fp8 and q_tokens <= 64 and h_total == 64 and splits == 5 and bpc == 2
     small = h_valid <= 32
     BM = 32 if small else 64
-    import os                                                                     
+    import os
     q_in_tmem = (not fp8) and (not small) and splits == 1 and (
         q_tokens > 64 or os.environ.get("MLA_FORCE_Q_TMEM") == "1"
     )
@@ -213,13 +219,11 @@ def make_kernel(
     recv_kind, recv_bytes = recv_where
     HGc = ((h_valid + 7) // 8) * 8                                  
     CHUNK = _chunk_bytes(h_valid)
-    compact_exchange = force_compact_exchange or (
-        fp8 and (h_total == 64 or (h_total == 128 and ktot >= 640))
-    )
-    XCHUNK = _exchange_chunk_bytes(compact_exchange, h_valid)
+    XCHUNK = CHUNK  # All peer partials travel as BF16.
     staging_bytes = 8 * CHUNK
                                                                                       
-    two_pass = bpc <= min(TWO_PASS_MAX_BLOCKS, nstage)
+    two_pass_blocks = TWO_PASS_MAX_BLOCKS
+    two_pass = bpc <= min(two_pass_blocks, nstage)
     n_sbuf = N_SBUF if two_pass else 2
     q_rows = q_tokens * h_total
     if n_items is None:
@@ -819,11 +823,14 @@ def make_kernel(
             return mloc
 
         def exp_pack(x, m_new, pw):
-            """pw <- P row (bf16/fp8) for x - m_new; returns the row sum."""
+            """Pack P; FP8 P and its FP32 sum both carry a factor of 448."""
+            exp_bias = txl.local_scalar(
+                "float32", init=txl.float32(FP8_P_LOG2_SCALE) - m_new
+            ) if fp8 else -m_new
             psum = txl.local_scalar("float32", init=txl.float32(0.0))
             e = txl.alloc_local((score_elems,), "float32")
             for j in range(score_elems):
-                txl.ptx["ex2.approx.ftz.f32"](e[j], x[j] - m_new)
+                txl.ptx["ex2.approx.ftz.f32"](e[j], x[j] + exp_bias if fp8 else x[j] - m_new)
                 txl.assign(psum, psum + e[j])
             if fp8:
                 for i in range(score_elems // 4):
@@ -874,11 +881,35 @@ def make_kernel(
                 peer = txl.local_scalar("float32")
                 txl.ptx.ld.shared.f32(peer, rowbuf.ptr_to([buf_idx, txl.bitwise_xor(w, 2) * 32 + lane]))
                 return txl.max(own, peer)
+            def rescale_output(alpha):
+                txl.ptx["tcgen05.fence::after_thread_sync"]()
+                rescale_width = 64 if fp8 and not short_split_decode else 32
+                o = txl.alloc_local((rescale_width,), "float32")
+                if fp8:
+                    alpha2 = txl.local_scalar("uint64")
+                    txl.ptx.mov.b64(alpha2, alpha, alpha)
+                for c in range((128 if small else 256) // rescale_width):
+                    addr = txl.cuda.get_tmem_addr(txl.uint32(O_BASE), 0, c * rescale_width)
+                    txl.ptx[f"tcgen05.ld.sync.aligned.32x32b.x{rescale_width}.b32"](*[o[i] for i in range(rescale_width)], addr)
+                    txl.ptx["tcgen05.wait::ld.sync.aligned"]()
+                    if fp8:
+                        for i in range(0, rescale_width, 2):
+                            pair = txl.local_scalar("uint64")
+                            txl.ptx.mov.b64(pair, o[i], o[i + 1])
+                            txl.ptx["mul.rn.ftz.f32x2"](pair, pair, alpha2)
+                            txl.ptx.mov.b64(o[i], o[i + 1], pair)
+                    else:
+                        for i in range(32):
+                            txl.assign(o[i], o[i] * alpha)
+                    txl.ptx[f"tcgen05.st.sync.aligned.32x32b.x{rescale_width}.b32"](addr, *[o[i] for i in range(rescale_width)])
+                txl.ptx["tcgen05.wait::st.sync.aligned"]()
+                txl.ptx["tcgen05.fence::before_thread_sync"]()
+
             if two_pass:
                                                                                        
-                xs = [txl.alloc_local((score_elems,), "float32") for _ in range(TWO_PASS_MAX_BLOCKS)]
+                xs = [txl.alloc_local((score_elems,), "float32") for _ in range(two_pass_blocks)]
                 mloc = txl.local_scalar("float32", init=txl.float32(NEG_INF))
-                for k in range(TWO_PASS_MAX_BLOCKS):
+                for k in range(two_pass_blocks):
                     with txl.If(k < n_blk), txl.Then():
                         t_ws = iket_range("sm-wait-s")
                         hot_wait(mask_ready, k % nstage, (k // nstage) & 1)
@@ -894,7 +925,7 @@ def make_kernel(
                         iket_end(t_math)
                 txl.assign(m_run, reduce_max(txl.int32(0), mloc))
                                                                                             
-                for k in range(TWO_PASS_MAX_BLOCKS):
+                for k in range(two_pass_blocks):
                     with txl.If(k < n_blk), txl.Then():
                         t_ps = iket_range("sm-pstore")
                         with txl.If(m_run == txl.float32(NEG_INF)):
@@ -935,7 +966,7 @@ def make_kernel(
                                                                                           
                     need = txl.local_scalar("uint32")
                     txl.ptx.vote_sync.any.pred(
-                        need, m_blk - m_run > txl.float32(RESCALE_THRESHOLD), txl.uint32(0xFFFFFFFF)
+                        need, m_blk - m_run > txl.float32(FP8_RESCALE_THRESHOLD if fp8 else RESCALE_THRESHOLD), txl.uint32(0xFFFFFFFF)
                     )
                     m_new = txl.local_scalar(
                         "float32",
@@ -968,17 +999,7 @@ def make_kernel(
                                                                              
                         hot_wait(p_free, (k - 1) % 2, ((k - 1) // 2) & 1)
                         with txl.If(txl.uint32(1) != txl.uint32(0)), txl.Then():
-                            txl.ptx["tcgen05.fence::after_thread_sync"]()
-                            o = txl.alloc_local((32,), "float32")
-                            for c in range(4 if small else 8):
-                                addr = txl.cuda.get_tmem_addr(txl.uint32(O_BASE), 0, c * 32)
-                                txl.ptx[_TMEM_LD32](*[o[i] for i in range(32)], addr)
-                                txl.ptx["tcgen05.wait::ld.sync.aligned"]()
-                                for i in range(32):
-                                    txl.assign(o[i], o[i] * alpha)
-                                txl.ptx[_TMEM_ST32](addr, *[o[i] for i in range(32)])
-                            txl.ptx["tcgen05.wait::st.sync.aligned"]()
-                            txl.ptx["tcgen05.fence::before_thread_sync"]()
+                            rescale_output(alpha)
                     txl.ptx["fence.proxy.async.shared::cta"]()
                     txl.ptx["mbarrier.arrive.shared.b64"](bar_addr(p_ready, txl.bitwise_and(k, 1)), txl.uint32(1))
                     iket_end(t_wpv)
@@ -1104,7 +1125,13 @@ def make_kernel(
                 for w in range(4 * i, 4 * i + 4):
                     txl.ptx.cvt.rn.bf16x2.f32(pk[w], elem(2 * w + 1), elem(2 * w))
 
-            def stage_piece(c, i):
+            def stage_piece(c, i, output=False):
+                if output and direct_output:
+                    txl.ptx["st.global.v4.u32"](
+                        out.ptr_to([(tok * h_total + grp * 64 + head) * D + c * 64 + i * 8]),
+                        pk[4 * i], pk[4 * i + 1], pk[4 * i + 2], pk[4 * i + 3],
+                    )
+                    return
                 piece = txl.bitwise_xor(txl.int32(i), hsw)
                 txl.ptx["st.shared.v4.u32"](
                     cvta(txl.ptr_byte_offset(staging.ptr_to([0]), c * CHUNK + head * 128 + piece * 16, "uint16")),
@@ -1112,25 +1139,16 @@ def make_kernel(
                 )
 
             def stage_exchange(c):
-                """Quantize and stage a peer partial in the exchange dtype."""
-                if compact_exchange:
-                    for i in range(4):
-                        for w in range(4):
-                            d = 16 * i + 4 * w
-                            txl.assign(
-                                pk[w],
-                                txl.cuda.fp8x4_e4m3_from_float4(
-                                    elem(d), elem(d + 1), elem(d + 2), elem(d + 3)
-                                ),
-                            )
-                        txl.ptx["st.shared.v4.u32"](
-                            cvta(txl.ptr_byte_offset(
-                                staging.ptr_to([0]),
-                                c * CHUNK + (i * HGc + head) * 16,
-                                "uint16",
-                            )),
-                            pk[0], pk[1], pk[2], pk[3],
-                        )
+                """Stage BF16 partials in the same P scale as the FP32 sums.
+
+                Keeping the common factor avoids an extra multiply on every
+                output element; it cancels in the final normalization.
+                """
+                if fp8 and not short_split_decode:
+                    for i in range(8):
+                        pack_piece(i)
+                    for i in range(8):
+                        stage_piece(c, i)
                 else:
                     for i in range(8):
                         pack_piece(i)
@@ -1168,7 +1186,9 @@ def make_kernel(
                     "float32",
                     init=txl.if_then_else(
                         m_all == txl.float32(NEG_INF), txl.float32(0.0),
-                        txl.cuda.fdividef(bmm2_scale, l_all + sink_e),
+                        txl.cuda.fdividef(
+                            bmm2_scale, l_all + sink_e * txl.float32(FP8_P_SCALE if fp8 else 1.0)
+                        ),
                     ),
                 )
                 return [txl.local_scalar("float32", init=fr[r] * inv) for r in range(C)]
@@ -1193,15 +1213,17 @@ def make_kernel(
                     with txl.If(head < HGc), txl.Then():
                         for i in range(8):
                             pack_piece(i)
-                            stage_piece(c, i)
-                    txl.ptx["fence.proxy.async.shared::cta"]()
-                    pair_sync()
-                    with txl.If(is_leader), txl.Then():
-                        tma_store_chunk(c)
+                            stage_piece(c, i, output=True)
+                    if not direct_output:
+                        txl.ptx["fence.proxy.async.shared::cta"]()
+                        pair_sync()
+                        with txl.If(is_leader), txl.Then():
+                            tma_store_chunk(c)
                 iket_end(t_stage)
                 t_st = iket_range("ep-store")
-                with txl.If(is_leader), txl.Then():
-                    txl.ptx["cp.async.bulk.wait_group.read"](txl.int32(0))
+                if not direct_output:
+                    with txl.If(is_leader), txl.Then():
+                        txl.ptx["cp.async.bulk.wait_group.read"](txl.int32(0))
                 iket_end(t_st)
                 return
 
@@ -1216,8 +1238,12 @@ def make_kernel(
                             bar_addr(recv_full, s_), txl.uint32((C - 1) * XCHUNK)
                         )
 
-            def send_chunk(c):
-                """Chunk c belongs to a peer: stage it as bf16 and bulk-copy it into the owner's slot."""
+            def send_chunk(c, wait_peer=True):
+                """Stage a BF16 peer partial and bulk-copy it into its owner's slot.
+
+                Peer readiness has one phase per launch. The same leader can
+                reuse its first acquire for a subsequent send to another slot.
+                """
                 t_s = iket_range("ep-send")
                 dest = c % C
                 slot = c // C
@@ -1228,7 +1254,8 @@ def make_kernel(
                 txl.ptx["fence.proxy.async.shared::cta"]()
                 pair_sync()
                 with txl.If(is_leader), txl.Then():
-                    txl.cuda.mbarrier_wait_acquire_cluster(txl.address_of(peer_ready.buf[0]), 0)
+                    if wait_peer:
+                        txl.cuda.mbarrier_wait_acquire_cluster(txl.address_of(peer_ready.buf[0]), 0)
                     src_idx = rank - txl.if_then_else(rank > dest, txl.int32(1), txl.int32(0))
                     rb = txl.local_scalar("uint32")
                     txl.ptx["mapa.shared::cluster.u32"](rb, bar_addr(recv_full, slot), txl.Cast("uint32", dest))
@@ -1267,77 +1294,41 @@ def make_kernel(
                 iket_end(t_wr)
                 t_red = iket_range("ep-reduce-store")
                 with txl.If(head < HGc), txl.Then():
-                    if compact_exchange:
-                        for i in range(4):
-                            words = [txl.alloc_local((4,), "uint32") for _ in range(C - 1)]
-                            for si in range(C - 1):
-                                txl.ptx["ld.shared.v4.u32"](
-                                    words[si][0], words[si][1], words[si][2], words[si][3],
-                                    cvta(txl.ptr_byte_offset(
-                                        recv.ptr_to([0]),
-                                        (slot * (C - 1) + si) * XCHUNK
-                                        + (i * HGc + head) * 16,
-                                        "uint16",
-                                    )),
+                    for i in range(8):
+                        piece = txl.bitwise_xor(txl.int32(i), hsw)
+                        words = [txl.alloc_local((4,), "uint32") for _ in range(C - 1)]
+                        for si in range(C - 1):
+                            txl.ptx["ld.shared.v4.u32"](
+                                words[si][0], words[si][1], words[si][2], words[si][3],
+                                cvta(txl.ptr_byte_offset(
+                                    recv.ptr_to([0]),
+                                    (slot * (C - 1) + si) * XCHUNK
+                                    + head * 128 + piece * 16,
+                                    "uint16",
+                                )),
+                            )
+                        for si in range(C - 1):
+                            for q in range(4):
+                                w = 4 * i + q
+                                lo = txl.cuda.uint_as_float(
+                                    txl.shift_left(words[si][q], txl.uint32(16))
                                 )
-                            for si in range(C - 1):
-                                for q in range(4):
-                                    pairs = txl.alloc_local((2,), "uint16")
-                                    txl.ptx.mov.b32(pairs[0], pairs[1], words[si][q])
-                                    for hp in range(2):
-                                        bf16_pair = txl.local_scalar("uint32")
-                                        txl.ptx.cvt.rn.bf16x2.e4m3x2(bf16_pair, pairs[hp])
-                                        lo = txl.cuda.uint_as_float(
-                                            txl.shift_left(bf16_pair, txl.uint32(16))
-                                        )
-                                        hi = txl.cuda.uint_as_float(
-                                            txl.bitwise_and(bf16_pair, txl.uint32(0xFFFF0000))
-                                        )
-                                        d = 16 * i + 4 * q + 2 * hp
-                                        vals2 = txl.local_scalar("uint64")
-                                        acc2 = txl.local_scalar("uint64")
-                                        txl.ptx.mov.b64(vals2, lo, hi)
-                                        txl.ptx.mov.b64(acc2, elem(d), elem(d + 1))
-                                        txl.ptx["fma.rn.ftz.f32x2"](acc2, vals2, sc2[si], acc2)
-                                        txl.ptx.mov.b64(elem(d), elem(d + 1), acc2)
-                            for oi in range(2):
-                                pack_piece(2 * i + oi)
-                                stage_piece(c, 2 * i + oi)
-                    else:
-                        for i in range(8):
-                            piece = txl.bitwise_xor(txl.int32(i), hsw)
-                            words = [txl.alloc_local((4,), "uint32") for _ in range(C - 1)]
-                            for si in range(C - 1):
-                                txl.ptx["ld.shared.v4.u32"](
-                                    words[si][0], words[si][1], words[si][2], words[si][3],
-                                    cvta(txl.ptr_byte_offset(
-                                        recv.ptr_to([0]),
-                                        (slot * (C - 1) + si) * XCHUNK
-                                        + head * 128 + piece * 16,
-                                        "uint16",
-                                    )),
+                                hi = txl.cuda.uint_as_float(
+                                    txl.bitwise_and(words[si][q], txl.uint32(0xFFFF0000))
                                 )
-                            for si in range(C - 1):
-                                for q in range(4):
-                                    w = 4 * i + q
-                                    lo = txl.cuda.uint_as_float(
-                                        txl.shift_left(words[si][q], txl.uint32(16))
-                                    )
-                                    hi = txl.cuda.uint_as_float(
-                                        txl.bitwise_and(words[si][q], txl.uint32(0xFFFF0000))
-                                    )
-                                    vals2 = txl.local_scalar("uint64")
-                                    acc2 = txl.local_scalar("uint64")
-                                    txl.ptx.mov.b64(vals2, lo, hi)
-                                    txl.ptx.mov.b64(acc2, elem(2 * w), elem(2 * w + 1))
-                                    txl.ptx["fma.rn.ftz.f32x2"](acc2, vals2, sc2[si], acc2)
-                                    txl.ptx.mov.b64(elem(2 * w), elem(2 * w + 1), acc2)
-                            pack_piece(i)
-                            stage_piece(c, i)
-                txl.ptx["fence.proxy.async.shared::cta"]()
-                pair_sync()
-                with txl.If(is_leader), txl.Then():
-                    tma_store_chunk(c)
+                                vals2 = txl.local_scalar("uint64")
+                                acc2 = txl.local_scalar("uint64")
+                                txl.ptx.mov.b64(vals2, lo, hi)
+                                txl.ptx.mov.b64(acc2, elem(2 * w), elem(2 * w + 1))
+                                txl.ptx["fma.rn.ftz.f32x2"](acc2, vals2, sc2[si], acc2)
+                                txl.ptx.mov.b64(elem(2 * w), elem(2 * w + 1), acc2)
+                        pack_piece(i)
+                        stage_piece(c, i, output=True)
+                if not direct_output:
+                    txl.ptx["fence.proxy.async.shared::cta"]()
+                    pair_sync()
+                    with txl.If(is_leader), txl.Then():
+                        tma_store_chunk(c)
                 iket_end(t_red)
 
             own_b = (cbase % C) == rank
@@ -1350,7 +1341,7 @@ def make_kernel(
                         reduce_chunk(cnext)
                     with txl.Else():
                         send_chunk(cbase)
-                        send_chunk(cnext)
+                        send_chunk(cnext, wait_peer=not short_split_decode)
             else:
                                                                                       
                 with txl.If(own_b):
@@ -1364,10 +1355,11 @@ def make_kernel(
                                 reduce_chunk(cnext)
                             with txl.Else():
                                 send_chunk(cbase)
-                                send_chunk(cnext)
+                                send_chunk(cnext, wait_peer=not short_split_decode)
             t_st = iket_range("ep-store")
-            with txl.If(is_leader), txl.Then():
-                txl.ptx["cp.async.bulk.wait_group.read"](txl.int32(0))
+            if not direct_output:
+                with txl.If(is_leader), txl.Then():
+                    txl.ptx["cp.async.bulk.wait_group.read"](txl.int32(0))
             iket_end(t_st)
 
         roles = txl.specialize(chain_dispatch=True)
@@ -1524,7 +1516,11 @@ def plan(h_total, q_tokens, ktot, fp8, prefill=False):
             s3, b3, c3 = _choose_split(kblk, q_tokens, groups, fp8, 3)
             if c3 < cost:
                 splits, bpc, nstage = s3, b3, 3
-    import os                                                                       
+    if fp8 and not prefill and h_total == 64 and splits == 5 and bpc == 2:
+        # Three stages retain enough alias space for BF16 peers. A fourth
+        # cannot add lookahead to these two-block splits and costs latency.
+        nstage = 3
+    import os
     if os.environ.get("MLA_SPLITS"):
         splits = int(os.environ["MLA_SPLITS"])
         bpc = (kblk + splits - 1) // splits

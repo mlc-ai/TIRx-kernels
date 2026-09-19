@@ -93,6 +93,16 @@ and a different producer schedule can reverse the result. The timing and
 binary diff prove the instruction removal and its effect, not which downstream
 stall counter changed.
 
+A ring can also provide storage for a later role. In a two-block split-attention
+path, reducing the input ring from four stages to three removed 32 KiB while
+still leaving enough dead Q/K storage for BF16 peer partials. Four layout/pool
+guards passed correctness and improved by 0.18--0.44% in five-round paired
+timings. Two stages required a separate receive allocation and was slower.
+Count both producer lookahead and the later alias footprint when choosing the
+minimum depth; loop trip count alone does not determine it. This small gain
+was insufficient by itself to meet the complete numerical-repair performance
+gate.
+
 ## Verification
 
 Benchmark both sides of every dispatch boundary and validate deadlock freedom,

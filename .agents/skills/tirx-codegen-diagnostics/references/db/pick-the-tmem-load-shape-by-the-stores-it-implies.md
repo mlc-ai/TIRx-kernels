@@ -58,6 +58,17 @@ whichever shape indexes most simply. The wide-fragment live-range cost still
 applies: reading the whole tile before storing any of it trades sectors for
 registers.
 
+Removing shared staging and its barriers does not guarantee a faster epilogue.
+In a short, unsplit attention path, reverting direct per-row stores to the
+existing shared/TMA output changed sixteen static `STG.E.128` sites into
+sixteen `STS.128` sites and two `UTMASTG.2D` sites. Both binaries used 151
+registers with zero stack/local storage. Five-round paired timings improved
+from 7.458 to 6.735 us at 64 heads and from 7.542 to 6.835 us at 128 heads;
+four head-count guards passed correctness. The split reduction path still
+benefited from direct stores, so keep the output choice local to the measured
+regime. These measurements establish the store-path tradeoff; sector counters
+were not collected in this experiment.
+
 ## Verification
 
 Compare `l1tex__t_sectors_pipe_lsu_mem_global_op_st` and `dram__bytes_write`
