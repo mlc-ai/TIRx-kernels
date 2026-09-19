@@ -97,6 +97,20 @@ slower still at 375.60 and 186.37 microseconds. Rare fallback is therefore not
 enough to justify a custom lossless format when every partial pays the codec
 cost.
 
+An adaptive lossy transport can be useful when exact baseline equivalence is
+not required. Counting how many S2F6 values rounded to zero and falling back to
+BF16 for suspicious groups improved outlier accuracy, but the count reduction
+itself regressed the eight-way row by 59.0% and the four-way row by 30.4%. A
+cheaper bound reused the producer's existing maximum numerator and row sum:
+groups with `max_abs > 0.5 * row_sum` used BF16, and the rest stayed S2F6. Only
+about 0.03% of groups fell back on the official inputs. For a 100x massive-
+channel stress case, non-outlier normalized RMS fell from 0.318 to 0.0125,
+maximum absolute error fell from 0.0266 to 0.00146, and the strict 1e-2 gate
+had no failures. Same-process paired timing measured an 8.45% regression on
+the eight-way row and a 1.24% speedup on the four-way row. This is an error-
+bounded mitigation, not a replacement for BF16 when the contract requires the
+baseline's intermediate precision.
+
 Serialized event markers around the three launches also located the widening
 cost on both sides of the workspace. On the eight-way row, the main launch
 changed from 85.19 to 98.89 microseconds and combine from 27.62 to 38.30; on
