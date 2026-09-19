@@ -63,14 +63,21 @@ the B200 run using FlashKDA commit `1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b`.
 | [`agent_evolved_kda_decode_multishape`](kda_decode_multishape.py) | `t6_b128_hv32_spec` | GB200 | Proton | 160.250 | FlashInfer `recurrent_kda` | 222.751 | 1.390x | GB200 run; Proton, rounds=5, cooldown=1s |
 | [`agent_evolved_kda_decode_multishape`](kda_decode_multishape.py) | `t3_b16_hv16_lower_bound` | GB200 | Proton | 10.075 | FlashInfer `recurrent_kda` | 15.976 | 1.586x | GB200 run; Proton, rounds=5, cooldown=1s |
 | [`agent_evolved_kda_decode_multishape`](kda_decode_multishape.py) | `all-thirty-geomean` | GB200 | Proton | 22.153 | FlashInfer `recurrent_kda` | 29.263 | 1.321x | geometric mean of the thirty official rows in that run |
-| [`agent_evolved_mla_dsv4_multishape`](mla_dsv4_multishape.py) | `prefill_h128_swa16384_topk4x_c16384_k1024_bf16_hnd` | GB200 | Proton | 78.676 | FlashInfer trtllm-gen DSv4 | 119.285 | 1.516x | GB200 run; Proton, rounds=5, cooldown=1s |
-| [`agent_evolved_mla_dsv4_multishape`](mla_dsv4_multishape.py) | `decode_h16_swa512_topk128x_c128_k132_fp8_hnd` | GB200 | Proton | 6.850 | FlashInfer trtllm-gen DSv4 | 16.200 | 2.365x | GB200 run; Proton, rounds=5, cooldown=1s |
-| [`agent_evolved_mla_dsv4_multishape`](mla_dsv4_multishape.py) | `prefill_h128_swa16384_topk4x_c16384_k1024_fp8_hnd` | GB200 | Proton | 86.594 | FlashInfer trtllm-gen DSv4 | 76.455 | 0.883x | GB200 run; Proton, rounds=5, cooldown=1s |
-| [`agent_evolved_mla_dsv4_multishape`](mla_dsv4_multishape.py) | `all-ninety-four-geomean` | GB200 | Proton | 9.563 | FlashInfer trtllm-gen DSv4 | 16.494 | 1.725x | geometric mean of the ninety-four official rows in that run |
+| [`agent_evolved_mla_dsv4_multishape`](mla_dsv4_multishape.py) | `prefill_h128_swa16384_topk4x_c16384_k1024_bf16_hnd` | GB200 | Proton | 79.082 | FlashInfer trtllm-gen DSv4 | 117.353 | 1.484x | PR #207 numerical-fix sweep; same-run pair, rounds=5, cooldown=1s |
+| [`agent_evolved_mla_dsv4_multishape`](mla_dsv4_multishape.py) | `decode_h16_swa512_topk128x_c128_k132_fp8_hnd` | GB200 | Proton | 7.000 | FlashInfer trtllm-gen DSv4 | 15.388 | 2.198x | PR #207 numerical-fix sweep; same-run pair, rounds=5, cooldown=1s |
+| [`agent_evolved_mla_dsv4_multishape`](mla_dsv4_multishape.py) | `prefill_h128_swa16384_topk4x_c16384_k1024_fp8_hnd` | GB200 | Proton | 88.025 | FlashInfer trtllm-gen DSv4 | 78.358 | 0.890x | PR #207 numerical-fix sweep; same-run pair, rounds=5, cooldown=1s |
+| [`agent_evolved_mla_dsv4_multishape`](mla_dsv4_multishape.py) | `all-ninety-four-geomean` | GB200 | Proton | 9.621 | FlashInfer trtllm-gen DSv4 | 16.503 | 1.715x | geometric mean of all 94 same-run pairs in the PR #207 numerical-fix sweep |
 | [`agent_evolved_vsa_multishape`](vsa_multishape.py) | `pooled_blk128_s80000_topk156` | GB200 | Proton | 4523.323 | FlashInfer `bsa_attn_fwd` | 7045.071 | 1.558x | GB200 run; Proton, rounds=5, cooldown=1s |
 | [`agent_evolved_vsa_multishape`](vsa_multishape.py) | `bsr_blk64_s4096_topk32` | GB200 | Proton | 34.869 | FlashInfer `bsa_attn_blk64_fwd` | 58.166 | 1.668x | GB200 run; Proton, rounds=5, cooldown=1s |
 | [`agent_evolved_vsa_multishape`](vsa_multishape.py) | `fastwan_blk64_s26624_h12_topk84_partial` | GB200 | Proton | 764.725 | FlashInfer `bsa_attn_blk64_fwd` | 938.857 | 1.228x | GB200 run; Proton, rounds=5, cooldown=1s |
 | [`agent_evolved_vsa_multishape`](vsa_multishape.py) | `all-eighteen-geomean` | GB200 | Proton | 92.210 | FlashInfer BSA | 154.753 | 1.678x | geometric mean of the eighteen official rows in that run |
+
+The MLA rows measure the kernel after the FP8 numerical repairs (BF16 split
+partials and P scaled by 448), against FlashInfer 0.6.18.post1 on GB200 with Proton. Each of
+the 94 configurations uses five same-run candidate/reference rounds and
+arithmetic-mean times; the aggregate row divides their geometric means.
+GPU execution was serialized by the benchmark server's per-GPU lease.
+Source and measurement details are recorded in [PR #207](https://github.com/mlc-ai/TIRx-kernels/pull/207).
 
 For `kcoral` rows the timer is the evolution harness's benchmark server, which
 reports GPU-only latency for candidate and reference in one run. Geomean rows

@@ -93,6 +93,13 @@ _add_in_place(values0, values1)
 One measured FP32 bias hoist regressed 6.6%; by contrast, staging a larger load
 set won when it created enough outstanding DRAM misses.
 
+Wider TMEM rescaling fragments can cross the same boundary. Increasing a
+packed-FP32 online-softmax rescale from x32 to x128 reduced eight load/store
+pairs to two, but increased registers from 88 to 168 and introduced a 56-byte
+stack. All fifteen targeted numerical cases passed; the large-prefill
+after/before latency ratio nevertheless worsened from 1.255 to 1.304 in
+three-round paired measurements. Fewer TMEM waits did not repay the spills.
+
 The same tradeoff applies to persistent reductions. Moving a nonnegative amax
 from a per-work shared reduction and atomic into a per-lane value carried across
 the persistent loop reduced the number of global atomics, but the loop-carried
