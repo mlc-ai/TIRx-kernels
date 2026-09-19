@@ -9,25 +9,20 @@ Hq=32, Hkv=2, top-k 8), and paged bf16 (B=3, Q=4096, KV=8192, Hq=8, Hkv=2,
 top-k 4). Selection is `q2k_indices` int32[Hkv, total_q, topk] of ascending
 sequence-local KV block ids padded with -1, under bottom-right causal masking.
 
-The selected kernel is the `dispatch-all-s2f6-raw-maxabs` frontier member of
-the 2026-09-13 MSA-prefill evolution run, the first run scored against the
-task's normalized-RMS bound. Everything from the module docstring's mechanism
-notes down to `setup_union` is that candidate's source; this module adds the
-registry interface, input generation, the independent oracle, and the
-reference arms.
+The selected kernel started from the `dispatch-all-s2f6-raw-maxabs` frontier
+member of the 2026-09-13 MSA-prefill evolution run, the first run scored
+against the task's normalized-RMS bound. This revision replaces its linear
+softmax exp2 emulation with FlashAttention-4's cubic and stores split-K
+partials as BF16, matching the reference path's intermediate precision.
 
 Numerics. Every MMA is `tcgen05.mma kind::f16` with bf16 operands and FP32
 accumulation; the FP8 row's E4M3 K/V are the contract's own storage format and
-are expanded to bf16 before they reach a tensor core. Two approximations sit
-on top of that, both inside the task's 1e-2 normalized-RMS bound and both
-measured: a cubic exp2 approximation in the softmax (0.002382 maximum relative
-error over the tested range), and, on the two sparse rows only, S2F6 split-K
-partials -- an 8-bit format carrying a `ue8m0` block scale per element pair,
-which halves partial traffic without the fixed-scale failure mode that sank an
-earlier E2M1 attempt. The dense row keeps bf16 partials. Measured RMS ratios
-are 0.007197 (dense), 0.008247 (FP8) and 0.008199 (paged), against 0.0025 for
-MiniMax itself; a reviewer who wants the approximation-free arithmetic should
-know it costs about 2% on the FP8 main kernel (NCU 80.67 us -> 79.04 us).
+are expanded to bf16 before they reach a tensor core. The union softmax uses
+FlashAttention-4's packed-f32x2 cubic exp2 approximation. The two sparse rows
+write BF16 split-K PV numerators and FP32 softmax statistics, matching the
+MiniMax reference's BF16 partial-output precision while keeping the final
+combine in FP32. The evolution run measured the BF16-partial FP8 main kernel
+about 2% slower than its S2F6 variant (80.67 us versus 79.04 us).
 
 Candidate mechanism notes, carried over from the evolution run:
 
@@ -46,9 +41,9 @@ Two approach families in one self-contained module:
   gathers the exact Q rows of each 128-row block tile with one TMA per lane,
   expands FP8 K/V to BF16 in the epilogue warpgroup as soon as a block lands,
   and overlaps the next block's K/V prefetch with edge-slot waits.
-  QK/softmax/PV writes normalized partials (S2F6-compressed for FP8 top-k 4/8)
-  which a TMA-staged combine kernel merges.  Kernels chain with programmatic
-  dependent launch.
+  QK/softmax/PV writes BF16 raw-numerator partials with FP32 max/sum statistics,
+  which a TMA-staged FP32 combine kernel merges. Kernels chain with
+  programmatic dependent launch.
 
 ``setup`` dispatches on the selection density derived from shapes: topk relative to
 the number of selectable blocks (a shape-only quantity).
@@ -402,7 +397,16 @@ def make_union_kernel(*, total_q, hq, hkv, topk, mask_words, paged, max_pages, k
             txl.ptx.mov.b32(out_f, out_i)
             return out_f
 
-        POLY_EX2_DEG1 = (0.9701787941914297, 0.9701787941914297)
+        # FlashAttention-4's minimax cubic on the fractional part in [0, 1).
+        # Keep the coefficients and fma.rn.ftz form aligned with that kernel:
+        # this path exists to move work off the MUFU pipe without accepting the
+        # old linear approximation's ~3% relative error.
+        POLY_EX2_DEG3 = (
+            1.0,
+            0.6951461434364319,
+            0.22756439447402954,
+            0.07711908966302872,
+        )
         FP32_ROUND_INT = float(2**23 + 2**22)
 
         def ex2_emulation_2(out_, idx, x, y):
@@ -428,13 +432,13 @@ def make_union_kernel(*, total_q, hq, hkv, topk, mask_words, paged, max_pages, k
             txl.ptx.sub.rn.ftz.f32x2(packed, packed, rhs)
             txl.ptx.mov.b64(xy_frac[0], xy_frac[1], packed)
             xy_frac_ex2 = txl.alloc_local([2], "float32")
-            txl.ptx.mov.b32(xy_frac_ex2[0], txl.float32(POLY_EX2_DEG1[1]))
-            txl.ptx.mov.b32(xy_frac_ex2[1], txl.float32(POLY_EX2_DEG1[1]))
-            for coeff in (POLY_EX2_DEG1[0],):
+            txl.ptx.mov.b32(xy_frac_ex2[0], txl.float32(POLY_EX2_DEG3[3]))
+            txl.ptx.mov.b32(xy_frac_ex2[1], txl.float32(POLY_EX2_DEG3[3]))
+            for coeff in (POLY_EX2_DEG3[2], POLY_EX2_DEG3[1], POLY_EX2_DEG3[0]):
                 txl.ptx.mov.b64(rhs, xy_frac[0], xy_frac[1])
                 txl.ptx.mov.b64(packed, xy_frac_ex2[0], xy_frac_ex2[1])
                 txl.ptx.mov.b64(addend, txl.float32(coeff), txl.float32(coeff))
-                txl.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend)
+                txl.ptx.fma.rn.ftz.f32x2(packed, packed, rhs, addend)
                 txl.ptx.mov.b64(xy_frac_ex2[0], xy_frac_ex2[1], packed)
             txl.ptx.mov.b32(out_[idx], combine_int_frac_ex2(xy_rounded[0], xy_frac_ex2[0]))
             txl.ptx.mov.b32(out_[idx + 1], combine_int_frac_ex2(xy_rounded[1], xy_frac_ex2[1]))
@@ -3131,10 +3135,11 @@ def setup_reverse(data, total_q, B):
     assert hd == HEAD_DIM and total_q_ == total_q
     hkv = k.shape[1]
     topk = q2k.shape[2]
-    # The raw-numerator representation keeps quantization scale independent
-    # of the row sum, so use the byte-wide S2F6 partial path for both official
-    # sparse rows.  The final output remains BF16.
-    compact_s2f6 = topk in (4, 8)
+    # Match the baseline's intermediate precision. MiniMax stores BF16
+    # O_partial, while the TRTLLM bridge does not quantize a global partial for
+    # the official top-k-4 shape. The reverse decomposition still needs a
+    # global split-K buffer, so BF16 is the closest precision-equivalent form.
+    compact_s2f6 = False
     assert topk % 4 == 0 and topk <= 255
     if paged:
         num_pages, hkv_p, page_size, hd_p = k.shape
@@ -3378,7 +3383,7 @@ KERNEL_META = {
     "provenance": {
         "generator": "hmz",
         "run": "msa_prefill-20260913-030259",
-        "selected_version": "frontier/dispatch-all-s2f6-raw-maxabs",
+        "selected_version": "numerics-fix/fa4-ex2-bf16-partials",
     },
 }
 
@@ -3510,7 +3515,7 @@ def get_kernel(**config: Any):
         }
     num_chunks = ceildiv(total_q, PREP_THREADS)
     kv_fp8 = resolved["kv_dtype"] == "float8_e4m3fn"
-    compact = topk in (4, 8)
+    compact = False
     return {
         "prep": make_prep_kernel(
             total_q=total_q, hq=hq, hkv=hkv, topk=topk, nblk=nblk, cap=cap,
