@@ -85,6 +85,24 @@ same kernel, and every other mode of the kernel measured flat across levels
 for that one specialization; a per-mode key alone would have traded the small
 shape against the long streams.
 
+Adding a cold numerical fallback to a 12-warp persistent backward kernel grew
+the generated local stack from 16 to 80 bytes even on inputs that skipped the
+fallback. After shortening that fallback's live ranges, a fresh role-budget
+sweep helped: eight compute warps and four auxiliary warps at 208/88 took
+155/261 us on two ordinary grouped-head shapes; 224/56 took 149/243 us,
+232/40 took 143/238 us, and 240/24 regressed to 146/245 us. All keep the same
+64,512-register CTA allocation. Mixed fallback predicates passed at every
+retained point. The fused family responded differently, so its budget was
+measured separately. Earlier results from a larger fallback had not predicted
+this sweep; repeat it after changing the fragment and branch structure.
+
+A phase-specific split was not better in that experiment. Restoring 208/88
+for the recurrence streams, then redistributing to 232/40 at the token phase
+boundary, left ordinary timings near 144/238/155/226 us and moved the large
+strong-decay case from roughly 513-518 to 523 us. Correctness passed, but the
+extra collective transitions did not justify retaining another allocation
+policy. A phase boundary makes redistribution legal, not automatically useful.
+
 ## Boundary
 
 An occupancy proof only shows that a larger budget is affordable; it does not
