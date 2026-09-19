@@ -83,6 +83,27 @@ launching those pipelines on three CUDA streams reduced the losses only to
 34.1% and 48.3%. The smaller working set did not repay repeated persistent-grid
 startup and the loss of one globally balanced work queue.
 
+Lossless bit packing did not provide a practical middle ground. A prototype
+rounded each value to BF16, stored its sign and seven mantissa bits plus a
+four-bit delta from a 32-value block exponent, and fell back to a separate BF16
+group for subnormals, non-finite values, or exponent spans above 14. Both an
+ordinary packed-12 layout and a byte-aligned planar layout passed the two
+reverse-route correctness gates. Only about 0.25% of groups used the fallback,
+but the exponent reductions, packing, and reconstruction dominated the saved
+traffic. In same-process, same-GPU CUDA-event measurements, the planar version
+measured 358.79 versus 128.83 microseconds on the eight-way row and 182.57
+versus 78.12 microseconds on the four-way row; the ordinary packed layout was
+slower still at 375.60 and 186.37 microseconds. Rare fallback is therefore not
+enough to justify a custom lossless format when every partial pays the codec
+cost.
+
+Serialized event markers around the three launches also located the widening
+cost on both sides of the workspace. On the eight-way row, the main launch
+changed from 85.19 to 98.89 microseconds and combine from 27.62 to 38.30; on
+the four-way row, main changed from 58.17 to 65.33 and combine from 19.71 to
+21.88. These markers deliberately serialize launches and are diagnostic rather
+than end-to-end PDL timings, but they rule out a combine-only fix.
+
 ## Boundary
 
 This applies when the algorithm, split count, and reduction are unchanged and
@@ -90,9 +111,11 @@ the regression begins with a wider intermediate format. It does not show that
 TMA is always preferable to direct global access, and it does not remove the
 bandwidth cost of the wider format. Recovering that cost requires reducing
 traffic or overlapping it at the pipeline level; changing load syntax or lane
-ownership alone is not enough. Do not add a row-readiness protocol solely to
-overlap the merge unless the producer already publishes the needed readiness
-state or a measured end-to-end run pays back that synchronization.
+ownership alone is not enough. A custom lossless format also needs a
+hardware-cheap codec; byte savings alone are insufficient. Do not add a
+row-readiness protocol solely to overlap the merge unless the producer already
+publishes the needed readiness state or a measured end-to-end run pays back
+that synchronization.
 
 ## Verification
 
