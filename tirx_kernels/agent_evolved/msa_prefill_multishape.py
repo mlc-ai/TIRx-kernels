@@ -12,15 +12,17 @@ sequence-local KV block ids padded with -1, under bottom-right causal masking.
 The selected kernel started from the `dispatch-all-s2f6-raw-maxabs` frontier
 member of the 2026-09-13 MSA-prefill evolution run, the first run scored
 against the task's normalized-RMS bound. This revision replaces its linear
-softmax exp2 emulation with FlashAttention-4's cubic.
+softmax exp2 emulation with FlashAttention-4's cubic and stores split-K
+partials as BF16, matching the reference path's intermediate precision.
 
 Numerics. Every MMA is `tcgen05.mma kind::f16` with bf16 operands and FP32
 accumulation; the FP8 row's E4M3 K/V are the contract's own storage format and
 are expanded to bf16 before they reach a tensor core. The union softmax uses
-FlashAttention-4's packed-f32x2 cubic exp2 approximation (8.77e-5 maximum
-relative error). On the two sparse rows, S2F6 split-K partials remain: an
-8-bit format carrying a `ue8m0` block scale per element pair, which halves
-partial traffic. The dense row keeps bf16 partials.
+FlashAttention-4's packed-f32x2 cubic exp2 approximation. The two sparse rows
+write BF16 split-K PV numerators and FP32 softmax statistics, matching the
+MiniMax reference's BF16 partial-output precision while keeping the final
+combine in FP32. The evolution run measured the BF16-partial FP8 main kernel
+about 2% slower than its S2F6 variant (80.67 us versus 79.04 us).
 
 Candidate mechanism notes, carried over from the evolution run:
 
@@ -39,9 +41,9 @@ Two approach families in one self-contained module:
   gathers the exact Q rows of each 128-row block tile with one TMA per lane,
   expands FP8 K/V to BF16 in the epilogue warpgroup as soon as a block lands,
   and overlaps the next block's K/V prefetch with edge-slot waits.
-  QK/softmax/PV writes raw-numerator partials (S2F6-compressed for top-k 4/8),
-  which a TMA-staged combine kernel merges. Kernels chain with programmatic
-  dependent launch.
+  QK/softmax/PV writes BF16 raw-numerator partials with FP32 max/sum statistics,
+  which a TMA-staged FP32 combine kernel merges. Kernels chain with
+  programmatic dependent launch.
 
 ``setup`` dispatches on the selection density derived from shapes: topk relative to
 the number of selectable blocks (a shape-only quantity).
@@ -3133,10 +3135,11 @@ def setup_reverse(data, total_q, B):
     assert hd == HEAD_DIM and total_q_ == total_q
     hkv = k.shape[1]
     topk = q2k.shape[2]
-    # The raw-numerator representation keeps quantization scale independent
-    # of the row sum, so use the byte-wide S2F6 partial path for both official
-    # sparse rows.  The final output remains BF16.
-    compact_s2f6 = topk in (4, 8)
+    # Match the baseline's intermediate precision. MiniMax stores BF16
+    # O_partial, while the TRTLLM bridge does not quantize a global partial for
+    # the official top-k-4 shape. The reverse decomposition still needs a
+    # global split-K buffer, so BF16 is the closest precision-equivalent form.
+    compact_s2f6 = False
     assert topk % 4 == 0 and topk <= 255
     if paged:
         num_pages, hkv_p, page_size, hd_p = k.shape
@@ -3380,7 +3383,7 @@ KERNEL_META = {
     "provenance": {
         "generator": "hmz",
         "run": "msa_prefill-20260913-030259",
-        "selected_version": "numerics-fix/fa4-ex2",
+        "selected_version": "numerics-fix/fa4-ex2-bf16-partials",
     },
 }
 
@@ -3512,7 +3515,7 @@ def get_kernel(**config: Any):
         }
     num_chunks = ceildiv(total_q, PREP_THREADS)
     kv_fp8 = resolved["kv_dtype"] == "float8_e4m3fn"
-    compact = topk in (4, 8)
+    compact = False
     return {
         "prep": make_prep_kernel(
             total_q=total_q, hq=hq, hkv=hkv, topk=topk, nblk=nblk, cap=cap,
