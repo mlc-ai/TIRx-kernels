@@ -38,13 +38,18 @@ shape-aware dispatcher over two persistent tcgen05 designs:
   v-heads, reduces dq/dk in TMEM, and produces dv, db and dg in one pass. Work
   units are dealt from a host-built readiness-ordered table.
 
-Numerical notes. All MMAs are ``kind::f16`` bf16 x bf16 -> fp32, the same class
-the FLA reference feeds ``tl.dot``; no tf32 or fp8 path is used. Two choices
-are lower precision than the reference and are deliberate: ``2^g`` is cached to
-global memory in bf16, and inverse gates are recovered with
-``rcp.approx.ftz.f32`` instead of the reference's fp32 ``exp2(gn - g)``.
-Measured across the official suite this keeps the maximum normalized RMS error
-ratio at 5.959e-3, inside the tightest per-output limit of 8e-3.
+Numerical notes. Gates are finite, nonpositive chunk-local cumulative base-2
+log decays, monotone within each chunk. MMAs use bf16 operands and fp32
+accumulation. Mild channels retain the bf16 ``2^g`` cache and reciprocal fast
+path. When the cached chunk-end decay is below 1/16, the state snapshot keeps
+its unscaled gradient and its consumers use bounded ``exp2(g_end - g_i)``.
+The intra-chunk correction multiplies adjacent bounded decays in fp32 instead
+of separately forming tiny exponentials and overflowing inverses. Its query/key
+diagonal contributions are omitted from dg because they cancel analytically;
+they are retained in dq/dk. Full and partial chunks use the same rounded-cache
+predicate for snapshot production and consumption. Tests cover mixed channels,
+strong and extreme decay, abrupt resets, and partial tails under the original
+per-output tolerances.
 """
 
 import ctypes
@@ -52,6 +57,7 @@ import math
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
+from itertools import pairwise
 from typing import Any
 from unittest import SkipTest
 
@@ -240,6 +246,34 @@ G_BYTES = CHUNK * D * 4
 IN3_BYTES = 3 * CHUNK * D * 2 + G_BYTES
 
 
+def _load_bf16_f32(ptr, *, shared=False):
+    word = txl.local_scalar("uint16")
+    if shared:
+        txl.ptx.ld.shared.b16(word, ptr)
+    else:
+        txl.ptx.ld.global_.nc.b16(word, ptr)
+    return txl.reinterpret("float32", txl.Cast("uint32", word) << txl.uint32(16))
+
+
+def _load_gate(g, token, head, channel, stride):
+    value = txl.local_scalar("float32")
+    txl.ptx.ld.global_.nc.f32(
+        value, g.ptr_to([token * txl.int64(stride) + txl.Cast("int64", head * D + channel)])
+    )
+    return value
+
+
+def _needs_stable(g_last):
+    """Match the bf16 cache consumer, including rounding at the dispatch boundary."""
+    value = txl.local_scalar("float32")
+    word = txl.local_scalar("uint32")
+    txl.ptx.ex2.approx.ftz.f32(value, g_last)
+    txl.ptx.cvt.rn.bf16x2.f32(word, value, value)
+    return txl.reinterpret("float32", (word & txl.uint32(0xFFFF)) << txl.uint32(16)) < txl.float32(
+        0.0625
+    )
+
+
 def make_mega_kernel(HQ: int, HV: int, static_grid=None):
     txl.MBarrier._wait = _ptx_mbarrier_wait
     G = HV // HQ
@@ -332,8 +366,8 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
         ep64 = txl.local_scalar("int64", init=txl.Cast("int64", epoch) * txl.int64(1 << 32))
 
         sp = txl.specialize()
-        cg = sp.role("cg", warps=list(range(8)), regs=208)
-        auxg = sp.warpgroup("aux", warps=[8, 9, 10, 11], regs=88)
+        cg = sp.role("cg", warps=list(range(8)), regs=232)
+        auxg = sp.warpgroup("aux", warps=[8, 9, 10, 11], regs=40)
         loader = sp.role("loader", warps=[8], group=auxg)
         mma = sp.role("mma", warps=[9], group=auxg)
         w10 = sp.role("w10", warps=[10], group=auxg)
@@ -408,6 +442,10 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
         b_do_empty.init(1)
         b_h_free = txl.MBarrier(smem, 1)
         b_h_free.init(256)
+        b_intra_free = txl.MBarrier(smem, 1)
+        b_intra_free.init(256)
+        b_stable_full = txl.MBarrier(smem, 1)
+        b_stable_full.init(256)
         b_aqk_empty = txl.TCGen05Bar(smem, 1)
         b_aqk_empty.init(1)
         b_akk_empty = txl.TCGen05Bar(smem, 2)
@@ -583,7 +621,8 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                         txl.ptx.ld.global_.s64(cs[0], cu_seqlens.ptr_to([i]))
                         txl.ptx.ld.global_.s64(cs[1], cu_seqlens.ptr_to([i + 1]))
                         txl.assign(
-                            cb, cb + ((txl.Cast("int32", cs[1] - cs[0]) + txl.int32(CHUNK - 1)) >> 6)
+                            cb,
+                            cb + ((txl.Cast("int32", cs[1] - cs[0]) + txl.int32(CHUNK - 1)) >> 6),
                         )
             return cb
 
@@ -595,9 +634,13 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
             lane = txl.lane_id()
             for j in range(2):
                 t = lane + txl.int32(32 * j)
-                tokc = bos + txl.Cast("int64", n * txl.int32(CHUNK) + txl.min(t, rows - txl.int32(1)))
+                tokc = bos + txl.Cast(
+                    "int64", n * txl.int32(CHUNK) + txl.min(t, rows - txl.int32(1))
+                )
                 u = txl.local_scalar("uint16")
-                txl.ptx.ld.global_.nc.u16(u, beta.ptr_to([tokc * txl.int64(HV) + txl.Cast("int64", hv)]))
+                txl.ptx.ld.global_.nc.u16(
+                    u, beta.ptr_to([tokc * txl.int64(HV) + txl.Cast("int64", hv)])
+                )
                 val = txl.Select(t < rows, bf16_bits_to_f32(u), txl.float32(0.0))
                 txl.ptx.st.shared.f32(dst_ptr_fn(t), val)
 
@@ -623,16 +666,22 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
             bos, seq_len, nch = seq_info(seq)
             cb = chunk_base(seq)
             c = txl.local_scalar("int32", init=cb + n)
-            rows = txl.local_scalar("int32", init=txl.min(txl.int32(CHUNK), seq_len - n * txl.int32(CHUNK)))
+            rows = txl.local_scalar(
+                "int32", init=txl.min(txl.int32(CHUNK), seq_len - n * txl.int32(CHUNK))
+            )
             return c, hq, seq, n, bos, rows, nch
 
         def load_beta_lanes_g(bos, hv, n, rows, slot):
             lane = txl.lane_id()
             for j in range(2):
                 t = lane + txl.int32(32 * j)
-                tokc = bos + txl.Cast("int64", n * txl.int32(CHUNK) + txl.min(t, rows - txl.int32(1)))
+                tokc = bos + txl.Cast(
+                    "int64", n * txl.int32(CHUNK) + txl.min(t, rows - txl.int32(1))
+                )
                 u = txl.local_scalar("uint16")
-                txl.ptx.ld.global_.nc.u16(u, beta.ptr_to([tokc * txl.int64(HV) + txl.Cast("int64", hv)]))
+                txl.ptx.ld.global_.nc.u16(
+                    u, beta.ptr_to([tokc * txl.int64(HV) + txl.Cast("int64", hv)])
+                )
                 val = txl.Select(
                     t < rows,
                     txl.reinterpret("float32", txl.Cast("uint32", u) << txl.uint32(16)),
@@ -691,7 +740,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                     )
                     for e in range(4):
                         blk_row = (MROW * txl.int32(4) + txl.int32(e)) * txl.int32(8) + drow
-                        txl.assign(diag[e], txl.Select(blk_row < rows, diag[e] & dmask, txl.uint32(0)))
+                        txl.assign(
+                            diag[e], txl.Select(blk_row < rows, diag[e] & dmask, txl.uint32(0))
+                        )
                     txl.ptx["stmatrix.sync.aligned.m8n8.x4.shared.b16"](
                         dptr, diag[0], diag[1], diag[2], diag[3]
                     )
@@ -807,7 +858,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                     """K/V of chunk m from their TMEM transposes (first half only), then token blocks
                     [u_lo, u_hi) of its kg / kbg / vb tiles into set m & 1 (the last half publishes)."""
                     rows = txl.local_scalar("int32", init=chunk_rows(seq_len, m))
-                    tok0 = txl.local_scalar("int64", init=bos + txl.Cast("int64", m * txl.int32(CHUNK)))
+                    tok0 = txl.local_scalar(
+                        "int64", init=bos + txl.Cast("int64", m * txl.int32(CHUNK))
+                    )
                     sset = txl.local_scalar("int32", init=m & txl.int32(1))
                     if u_lo == 0:
                         phase("fw-kv")
@@ -847,7 +900,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                             txl.ptx.cvt.rn.bf16.f32(bu0, eg0)
                             txl.ptx.cvt.rn.bf16.f32(bu1, eg1)
                             egidx0 = (tok0 + txl.Cast("int64", row0 + txl.int32(i))) * HVK64 + gcol
-                            egidx1 = (tok0 + txl.Cast("int64", row0 + txl.int32(i + 1))) * HVK64 + gcol
+                            egidx1 = (
+                                tok0 + txl.Cast("int64", row0 + txl.int32(i + 1))
+                            ) * HVK64 + gcol
                             with txl.If(valid0), txl.Then():
                                 txl.ptx["st.global.L1::no_allocate.b16"](
                                     egcache.ptr_to([egidx0]), bu0
@@ -966,7 +1021,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                     txl.ptx[TC_FENCE_AFTER]()
                     txl.ptx[FENCE_ASYNC]()
                     phase("f-wT")
-                    txl.ptx[TC_LD32](*(acc[i] for i in range(32)), tmem_at(TM_W0 + sn * 64 + wg * 32))
+                    txl.ptx[TC_LD32](
+                        *(acc[i] for i in range(32)), tmem_at(TM_W0 + sn * 64 + wg * 32)
+                    )
                     txl.ptx[WAIT_LD]()
                     for p in range(16):
                         pack_bf16x2(wds[p], acc[2 * p], acc[2 * p + 1])
@@ -991,7 +1048,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                     txl.ptx[TC_FENCE_AFTER]()
                     txl.ptx[FENCE_ASYNC]()
                     phase("f-vnT")
-                    txl.ptx[TC_LD32](*(acc[i] for i in range(32)), tmem_at(TM_U0 + sn * 64 + wg * 32))
+                    txl.ptx[TC_LD32](
+                        *(acc[i] for i in range(32)), tmem_at(TM_U0 + sn * 64 + wg * 32)
+                    )
                     txl.ptx[WAIT_LD]()
                     for p in range(16):
                         pack_bf16x2(wds[p], acc[2 * p], acc[2 * p + 1])
@@ -1055,17 +1114,22 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                     b_qk_read.arrive(0)
                     txl.assign(bqk, bqk + txl.int32(1))
 
-                def b_prep2(m, sset, bslot):
+                def b_prep2(m, sset, bslot, gn):
                     """T1 (TMEM set sset), T2 (shared) and kbg (TMEM set sset) of chunk m."""
                     rows = txl.local_scalar("int32", init=chunk_rows(seq_len, m))
                     phase("b-prep2")
+                    offset = txl.local_scalar(
+                        "float32", init=txl.Select(_needs_stable(gn), gn, txl.float32(0.0))
+                    )
                     w1 = txl.alloc_local([16], "uint32")
                     w3 = txl.alloc_local([16], "uint32")
                     for u in range(4):
                         w2 = txl.alloc_local([4], "uint32")
                         for p in range(4):
                             i = 8 * u + 2 * p
-                            m0 = txl.Select(row0 + txl.int32(i) < rows, txl.float32(1.0), txl.float32(0.0))
+                            m0 = txl.Select(
+                                row0 + txl.int32(i) < rows, txl.float32(1.0), txl.float32(0.0)
+                            )
                             m1 = txl.Select(
                                 row0 + txl.int32(i + 1) < rows, txl.float32(1.0), txl.float32(0.0)
                             )
@@ -1075,8 +1139,8 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                             en1 = txl.local_scalar("float32")
                             txl.ptx.ex2.approx.ftz.f32(eg0, gv[i])
                             txl.ptx.ex2.approx.ftz.f32(eg1, gv[i + 1])
-                            txl.ptx.ex2.approx.ftz.f32(en0, txl.float32(0.0) - gv[i])
-                            txl.ptx.ex2.approx.ftz.f32(en1, txl.float32(0.0) - gv[i + 1])
+                            txl.ptx.ex2.approx.ftz.f32(en0, offset - gv[i])
+                            txl.ptx.ex2.approx.ftz.f32(en1, offset - gv[i + 1])
                             txl.ptx["ld.shared.v2.f32"](
                                 bpair[0], bpair[1], txl.address_of(s_bbeta[bslot, row0 + i])
                             )
@@ -1088,7 +1152,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                 txl.cuda.make_float2(vv[i], vv[i + 1]),
                                 txl.cuda.make_float2(eg0, eg1),
                             )
-                            txl.ptx["mul.rn.f32x2"](pair0, pair0, txl.cuda.make_float2(scale, scale))
+                            txl.ptx["mul.rn.f32x2"](
+                                pair0, pair0, txl.cuda.make_float2(scale, scale)
+                            )
                             txl.ptx["mul.rn.f32x2"](pair0, pair0, txl.cuda.make_float2(m0, m1))
                             txl.ptx["mul.rn.f32x2"](
                                 pair1,
@@ -1124,7 +1190,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                     MB["prep_ready"].arrive(0)
 
                 b_prep(nch - txl.int32(1), gn_c)
-                b_prep2(nch - txl.int32(1), bcyc & txl.int32(1), bcyc & txl.int32(1))
+                b_prep2(nch - txl.int32(1), bcyc & txl.int32(1), bcyc & txl.int32(1), gn_c)
                 with txl.serial(nch) as rn:
                     n = nch - txl.int32(1) - rn
                     par = txl.local_scalar("int32", init=bcyc & txl.int32(1))
@@ -1154,23 +1220,32 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                 *(acc[32 + i] for i in range(32)), tmem_at(TM_DH + wg * 64 + 32)
                             )
                             txl.ptx[WAIT_LD]()
+                    # Strong channels publish unscaled DH for the bounded
+                    # K * exp2(g_end - g_i) contraction; mild channels retain
+                    # the scaled snapshot shared with the reciprocal fast path.
+                    snapshot_raw = txl.local_scalar("bool", init=_needs_stable(gn_c))
                     for p in range(32):
+                        raw0 = txl.local_scalar("float32", init=acc[2 * p])
+                        raw1 = txl.local_scalar("float32", init=acc[2 * p + 1])
                         dpair = txl.local_scalar("uint64")
                         txl.ptx["mul.rn.f32x2"](
-                            dpair,
-                            txl.cuda.make_float2(acc[2 * p], acc[2 * p + 1]),
-                            txl.cuda.make_float2(egn, egn),
+                            dpair, txl.cuda.make_float2(raw0, raw1), txl.cuda.make_float2(egn, egn)
                         )
                         txl.assign(acc[2 * p], txl.cuda.float2_x(dpair))
                         txl.assign(acc[2 * p + 1], txl.cuda.float2_y(dpair))
+                        pack_bf16x2(
+                            wds[p],
+                            txl.Select(snapshot_raw, raw0, acc[2 * p]),
+                            txl.Select(snapshot_raw, raw1, acc[2 * p + 1]),
+                        )
                     txl.ptx[TC_ST32](tmem_at(TM_DH + wg * 64), *(acc[i] for i in range(32)))
-                    txl.ptx[TC_ST32](tmem_at(TM_DH + wg * 64 + 32), *(acc[32 + i] for i in range(32)))
+                    txl.ptx[TC_ST32](
+                        tmem_at(TM_DH + wg * 64 + 32), *(acc[32 + i] for i in range(32))
+                    )
                     phase("bw-stored")
                     with txl.If(rn > txl.int32(0)), txl.Then():
                         b_dhb_stored.wait(0, par ^ txl.int32(1))
                     phase("b-dhb2")
-                    for p in range(32):
-                        pack_bf16x2(wds[p], acc[2 * p], acc[2 * p + 1])
                     dhst = txl.local_scalar("int32", init=B_DHB + wg * txl.int32(2) + xs)
                     for u in range(8):
                         txl.ptx["st.shared.v4.b32"](
@@ -1211,7 +1286,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                     for p in range(16):
                         i = 2 * p
                         m0 = txl.Select(row0 + txl.int32(i) < rows, acc[i], txl.float32(0.0))
-                        m1 = txl.Select(row0 + txl.int32(i + 1) < rows, acc[i + 1], txl.float32(0.0))
+                        m1 = txl.Select(
+                            row0 + txl.int32(i + 1) < rows, acc[i + 1], txl.float32(0.0)
+                        )
                         pack_bf16x2(wds[p], m0, m1)
                     for u in range(4):
                         txl.ptx["st.shared.v4.b32"](
@@ -1225,7 +1302,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                     txl.ptx[FENCE_ASYNC]()
                     MB["dv2T_ready"].arrive(0)
                     with txl.If(rn + txl.int32(1) < nch), txl.Then():
-                        b_prep2(n - txl.int32(1), par ^ txl.int32(1), par ^ txl.int32(1))
+                        b_prep2(n - txl.int32(1), par ^ txl.int32(1), par ^ txl.int32(1), gn_1)
                     txl.assign(gn_c, gn_1)
                     phase_end()
                     txl.assign(bcyc, bcyc + txl.int32(1))
@@ -1234,12 +1311,13 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                 txl.ptx[TC_LD32](*(acc[i] for i in range(32)), tmem_at(TM_DH + wg * 64))
                 txl.ptx[TC_LD32](*(acc[32 + i] for i in range(32)), tmem_at(TM_DH + wg * 64 + 32))
                 txl.ptx[WAIT_LD]()
-                obase = ((txl.Cast("int64", seq) * txl.int64(HV) + hv64) * txl.int64(D) + x64) * txl.int64(
-                    D
-                ) + txl.Cast("int64", wg * 64)
+                obase = (
+                    (txl.Cast("int64", seq) * txl.int64(HV) + hv64) * txl.int64(D) + x64
+                ) * txl.int64(D) + txl.Cast("int64", wg * 64)
                 for m8 in range(8):
                     txl.ptx["st.global.L1::no_allocate.v8.f32"](
-                        dh0.ptr_to([obase + txl.int64(8 * m8)]), *(acc[8 * m8 + i] for i in range(8))
+                        dh0.ptr_to([obase + txl.int64(8 * m8)]),
+                        *(acc[8 * m8 + i] for i in range(8)),
                     )
                 b_dhb_stored.wait(0, (bcyc & txl.int32(1)) ^ txl.int32(1))
 
@@ -1332,7 +1410,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                             frag[o + 1],
                             frag[o + 2],
                             frag[o + 3],
-                            tile.m8n8x4(row0 + txl.int32(16 * rb), col0 + txl.int32(16 * cb_), lane),
+                            tile.m8n8x4(
+                                row0 + txl.int32(16 * rb), col0 + txl.int32(16 * cb_), lane
+                            ),
                         )
 
             def store_transpose_frag(base, frag):
@@ -1362,6 +1442,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
             dgv = txl.alloc_local([32], "float32")
             oq = txl.alloc_local([8], "float32")
             ok8 = txl.alloc_local([8], "float32")
+            gn = txl.local_scalar("float32")
             egn = txl.local_scalar("float32")
             dgk = txl.local_scalar("float32")
             dgk_k = txl.local_scalar("float32")
@@ -1370,7 +1451,8 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
             u16 = txl.local_scalar("uint16")
 
             def rcp(dst, val):
-                txl.ptx.rcp.approx.ftz.f32(dst, val)
+                txl.ptx.rcp.approx.ftz.f32(dst, txl.Select(strong, txl.float32(1.0), val))
+                txl.assign(dst, txl.Select(strong, txl.float32(0.0), dst))
 
             def s_beta_row(c):
                 b = txl.local_scalar("float32")
@@ -1386,7 +1468,8 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                 tok0 = txl.local_scalar("int64", init=bos + txl.Cast("int64", n * txl.int32(CHUNK)))
                 last = txl.local_scalar("int32", init=rows - txl.int32(1))
                 xq_base = txl.local_scalar(
-                    "int64", init=(tok0 + txl.Cast("int64", row0)) * HQK64 + hq64 * txl.int64(D) + x64
+                    "int64",
+                    init=(tok0 + txl.Cast("int64", row0)) * HQK64 + hq64 * txl.int64(D) + x64,
                 )
                 with txl.serial(G) as gi:
                     hv = txl.local_scalar("int32", init=hq * txl.int32(G) + gi)
@@ -1396,6 +1479,28 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                         "int64",
                         init=(tok0 + txl.Cast("int64", row0)) * HVK64 + hv64 * txl.int64(D) + x64,
                     )
+
+                    gn = txl.local_scalar("float32", init=txl.float32(0.0))
+                    strong = txl.local_scalar("bool")
+
+                    def state_decay(dst, i, cached_gate):
+                        with txl.If(strong):
+                            with txl.Then():
+                                gi_value = txl.local_scalar("float32")
+                                ti = txl.min(row0 + txl.int32(i), last)
+                                txl.ptx.ld.global_.nc.f32(
+                                    gi_value,
+                                    g.ptr_to(
+                                        [
+                                            (tok0 + txl.Cast("int64", ti)) * HVK64
+                                            + hv64 * txl.int64(D)
+                                            + x64
+                                        ]
+                                    ),
+                                )
+                                txl.ptx.ex2.approx.ftz.f32(dst, gn - gi_value)
+                            with txl.Else():
+                                txl.ptx.rcp.approx.ftz.f32(dst, cached_gate)
 
                     phase("w-in")
                     b_in_full.wait(0, par)
@@ -1426,10 +1531,24 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                             lq == txl.int32(0),
                             t4[0],
                             txl.Select(
-                                lq == txl.int32(1), t4[1], txl.Select(lq == txl.int32(2), t4[2], t4[3])
+                                lq == txl.int32(1),
+                                t4[1],
+                                txl.Select(lq == txl.int32(2), t4[2], t4[3]),
                             ),
                         ),
                     )
+                    txl.assign(strong, egn < txl.float32(0.0625))
+                    with txl.If(strong), txl.Then():
+                        txl.ptx.ld.global_.nc.f32(
+                            gn,
+                            g.ptr_to(
+                                [
+                                    (tok0 + txl.Cast("int64", last)) * HVK64
+                                    + hv64 * txl.int64(D)
+                                    + x64
+                                ]
+                            ),
+                        )
                     for half in range(2):
                         vb32 = txl.alloc_local([16], "float32")
                         for p in range(8):
@@ -1451,15 +1570,12 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
 
                     for i in range(32):
                         txl.assign(
-                            egf[i],
-                            txl.Select(
-                                (row0 + txl.int32(i) < rows) & (egf[i] != txl.float32(0.0)),
-                                egf[i],
-                                txl.float32(1.0),
-                            ),
+                            egf[i], txl.Select(row0 + txl.int32(i) < rows, egf[i], txl.float32(1.0))
                         )
                     for i in range(16):
-                        m0 = txl.Select(row0 + txl.int32(2 * i) < rows, txl.float32(1.0), txl.float32(0.0))
+                        m0 = txl.Select(
+                            row0 + txl.int32(2 * i) < rows, txl.float32(1.0), txl.float32(0.0)
+                        )
                         m1 = txl.Select(
                             row0 + txl.int32(2 * i + 1) < rows, txl.float32(1.0), txl.float32(0.0)
                         )
@@ -1485,13 +1601,19 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                 row0 + txl.int32(2 * i) < rows, txl.float32(1.0), txl.float32(0.0)
                             )
                             m1 = txl.Select(
-                                row0 + txl.int32(2 * i + 1) < rows, txl.float32(1.0), txl.float32(0.0)
+                                row0 + txl.int32(2 * i + 1) < rows,
+                                txl.float32(1.0),
+                                txl.float32(0.0),
                             )
                             txl.ptx["ld.shared.v2.f32"](
                                 bpair[0], bpair[1], txl.address_of(s_beta[par, row0 + 2 * i])
                             )
-                            rcp(t0, egf[2 * i])
-                            rcp(t1, egf[2 * i + 1])
+                            txl.ptx.rcp.approx.ftz.f32(
+                                t0, txl.Select(strong, txl.float32(1.0), egf[2 * i])
+                            )
+                            txl.ptx.rcp.approx.ftz.f32(
+                                t1, txl.Select(strong, txl.float32(1.0), egf[2 * i + 1])
+                            )
                             txl.ptx["mul.rn.f32x2"](
                                 prep0,
                                 txl.cuda.make_float2(xf[2 * i], xf[2 * i + 1]),
@@ -1519,6 +1641,27 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                     st_row(T1, row0, qw, 0, 4)
                     st_row(T2, row0, kw, 0, 4)
                     st_row(T3, row0, t3w, 0, 4)
+                    with txl.If(strong), txl.Then():
+                        with txl.serial(16) as pi:
+                            values = txl.alloc_local([2], "float32")
+                            for e in range(2):
+                                ti0 = row0 + 2 * pi + e
+                                token = tok0 + txl.Cast("int64", txl.min(ti0, last))
+                                gate = _load_gate(g, token, hv, x, HV * D)
+                                kval = _load_bf16_f32(
+                                    k.ptr_to(
+                                        [token * txl.int64(HQ * D) + txl.Cast("int64", hq * D + x)]
+                                    )
+                                )
+                                decay = txl.local_scalar("float32")
+                                txl.ptx.ex2.approx.ftz.f32(decay, gn - gate)
+                                txl.assign(
+                                    values[e],
+                                    txl.Select(ti0 < rows, kval * decay, txl.float32(0.0)),
+                                )
+                            word = txl.local_scalar("uint32")
+                            pack_bf16x2(word, values[0], values[1])
+                            txl.ptx.st.shared.b32(TT[T2 + xs].ptr_to(xr, row0 + 2 * pi), word)
                     txl.ptx[FENCE_ASYNC]()
                     marrive("t_early")
 
@@ -1546,7 +1689,13 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                 txl.cuda.make_float2(lo(dw[p]), hi(dw[p])),
                                 dgk2,
                             )
-                    txl.assign(dgk, txl.cuda.float2_x(dgk2) + txl.cuda.float2_y(dgk2))
+                    with txl.If(strong), txl.Then():
+                        txl.ptx.ex2.approx.ftz.f32(egn, gn)
+                    txl.assign(
+                        dgk,
+                        (txl.cuda.float2_x(dgk2) + txl.cuda.float2_y(dgk2))
+                        * txl.Select(strong, egn, txl.float32(1.0)),
+                    )
 
                     def readout_to_tile(slot, stage0):
                         ld32(acc, slot + wg * 32)
@@ -1565,6 +1714,11 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                     twait("dv2_done")
                     phase("c5")
                     readout_to_tile(S3, DV2)
+                    with txl.If(strong), txl.Then():
+                        for i in range(16):
+                            txl.assign(kw[i], txl.uint32(0))
+                        st_row(T2, row0, kw, 0, 4)
+                    txl.ptx[FENCE_ASYNC]()
                     marrive("dv2T_ready")
                     phase("w-Vn")
                     twait("Vn_done")
@@ -1632,7 +1786,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                         tile = TT[stage]
                         for half in range(2):
                             txl.ptx["stmatrix.sync.aligned.m8n8.x4.shared.b16"](
-                                tile.m8n8x4(quad * txl.int32(16), row0 + txl.int32(16 * half), lane),
+                                tile.m8n8x4(
+                                    quad * txl.int32(16), row0 + txl.int32(16 * half), lane
+                                ),
                                 wds[4 * half],
                                 wds[4 * half + 1],
                                 wds[4 * half + 2],
@@ -1683,7 +1839,8 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                             for p in range(4):
                                 i = 8 * b + 2 * p
                                 txl.assign(
-                                    pa_acc, txl.cuda.make_float2(acc[ab + 2 * p], acc[ab + 2 * p + 1])
+                                    pa_acc,
+                                    txl.cuda.make_float2(acc[ab + 2 * p], acc[ab + 2 * p + 1]),
                                 )
                                 txl.assign(pa_v, txl.cuda.make_float2(lo(vq[p]), hi(vq[p])))
                                 txl.ptx["mul.rn.f32x2"](pa_db, pa_acc, pa_v)
@@ -1695,7 +1852,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                 txl.ptx["mul.rn.f32x2"](
                                     pa_dv, pa_acc, txl.cuda.make_float2(t4[0], t4[1])
                                 )
-                                pack_bf16x2(pa_word, txl.cuda.float2_x(pa_dv), txl.cuda.float2_y(pa_dv))
+                                pack_bf16x2(
+                                    pa_word, txl.cuda.float2_x(pa_dv), txl.cuda.float2_y(pa_dv)
+                                )
                                 with txl.If(row0 + txl.int32(i) < rows), txl.Then():
                                     txl.ptx["st.global.L1::no_allocate.b16"](
                                         dv.ptr_to([x_base + txl.int64(i * HVK)]),
@@ -1755,7 +1914,8 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                         txl.ptx["add.rn.f32x2"](sum_pair0, sum_pair0, sum_pair1)
                         txl.ptx["add.rn.f32x2"](dsum_v2, dsum_v2, sum_pair0)
                     txl.ptx[FENCE_ASYNC]()
-                    b_mid_free.arrive(0)
+                    with txl.If(txl.Not(strong)), txl.Then():
+                        b_mid_free.arrive(0)
                     phase("w-Y")
                     twait("Y_done")
                     phase("c10")
@@ -1769,6 +1929,122 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                     phase("w-epi")
                     twait("dq2_done")
                     phase("epi-q")
+
+                    def extra_ptr(base, i):
+                        return TT[base + 2 * wg + (i >> 4)].ptr_to(4 * (i & 15) + quad, 2 * lane)
+
+                    strong_mask = txl.local_scalar("uint32")
+                    txl.ptx.vote_sync.ballot.b32(
+                        strong_mask, txl.ptx.pred(strong), txl.uint32(0xFFFFFFFF)
+                    )
+
+                    def cached_ptr(base, ti):
+                        return TT[base + (ti >> 4)].ptr_to(4 * (ti & 15) + quad, 2 * lane)
+
+                    with txl.If(strong_mask != txl.uint32(0)), txl.Then():
+                        twait("chunk_done")
+                        with txl.If(strong), txl.Then():
+                            with txl.serial(32) as i:
+                                token = tok0 + txl.Cast("int64", txl.min(row0 + i, last))
+                                gate = _load_gate(g, token, hv, x, HV * D)
+                                previous_gate = _load_gate(
+                                    g, txl.max(tok0, token - txl.int64(1)), hv, x, HV * D
+                                )
+                                txl.ptx.ex2.approx.ftz.f32(gate, gate - previous_gate)
+                                q_value = _load_bf16_f32(
+                                    q.ptr_to(
+                                        [token * txl.int64(HQ * D) + txl.Cast("int64", hq * D + x)]
+                                    )
+                                )
+                                k_value = _load_bf16_f32(
+                                    k.ptr_to(
+                                        [token * txl.int64(HQ * D) + txl.Cast("int64", hq * D + x)]
+                                    )
+                                )
+                                word = txl.local_scalar("uint32")
+                                pack_bf16x2(word, q_value, k_value)
+                                txl.ptx.st.shared.f32(cached_ptr(12, row0 + i), gate)
+                                txl.ptx.st.shared.b32(cached_ptr(16, row0 + i), word)
+                    txl.ptx["bar.warp.sync"](txl.uint32(0xFFFFFFFF))
+                    with txl.If(lane == txl.int32(0)), txl.Then():
+                        b_stable_full.arrive(0, count=32)
+                    with txl.If(strong), txl.Then():
+                        b_stable_full.wait(0, par)
+                        with txl.serial(8) as block:
+                            i0 = 4 * block
+                            ti0 = row0 + i0
+                            qe = txl.alloc_local([4], "float32")
+                            kp = txl.alloc_local([4], "float32")
+                            kf = txl.alloc_local([4], "float32")
+                            decay = txl.alloc_local([4], "float32")
+                            for e in range(4):
+                                txl.assign(qe[e], txl.float32(0.0))
+                                txl.assign(kp[e], txl.float32(0.0))
+                                txl.assign(kf[e], txl.float32(0.0))
+                                txl.assign(decay[e], txl.float32(1.0))
+                                diagonal = txl.local_scalar("uint16")
+                                txl.ptx.ld.shared.b16(diagonal, TT[T5].ptr_to(ti0 + e, ti0 + e))
+                                txl.ptx.st.shared.b16(TT[T6 + xs].ptr_to(xr, ti0 + e), diagonal)
+                            j = txl.local_scalar("int32", init=txl.min(ti0 + txl.int32(3), last))
+                            # With alpha in [0, 1], the earliest row is last to
+                            # underflow in this direction. Only skip exact zeros.
+                            with txl.While((j >= txl.int32(0)) & (decay[0] != txl.float32(0.0))):
+                                alpha = txl.local_scalar("float32")
+                                word = txl.local_scalar("uint32")
+                                txl.ptx.ld.shared.f32(alpha, cached_ptr(12, j))
+                                txl.ptx.ld.shared.b32(word, cached_ptr(16, j))
+                                for e in range(4):
+                                    aq = _load_bf16_f32(TT[T5].ptr_to(ti0 + e, j), shared=True)
+                                    ak = _load_bf16_f32(TT[T5 + 1].ptr_to(ti0 + e, j), shared=True)
+                                    txl.ptx.fma.rn.f32(
+                                        qe[e],
+                                        hi(word) * decay[e],
+                                        txl.Select(j == ti0 + e, txl.float32(0.0), aq),
+                                        qe[e],
+                                    )
+                                    txl.ptx.fma.rn.f32(kp[e], hi(word) * decay[e], ak, kp[e])
+                                    txl.assign(
+                                        decay[e],
+                                        decay[e]
+                                        * txl.Select(j <= ti0 + e, alpha, txl.float32(1.0)),
+                                    )
+                                txl.assign(j, j - txl.int32(1))
+                            for e in range(4):
+                                txl.assign(decay[e], txl.float32(1.0))
+                            txl.assign(j, ti0)
+                            # In the forward direction the latest row is last.
+                            with txl.While((j < rows) & (decay[3] != txl.float32(0.0))):
+                                alpha = txl.local_scalar("float32")
+                                word = txl.local_scalar("uint32")
+                                txl.ptx.ld.shared.f32(alpha, cached_ptr(12, j))
+                                txl.ptx.ld.shared.b32(word, cached_ptr(16, j))
+                                for e in range(4):
+                                    txl.assign(
+                                        decay[e],
+                                        decay[e] * txl.Select(j > ti0 + e, alpha, txl.float32(1.0)),
+                                    )
+                                    aq = _load_bf16_f32(TT[T5].ptr_to(j, ti0 + e), shared=True)
+                                    ak = _load_bf16_f32(TT[T5 + 1].ptr_to(j, ti0 + e), shared=True)
+                                    term = txl.local_scalar("float32")
+                                    txl.ptx.fma.rn.f32(
+                                        term,
+                                        lo(word) * scale,
+                                        txl.Select(j == ti0 + e, txl.float32(0.0), aq),
+                                        hi(word) * s_beta_row(j) * ak,
+                                    )
+                                    txl.ptx.fma.rn.f32(kf[e], term, decay[e], kf[e])
+                                txl.assign(j, j + txl.int32(1))
+                            for e in range(4):
+                                txl.ptx.st.shared.f32(extra_ptr(0, i0 + e), qe[e] * scale)
+                                txl.ptx.st.shared.f32(extra_ptr(4, i0 + e), kp[e])
+                                txl.ptx.st.shared.f32(extra_ptr(20, i0 + e), kf[e])
+                        txl.ptx[FENCE_ASYNC]()
+                        b_mid_free.arrive(0)
+
+                    txl.ptx[FENCE_ASYNC]()
+                    txl.ptx["bar.warp.sync"](txl.uint32(0xFFFFFFFF))
+                    with txl.If(lane == txl.int32(0)), txl.Then():
+                        b_intra_free.arrive(0, count=32)
                     dgk_k2 = txl.local_scalar(
                         "uint64", init=txl.cuda.make_float2(txl.float32(0.0), txl.float32(0.0))
                     )
@@ -1802,7 +2078,14 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                     st8(tm_col + wg * 32 + 8 * b, vals)
                                     txl.ptx[WAIT_ST]()
 
-                    def epilogue():
+                    def diagonal_term(i, inputs):
+                        diagonal = txl.local_scalar("uint32")
+                        txl.ptx.ld.shared.b32(diagonal, TT[T6 + xs].ptr_to(xr, row0 + i))
+                        return txl.cuda.make_float2(
+                            lo(inputs) * scale * lo(diagonal), hi(inputs) * scale * hi(diagonal)
+                        )
+
+                    def epilogue(stable):
                         pair0 = txl.local_scalar("uint64")
                         pair1 = txl.local_scalar("uint64")
                         pair2 = txl.local_scalar("uint64")
@@ -1817,8 +2100,12 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                 q_loads(b + 1, 8 * ((b + 1) % 2))
                             for p in range(4):
                                 i = 8 * b + 2 * p
-                                rcp(enA[i >> 1], lo(egcw[i >> 1]))
-                                rcp(enB[i >> 1], hi(egcw[i >> 1]))
+                                if stable:
+                                    rcp(enA[i >> 1], lo(egcw[i >> 1]))
+                                    rcp(enB[i >> 1], hi(egcw[i >> 1]))
+                                else:
+                                    txl.ptx.rcp.approx.ftz.f32(enA[i >> 1], lo(egcw[i >> 1]))
+                                    txl.ptx.rcp.approx.ftz.f32(enB[i >> 1], hi(egcw[i >> 1]))
                                 txl.ptx["mul.rn.f32x2"](
                                     pair1,
                                     txl.cuda.make_float2(lo(egcw[i >> 1]), hi(egcw[i >> 1])),
@@ -1829,13 +2116,27 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                     txl.cuda.make_float2(acc[ab + 2 * p], acc[ab + 2 * p + 1]),
                                     pair1,
                                 )
-                                txl.assign(ok8[2 * p], txl.cuda.float2_x(pair0))
-                                txl.assign(ok8[2 * p + 1], txl.cuda.float2_y(pair0))
+                                if stable:
+                                    with txl.If(strong), txl.Then():
+                                        txl.ptx.ld.shared.f32(t0, extra_ptr(0, i))
+                                        txl.ptx.ld.shared.f32(t1, extra_ptr(0, i + 1))
+                                        txl.ptx["add.rn.f32x2"](
+                                            pair0, pair0, txl.cuda.make_float2(t0, t1)
+                                        )
                                 txl.ptx["mul.rn.f32x2"](
-                                    pair1, txl.cuda.make_float2(lo(qc[i >> 1]), hi(qc[i >> 1])), pair0
+                                    pair1,
+                                    txl.cuda.make_float2(lo(qc[i >> 1]), hi(qc[i >> 1])),
+                                    pair0,
                                 )
                                 txl.assign(dgv[i], txl.cuda.float2_x(pair1))
                                 txl.assign(dgv[i + 1], txl.cuda.float2_y(pair1))
+                                if stable:
+                                    with txl.If(strong), txl.Then():
+                                        txl.ptx["add.rn.f32x2"](
+                                            pair0, pair0, diagonal_term(i, kc[i >> 1])
+                                        )
+                                txl.assign(ok8[2 * p], txl.cuda.float2_x(pair0))
+                                txl.assign(ok8[2 * p + 1], txl.cuda.float2_y(pair0))
                             emit_group_output(b, ok8, TM_ADQ, dq, xq_base)
                             if b < 3:
                                 txl.ptx[WAIT_LD]()
@@ -1852,15 +2153,29 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                             for p in range(2):
                                 i = 4 * b + 2 * p
                                 txl.assign(pair0, txl.cuda.make_float2(enA[i >> 1], enB[i >> 1]))
-                                txl.assign(pair1, txl.cuda.make_float2(lo(kc[i >> 1]), hi(kc[i >> 1])))
-                                txl.ptx["add.rn.f32x2"](
-                                    pair2,
+                                txl.assign(
+                                    pair1, txl.cuda.make_float2(lo(kc[i >> 1]), hi(kc[i >> 1]))
+                                )
+                                if stable:
+                                    state_decay(t0, i, lo(egcw[i >> 1]))
+                                    state_decay(t1, i + 1, hi(egcw[i >> 1]))
+                                else:
+                                    txl.assign(t0, enA[i >> 1])
+                                    txl.assign(t1, enB[i >> 1])
+                                state_pair = txl.local_scalar("uint64")
+                                txl.ptx["mul.rn.f32x2"](
+                                    state_pair,
                                     txl.cuda.make_float2(acc[ab + 2 * p], acc[ab + 2 * p + 1]),
+                                    txl.cuda.make_float2(t0, t1),
+                                )
+                                txl.ptx["fma.rn.f32x2"](
+                                    pair2,
                                     txl.cuda.make_float2(
                                         acc[ab + 8 + 2 * p], acc[ab + 8 + 2 * p + 1]
                                     ),
+                                    pair0,
+                                    state_pair,
                                 )
-                                txl.ptx["mul.rn.f32x2"](pair2, pair2, pair0)
                                 txl.ptx["mul.rn.f32x2"](
                                     pair3,
                                     txl.cuda.make_float2(
@@ -1868,6 +2183,18 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                     ),
                                     txl.cuda.make_float2(lo(egcw[i >> 1]), hi(egcw[i >> 1])),
                                 )
+                                if stable:
+                                    with txl.If(strong), txl.Then():
+                                        txl.ptx.ld.shared.f32(t0, extra_ptr(20, i))
+                                        txl.ptx.ld.shared.f32(t1, extra_ptr(20, i + 1))
+                                        txl.ptx["add.rn.f32x2"](
+                                            pair2, pair2, txl.cuda.make_float2(t0, t1)
+                                        )
+                                        txl.ptx.ld.shared.f32(t0, extra_ptr(4, i))
+                                        txl.ptx.ld.shared.f32(t1, extra_ptr(4, i + 1))
+                                        txl.ptx["add.rn.f32x2"](
+                                            pair3, pair3, txl.cuda.make_float2(t0, t1)
+                                        )
                                 txl.ptx["mul.rn.f32x2"](pair4, pair1, pair3)
                                 txl.ptx.st.shared.f32(
                                     TT[dbx + (i >> 4)].ptr_to(4 * (i & 15) + quad, 2 * lane),
@@ -1879,12 +2206,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                     ),
                                     txl.cuda.float2_y(pair4),
                                 )
-                                txl.ptx["mul.rn.f32x2"](
-                                    pair4,
-                                    txl.cuda.make_float2(acc[ab + 2 * p], acc[ab + 2 * p + 1]),
-                                    pair0,
-                                )
-                                txl.ptx["mul.rn.f32x2"](pair5, pair1, pair4)
+                                txl.ptx["mul.rn.f32x2"](pair5, pair1, state_pair)
                                 txl.ptx["add.rn.f32x2"](dgk_k2, dgk_k2, pair5)
                                 txl.ptx["mul.rn.f32x2"](
                                     pair3,
@@ -1894,6 +2216,11 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                     ),
                                 )
                                 txl.ptx["add.rn.f32x2"](pair5, pair2, pair3)
+                                if stable:
+                                    with txl.If(strong), txl.Then():
+                                        txl.ptx["add.rn.f32x2"](
+                                            pair5, pair5, diagonal_term(i, qc[i >> 1])
+                                        )
                                 txl.assign(ok8[4 * (b % 2) + 2 * p], txl.cuda.float2_x(pair5))
                                 txl.assign(ok8[4 * (b % 2) + 2 * p + 1], txl.cuda.float2_y(pair5))
                                 txl.ptx["sub.rn.f32x2"](pair3, pair3, pair2)
@@ -1906,48 +2233,52 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                 emit_group_output(b // 2, ok8, TM_ADK, dk, xq_base)
                             if b < 7:
                                 txl.ptx[WAIT_LD]()
-                        bar_wg()
-                        txl.assign(dsum2, dsum_v2)
-                        for u in range(8):
-                            txl.ptx["ld.shared.v4.f32"](
-                                t4[0],
-                                t4[1],
-                                t4[2],
-                                t4[3],
-                                TT[dbx + (quad >> 1)].ptr_to(srow, 8 * u),
-                            )
-                            txl.assign(sum_pair0, txl.cuda.make_float2(t4[0], t4[1]))
-                            txl.assign(sum_pair1, txl.cuda.make_float2(t4[2], t4[3]))
-                            txl.ptx["add.rn.f32x2"](sum_pair0, sum_pair0, sum_pair1)
-                            txl.ptx["add.rn.f32x2"](dsum2, dsum2, sum_pair0)
-                        dsum = txl.local_scalar(
-                            "float32", init=txl.cuda.float2_x(dsum2) + txl.cuda.float2_y(dsum2)
-                        )
-                        txl.ptx[FENCE_ASYNC]()
-                        b_h_free.arrive(0)
-                        for s in (1, 2):
-                            r = txl.local_scalar("uint32")
-                            txl.ptx.shfl_sync.bfly.b32(
-                                r,
-                                txl.reinterpret("uint32", dsum),
-                                txl.uint32(s),
-                                txl.uint32(0x1F),
-                                txl.uint32(0xFFFFFFFF),
-                            )
-                            txl.assign(dsum, dsum + txl.reinterpret("float32", r))
-                        with txl.If((tq == txl.int32(0)) & (row0 + ti < rows)), txl.Then():
-                            txl.ptx["st.global.L1::no_allocate.f32"](
-                                db.ptr_to(
-                                    [(tok0 + txl.Cast("int64", row0 + ti)) * txl.int64(HV) + hv64]
-                                ),
-                                dsum,
-                            )
 
-                    epilogue()
+                    with txl.If(strong_mask != txl.uint32(0)):
+                        with txl.Then():
+                            epilogue(True)
+                        with txl.Else():
+                            epilogue(False)
+                    dbx = 2 * wg
+                    bar_wg()
+                    txl.assign(dsum2, dsum_v2)
+                    for u in range(8):
+                        txl.ptx["ld.shared.v4.f32"](
+                            t4[0], t4[1], t4[2], t4[3], TT[dbx + (quad >> 1)].ptr_to(srow, 8 * u)
+                        )
+                        txl.assign(sum_pair0, txl.cuda.make_float2(t4[0], t4[1]))
+                        txl.assign(sum_pair1, txl.cuda.make_float2(t4[2], t4[3]))
+                        txl.ptx["add.rn.f32x2"](sum_pair0, sum_pair0, sum_pair1)
+                        txl.ptx["add.rn.f32x2"](dsum2, dsum2, sum_pair0)
+                    dsum = txl.local_scalar(
+                        "float32", init=txl.cuda.float2_x(dsum2) + txl.cuda.float2_y(dsum2)
+                    )
+                    txl.ptx[FENCE_ASYNC]()
+                    b_h_free.arrive(0)
+                    for s in (1, 2):
+                        r = txl.local_scalar("uint32")
+                        txl.ptx.shfl_sync.bfly.b32(
+                            r,
+                            txl.reinterpret("uint32", dsum),
+                            txl.uint32(s),
+                            txl.uint32(0x1F),
+                            txl.uint32(0xFFFFFFFF),
+                        )
+                        txl.assign(dsum, dsum + txl.reinterpret("float32", r))
+                    with txl.If((tq == txl.int32(0)) & (row0 + ti < rows)), txl.Then():
+                        txl.ptx["st.global.L1::no_allocate.f32"](
+                            db.ptr_to(
+                                [(tok0 + txl.Cast("int64", row0 + ti)) * txl.int64(HV) + hv64]
+                            ),
+                            dsum,
+                        )
+
                     txl.assign(dgk_k, txl.cuda.float2_x(dgk_k2) + txl.cuda.float2_y(dgk_k2))
                     phase("cumsum")
                     for i in range(32):
-                        txl.assign(dgv[i], txl.Select(row0 + txl.int32(i) < rows, dgv[i], txl.float32(0.0)))
+                        txl.assign(
+                            dgv[i], txl.Select(row0 + txl.int32(i) < rows, dgv[i], txl.float32(0.0))
+                        )
 
                     tot = txl.alloc_local([16], "float32")
                     for i in range(16):
@@ -2096,11 +2427,13 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                             with txl.serial(nch) as n:
                                 set_u = txl.local_scalar(
                                     "uint64",
-                                    init=txl.Cast("uint64", n & txl.int32(1)) * txl.uint64(SET_UNITS),
+                                    init=txl.Cast("uint64", n & txl.int32(1))
+                                    * txl.uint64(SET_UNITS),
                                 )
                                 akk_u = txl.local_scalar(
                                     "uint64",
-                                    init=txl.Cast("uint64", st_akk.stage) * txl.uint64(UNITS_PER_STAGE),
+                                    init=txl.Cast("uint64", st_akk.stage)
+                                    * txl.uint64(UNITS_PER_STAGE),
                                 )
                                 dW = (n & txl.int32(1)) * 64
                                 mphase("fmw-tiles")
@@ -2422,9 +2755,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                     mbd = txl.cuda.cvta_generic_to_shared(b_bdo_full.ptr_to([par]))
                                     for d0 in (0, 64):
                                         txl.ptx[TMA_LD](
-                                            TT[B_DO + par * txl.int32(2) + txl.int32(d0 // 64)].ptr_to(
-                                                0, 0
-                                            ),
+                                            TT[
+                                                B_DO + par * txl.int32(2) + txl.int32(d0 // 64)
+                                            ].ptr_to(0, 0),
                                             txl.address_of(do_map),
                                             txl.int32(d0),
                                             tok0,
@@ -2816,19 +3149,19 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
 
                     lphase("lw-flags")
                     with txl.If(elected()), txl.Then():
-                        tgt_f = txl.local_scalar("int64", init=ep64 + txl.Cast("int64", n + txl.int32(1)))
+                        tgt_f = txl.local_scalar(
+                            "int64", init=ep64 + txl.Cast("int64", n + txl.int32(1))
+                        )
                         tgt_b = txl.local_scalar("int64", init=ep64 + txl.Cast("int64", nch_i - n))
                         for gi_ in range(G):
                             fidx = seq * txl.int32(HV) + hq * txl.int32(G) + txl.int32(gi_)
                             flf = txl.local_scalar("int64", init=txl.int64(0))
                             txl.cuda.wait_until(
-                                flf, flags.ptr_to([fidx]), flf >= tgt_f,
-                                scope="gpu",
+                                flf, flags.ptr_to([fidx]), flf >= tgt_f, scope="gpu"
                             )
                             flb = txl.local_scalar("int64", init=txl.int64(0))
                             txl.cuda.wait_until(
-                                flb, flags.ptr_to([num_chains + fidx]), flb >= tgt_b,
-                                scope="gpu",
+                                flb, flags.ptr_to([num_chains + fidx]), flb >= tgt_b, scope="gpu"
                             )
 
                         with txl.If(rows < txl.int32(CHUNK)), txl.Then():
@@ -2841,7 +3174,11 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                                     txl.cuda.wait_until(
                                         fl2,
                                         flags.ptr_to(
-                                            [s2 * txl.int32(HV) + hq * txl.int32(G) + txl.int32(gi_)]
+                                            [
+                                                s2 * txl.int32(HV)
+                                                + hq * txl.int32(G)
+                                                + txl.int32(gi_)
+                                            ]
                                         ),
                                         fl2 >= tgt_1,
                                         scope="gpu",
@@ -2894,6 +3231,8 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
                         lphase("lw-chunk")
                         with txl.If(cyc > txl.int32(0)), txl.Then():
                             TCG["chunk_done"].wait(0, npar)
+                            # dAqk/dAkk stay live through the stable intra pass.
+                            b_intra_free.wait(0, npar)
                         lphase("l-issue2")
                         with txl.If(elected()), txl.Then():
                             b_eg_full.arrive(0, tx_count=EG_BYTES)
@@ -3027,7 +3366,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None):
 
         with txl.If(txl.thread_id() == txl.int32(0)), txl.Then():
             done = txl.local_scalar("int32")
-            txl.ptx["atom.acq_rel.gpu.global.add.s32"](done, stream_counter.ptr_to([1]), txl.int32(1))
+            txl.ptx["atom.acq_rel.gpu.global.add.s32"](
+                done, stream_counter.ptr_to([1]), txl.int32(1)
+            )
             with txl.If(done == num_ctas - txl.int32(1)), txl.Then():
                 txl.ptx["st.release.gpu.global.s32"](stream_counter.ptr_to([0]), txl.int32(0))
                 txl.ptx["st.release.gpu.global.s32"](stream_counter.ptr_to([1]), txl.int32(0))
@@ -3125,8 +3466,8 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
             return c
 
         sp = txl.specialize()
-        cg = sp.role("cg", warps=list(range(8)), regs=208)
-        auxg = sp.warpgroup("aux", warps=[8, 9, 10, 11], regs=88)
+        cg = sp.role("cg", warps=list(range(8)), regs=224)
+        auxg = sp.warpgroup("aux", warps=[8, 9, 10, 11], regs=56)
         loader = sp.role("loader", warps=[8], group=auxg)
         mma = sp.role("mma", warps=[9], group=auxg)
         idle = sp.role("idle", warps=[10, 11], group=auxg)
@@ -3151,6 +3492,10 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
         b_do_empty.init(1)
         b_h_free = txl.MBarrier(smem, 1)
         b_h_free.init(256)
+        b_intra_free = txl.MBarrier(smem, 1)
+        b_intra_free.init(256)
+        b_stable_full = txl.MBarrier(smem, 1)
+        b_stable_full.init(256)
         b_aqk_empty = txl.TCGen05Bar(smem, 1)
         b_aqk_empty.init(1)
         b_akk_empty = txl.TCGen05Bar(smem, 2)
@@ -3286,7 +3631,9 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                 cs = txl.alloc_local([2], "int64")
                 txl.ptx.ld.global_.s64(cs[0], cu_seqlens.ptr_to([i]))
                 txl.ptx.ld.global_.s64(cs[1], cu_seqlens.ptr_to([i + 1]))
-                txl.assign(cb, cb + ((txl.Cast("int32", cs[1] - cs[0]) + txl.int32(CHUNK - 1)) >> 6))
+                txl.assign(
+                    cb, cb + ((txl.Cast("int32", cs[1] - cs[0]) + txl.int32(CHUNK - 1)) >> 6)
+                )
             return cb
 
         P1_KV, P1_AKK, P1_HS, P1_G, P1_KG, P1_KBG, P1_VB = 0, 8, 9, 13, 21, 23, 25
@@ -3374,7 +3721,9 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                 h_c0()
                 with txl.serial(nch) as n:
                     rows = txl.int32(CHUNK)
-                    tok0 = txl.local_scalar("int64", init=bos + txl.Cast("int64", n * txl.int32(CHUNK)))
+                    tok0 = txl.local_scalar(
+                        "int64", init=bos + txl.Cast("int64", n * txl.int32(CHUNK))
+                    )
                     txl.ptx.ex2.approx.ftz.f32(egn, gn)
                     phase("hw-kv")
                     b_kvT_done.wait(0, p1c & txl.int32(1))
@@ -3443,7 +3792,8 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                     with txl.If(n == txl.int32(0)):
                         with txl.Then():
                             h0base = (
-                                (txl.Cast("int64", seq) * txl.int64(H) + head64) * txl.int64(D) + x64
+                                (txl.Cast("int64", seq) * txl.int64(H) + head64) * txl.int64(D)
+                                + x64
                             ) * txl.int64(D) + txl.Cast("int64", hc0)
                             for m in range(8):
                                 txl.ptx[
@@ -3565,7 +3915,8 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                 txl.ptx[TC_FENCE_AFTER]()
                 mphase("hm-kvT")
                 kv_u = txl.local_scalar(
-                    "uint64", init=txl.Cast("uint64", st_kv1.stage) * txl.uint64(4 * UNITS_PER_STAGE)
+                    "uint64",
+                    init=txl.Cast("uint64", st_kv1.stage) * txl.uint64(4 * UNITS_PER_STAGE),
                 )
                 with txl.If(elected()), txl.Then():
                     for j in range(4):
@@ -3618,7 +3969,8 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                     p_akk1.full.wait(st_akk.stage, st_akk.phase)
                     txl.ptx[TC_FENCE_AFTER]()
                     akk_u = txl.local_scalar(
-                        "uint64", init=txl.Cast("uint64", st_akk.stage) * txl.uint64(UNITS_PER_STAGE)
+                        "uint64",
+                        init=txl.Cast("uint64", st_akk.stage) * txl.uint64(UNITS_PER_STAGE),
                     )
                     mphase("hm-WU")
                     with txl.If(elected()), txl.Then():
@@ -3637,7 +3989,8 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                     p_hs.full.wait(st_hs.stage, st_hs.phase)
                     txl.ptx[TC_FENCE_AFTER]()
                     hs_u = txl.local_scalar(
-                        "uint64", init=txl.Cast("uint64", st_hs.stage) * txl.uint64(4 * UNITS_PER_STAGE)
+                        "uint64",
+                        init=txl.Cast("uint64", st_hs.stage) * txl.uint64(4 * UNITS_PER_STAGE),
                     )
                     mphase("hm-Vn")
                     with txl.If(elected()), txl.Then():
@@ -3710,11 +4063,17 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                             for tmap in (k_map, v_map):
                                 for d0 in (0, 64):
                                     txl.ptx[TMA_PREFETCH](
-                                        txl.address_of(tmap), txl.int32(d0), tok0 + txl.int32(CHUNK), head
+                                        txl.address_of(tmap),
+                                        txl.int32(d0),
+                                        tok0 + txl.int32(CHUNK),
+                                        head,
                                     )
                             for d0 in (0, 32, 64, 96):
                                 txl.ptx[TMA_PREFETCH](
-                                    txl.address_of(g_map), txl.int32(d0), tok0 + txl.int32(CHUNK), head
+                                    txl.address_of(g_map),
+                                    txl.int32(d0),
+                                    tok0 + txl.int32(CHUNK),
+                                    head,
                                 )
                             txl.ptx[TMA_PREFETCH](
                                 txl.address_of(akk_map), txl.int32(0), tok0 + txl.int32(CHUNK), head
@@ -3760,15 +4119,10 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                         p_hs.empty.arrive(st_hs.stage)
                     st_hs.advance()
 
-
-
                 with txl.If(elected()), txl.Then():
                     txl.ptx[BULK_WAIT](0)
                     txl.ptx["fence.proxy.async.global"]()
                     txl.ptx.st.release.gpu.global_.s32(flags.ptr_to([chain]), epoch)
-
-
-
 
         with cg:
             p1_compute()
@@ -3926,7 +4280,8 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                 txl.ptx.ex2.approx.ftz.f32(dst, val)
 
             def rcp(dst, val):
-                txl.ptx.rcp.approx.ftz.f32(dst, val)
+                txl.ptx.rcp.approx.ftz.f32(dst, txl.Select(strong, txl.float32(1.0), val))
+                txl.assign(dst, txl.Select(strong, txl.float32(0.0), dst))
 
             def load_u16_pair(words, i, ptr):
                 if i % 2 == 0:
@@ -3944,7 +4299,9 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
 
             def shfl_xor1_u32(val):
                 r = txl.local_scalar("uint32")
-                txl.ptx.shfl_sync.bfly.b32(r, val, txl.uint32(1), txl.uint32(0x1F), txl.uint32(0xFFFFFFFF))
+                txl.ptx.shfl_sync.bfly.b32(
+                    r, val, txl.uint32(1), txl.uint32(0x1F), txl.uint32(0xFFFFFFFF)
+                )
                 return r
 
             def gcol_ptr(tensor, i):
@@ -3973,10 +4330,28 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
 
                     rows = txl.int32(CHUNK)
                     last = txl.int32(CHUNK - 1)
-                    tok0 = txl.local_scalar("int64", init=bos + txl.Cast("int64", n * txl.int32(CHUNK)))
+                    tok0 = txl.local_scalar(
+                        "int64", init=bos + txl.Cast("int64", n * txl.int32(CHUNK))
+                    )
                     x_base = txl.local_scalar(
                         "int64", init=(tok0 + txl.Cast("int64", row0)) * HK64 + gcol
                     )
+
+                    gn = txl.local_scalar("float32", init=txl.float32(0.0))
+                    strong = txl.local_scalar("bool")
+
+                    def state_decay(dst, i, cached_gate):
+                        with txl.If(strong):
+                            with txl.Then():
+                                gi_value = txl.local_scalar("float32")
+                                ti = txl.min(row0 + txl.int32(i), last)
+                                txl.ptx.ld.global_.nc.f32(
+                                    gi_value,
+                                    g.ptr_to([(tok0 + txl.Cast("int64", ti)) * HK64 + gcol]),
+                                )
+                                txl.ptx.ex2.approx.ftz.f32(dst, gn - gi_value)
+                            with txl.Else():
+                                txl.ptx.rcp.approx.ftz.f32(dst, cached_gate)
 
                     phase("w-in")
                     b_in_full.wait(0, par)
@@ -3987,7 +4362,9 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                     with txl.If(lane < txl.int32(8)), txl.Then():
                         btok = wr * txl.int32(8) + lane
                         txl.ptx.ld.shared.u16(u16, s_beta_in.ptr_to([btok, head & txl.int32(7)]))
-                        txl.ptx.st.shared.f32(txl.address_of(s_beta[btok]), lo(txl.Cast("uint32", u16)))
+                        txl.ptx.st.shared.f32(
+                            txl.address_of(s_beta[btok]), lo(txl.Cast("uint32", u16))
+                        )
 
                     egf = txl.alloc_local([32], "float32")
                     xf = txl.alloc_local([32], "float32")
@@ -4026,6 +4403,12 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                     ld32(xf, S3 + wg * 32)
                     txl.ptx[WAIT_LD]()
                     txl.assign(egn, t4[3])
+                    txl.assign(strong, egn < txl.float32(0.0625))
+                    with txl.If(strong), txl.Then():
+                        txl.ptx.ld.global_.nc.f32(
+                            gn, g.ptr_to([(tok0 + txl.Cast("int64", last)) * HK64 + gcol])
+                        )
+                        txl.ptx.ex2.approx.ftz.f32(egn, gn)
                     for i in range(16):
                         txl.ptx["mul.rn.f32x2"](
                             prep0,
@@ -4048,8 +4431,12 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                             txl.ptx["ld.shared.v2.f32"](
                                 bpair[0], bpair[1], txl.address_of(s_beta[row0 + 2 * i])
                             )
-                            rcp(t0, egf[2 * i])
-                            rcp(t1, egf[2 * i + 1])
+                            txl.ptx.rcp.approx.ftz.f32(
+                                t0, txl.Select(strong, txl.float32(1.0), egf[2 * i])
+                            )
+                            txl.ptx.rcp.approx.ftz.f32(
+                                t1, txl.Select(strong, txl.float32(1.0), egf[2 * i + 1])
+                            )
                             txl.ptx["mul.rn.f32x2"](
                                 prep0,
                                 txl.cuda.make_float2(xf[2 * i], xf[2 * i + 1]),
@@ -4075,6 +4462,27 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                     st_row(T1, row0, qw, 0, 4)
                     st_row(T2, row0, kw, 0, 4)
                     st_row(T3, row0, t3w, 0, 4)
+                    with txl.If(strong), txl.Then():
+                        with txl.serial(16) as pi:
+                            values = txl.alloc_local([2], "float32")
+                            for e in range(2):
+                                ti0 = row0 + 2 * pi + e
+                                token = tok0 + txl.Cast("int64", txl.min(ti0, last))
+                                gate = _load_gate(g, token, head, x, H * D)
+                                kval = _load_bf16_f32(
+                                    k.ptr_to(
+                                        [token * txl.int64(H * D) + txl.Cast("int64", head * D + x)]
+                                    )
+                                )
+                                decay = txl.local_scalar("float32")
+                                txl.ptx.ex2.approx.ftz.f32(decay, gn - gate)
+                                txl.assign(
+                                    values[e],
+                                    txl.Select(ti0 < rows, kval * decay, txl.float32(0.0)),
+                                )
+                            word = txl.local_scalar("uint32")
+                            pack_bf16x2(word, values[0], values[1])
+                            txl.ptx.st.shared.b32(TT[T2 + xs].ptr_to(xr, row0 + 2 * pi), word)
                     txl.ptx[FENCE_ASYNC]()
                     marrive("t_early")
                     phase("c1c")
@@ -4107,15 +4515,23 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                         hc = wg * 64 + 32 * half
                         a0 = 32 * half
 
+                        raw_dh = txl.alloc_local([16], "uint32")
                         for p in range(16):
+                            raw0 = txl.local_scalar("float32", init=acc[a0 + 2 * p])
+                            raw1 = txl.local_scalar("float32", init=acc[a0 + 2 * p + 1])
                             dpair = txl.local_scalar("uint64")
                             txl.ptx["mul.rn.f32x2"](
                                 dpair,
-                                txl.cuda.make_float2(acc[a0 + 2 * p], acc[a0 + 2 * p + 1]),
+                                txl.cuda.make_float2(raw0, raw1),
                                 txl.cuda.make_float2(egn, egn),
                             )
                             txl.assign(acc[a0 + 2 * p], txl.cuda.float2_x(dpair))
                             txl.assign(acc[a0 + 2 * p + 1], txl.cuda.float2_y(dpair))
+                            pack_bf16x2(
+                                raw_dh[p],
+                                txl.Select(strong, raw0, acc[a0 + 2 * p]),
+                                txl.Select(strong, raw1, acc[a0 + 2 * p + 1]),
+                            )
                         for u in range(4):
                             txl.ptx["ld.shared.v4.b32"](
                                 wds[0],
@@ -4133,15 +4549,13 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                                     ),
                                     dgk2,
                                 )
-                        for p in range(16):
-                            pack_bf16x2(wds[p], acc[a0 + 2 * p], acc[a0 + 2 * p + 1])
                         for u in range(4):
                             txl.ptx["st.shared.v4.b32"](
                                 TT[DHB + hst].ptr_to(xr, 32 * half + 8 * u),
-                                wds[4 * u],
-                                wds[4 * u + 1],
-                                wds[4 * u + 2],
-                                wds[4 * u + 3],
+                                raw_dh[4 * u],
+                                raw_dh[4 * u + 1],
+                                raw_dh[4 * u + 2],
+                                raw_dh[4 * u + 3],
                             )
                         txl.ptx[TC_ST32](tmem_at(TM_DH + hc), *(acc[a0 + i] for i in range(32)))
                     txl.assign(dgk, txl.cuda.float2_x(dgk2) + txl.cuda.float2_y(dgk2))
@@ -4166,6 +4580,11 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                     twait("dv2_done")
                     phase("c5")
                     readout_to_tile(S3, DV2)
+                    with txl.If(strong), txl.Then():
+                        for i in range(16):
+                            txl.assign(kw[i], txl.uint32(0))
+                        st_row(T2, row0, kw, 0, 4)
+                    txl.ptx[FENCE_ASYNC]()
                     marrive("dv2T_ready")
                     phase("w-Vn")
                     twait("Vn_done")
@@ -4230,7 +4649,9 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                         tile = TT[stage]
                         for half in range(2):
                             txl.ptx["stmatrix.sync.aligned.m8n8.x4.shared.b16"](
-                                tile.m8n8x4(quad * txl.int32(16), row0 + txl.int32(16 * half), lane),
+                                tile.m8n8x4(
+                                    quad * txl.int32(16), row0 + txl.int32(16 * half), lane
+                                ),
                                 wds[4 * half],
                                 wds[4 * half + 1],
                                 wds[4 * half + 2],
@@ -4278,7 +4699,8 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                             for p in range(4):
                                 i = 8 * b + 2 * p
                                 txl.assign(
-                                    pa_acc, txl.cuda.make_float2(acc[ab + 2 * p], acc[ab + 2 * p + 1])
+                                    pa_acc,
+                                    txl.cuda.make_float2(acc[ab + 2 * p], acc[ab + 2 * p + 1]),
                                 )
                                 txl.assign(pa_v, txl.cuda.make_float2(lo(vq[p]), hi(vq[p])))
                                 txl.ptx["mul.rn.f32x2"](pa_db, pa_acc, pa_v)
@@ -4290,9 +4712,12 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                                 txl.ptx["mul.rn.f32x2"](
                                     pa_dv, pa_acc, txl.cuda.make_float2(t4[0], t4[1])
                                 )
-                                pack_bf16x2(pa_word, txl.cuda.float2_x(pa_dv), txl.cuda.float2_y(pa_dv))
+                                pack_bf16x2(
+                                    pa_word, txl.cuda.float2_x(pa_dv), txl.cuda.float2_y(pa_dv)
+                                )
                                 txl.ptx["st.global.L1::no_allocate.b16"](
-                                    dv.ptr_to([x_base + txl.int64(i * HK)]), txl.Cast("uint16", pa_word)
+                                    dv.ptr_to([x_base + txl.int64(i * HK)]),
+                                    txl.Cast("uint16", pa_word),
                                 )
                                 txl.ptx["st.global.L1::no_allocate.b16"](
                                     dv.ptr_to([x_base + txl.int64((i + 1) * HK)]),
@@ -4339,7 +4764,8 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                         txl.assign(dsum_v, dsum_v + ((t4[0] + t4[1]) + (t4[2] + t4[3])))
 
                     txl.ptx[FENCE_ASYNC]()
-                    b_mid_free.arrive(0)
+                    with txl.If(txl.Not(strong)), txl.Then():
+                        b_mid_free.arrive(0)
                     phase("w-Y")
                     twait("Y_done")
                     phase("c10")
@@ -4349,6 +4775,122 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                     phase("w-epi")
                     twait("dq2_done")
                     phase("epi")
+
+                    def extra_ptr(base, i):
+                        return TT[base + 2 * wg + (i >> 4)].ptr_to(4 * (i & 15) + quad, 2 * lane)
+
+                    strong_mask = txl.local_scalar("uint32")
+                    txl.ptx.vote_sync.ballot.b32(
+                        strong_mask, txl.ptx.pred(strong), txl.uint32(0xFFFFFFFF)
+                    )
+
+                    def cached_ptr(base, ti):
+                        return TT[base + (ti >> 4)].ptr_to(4 * (ti & 15) + quad, 2 * lane)
+
+                    with txl.If(strong_mask != txl.uint32(0)), txl.Then():
+                        twait("chunk_done")
+                        with txl.If(strong), txl.Then():
+                            with txl.serial(32) as i:
+                                token = tok0 + txl.Cast("int64", txl.min(row0 + i, last))
+                                gate = _load_gate(g, token, head, x, H * D)
+                                previous_gate = _load_gate(
+                                    g, txl.max(tok0, token - txl.int64(1)), head, x, H * D
+                                )
+                                txl.ptx.ex2.approx.ftz.f32(gate, gate - previous_gate)
+                                q_value = _load_bf16_f32(
+                                    q.ptr_to(
+                                        [token * txl.int64(H * D) + txl.Cast("int64", head * D + x)]
+                                    )
+                                )
+                                k_value = _load_bf16_f32(
+                                    k.ptr_to(
+                                        [token * txl.int64(H * D) + txl.Cast("int64", head * D + x)]
+                                    )
+                                )
+                                word = txl.local_scalar("uint32")
+                                pack_bf16x2(word, q_value, k_value)
+                                txl.ptx.st.shared.f32(cached_ptr(12, row0 + i), gate)
+                                txl.ptx.st.shared.b32(cached_ptr(16, row0 + i), word)
+                    txl.ptx["bar.warp.sync"](txl.uint32(0xFFFFFFFF))
+                    with txl.If(lane == txl.int32(0)), txl.Then():
+                        b_stable_full.arrive(0, count=32)
+                    with txl.If(strong), txl.Then():
+                        b_stable_full.wait(0, par)
+                        with txl.serial(4) as block:
+                            i0 = 8 * block
+                            ti0 = row0 + i0
+                            qe = txl.alloc_local([8], "float32")
+                            kp = txl.alloc_local([8], "float32")
+                            kf = txl.alloc_local([8], "float32")
+                            decay = txl.alloc_local([8], "float32")
+                            for e in range(8):
+                                txl.assign(qe[e], txl.float32(0.0))
+                                txl.assign(kp[e], txl.float32(0.0))
+                                txl.assign(kf[e], txl.float32(0.0))
+                                txl.assign(decay[e], txl.float32(1.0))
+                                diagonal = txl.local_scalar("uint16")
+                                txl.ptx.ld.shared.b16(diagonal, TT[T5].ptr_to(ti0 + e, ti0 + e))
+                                txl.ptx.st.shared.b16(TT[T6 + xs].ptr_to(xr, ti0 + e), diagonal)
+                            j = txl.local_scalar("int32", init=txl.min(ti0 + txl.int32(7), last))
+                            # With alpha in [0, 1], the earliest row is last to
+                            # underflow in this direction. Only skip exact zeros.
+                            with txl.While((j >= txl.int32(0)) & (decay[0] != txl.float32(0.0))):
+                                alpha = txl.local_scalar("float32")
+                                word = txl.local_scalar("uint32")
+                                txl.ptx.ld.shared.f32(alpha, cached_ptr(12, j))
+                                txl.ptx.ld.shared.b32(word, cached_ptr(16, j))
+                                for e in range(8):
+                                    aq = _load_bf16_f32(TT[T5].ptr_to(ti0 + e, j), shared=True)
+                                    ak = _load_bf16_f32(TT[T5 + 1].ptr_to(ti0 + e, j), shared=True)
+                                    txl.ptx.fma.rn.f32(
+                                        qe[e],
+                                        hi(word) * decay[e],
+                                        txl.Select(j == ti0 + e, txl.float32(0.0), aq),
+                                        qe[e],
+                                    )
+                                    txl.ptx.fma.rn.f32(kp[e], hi(word) * decay[e], ak, kp[e])
+                                    txl.assign(
+                                        decay[e],
+                                        decay[e]
+                                        * txl.Select(j <= ti0 + e, alpha, txl.float32(1.0)),
+                                    )
+                                txl.assign(j, j - txl.int32(1))
+                            for e in range(8):
+                                txl.assign(decay[e], txl.float32(1.0))
+                            txl.assign(j, ti0)
+                            # In the forward direction the latest row is last.
+                            with txl.While((j < rows) & (decay[7] != txl.float32(0.0))):
+                                alpha = txl.local_scalar("float32")
+                                word = txl.local_scalar("uint32")
+                                txl.ptx.ld.shared.f32(alpha, cached_ptr(12, j))
+                                txl.ptx.ld.shared.b32(word, cached_ptr(16, j))
+                                for e in range(8):
+                                    txl.assign(
+                                        decay[e],
+                                        decay[e] * txl.Select(j > ti0 + e, alpha, txl.float32(1.0)),
+                                    )
+                                    aq = _load_bf16_f32(TT[T5].ptr_to(j, ti0 + e), shared=True)
+                                    ak = _load_bf16_f32(TT[T5 + 1].ptr_to(j, ti0 + e), shared=True)
+                                    term = txl.local_scalar("float32")
+                                    txl.ptx.fma.rn.f32(
+                                        term,
+                                        lo(word) * scale,
+                                        txl.Select(j == ti0 + e, txl.float32(0.0), aq),
+                                        hi(word) * s_beta_row(j) * ak,
+                                    )
+                                    txl.ptx.fma.rn.f32(kf[e], term, decay[e], kf[e])
+                                txl.assign(j, j + txl.int32(1))
+                            for e in range(8):
+                                txl.ptx.st.shared.f32(extra_ptr(0, i0 + e), qe[e] * scale)
+                                txl.ptx.st.shared.f32(extra_ptr(4, i0 + e), kp[e])
+                                txl.ptx.st.shared.f32(extra_ptr(20, i0 + e), kf[e])
+                        txl.ptx[FENCE_ASYNC]()
+                        b_mid_free.arrive(0)
+
+                    txl.ptx[FENCE_ASYNC]()
+                    txl.ptx["bar.warp.sync"](txl.uint32(0xFFFFFFFF))
+                    with txl.If(lane == txl.int32(0)), txl.Then():
+                        b_intra_free.arrive(0, count=32)
                     dgk_k2 = txl.local_scalar(
                         "uint64", init=txl.cuda.make_float2(txl.float32(0.0), txl.float32(0.0))
                     )
@@ -4361,8 +4903,14 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                         ld4(acc, S6 + wg * 32 + 4 * b, base + 4)
                         ld4(acc, S3 + wg * 32 + 4 * b, base + 8)
 
-                    def epilogue(full):
-                        assert full
+                    def diagonal_term(i, inputs):
+                        diagonal = txl.local_scalar("uint32")
+                        txl.ptx.ld.shared.b32(diagonal, TT[T6 + xs].ptr_to(xr, row0 + i))
+                        return txl.cuda.make_float2(
+                            lo(inputs) * scale * lo(diagonal), hi(inputs) * scale * hi(diagonal)
+                        )
+
+                    def epilogue(stable):
                         pair0 = txl.local_scalar("uint64")
                         pair1 = txl.local_scalar("uint64")
                         pair2 = txl.local_scalar("uint64")
@@ -4379,8 +4927,12 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                             for p in range(4):
                                 i = 8 * b + 2 * p
 
-                                rcp(enA[i >> 1], lo(egcw[i >> 1]))
-                                rcp(enB[i >> 1], hi(egcw[i >> 1]))
+                                if stable:
+                                    rcp(enA[i >> 1], lo(egcw[i >> 1]))
+                                    rcp(enB[i >> 1], hi(egcw[i >> 1]))
+                                else:
+                                    txl.ptx.rcp.approx.ftz.f32(enA[i >> 1], lo(egcw[i >> 1]))
+                                    txl.ptx.rcp.approx.ftz.f32(enB[i >> 1], hi(egcw[i >> 1]))
                                 txl.ptx["mul.rn.f32x2"](
                                     pair1,
                                     txl.cuda.make_float2(lo(egcw[i >> 1]), hi(egcw[i >> 1])),
@@ -4391,18 +4943,33 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                                     txl.cuda.make_float2(acc[ab + 2 * p], acc[ab + 2 * p + 1]),
                                     pair1,
                                 )
+                                if stable:
+                                    with txl.If(strong), txl.Then():
+                                        txl.ptx.ld.shared.f32(t0, extra_ptr(0, i))
+                                        txl.ptx.ld.shared.f32(t1, extra_ptr(0, i + 1))
+                                        txl.ptx["add.rn.f32x2"](
+                                            pair0, pair0, txl.cuda.make_float2(t0, t1)
+                                        )
+                                txl.ptx["mul.rn.f32x2"](
+                                    pair1,
+                                    txl.cuda.make_float2(lo(qc[i >> 1]), hi(qc[i >> 1])),
+                                    pair0,
+                                )
+                                txl.assign(dgv[i], txl.cuda.float2_x(pair1))
+                                txl.assign(dgv[i + 1], txl.cuda.float2_y(pair1))
+                                if stable:
+                                    with txl.If(strong), txl.Then():
+                                        txl.ptx["add.rn.f32x2"](
+                                            pair0, pair0, diagonal_term(i, kc[i >> 1])
+                                        )
                                 txl.ptx["st.global.L1::no_allocate.f32"](
-                                    dq.ptr_to([x_base + txl.int64(i * HK)]), txl.cuda.float2_x(pair0)
+                                    dq.ptr_to([x_base + txl.int64(i * HK)]),
+                                    txl.cuda.float2_x(pair0),
                                 )
                                 txl.ptx["st.global.L1::no_allocate.f32"](
                                     dq.ptr_to([x_base + txl.int64((i + 1) * HK)]),
                                     txl.cuda.float2_y(pair0),
                                 )
-                                txl.ptx["mul.rn.f32x2"](
-                                    pair1, txl.cuda.make_float2(lo(qc[i >> 1]), hi(qc[i >> 1])), pair0
-                                )
-                                txl.assign(dgv[i], txl.cuda.float2_x(pair1))
-                                txl.assign(dgv[i + 1], txl.cuda.float2_y(pair1))
                             if b < 3:
                                 txl.ptx[WAIT_LD]()
                         twait("dkt_done")
@@ -4417,15 +4984,29 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                             for p in range(2):
                                 i = 4 * b + 2 * p
                                 txl.assign(pair0, txl.cuda.make_float2(enA[i >> 1], enB[i >> 1]))
-                                txl.assign(pair1, txl.cuda.make_float2(lo(kc[i >> 1]), hi(kc[i >> 1])))
-                                txl.ptx["add.rn.f32x2"](
-                                    pair2,
+                                txl.assign(
+                                    pair1, txl.cuda.make_float2(lo(kc[i >> 1]), hi(kc[i >> 1]))
+                                )
+                                if stable:
+                                    state_decay(t0, i, lo(egcw[i >> 1]))
+                                    state_decay(t1, i + 1, hi(egcw[i >> 1]))
+                                else:
+                                    txl.assign(t0, enA[i >> 1])
+                                    txl.assign(t1, enB[i >> 1])
+                                state_pair = txl.local_scalar("uint64")
+                                txl.ptx["mul.rn.f32x2"](
+                                    state_pair,
                                     txl.cuda.make_float2(acc[ab + 2 * p], acc[ab + 2 * p + 1]),
+                                    txl.cuda.make_float2(t0, t1),
+                                )
+                                txl.ptx["fma.rn.f32x2"](
+                                    pair2,
                                     txl.cuda.make_float2(
                                         acc[ab + 8 + 2 * p], acc[ab + 8 + 2 * p + 1]
                                     ),
+                                    pair0,
+                                    state_pair,
                                 )
-                                txl.ptx["mul.rn.f32x2"](pair2, pair2, pair0)
                                 txl.ptx["mul.rn.f32x2"](
                                     pair3,
                                     txl.cuda.make_float2(
@@ -4433,6 +5014,18 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                                     ),
                                     txl.cuda.make_float2(lo(egcw[i >> 1]), hi(egcw[i >> 1])),
                                 )
+                                if stable:
+                                    with txl.If(strong), txl.Then():
+                                        txl.ptx.ld.shared.f32(t0, extra_ptr(20, i))
+                                        txl.ptx.ld.shared.f32(t1, extra_ptr(20, i + 1))
+                                        txl.ptx["add.rn.f32x2"](
+                                            pair2, pair2, txl.cuda.make_float2(t0, t1)
+                                        )
+                                        txl.ptx.ld.shared.f32(t0, extra_ptr(4, i))
+                                        txl.ptx.ld.shared.f32(t1, extra_ptr(4, i + 1))
+                                        txl.ptx["add.rn.f32x2"](
+                                            pair3, pair3, txl.cuda.make_float2(t0, t1)
+                                        )
                                 txl.ptx["mul.rn.f32x2"](pair4, pair1, pair3)
                                 txl.ptx.st.shared.f32(
                                     TT[dbx + (i >> 4)].ptr_to(4 * (i & 15) + quad, 2 * lane),
@@ -4444,29 +5037,30 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                                     ),
                                     txl.cuda.float2_y(pair4),
                                 )
-                                txl.ptx["mul.rn.f32x2"](
-                                    pair4,
-                                    txl.cuda.make_float2(acc[ab + 2 * p], acc[ab + 2 * p + 1]),
-                                    pair0,
-                                )
-                                txl.ptx["mul.rn.f32x2"](pair5, pair1, pair4)
+                                txl.ptx["mul.rn.f32x2"](pair5, pair1, state_pair)
                                 txl.ptx["add.rn.f32x2"](dgk_k2, dgk_k2, pair5)
                                 beta_pair = txl.cuda.make_float2(
                                     s_beta_row(row0 + i), s_beta_row(row0 + i + 1)
                                 )
                                 txl.ptx["fma.rn.f32x2"](pair5, pair3, beta_pair, pair2)
-                                txl.ptx["st.global.L1::no_allocate.f32"](
-                                    dk.ptr_to([x_base + txl.int64(i * HK)]), txl.cuda.float2_x(pair5)
-                                )
-                                txl.ptx["st.global.L1::no_allocate.f32"](
-                                    dk.ptr_to([x_base + txl.int64((i + 1) * HK)]),
-                                    txl.cuda.float2_y(pair5),
-                                )
                                 txl.ptx["fma.rn.f32x2"](
                                     pair3,
                                     pair2,
                                     txl.cuda.make_float2(txl.float32(-2.0), txl.float32(-2.0)),
                                     pair5,
+                                )
+                                if stable:
+                                    with txl.If(strong), txl.Then():
+                                        txl.ptx["add.rn.f32x2"](
+                                            pair5, pair5, diagonal_term(i, qc[i >> 1])
+                                        )
+                                txl.ptx["st.global.L1::no_allocate.f32"](
+                                    dk.ptr_to([x_base + txl.int64(i * HK)]),
+                                    txl.cuda.float2_x(pair5),
+                                )
+                                txl.ptx["st.global.L1::no_allocate.f32"](
+                                    dk.ptr_to([x_base + txl.int64((i + 1) * HK)]),
+                                    txl.cuda.float2_y(pair5),
                                 )
                                 txl.ptx["fma.rn.f32x2"](
                                     pair5, pair1, pair3, txl.cuda.make_float2(dgv[i], dgv[i + 1])
@@ -4476,39 +5070,40 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                             if b < 7:
                                 txl.ptx[WAIT_LD]()
 
-                        txl.assign(dgk_k, txl.cuda.float2_x(dgk_k2) + txl.cuda.float2_y(dgk_k2))
-                        bar_wg()
-                        dsum = txl.local_scalar("float32", init=dsum_v)
-                        for u in range(8):
-                            txl.ptx["ld.shared.v4.f32"](
-                                t4[0],
-                                t4[1],
-                                t4[2],
-                                t4[3],
-                                TT[dbx + (quad >> 1)].ptr_to(srow, 8 * u),
-                            )
-                            txl.assign(dsum, dsum + ((t4[0] + t4[1]) + (t4[2] + t4[3])))
-                        txl.ptx[FENCE_ASYNC]()
-                        b_h_free.arrive(0)
-                        for s in (1, 2):
-                            r = txl.local_scalar("uint32")
-                            txl.ptx.shfl_sync.bfly.b32(
-                                r,
-                                txl.reinterpret("uint32", dsum),
-                                txl.uint32(s),
-                                txl.uint32(0x1F),
-                                txl.uint32(0xFFFFFFFF),
-                            )
-                            txl.assign(dsum, dsum + txl.reinterpret("float32", r))
-                        with txl.If(tq == txl.int32(0)), txl.Then():
-                            txl.ptx["st.global.L1::no_allocate.f32"](
-                                db.ptr_to(
-                                    [(tok0 + txl.Cast("int64", row0 + ti)) * txl.int64(H) + head64]
-                                ),
-                                dsum,
-                            )
+                    with txl.If(strong_mask != txl.uint32(0)):
+                        with txl.Then():
+                            epilogue(True)
+                        with txl.Else():
+                            epilogue(False)
+                    dbx = 2 * wg
+                    txl.assign(dgk_k, txl.cuda.float2_x(dgk_k2) + txl.cuda.float2_y(dgk_k2))
+                    bar_wg()
+                    dsum = txl.local_scalar("float32", init=dsum_v)
+                    for u in range(8):
+                        txl.ptx["ld.shared.v4.f32"](
+                            t4[0], t4[1], t4[2], t4[3], TT[dbx + (quad >> 1)].ptr_to(srow, 8 * u)
+                        )
+                        txl.assign(dsum, dsum + ((t4[0] + t4[1]) + (t4[2] + t4[3])))
+                    txl.ptx[FENCE_ASYNC]()
+                    b_h_free.arrive(0)
+                    for s in (1, 2):
+                        r = txl.local_scalar("uint32")
+                        txl.ptx.shfl_sync.bfly.b32(
+                            r,
+                            txl.reinterpret("uint32", dsum),
+                            txl.uint32(s),
+                            txl.uint32(0x1F),
+                            txl.uint32(0xFFFFFFFF),
+                        )
+                        txl.assign(dsum, dsum + txl.reinterpret("float32", r))
+                    with txl.If(tq == txl.int32(0)), txl.Then():
+                        txl.ptx["st.global.L1::no_allocate.f32"](
+                            db.ptr_to(
+                                [(tok0 + txl.Cast("int64", row0 + ti)) * txl.int64(H) + head64]
+                            ),
+                            dsum,
+                        )
 
-                    epilogue(True)
                     phase("cumsum")
 
                     for i in range(30, -1, -1):
@@ -4536,9 +5131,9 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                 ld32(acc, TM_DH + wg * 64)
                 ld32(acc, TM_DH + wg * 64 + 32, 32)
                 txl.ptx[WAIT_LD]()
-                obase = ((txl.Cast("int64", seq) * txl.int64(H) + head64) * txl.int64(D) + x64) * txl.int64(
-                    D
-                ) + txl.Cast("int64", wg * 64)
+                obase = (
+                    (txl.Cast("int64", seq) * txl.int64(H) + head64) * txl.int64(D) + x64
+                ) * txl.int64(D) + txl.Cast("int64", wg * 64)
                 for m in range(8):
                     txl.ptx["st.global.L1::no_allocate.v8.f32"](
                         dh0.ptr_to([obase + txl.int64(8 * m)]), *(acc[8 * m + i] for i in range(8))
@@ -4769,9 +5364,7 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                     with txl.If(elected()), txl.Then():
                         # The epoch flag is a declared synchronization word.
                         fl = txl.local_scalar("int32", init=txl.int32(0))
-                        txl.cuda.wait_until(
-                            fl, flags.ptr_to([work]), fl == epoch, scope="gpu"
-                        )
+                        txl.cuda.wait_until(fl, flags.ptr_to([work]), fl == epoch, scope="gpu")
                     txl.ptx["bar.warp.sync"](txl.uint32(0xFFFFFFFF))
                     txl.ptx["fence.proxy.async.global"]()
                     lphase_end()
@@ -4823,6 +5416,8 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                                 )
                         lphase("lw-chunk")
                         TC["chunk_done"].wait(0, npar)
+                        # dAqk/dAkk stay live through the stable intra pass.
+                        b_intra_free.wait(0, npar)
                         lphase("l-issue-eg")
                         with txl.If(elected()), txl.Then():
                             b_eg_full.arrive(0, tx_count=EG_BYTES)
@@ -4890,9 +5485,9 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                                 with txl.If(i2 + txl.int32(1) < n_p2), txl.Then():
                                     nxt = p2_chain(i2 + txl.int32(1))
                                     seq2, head2, bos2, seq_len2, nch2 = work_coords(nxt)
-                                    tokn = txl.Cast("int32", bos2) + (nch2 - txl.int32(1)) * txl.int32(
-                                        CHUNK
-                                    )
+                                    tokn = txl.Cast("int32", bos2) + (
+                                        nch2 - txl.int32(1)
+                                    ) * txl.int32(CHUNK)
                                     hidn = (chunk_base(seq2) + nch2 - txl.int32(1)) * txl.int32(
                                         H
                                     ) + head2
@@ -4922,8 +5517,12 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                                     txl.ptx[TMA_PREFETCH](
                                         txl.address_of(eg_map), txl.int32(d0), tokp, head
                                     )
-                                txl.ptx[TMA_PREFETCH](txl.address_of(aqk_map), txl.int32(0), tokp, head)
-                                txl.ptx[TMA_PREFETCH](txl.address_of(akk_map), txl.int32(0), tokp, head)
+                                txl.ptx[TMA_PREFETCH](
+                                    txl.address_of(aqk_map), txl.int32(0), tokp, head
+                                )
+                                txl.ptx[TMA_PREFETCH](
+                                    txl.address_of(akk_map), txl.int32(0), tokp, head
+                                )
                                 for d0 in (0, 64):
                                     txl.ptx[TMA_PREFETCH](
                                         txl.address_of(h_map),
@@ -4939,7 +5538,9 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                     p1_storer()
                 txl.ptx.bar.sync(txl.uint32(5), txl.uint32(384))
                 cyc = txl.local_scalar("int32", init=txl.int32(0))
-                rowc = txl.local_scalar("int32", init=txl.warp_id_in_role() * txl.int32(32) + txl.lane_id())
+                rowc = txl.local_scalar(
+                    "int32", init=txl.warp_id_in_role() * txl.int32(32) + txl.lane_id()
+                )
                 with txl.serial(n_p2) as i2:
                     work = txl.local_scalar("int32", init=p2_chain(i2))
                     seq, head, bos, seq_len, nch = work_coords(work)
@@ -4951,7 +5552,8 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                         dmat = txl.lane_id() >> txl.int32(3)
                         dblk = txl.warp_id_in_role() * txl.int32(4) + dmat
                         dptr = TT[S_AQK].ptr_to(
-                            dblk * txl.int32(8) + (txl.lane_id() & txl.int32(7)), dblk * txl.int32(8)
+                            dblk * txl.int32(8) + (txl.lane_id() & txl.int32(7)),
+                            dblk * txl.int32(8),
                         )
                         txl.ptx["ldmatrix.sync.aligned.m8n8.x4.shared.b16"](
                             diag[0], diag[1], diag[2], diag[3], dptr
@@ -4961,7 +5563,9 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
                         dmask = txl.Select(
                             dcol > drow,
                             txl.uint32(0),
-                            txl.Select(dcol == drow, txl.uint32(0x0000FFFF), txl.uint32(0xFFFFFFFF)),
+                            txl.Select(
+                                dcol == drow, txl.uint32(0x0000FFFF), txl.uint32(0xFFFFFFFF)
+                            ),
                         )
                         for e in range(4):
                             txl.assign(diag[e], diag[e] & dmask)
@@ -4985,7 +5589,8 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
         with txl.If(txl.warp_id() == 8), txl.Then():
             txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"]()
             txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
-                txl.Cast("uint32", txl.local_scalar("int32", init=tmem_preamble()[0])), txl.uint32(512)
+                txl.Cast("uint32", txl.local_scalar("int32", init=tmem_preamble()[0])),
+                txl.uint32(512),
             )
 
     return kda_bwd_fused
@@ -5453,8 +6058,11 @@ class KDABackwardConfig:
     seq_lens: tuple[int, ...]
     seed: int = 0
     scale: float = 1.0 / math.sqrt(D)
+    gate_profile: str = "mild"
 
     def validate(self) -> None:
+        if self.gate_profile not in ("mild", "strong", "mixed", "reset", "extreme"):
+            raise ValueError(f"unsupported gate profile {self.gate_profile!r}")
         if self.num_v_heads % self.num_qk_heads != 0:
             raise ValueError(
                 f"Hv must be a multiple of Hqk, got {self.num_v_heads} % {self.num_qk_heads}"
@@ -5492,6 +6100,38 @@ CONFIGS = [
         "seed": 2858210400 + index,
     }
     for index, (label, _total, hq, hv, lens) in enumerate(_OFFICIAL_WORKLOADS)
+]
+
+# Keep the established performance portfolio while exercising the numerical
+# range in correctness, including GVA and masked partial chunks.
+BENCH_CONFIGS = list(CONFIGS)
+CONFIGS += [
+    {
+        "label": f"{profile}_{family}",
+        "num_qk_heads": 8 if family == "fused" else 2,
+        "num_v_heads": 8 if family == "fused" else 4,
+        "seq_lens": (128, 128) if family == "fused" else (129, 79),
+        "seed": 23,
+        "gate_profile": profile,
+    }
+    for family in ("fused", "mega")
+    for profile in ("strong", "mixed", "reset", "extreme")
+]
+CONFIGS += [
+    {
+        "label": f"{profile}_gva4_tails",
+        "num_qk_heads": 2,
+        "num_v_heads": 8,
+        "seq_lens": (1, 63, 64, 65, 127, 128, 129),
+        "seed": 31,
+        "gate_profile": profile,
+    }
+    for profile in ("mixed", "strong")
+]
+CONFIGS += [
+    {**config, "label": f"strong_{config['label']}", "gate_profile": "strong"}
+    for config in BENCH_CONFIGS
+    if config["label"] in ("packed_1024x8_h96", "p04_hq2_hv4_t18432")
 ]
 
 
@@ -5617,6 +6257,26 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     for length in cfg.seq_lens:
         offsets.append(offsets[-1] + length)
     cu_seqlens = torch.tensor(offsets, dtype=torch.int64, device=device)
+
+    if cfg.gate_profile == "strong":
+        gate_increments.mul_(256.0)
+    elif cfg.gate_profile == "mixed":
+        # Mix the fast path, its dispatch boundary, both floating-point cliffs,
+        # and gates far beyond either cliff within each head and warp.
+        levels = torch.tensor(
+            [0.0, 0.03, 0.0625, 0.06253, 0.06255, 0.49, 0.51, 1.5, 1.9375, 1.96875, 2.0, 3.6, 8.0],
+            device=device,
+        )
+        channels = torch.arange(D, device=device) % levels.numel()
+        gate_increments.copy_(-levels[channels].view(1, 1, 1, D).expand(v_shape))
+    elif cfg.gate_profile == "reset":
+        # A large first-token decay must not erase interactions among the
+        # following tokens: their pairwise exponent differences are still zero.
+        gate_increments.zero_()
+        for bos, eos in pairwise(offsets):
+            gate_increments[:, bos:eos:CHUNK].fill_(-512.0)
+    elif cfg.gate_profile == "extreme":
+        gate_increments.fill_(-512.0)
 
     with _native_fla_backend():
         from fla.ops.utils import chunk_local_cumsum
@@ -5812,6 +6472,7 @@ def run_bench(
 
 
 __all__ = [
+    "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
     "check_correctness",

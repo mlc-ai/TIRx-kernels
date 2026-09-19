@@ -93,6 +93,14 @@ _add_in_place(values0, values1)
 One measured FP32 bias hoist regressed 6.6%; by contrast, staging a larger load
 set won when it created enough outstanding DRAM misses.
 
+Repeated inline-assembly helper calls in generated CUDA are not sufficient
+evidence that another hoist will help. One tiled decay loop emitted four or
+eight identical shared beta loads per iteration. Moving the load and its two
+scaled operands outside the tile's unrolled body left the SASS instruction,
+shared-load, and local-load counts unchanged in both kernel families. Large
+strong-decay timings stayed at about 4.80 ms and 513 us. Inspect the assembled
+code before treating repeated generated-source expressions as surviving work.
+
 The same tradeoff applies to persistent reductions. Moving a nonnegative amax
 from a per-work shared reduction and atomic into a per-lane value carried across
 the persistent loop reduced the number of global atomics, but the loop-carried
