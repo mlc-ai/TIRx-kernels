@@ -46,17 +46,26 @@ baseline/final times were 54.307/54.317 us, 119.646/119.631 us, and
 This sequence is valid only when the undefined values are dominated by the
 merge.
 
-The spelling depends on an API the current engine no longer offers. As of
-2026-08-18 the typed PTX engine rejects `pred=` on every instruction that has a
-destination and no longer accepts `preserve_dst`, so the write-only/read-write
-split above cannot be expressed through it. Where both candidate shared
-addresses are independently proven in bounds, the IR-valid branch-free fallback
-is an unconditional load, subtract, and exponentiation followed by `selp` to
-zero the inactive result. That ordering is essential: selecting zero before an
-unconditional `ex2` would turn inactive lanes into one. The complete ten-config
-GDN CP IR matrix passed the low-level contract with this spelling, but GPU
-correctness was not completed before the available GPUs became occupied; do not
-promote the fallback on IR evidence alone.
+The current paired typed PTX engine accepts `pred=` and `preserve_dst=True`.
+Materialize a computed predicate as a boolean local when the operand validator
+does not accept the expression directly. Inspect the generated helper: a
+write-only `"=l"` constraint leaves an inactive 64-bit destination undefined;
+the preserving form needs `"+l"`.
+
+This distinction also applies to polling. A consumer that caches completed
+records and reloads only pending ones must retain every inactive destination.
+In a measured tagged-record reduction, using the default predicated load made
+the polling loop fail to terminate. Adding `preserve_dst=True` emitted the
+read-write constraint, restored bitwise agreement, and completed five timing
+rounds. The preserving variant measured 28.938 us versus 29.054 us for the
+unconditionally reloading consumer; the main benefit of the policy was
+correctness, not a large performance gain.
+
+On a shorter reduction with nine peer records, caching completed publications
+with preserving predicated loads reduced pure GPU time from 6.521 to 6.478 us
+over five rounds. It retained 43 registers, zero stack, bitwise output, and
+passed Synccheck. The cached payload is valid only while the producer cannot
+reuse that record for another generation during this invocation.
 
 ## Verification
 

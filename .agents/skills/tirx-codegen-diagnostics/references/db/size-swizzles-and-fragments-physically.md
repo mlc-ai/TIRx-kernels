@@ -59,6 +59,16 @@ minimum.
 Smaller is not automatically better when it adds synchronization or breaks
 vector alignment.
 
+Adding a narrower runtime branch can also increase spill pressure in the
+surrounding persistent pipeline. A two-column consumer added beside existing
+four- and sixteen-column paths kept the MMA tile at sixteen columns, but
+increased static stack from 536 to 656 bytes and slowed a short routed workload
+from 29.107 to 30.473 us despite bitwise-identical outputs. Replacing the
+four-column branch instead of adding a third branch still used 664 bytes and
+measured 29.829 versus 29.023 us. Narrowing the arithmetic alone did not shorten
+the compiler's combined live ranges; neither version was retained. Inspect the
+complete role's generated code after specialization, including the fallback.
+
 Twist on the byte offset, never on the row index. A `Swizzle<B,4,3>` XORs bits
 `[4, 4+B)` of the byte offset with bits `[7, 7+B)`, and those source bits sit at
 128 bytes whatever the row is: a 128-byte row twists on the row index only by

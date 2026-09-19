@@ -85,6 +85,14 @@ targeted result reached a 0.97877 minimum and 1.00850 geometric mean, but the
 result is the shape-selective live-range reduction; the static improvement alone
 is not a performance verdict.
 
+In a nine-record polling tail, materializing one 64-bit byte address before
+adding constant route offsets changed nine separately formed pointers into
+`LDG` base-plus-immediate accesses and reduced allocation from 58 to 42
+registers with zero stack. Same-worker pure GPU time changed only from 6.559
+to 6.543 us over nine rounds, with a second measurement flat. The register
+reduction enabled a later staged-load experiment, but alone it did not remove
+the remaining latency gap.
+
 ## Boundary
 
 Native offsets, explicit arithmetic, and cursor induction are alternative

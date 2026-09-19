@@ -75,6 +75,23 @@ plain-`.f32` arithmetic at all. Inheriting a sibling's arithmetic helpers is a
 silent divergence in either direction; read the reference's own PTX census
 first.
 
+Matching the FTZ flag alone does not justify splitting an FMA into a multiply
+and a global FP32 atomic add. An FMA can add a subnormal product to a normal
+accumulator without materializing that product; the atomic flushes its
+subnormal input. A measured ten-term reduction with every expert value equal
+to `2**-124` and weights `[0.5, 1/18, ..., 1/18]` returned approximately
+`2**-124` with `fma.rn.ftz.f32`, but only `2**-125` with a separately computed
+product and `red.add.f32`. Preserve the fused weighted reduction when this
+range is part of the numerical contract; fast-math reference flags do not
+authorize the split.
+
+Widening the accumulator is insufficient if its input conversion still uses
+fast-math defaults. In the same experiment, an ordinary FP32-to-FP64 cast lost
+the small contributions before `red.add.f64`; explicitly emitting
+`cvt.f64.f32` preserved them and recovered approximately `2**-124`. Pin the
+conversion as well as the arithmetic, and inspect the production compiler
+path rather than a separately compiled non-fast-math binary.
+
 ## Verification
 
 Denormal inputs plus an instruction-by-instruction PTX comparison.

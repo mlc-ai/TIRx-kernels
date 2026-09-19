@@ -106,6 +106,29 @@ to 552. The final allocation was 53 registers with no spill; all 18 correctness
 cases passed, and the complete four-shape benchmark matrix measured
 1.0249-1.1635x against the reference.
 
+A tagged cross-CTA reduction exposed the same ordering issue at its tail.
+Issuing ten read-only routing-weight loads before the independent payload
+polling loop, while leaving weight scaling after the loop, reduced same-worker
+pure GPU time from 6.986 to 6.742 microseconds over five rounds with bitwise
+identical output. SASS retained the weight loads ahead of the tagged-record
+loads. Pairing those loads or separately warming their cache line did not add a
+measurable benefit. The polling loop orders the mutable payload only; it is not
+a prerequisite for reading the immutable weights.
+
+The corresponding larger reduction benefited from hoisting immutable weights
+across its global completion wait: 53.526 to 52.697 us for 64 rows. Merely
+separating loads and scaling after the wait regressed to 53.783 us, and warming
+the entire table in the prologue gave 53.517 us. At 128 rows, hoisting was
+nearly flat and whole-table warming regressed by about 2%. Retain the measured
+shape restriction; moving reads to a useful overlap window matters more than
+simply issuing or caching them earlier.
+
+Staging independent shared-memory loads can also help a short all-reduce.
+Loading all eight gate/up pairs before accumulating them in the original order
+reduced pure GPU time from 6.688 to 6.601 us, with bitwise output and no spill.
+A packed FP32 addition form ran at 6.677 us: preserving the wider issue window
+was the useful change there, while arithmetic packing did not add to it.
+
 ## Boundary
 
 It can regress when the staged raw values spill or the loads usually hit cache.
