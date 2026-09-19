@@ -63,6 +63,16 @@ causing bitwise mismatches on denormals. Independently, a float compare/select
 whose PTX form is unpinned lets the codegen choose whether `setp` carries `.ftz`
 and lets ptxas choose between `selp` and a branch.
 
+Instruction width is part of the precision contract too. In one measured
+attention family, seven production rows rounded the exponent argument to
+BF16/FP16 before a packed `ex2`, while their reference evaluated `ex2` from
+FP32 and narrowed only the result. Replacing those packed half forms with
+scalar `ex2.approx.ftz.f32` removed every half-exponential mnemonic in the
+affected generated sources. Three wide-logit rows passed. A final 15-round
+same-request A/B across all ten production rows had a +1.93% worst regression
+and a -0.34% median; the exposed scalar MUFU work remained hidden well enough
+to stay inside a 5% per-shape gate.
+
 ## Boundary
 
 The direction is a property of the reference, not of the family, and both

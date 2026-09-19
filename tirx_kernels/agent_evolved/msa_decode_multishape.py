@@ -32,11 +32,15 @@ every row at or above parity. The two fp8 rows reach about 10x, the long
 65536-token paged row 6.1x, and the previously pinned q16 row 6.26x -- itself
 faster than the single-shape kernel this module replaces (5.851x).
 
-The only numerical approximation is in the softmax exponential, where a
-packed-f32x2 polynomial replaces some native `ex2.approx.ftz.f32` evaluations;
-its worst-case relative error stays below bf16's own rounding. Both tcgen05
-MMAs are `kind::f16` with FP32 accumulation on the bf16/fp16 rows and
-`kind::f8f6f4` on the fp8 rows, matching each row's declared storage dtype.
+Softmax exponent arguments stay in FP32: the q16 route uses a packed-f32x2
+polynomial whose worst-case relative error stays below bf16's own rounding,
+and the other routes use native `ex2.approx.ftz.f32` before narrowing P.  The
+fp8 route applies exact power-of-two scales to its internal Q and P exchanges;
+the Q scale is folded into the QK multiplier, while the P scale cancels in the
+final O / l ratio and is coupled to a lower lazy-rescale threshold so E4M3
+cannot saturate. Both tcgen05 MMAs are `kind::f16` with FP32 accumulation on
+the bf16/fp16 rows and `kind::f8f6f4` on the fp8 rows, matching each row's
+declared storage dtype.
 """
 
 import ctypes
@@ -55,6 +59,11 @@ BLK = 128
 LOG2E = 1.4426950408889634
 NEG_INF = float("-inf")
 RESCALE_THRESH = 8.0
+FP8_Q_SCALE_LOG2 = 3.0
+FP8_Q_SCALE = float(2**int(FP8_Q_SCALE_LOG2))
+FP8_Q_SCALE_BF16X2 = 0x41004100
+FP8_P_SCALE_LOG2 = 4.0
+FP8_RESCALE_THRESH = RESCALE_THRESH - FP8_P_SCALE_LOG2
 DEBUG_SKIP_SOFTMAX = os.environ.get("KV_DEBUG_SKIP_SOFTMAX", "0") == "1"
 ENV_STAGES = int(os.environ.get("KV_STAGES", "0"))
 ENV_NO_HINT = os.environ.get("KV_NO_HINT", "0") == "1"
@@ -3747,7 +3756,6 @@ def _build_q16_twotile_factory():
             union_meta = smem.alloc((16,), txl.i32)
             token_masks = smem.alloc((2 * TOK_PER_CTA,), txl.u32)
             output_lane_masks = smem.alloc((2, MAX_BLOCKS, N_TILES, 4), txl.u32)
-            mrg_order = smem.alloc((2,), txl.i32)
 
 
             kv_pipe = txl.PipelineState(KV_DEPTH, phase=0)
@@ -4067,7 +4075,14 @@ def _build_q16_twotile_factory():
                                     txl.ptx.st.shared.b32(
                                         union_meta.ptr_to([slot * 8 + 1]), txl.Cast("int32", nm_h)
                                     )
-                                    txl.ptx.st.shared.b32(union_meta.ptr_to([slot * 8 + 6]), is_split)
+                                    # Encode the logical half as 1/2 (zero means unsplit).
+                                    # The merge must not depend on which CTA reaches an
+                                    # atomic counter first: swapping the FMA operands can
+                                    # move the final BF16 output by one ULP.
+                                    txl.ptx.st.shared.b32(
+                                        union_meta.ptr_to([slot * 8 + 6]),
+                                        txl.Select(is_split != 0, half + 1, 0),
+                                    )
                                     txl.ptx.st.shared.b32(union_meta.ptr_to([slot * 8 + 7]), s_idx)
                                     txl.ptx.st.shared.b32(union_meta.ptr_to([slot * 8 + 2]), tok_base)
                                     txl.ptx.st.shared.b32(union_meta.ptr_to([slot * 8 + 3]), kv_head)
@@ -4644,14 +4659,7 @@ def _build_q16_twotile_factory():
                         if SPLIT:
                             with txl.If(split_x != 0), txl.Then():
                                 ctl_base = (s_x * 2 + wg_id) * 2
-                                with txl.If(tid_in_wg == 0), txl.Then():
-                                    old = txl.local_scalar("int32")
-                                    txl.ptx.atom.acq_rel.gpu.global_.add.s32(
-                                        old, mrg_ctl.ptr_to([ctl_base]), txl.int32(1)
-                                    )
-                                    txl.ptx.st.shared.b32(mrg_order.ptr_to([wg_id]), old)
-                                txl.ptx.bar.sync(txl.Cast("uint32", 1 + wg_id), txl.uint32(128))
-                                order = ld_shared_i32(mrg_order.ptr_to([wg_id]))
+                                order = split_x - 1
                                 ml_base = ((s_x * 2 + wg_id) * 2) * BLK_M
 
 
@@ -4716,7 +4724,6 @@ def _build_q16_twotile_factory():
                                                     o_row_f32[c * MRG_CHUNK + i] * a_a + ob[i] * a_b,
                                                 )
                                         with txl.If(tid_in_wg == 0), txl.Then():
-                                            txl.ptx.st.relaxed.gpu.global_.b32(mrg_ctl.ptr_to([ctl_base]), txl.int32(0))
                                             txl.ptx.st.relaxed.gpu.global_.b32(
                                                 mrg_ctl.ptr_to([ctl_base + 1]), txl.int32(0)
                                             )
@@ -4942,6 +4949,12 @@ def make_kernel_q1d(cfg):
     NQ = G
     NQ_PAD = max(16, ceildiv(NQ, 16) * 16)
     FP8 = kind == "fp8"
+    # FP8 Q and P use exact power-of-two scales.  The host divides the QK
+    # scale by FP8_Q_SCALE, while the final O / l ratio cancels FP8_P_SCALE.
+    # Keeping their log2 shifts explicit also records the coupling between
+    # the E4M3 range and the lazy-rescale threshold.
+    P_EXP_BIAS = FP8_P_SCALE_LOG2 if FP8 else 0.0
+    RESCALE_THRESHOLD = FP8_RESCALE_THRESH if FP8 else RESCALE_THRESH
     kv_dt = {"bf16": txl.bf16, "f16": txl.f16, "fp8": txl.u8}[kind]
     out_dt = txl.f16 if kind == "f16" else txl.bf16
     EB = 1 if FP8 else 2
@@ -5071,6 +5084,7 @@ def make_kernel_q1d(cfg):
 
         def quantize_q_words(qslot, qw):
             """e4m3 Q rows from the prefetched raw words (mirrors quantize_q's layout)."""
+            scaled = txl.alloc_local([8], "uint32")
             e4 = txl.alloc_local([8], "uint16")
             packed4 = txl.alloc_local([4], "uint32")
             for r in range(Q_ROUNDS):
@@ -5080,7 +5094,12 @@ def make_kernel_q1d(cfg):
                     n = c >> 3
                     k16 = c & 7
                     for i in range(8):
-                        txl.ptx.cvt.rn.satfinite.e4m3x2.bf16x2(e4[i], txl.Cast("uint32", qw[8 * r + i]))
+                        txl.ptx.mul.rn.bf16x2(
+                            scaled[i],
+                            txl.Cast("uint32", qw[8 * r + i]),
+                            txl.uint32(FP8_Q_SCALE_BF16X2),
+                        )
+                        txl.ptx.cvt.rn.satfinite.e4m3x2.bf16x2(e4[i], scaled[i])
                     for i in range(4):
                         txl.ptx.mov.b32(packed4[i], e4[2 * i], e4[2 * i + 1])
                     txl.ptx.st.shared.v4.b32(q_smem[qslot].ptr_to(n, k16 * 16), packed4[0], packed4[1], packed4[2], packed4[3])
@@ -5229,22 +5248,26 @@ def make_kernel_q1d(cfg):
 
         def exp_block_packed(sv, msub, kv_pos, words):
             """p = exp2(s*scale - m) for this thread's NQ columns, computed two at a time
-            in packed half precision (bf16x2 for bf16/fp8 K/V, f16x2 for f16 K/V).  The
+            from fp32 exponent arguments, then packed as bf16x2/f16x2.  FP8 P carries
+            an exact power-of-two scale that cancels in the final O / l ratio.  The
             packed words are the P^T row (before the fp8 conversion) and the partial
             sums accumulate the quantized probabilities in fp32."""
             valid = kv_pos <= causal_off
             for i in range(0, NQ, 2):
-                x0 = sv[i] * scale_log2 - msub[i]
-                x1 = sv[i + 1] * scale_log2 - msub[i + 1]
-                xw = txl.local_scalar("uint32")
+                x0 = sv[i] * scale_log2 - msub[i] + txl.float32(P_EXP_BIAS)
+                x1 = sv[i + 1] * scale_log2 - msub[i + 1] + txl.float32(P_EXP_BIAS)
+                p0 = txl.local_scalar("float32")
+                p1 = txl.local_scalar("float32")
                 pw = txl.local_scalar("uint32")
+                txl.ptx.ex2.approx.ftz.f32(p0, x0)
+                txl.ptx.ex2.approx.ftz.f32(p1, x1)
+                txl.assign(p0, txl.Select(valid, p0, txl.float32(0.0)))
+                txl.assign(p1, txl.Select(valid, p1, txl.float32(0.0)))
                 if kind == "f16":
-                    txl.ptx.cvt.rn.f16x2.f32(xw, x1, x0)
-                    txl.ptx.ex2.approx.f16x2(pw, xw)
+                    txl.ptx.cvt.rn.f16x2.f32(pw, p1, p0)
                 else:
-                    txl.ptx.cvt.rn.bf16x2.f32(xw, x1, x0)
-                    txl.ptx.ex2.approx.ftz.bf16x2(pw, xw)
-                txl.assign(words[i // 2], txl.Select(valid, pw, txl.uint32(0)))
+                    txl.ptx.cvt.rn.bf16x2.f32(pw, p1, p0)
+                txl.assign(words[i // 2], pw)
                 lo = txl.local_scalar("float32")
                 hi = txl.local_scalar("float32")
                 if kind == "f16":
@@ -5288,6 +5311,7 @@ def make_kernel_q1d(cfg):
 
         def quantize_q(qslot, h, tok_base):
             words8 = txl.alloc_local([8], "int32")
+            scaled = txl.alloc_local([8], "uint32")
             e4 = txl.alloc_local([8], "uint16")
             packed4 = txl.alloc_local([4], "uint32")
             for r in range(Q_ROUNDS):
@@ -5301,7 +5325,12 @@ def make_kernel_q1d(cfg):
                     txl.ptx.ld.global_.nc.v4.b32(words8[0], words8[1], words8[2], words8[3], qraw.ptr_to([wbase]))
                     txl.ptx.ld.global_.nc.v4.b32(words8[4], words8[5], words8[6], words8[7], qraw.ptr_to([wbase + 4]))
                     for i in range(8):
-                        txl.ptx.cvt.rn.satfinite.e4m3x2.bf16x2(e4[i], txl.Cast("uint32", words8[i]))
+                        txl.ptx.mul.rn.bf16x2(
+                            scaled[i],
+                            txl.Cast("uint32", words8[i]),
+                            txl.uint32(FP8_Q_SCALE_BF16X2),
+                        )
+                        txl.ptx.cvt.rn.satfinite.e4m3x2.bf16x2(e4[i], scaled[i])
                     for i in range(4):
                         txl.ptx.mov.b32(packed4[i], e4[2 * i], e4[2 * i + 1])
                     txl.ptx.st.shared.v4.b32(q_smem[qslot].ptr_to(n, k16 * 16), packed4[0], packed4[1], packed4[2], packed4[3])
@@ -5497,7 +5526,7 @@ def make_kernel_q1d(cfg):
                                         m_old = txl.local_scalar("float32", init=m[nl])
                                         m_new = txl.local_scalar("float32", init=txl.max(m_old, mb[nl]))
                                         d = txl.local_scalar("float32", init=m_new - m_old)
-                                        big = d > txl.float32(RESCALE_THRESH)
+                                        big = d > txl.float32(RESCALE_THRESHOLD)
                                         do_r = txl.And(m_old != txl.float32(NEG_INF), big)
                                         txl.assign(dlog[nl], txl.Select(do_r, txl.float32(0.0) - d, txl.float32(0.0)))
                                         txl.assign(m[nl], txl.Select(big, m_new, m_old))
@@ -6148,7 +6177,7 @@ def setup_q1d(data, B, seqlen_q):
         ptab,
         qraw,
         sched,
-        float(scale * LOG2E),
+        float(scale * LOG2E / (FP8_Q_SCALE if fp8 else 1.0)),
     )
     keep = (q, k, v, q2k, q2k_flat, lens, ptab, qraw, out, out_flat, sched, q_map, k_map, v_map)
 
@@ -6429,19 +6458,22 @@ def make_kernel_q4d(cfg):
                 txl.ptx.cvt.rn.bf16.f32(dst16, src)
 
         def exp_group_packed(sv, m_arr, valid, words, i0, i1):
-            """p = exp2(s*scale - m) for columns i0..i1-1 (pairs), packed half words; zero if not valid."""
+            """FP32 exp2 for columns i0..i1-1, then pack the results; zero if invalid."""
             for i in range(i0, i1, 2):
                 x0 = sv[i] * scale_log2 - m_arr[i]
                 x1 = sv[i + 1] * scale_log2 - m_arr[i + 1]
-                xw = txl.local_scalar("uint32")
+                p0 = txl.local_scalar("float32")
+                p1 = txl.local_scalar("float32")
                 pw = txl.local_scalar("uint32")
+                txl.ptx.ex2.approx.ftz.f32(p0, x0)
+                txl.ptx.ex2.approx.ftz.f32(p1, x1)
+                txl.assign(p0, txl.Select(valid, p0, txl.float32(0.0)))
+                txl.assign(p1, txl.Select(valid, p1, txl.float32(0.0)))
                 if kind == "f16":
-                    txl.ptx.cvt.rn.f16x2.f32(xw, x1, x0)
-                    txl.ptx.ex2.approx.f16x2(pw, xw)
+                    txl.ptx.cvt.rn.f16x2.f32(pw, p1, p0)
                 else:
-                    txl.ptx.cvt.rn.bf16x2.f32(xw, x1, x0)
-                    txl.ptx.ex2.approx.ftz.bf16x2(pw, xw)
-                txl.assign(words[i // 2], txl.Select(valid, pw, txl.uint32(0)))
+                    txl.ptx.cvt.rn.bf16x2.f32(pw, p1, p0)
+                txl.assign(words[i // 2], pw)
 
         def accumulate_sums(words, lsum_arr, i0=0, i1=None):
             for i in range(i0, NQW if i1 is None else i1, 2):
@@ -7716,9 +7748,11 @@ def make_kernel_q4r(cfg):
                 for j in range(32):
                     x0 = scores[2 * j] * scale_log2 + bias
                     x1 = scores[2 * j + 1] * scale_log2 + bias
-                    xw = txl.local_scalar("uint32")
-                    txl.ptx.cvt.rn.bf16x2.f32(xw, x1, x0)
-                    txl.ptx.ex2.approx.ftz.bf16x2(packed_p[j], xw)
+                    p0 = txl.local_scalar("float32")
+                    p1 = txl.local_scalar("float32")
+                    txl.ptx.ex2.approx.ftz.f32(p0, x0)
+                    txl.ptx.ex2.approx.ftz.f32(p1, x1)
+                    txl.ptx.cvt.rn.bf16x2.f32(packed_p[j], p1, p0)
                     lo = txl.local_scalar("float32")
                     hi = txl.local_scalar("float32")
                     txl.ptx.mov.b32(lo, txl.shift_left(txl.bitwise_and(packed_p[j], txl.uint32(0xFFFF)), txl.uint32(16)))
@@ -7928,8 +7962,8 @@ KERNEL_META = {
 
 
 def _cfg(label, batch_size, seqlen_q, seqlen_kv, num_qo_heads, num_kv_heads, topk,
-         kv_layout, q_dtype, kv_dtype, seed):
-    return {
+         kv_layout, q_dtype, kv_dtype, seed, input_regime="random"):
+    config = {
         "label": label,
         "batch_size": batch_size,
         "seqlen_q": seqlen_q,
@@ -7942,11 +7976,16 @@ def _cfg(label, batch_size, seqlen_q, seqlen_kv, num_qo_heads, num_kv_heads, top
         "kv_dtype": kv_dtype,
         "seed": seed,
     }
+    # Preserve the original benchmark config schema so paired A/B can pass an
+    # after config to an older revision.  Only test-only rows carry this axis.
+    if input_regime != "random":
+        config["input_regime"] = input_regime
+    return config
 
 
 # The ten packaged `msa_sparse_decode_hd128_blk128` official rows, in the
 # order the task's workload list declares them.
-CONFIGS = [
+BENCH_CONFIGS = [
     _cfg("decode_bf16_b128_q1_kv4096_h64", 128, 1, 4096, 64, 4, 16, "flat", "bfloat16", "bfloat16", 50),
     _cfg("speculative_bf16_b128_q4_kv4096_h64", 128, 4, 4096, 64, 4, 16, "flat", "bfloat16", "bfloat16", 50),
     _cfg("mtp_bf16_b128_q16_kv4096_h64", 128, 16, 4096, 64, 4, 16, "flat", "bfloat16", "bfloat16", 50),
@@ -7959,7 +7998,21 @@ CONFIGS = [
     _cfg("boundary_decode_bf16_b2_q1_kv257_h8_hkv1_k4_paged", 2, 1, 257, 8, 1, 4, "paged", "bfloat16", "bfloat16", 50),
 ]
 
-_CONFIG_KEYS = set(CONFIGS[0]) - {"label"}
+# Small test-only rows keep the hot-shape benchmark matrix unchanged while
+# exercising ranges that randn/3 never reaches.  The three FP8 rows share one
+# specialization; likewise the two q4 rows isolate the BF16 q4r and FP16 q4d
+# exponent paths without making the correctness suite memory-heavy.
+CONFIGS = [
+    *BENCH_CONFIGS,
+    _cfg("stress_fp8_q_underflow", 2, 1, 2048, 16, 1, 16, "flat", "bfloat16", "float8_e4m3fn", 91, "fp8_q_underflow"),
+    _cfg("stress_fp8_q_wide", 2, 1, 2048, 16, 1, 16, "flat", "bfloat16", "float8_e4m3fn", 96, "fp8_q_wide"),
+    _cfg("stress_fp8_p_tail_and_rescale", 2, 1, 2048, 16, 1, 16, "flat", "bfloat16", "float8_e4m3fn", 92, "fp8_p_tail"),
+    _cfg("stress_bf16_q1_exp", 2, 1, 2048, 16, 1, 16, "flat", "bfloat16", "bfloat16", 93, "wide_logits"),
+    _cfg("stress_bf16_q4r_exp", 2, 4, 2048, 16, 1, 16, "flat", "bfloat16", "bfloat16", 94, "wide_logits"),
+    _cfg("stress_fp16_q4d_exp", 2, 4, 2048, 16, 1, 16, "flat", "float16", "float16", 95, "wide_logits"),
+]
+
+_CONFIG_KEYS = (set(CONFIGS[0]) - {"label"}) | {"input_regime"}
 _BY_LABEL = {config["label"]: config for config in CONFIGS}
 
 _DTYPES = {
@@ -7979,6 +8032,7 @@ def _config(**config: Any) -> dict[str, Any]:
     if unknown:
         raise ValueError(f"unsupported config keys: {sorted(unknown)}")
     base.update(values)
+    base.setdefault("input_regime", "random")
     resolved = {key: base[key] for key in _CONFIG_KEYS}
     if int(resolved["num_qo_heads"]) % int(resolved["num_kv_heads"]):
         raise ValueError("num_qo_heads must be a multiple of num_kv_heads")
@@ -8079,21 +8133,55 @@ def prepare_data(**config: Any) -> dict[str, Any]:
     topk = int(resolved["topk"])
     q_dtype = _DTYPES[str(resolved["q_dtype"])]
     kv_dtype = _DTYPES[str(resolved["kv_dtype"])]
+    input_regime = str(resolved["input_regime"])
     generator = torch.Generator(device=device).manual_seed(int(resolved["seed"]))
 
-    def randn(shape, dtype):
+    amplitudes = {
+        "random": (1.0, 1.0, 1.0),
+        # Q std ~= 3e-3 while K std ~= 30 keeps the exact logits useful and
+        # places an unscaled E4M3 Q squarely on its subnormal cliff.
+        "fp8_q_underflow": (0.009, 90.0, 1.0),
+        # Reciprocal Q/K scaling preserves useful logits while checking that
+        # the fixed power-of-two Q scale did not merely move the cliff into a
+        # realistic high-amplitude range (Q std ~= 21, E4M3 K std ~= 0.005).
+        "fp8_q_wide": (64.0, 1.0 / 64.0, 1.0),
+        "fp8_p_tail": (1.0, 1.0, 1.0),
+        # Sixteen times the normal logit variance crosses the lazy-rescale
+        # boundary and exercises exponent arguments far outside randn/3.
+        "wide_logits": (4.0, 4.0, 1.0),
+    }
+    if input_regime not in amplitudes:
+        raise ValueError(f"unsupported input_regime: {input_regime!r}")
+    q_amplitude, k_amplitude, v_amplitude = amplitudes[input_regime]
+
+    def randn(shape, dtype, amplitude):
         values = torch.randn(shape, dtype=torch.float32, device=device, generator=generator)
-        return (values / 3.0).to(dtype)
+        return (values * (amplitude / 3.0)).to(dtype)
 
     total_q = batch_size * seqlen_q
     total_k = batch_size * seqlen_kv
-    q = randn((total_q, num_qo_heads, HEAD_DIM), q_dtype)
-    k = randn((total_k, num_kv_heads, HEAD_DIM), kv_dtype)
-    v = randn((total_k, num_kv_heads, HEAD_DIM), kv_dtype)
+    q = randn((total_q, num_qo_heads, HEAD_DIM), q_dtype, q_amplitude)
+    k = randn((total_k, num_kv_heads, HEAD_DIM), kv_dtype, k_amplitude)
+    v = randn((total_k, num_kv_heads, HEAD_DIM), kv_dtype, v_amplitude)
     cu_seqlens_k = torch.arange(0, total_k + 1, seqlen_kv, dtype=torch.int32, device=device)
     q2k_indices = _make_q2k_indices(
         batch_size, seqlen_q, seqlen_kv, num_kv_heads, topk, int(resolved["seed"]), device
     )
+    if input_regime == "fp8_p_tail":
+        if str(resolved["kv_layout"]) != "flat" or topk * BLOCK_SIZE != seqlen_kv:
+            raise ValueError("fp8_p_tail requires a flat row selecting the full KV sequence")
+        q = torch.zeros(q.shape, dtype=q_dtype, device=device)
+        q[..., 0] = 2.0
+        logical_k = torch.zeros(k.shape, dtype=torch.float32, device=device)
+        logical_k[..., 0] = -40.0
+        # Put the sole maximum in the final block: this combines 2047 E4M3
+        # tail probabilities with a >8-log2 late max jump.
+        for batch in range(batch_size):
+            logical_k[(batch + 1) * seqlen_kv - 1, :, 0] = 0.0
+        k = logical_k.to(kv_dtype)
+        v = torch.ones(v.shape, dtype=torch.float32, device=device).to(kv_dtype)
+        q2k_indices = torch.arange(topk, dtype=torch.int32, device=device).view(1, 1, topk)
+        q2k_indices = q2k_indices.expand(num_kv_heads, total_q, topk).contiguous()
     page_table = seqused_k = None
     if str(resolved["kv_layout"]) == "paged":
         k, page_table = _to_pages(k, batch_size, seqlen_kv)
@@ -8176,18 +8264,46 @@ def _reference_output(case: dict[str, Any]) -> torch.Tensor:
     return out.to(q.dtype)
 
 
-def _gate(kv_dtype: str) -> tuple[float, float]:
-    """The packaged gate: looser on fp8 rows, as the task declares."""
-    return (0.1, 0.1) if str(kv_dtype) == "float8_e4m3fn" else (1e-2, 1e-2)
+def _gate(kv_dtype: str) -> tuple[float, float, float]:
+    """Elementwise and tensor-level budgets for the native output dtype."""
+    if str(kv_dtype) == "float8_e4m3fn":
+        return (2e-3, 5e-2, 5e-2)
+    return (5e-4, 1e-2, 1e-2)
 
 
 def check_correctness(outputs: dict[str, Any], **config: Any) -> None:
-    """Gate the kernel output against the oracle in the native output dtype."""
-    case = outputs["case"]
-    atol, rtol = _gate(case["config"]["kv_dtype"])
-    torch.testing.assert_close(
-        outputs["output"], _reference_output(case), atol=atol, rtol=rtol
-    )
+    """Reject non-finite, non-repeatable, pointwise, and RMS regressions."""
+    case = outputs.get("case")
+    resolved = case["config"] if case is not None else _config(**config)
+    first = outputs.get("first")
+    actual = outputs.get("actual", outputs.get("output"))
+    reference = outputs.get("reference")
+    if reference is None:
+        if case is None:
+            raise ValueError("case or reference is required for correctness checking")
+        reference = _reference_output(case)
+    if actual is None:
+        raise ValueError("actual or output is required for correctness checking")
+    for name, tensor in (("actual", actual), ("reference", reference)):
+        if not torch.isfinite(tensor).all():
+            raise AssertionError(f"{name} output contains non-finite values")
+    if first is not None:
+        if not torch.isfinite(first).all():
+            raise AssertionError("first output contains non-finite values")
+        if not torch.equal(first, actual):
+            max_abs = float((first.float() - actual.float()).abs().max())
+            raise AssertionError(
+                f"identical launches are not exactly repeatable; max abs diff={max_abs:.6e}"
+            )
+    atol, rtol, rms_limit = _gate(str(resolved["kv_dtype"]))
+    torch.testing.assert_close(actual, reference, atol=atol, rtol=rtol)
+    diff_rms = torch.sqrt(torch.mean((actual.float() - reference.float()).square()))
+    reference_rms = torch.sqrt(torch.mean(reference.float().square()))
+    rms_ratio = float(diff_rms / (reference_rms + 1e-8))
+    if rms_ratio >= rms_limit:
+        raise AssertionError(
+            f"normalized RMS error ratio {rms_ratio:.6e} must be below {rms_limit:.6e}"
+        )
 
 
 def run_test(**config: Any) -> None:
@@ -8195,9 +8311,21 @@ def run_test(**config: Any) -> None:
     _assert_supported_arch()
     case = prepare_data(**config)
     run = _launch_state(case)
+    case["output"].fill_(float("nan"))
     run()
     torch.cuda.synchronize()
-    check_correctness({"case": case, "output": case["output"]}, **config)
+    first = case["output"].clone()
+    # A second poison value catches kernels that silently leave rows unwritten.
+    case["output"].fill_(42.0)
+    run()
+    torch.cuda.synchronize()
+    actual = case["output"].clone()
+    reference = _reference_output(case)
+    torch.cuda.synchronize()
+    check_correctness(
+        {"case": case, "first": first, "actual": actual, "reference": reference},
+        **config,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -8408,8 +8536,23 @@ def run_gpu(
     cooldown_s = config.pop("cooldown_s", 1.0)
     case = prepared["case"]
     run = prepared["run"]
+    # Correctness is deliberately outside the timed region.  Benchmarks must
+    # not be able to publish a fast number for a kernel that fails the same
+    # finite/determinism/error contract as the test entry point.
+    case["output"].fill_(float("nan"))
     run()
     torch.cuda.synchronize()
+    first = case["output"].clone()
+    case["output"].fill_(42.0)
+    run()
+    torch.cuda.synchronize()
+    actual = case["output"].clone()
+    reference = _reference_output(case)
+    torch.cuda.synchronize()
+    check_correctness(
+        {"case": case, "first": first, "actual": actual, "reference": reference},
+        **config,
+    )
 
     return bench(
         {"tirx": run},
@@ -8436,6 +8579,7 @@ def run_bench(
 
 
 __all__ = [
+    "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
     "check_correctness",
