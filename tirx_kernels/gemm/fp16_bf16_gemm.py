@@ -142,9 +142,125 @@ _THOR_GEMM_CONFIGS = {
 }
 
 
-def _cfg_for(N):
+# Thor knobs measured per (M, N, K) rather than per N. The square rows overlap
+# _THOR_GEMM_CONFIGS and win where they disagree; the rectangular rows have no
+# equivalent in the N-keyed table, which cannot distinguish them at all.
+# fmt: off
+_THOR_SHAPE_CONFIGS = {
+    (1024, 1024, 1024): {"cta_k": 64, "cta_n": 256, "l2_group_size": 4, "overlap_epilogue": True, "pipe_depth": 5, "wb_pipe_depth": 8},
+    (1024, 8192, 2048): {"cta_k": 64, "cta_n": 256, "l2_group_size": 6, "overlap_epilogue": True, "pipe_depth": 5, "wb_pipe_depth": 8},
+    (2048, 2048, 2048): {"cta_k": 64, "cta_n": 256, "l2_group_size": 1, "overlap_epilogue": True, "pipe_depth": 5, "wb_pipe_depth": 8},
+    (2048, 4096, 11008): {"cta_k": 128, "cta_n": 128, "l2_group_size": 4, "overlap_epilogue": True, "pipe_depth": 4, "wb_pipe_depth": 4},
+    (2048, 8192, 1024): {"cta_k": 64, "cta_n": 256, "l2_group_size": 1, "overlap_epilogue": True, "pipe_depth": 4, "wb_pipe_depth": 8},
+    (2048, 11008, 4096): {"cta_k": 64, "cta_n": 256, "l2_group_size": 8, "overlap_epilogue": False, "pipe_depth": 4, "wb_pipe_depth": 8},
+    (4096, 2048, 8192): {"cta_k": 128, "cta_n": 256, "l2_group_size": 4, "overlap_epilogue": True, "pipe_depth": 3, "wb_pipe_depth": 8},
+    (4096, 4096, 4096): {"cta_k": 64, "cta_n": 256, "l2_group_size": 4, "overlap_epilogue": False, "pipe_depth": 4, "wb_pipe_depth": 8},
+    (4096, 4096, 11008): {"cta_k": 128, "cta_n": 128, "l2_group_size": 3, "overlap_epilogue": True, "pipe_depth": 4, "wb_pipe_depth": 4},
+    (4096, 11008, 4096): {"cta_k": 64, "cta_n": 256, "l2_group_size": 2, "overlap_epilogue": False, "pipe_depth": 4, "wb_pipe_depth": 8},
+    (8192, 1024, 2048): {"cta_k": 64, "cta_n": 256, "l2_group_size": 1, "overlap_epilogue": True, "pipe_depth": 5, "wb_pipe_depth": 8},
+    (8192, 8192, 8192): {"cta_k": 128, "cta_n": 256, "l2_group_size": 4, "overlap_epilogue": True, "pipe_depth": 3, "wb_pipe_depth": 8},
+}
+# fmt: on
+
+# Thor's shared memory budget per CTA.
+_THOR_SMEM_LIMIT = 232448
+
+
+def _smem_bytes(cfg):
+    """Bytes the traced kernel's pool holds for this config.
+
+    The literal 2s are the element size: both supported dtypes are 16-bit, so
+    this is dtype-independent. A wider operand dtype would need them replaced
+    by ``ab_type.bits // 8``.
+    """
+    mma_n, blk_k, pipe = cfg["cta_n"], cfg["cta_k"], cfg["pipe_depth"]
+    nc = 1 if cfg["overlap_epilogue"] else 2
+    wb = cfg["wb_pipe_depth"]
+    epi_n = mma_n // wb
+    nd = 2 if wb > 1 else 1
+    return (
+        1024
+        + pipe * nc * 128 * blk_k * 2
+        + pipe * (mma_n // 2) * blk_k * 2
+        + nc * nd * 128 * epi_n * 2
+    )
+
+
+def _cfg_valid(K, cfg):
+    mma_n, wb = cfg["cta_n"], cfg["wb_pipe_depth"]
+    if mma_n % wb or (mma_n // wb) not in (32, 64):
+        return False
+    if cfg["cta_k"] == 128 and K % 64:
+        return False
+    return _smem_bytes(cfg) <= _THOR_SMEM_LIMIT
+
+
+def _thor_heuristic_cfg(M, N, K):
+    """Pick a workable Thor config for a shape with no measured entry.
+
+    Larger N tiles amortize the A stream; two consumer warpgroups double the
+    tile's M extent while sharing one B tile. Both are taken only when the
+    shape is large enough to keep the machine busy at that tile size, and the
+    L2 group is sized so the resident A panel plus the concurrently streamed B
+    columns stay inside this device's L2.
+    """
+    clusters = 10  # 20 SMs, 2-CTA clusters
+    best = None
+    for mma_n in (256, 128, 64):
+        for overlap in (False, True):
+            nc = 1 if overlap else 2
+            tile_m = 256 * nc
+            if -(-M // tile_m) * -(-N // mma_n) < clusters:
+                continue
+            for wb in sorted({mma_n // 32, mma_n // 64} - {0}):
+                for group in (8, 6, 4, 3, 2, 1):
+                    cfg = {
+                        "cta_n": mma_n,
+                        "cta_k": 64,
+                        "l2_group_size": group,
+                        "overlap_epilogue": overlap,
+                        "pipe_depth": 4,
+                        "wb_pipe_depth": wb,
+                    }
+                    if not _cfg_valid(K, cfg):
+                        continue
+                    n_live = -(-clusters // group)
+                    if (group * tile_m + n_live * mma_n) * K * 2 > 30 * 1024 * 1024:
+                        continue
+                    # Prefer the largest panel: B traffic scales as 1/panel.
+                    score = (group * tile_m, mma_n)
+                    if best is None or score > best[0]:
+                        best = (score, cfg)
+        if best is not None:
+            return best[1]
+    for mma_n in (64, 128, 256):
+        cfg = dict(_DEFAULT_CONFIG)
+        cfg.update(
+            cta_n=mma_n,
+            overlap_epilogue=True,
+            l2_group_size=1,
+            wb_pipe_depth=max(mma_n // 64, 1),
+            pipe_depth=4,
+        )
+        if _cfg_valid(K, cfg):
+            return cfg
+    raise ValueError(f"no valid GEMM config for M={M} N={N} K={K}")
+
+
+def _cfg_for(M, N, K):
     if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
-        return _THOR_GEMM_CONFIGS.get(N, GEMM_CONFIGS.get(N, _DEFAULT_CONFIG))
+        override = _THOR_SHAPE_CONFIGS.get((M, N, K))
+        if override is not None:
+            cfg = dict(_DEFAULT_CONFIG)
+            cfg.update(override)
+            return cfg
+        # Unmeasured shapes keep the established N-keyed fallback chain; the
+        # heuristic runs only for an N neither table knows.
+        if N in _THOR_GEMM_CONFIGS:
+            return _THOR_GEMM_CONFIGS[N]
+        if N in GEMM_CONFIGS:
+            return GEMM_CONFIGS[N]
+        return _thor_heuristic_cfg(M, N, K)
     return GEMM_CONFIGS.get(N, _DEFAULT_CONFIG)
 
 
@@ -153,7 +269,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
     if dtype not in _DTYPE_MAP:
         raise ValueError(f"Unsupported dtype: {dtype}")
     ab_type = _DTYPE_MAP[dtype]
-    cfg = _cfg_for(N)
+    cfg = _cfg_for(M, N, Kdim)
     MMA_N = cfg["cta_n"]
     BLK_K = cfg["cta_k"]
     PIPE_DEPTH = cfg["pipe_depth"]
@@ -689,10 +805,26 @@ KERNEL_META = {
     "category": "gemm",
     "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
 }
+# Rectangular shapes the square sweep cannot reach: LLM projection and FFN
+# aspect ratios.
+_RECT_SHAPES = [
+    (1024, 8192, 2048),
+    (2048, 4096, 11008),
+    (2048, 8192, 1024),
+    (2048, 11008, 4096),
+    (4096, 2048, 8192),
+    (4096, 4096, 11008),
+    (4096, 11008, 4096),
+    (8192, 1024, 2048),
+]
 CONFIGS = [
     {"dtype": d, "M": s, "N": s, "K": s, "label": f"{d}_{s}x{s}x{s}"}
     for d in ["fp16", "bf16"]
     for s in [1024, 2048, 4096, 8192, 16384]
+] + [
+    {"dtype": d, "M": M, "N": N, "K": K, "label": f"{d}_{M}x{N}x{K}"}
+    for d in ["fp16", "bf16"]
+    for M, N, K in _RECT_SHAPES
 ]
 
 
