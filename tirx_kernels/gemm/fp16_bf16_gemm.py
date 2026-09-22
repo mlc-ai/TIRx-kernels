@@ -176,8 +176,14 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
     CVT_F32X2 = "cvt.rn.f16x2.f32" if AB_DTYPE == "float16" else "cvt.rn.bf16x2.f32"
     TMEM_LD_OVERLAP = _TMEM_LD_32 if EPI_N == 32 else _TMEM_LD_64
 
-    NUM_M_TILES = M // (256 * NUM_CONSUMER)
-    NUM_N_TILES = N // MMA_N
+    # Ceil-round so shapes that do not divide the tile are still covered. The
+    # tensor maps carry the true global extents, so an overhanging tile reads
+    # zeros -- contributing nothing to the dot product -- and its out-of-range
+    # output rows are dropped by the TMA store.
+    CTA_TILE_M = 256 * NUM_CONSUMER
+    NUM_M_TILES = -(-M // CTA_TILE_M)
+    NUM_N_TILES = -(-N // MMA_N)
+    NUM_K_TILES = -(-Kdim // BLK_K)
     WARPS = (NUM_CONSUMER + 1) * 4
     CONSUMER_WARPS = list(range(NUM_CONSUMER * 4))
 
@@ -380,7 +386,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                         )
 
                 def tma_load(m_idx, n_idx):
-                    with txl.serial(Kdim // BLK_K) as k_tile:
+                    with txl.serial(NUM_K_TILES) as k_tile:
                         tma_load_stage(k_tile, m_idx, n_idx)
                         tma_cur.advance()
 
@@ -459,7 +465,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                     slot = tmem_buf.stage if OVERLAP else pw
                     tmem_pipe.empty.wait(slot, tmem_buf.phase)
                     txl.assign(accum[0], 0)
-                    with txl.serial(Kdim // BLK_K) as _k_tile:
+                    with txl.serial(NUM_K_TILES) as _k_tile:
                         mma_stage(slot)
                         mma_smem.advance()
                     tmem_pipe.full.arrive(slot, cta_group=2, cta_mask=3)
