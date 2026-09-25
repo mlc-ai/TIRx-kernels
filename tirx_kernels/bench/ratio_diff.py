@@ -743,7 +743,7 @@ def main() -> int:
         "-o",
         type=Path,
         default=None,
-        help="Write report path (default: .bench-suite/reports/<run>/tirx_kernels.bench.md)",
+        help="Write report path (default: .bench-suite/reports/<run>/bench.md)",
     )
     args = parser.parse_args()
 
@@ -755,7 +755,7 @@ def main() -> int:
         current_path = Path(args.current).resolve()
         reports_dir = current_path.parent.parent / "reports" / current_path.stem
         reports_dir.mkdir(parents=True, exist_ok=True)
-        output_path = reports_dir / "tirx_kernels.bench.md"
+        output_path = reports_dir / "bench.md"
     output_path.write_text(report)
     print(f"[ratio_diff] written: {output_path}", file=sys.stderr)
     return failures

@@ -60,7 +60,7 @@ def test_task_discovery_needs_no_json_or_package_markers(monkeypatch, tmp_path):
     private = task / "_helpers"
     private.mkdir()
     (private / "kernel.py").write_text(f"KERNEL_META = {_meta(name='private')!r}\n")
-    (task.parent / "tirx_kernels.bench.py").write_text(f"KERNEL_META = {_meta(name='harness')!r}\n")
+    (task.parent / "bench.py").write_text(f"KERNEL_META = {_meta(name='harness')!r}\n")
     monkeypatch.setattr(registry, "_kernels_root", lambda: tmp_path)
 
     index = registry.kernel_index(strict=True)

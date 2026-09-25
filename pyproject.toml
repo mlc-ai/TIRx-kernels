@@ -29,7 +29,6 @@ exclude = ["*.__pycache__"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json", "*.yaml", "*.md", "*.cu"]
-"tirx_kernels.bench" = ["config/**/*.yaml"]
 
 [tool.ruff]
 line-length = 100

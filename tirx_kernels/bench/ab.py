@@ -472,7 +472,7 @@ def run_ab(
         before_payload, after_payload, threshold_pct=threshold, paired=True
     )
     if not no_report:
-        report_path = campaign_root / "tirx_kernels.bench.md"
+        report_path = campaign_root / "bench.md"
         report_path.write_text(report)
         print(f"[bench-suite ab] wrote {report_path}")
         print(report)

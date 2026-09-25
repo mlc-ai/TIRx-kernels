@@ -17,8 +17,8 @@ Before editing a kernel, inspect the current versions of:
 - `tirx_kernels/bench/registry.py`
 - `tirx_kernels/bench/run.py`
 - `tirx_kernels/bench/test.py`
-- `tirx_kernels/bench/README.md` and the relevant file under
-  `tirx_kernels/bench/config/`
+- `tirx_kernels/bench/README.md` and the relevant YAML file under
+  `tirx_kernels/<task_set>/<task>/`
 - `LICENSE`, `NOTICE`, `licenses/`, and the License section of `README.md`
 - `tests/lint/check_license_headers.py` and the license hook in
   `.pre-commit-config.yaml`
@@ -112,7 +112,7 @@ Important:
 - `KERNEL_META["name"]` must be globally unique and is the CLI kernel name.
 - `category` is the containing task set under `tirx_kernels/`. Kernels import
   through `tirx_kernels.<task_set>.<task>.<device>.<module>`. JSON task metadata
-  and task-local `tirx_kernels.bench.py` are optional; discovery still reads `KERNEL_META`.
+  and task-local `bench.py` are optional; discovery still reads `KERNEL_META`.
 - Multiple implementations may live side by side in a device directory. Do not
   add a dispatcher or change configuration formats as part of a directory move.
 - `get_kernel` returns the TIRx `PrimFunc`, or a list for a multi-kernel workload.
@@ -222,7 +222,7 @@ There are three distinct configuration layers. Do not collapse their roles:
 1. `CONFIGS` is the labeled correctness/default module matrix.
 2. Optional `BENCH_CONFIGS` is the module benchmark matrix. The benchmark CLI
    prefers it and falls back to `CONFIGS` when it is absent.
-3. `tirx_kernels/bench/config/<task_set>/<task>/<kernel>.yaml` selects the curated regression
+3. `tirx_kernels/<task_set>/<task>/<kernel>.yaml` selects the curated regression
    sweep and marks each benchmark config `default: true|false`.
 
 Every module config must have a stable, meaningful `label`; the runner removes

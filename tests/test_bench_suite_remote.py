@@ -174,7 +174,7 @@ def _make_package(root: Path) -> Path:
     (root / "tirx_kernels" / "tirx_lite" / "__init__.py").write_text("")
     (root / "tirx_kernels" / "bench").mkdir()
     (root / "tirx_kernels" / "bench" / "baseline.json").write_text("{}")
-    (root / "tirx_kernels" / "bench" / "config.yaml").write_text("kernel: rmsnorm\n")
+    (kernel_dir.parent / "rmsnorm.yaml").write_text("kernel: rmsnorm\n")
     (root / ".git").mkdir()
     (root / ".git" / "config").write_text("must not ship")
     return root
@@ -194,7 +194,7 @@ def test_build_tree_archive_is_deterministic_and_excludes_caches(tmp_path):
     assert names == sorted(names)
     assert "tirx_kernels/basic/rmsnorm/b200/rmsnorm.py" in names
     assert "tirx_kernels/basic/rmsnorm/b200/kernel.cu" in names
-    assert "tirx_kernels/bench/config.yaml" in names
+    assert "tirx_kernels/basic/rmsnorm/rmsnorm.yaml" in names
     assert "tirx_kernels/tirx_lite/__init__.py" in names
     assert "tirx_kernels/__init__.py" in names
     assert not any(name.startswith(".git/") for name in names)

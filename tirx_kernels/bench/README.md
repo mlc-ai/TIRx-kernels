@@ -11,8 +11,9 @@ replace the direct verdict. The same flag exists on
 
 ## Workloads
 
-`config/<task_set>/<task>/<kernel>.yaml` is the workload source of truth. Each
-registered kernel has one file. Files with `default_suite: true` select one to
+`tirx_kernels/<task_set>/<task>/<kernel>.yaml` is the workload source of truth. Each
+registered kernel has one file beside its task's device directories. Multiple
+implementations of a task keep separate files named after their public kernel names. Files with `default_suite: true` select one to
 three representative single-GPU rows with `default: true`; curated three-row
 files label them `small`, `medium`, and `large`. The current default roster is
 274 rows across 93 device kernels: 241 rows from 82 kernels validated on
@@ -141,7 +142,7 @@ process each; A/B campaigns default to `--max-in-flight 1` so the two sides of a
 pair are adjacent on the lease. A side that fails or lands on a different GPU
 fails the pair; there is no retry. Artifacts are written under
 `.bench-suite/ab/<stamp>-<name>/` (`campaign.json`, `before.json`, `after.json`,
-`tirx_kernels.bench.md`, `workloads/NNN/<side>.log`) and the direct gate remains strict
+`bench.md`, `workloads/NNN/<side>.log`) and the direct gate remains strict
 `after/before < 1.01`.
 
 ## Execution model
@@ -197,7 +198,7 @@ Useful options:
 | Kind | Location |
 |---|---|
 | Runner | `run.py` |
-| Workload definitions | `config/<task_set>/<task>/<kernel>.yaml` |
+| Workload definitions | `tirx_kernels/<task_set>/<task>/<kernel>.yaml` |
 | Canonical before baseline | `baseline.json`, `baseline.md` |
 | Baseline replacement | `promote_baseline.py` |
 | Direct gate | `ratio_diff.py` |
@@ -205,7 +206,7 @@ Useful options:
 | Client backend | `remote.py` |
 | Raw runs | `.bench-suite/runs/<id>.json` |
 | Per-workload logs | `.bench-suite/logs/<kernel>__<config>.log` (server stdout/stderr, request id, timings) |
-| Reports | `.bench-suite/reports/<id>/tirx_kernels.bench.md` |
+| Reports | `.bench-suite/reports/<id>/bench.md` |
 
 ## Reading a ratio you do not trust
 

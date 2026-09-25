@@ -10,8 +10,9 @@ Task sets live under the root-level `tirx_kernels/` package as
 `tirx_kernels/<task_set>/<task>/<device>/`.
 Each task has one home; distinct implementations remain side by side, with no
 required dispatcher. `definition.json`, `workloads.json`, and task-local
-`tirx_kernels.bench.py` are optional. Existing Python configuration lists and suite YAML
-retain their formats. See [the layout guide](docs/layout.md).
+`bench.py` are optional. Existing Python configuration lists and suite YAML
+retain their formats. Each suite YAML lives beside its task's device directories
+as `<kernel>.yaml`. See [the layout guide](docs/layout.md).
 
 The hardware directory identifies the implementation's primary target. The exact
 execution allowlist remains `KERNEL_META["runtime_cuda_archs"]`. Unless annotated,

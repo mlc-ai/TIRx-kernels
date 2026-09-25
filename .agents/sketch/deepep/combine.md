@@ -614,7 +614,7 @@ exact sum once, identically to fp32-accumulate-then-cast.
   4 configs (t128 / t4096 / t1024 masked 0.3 / t1024 align128), reference
   `ElasticBuffer.combine` on identical group-sum inputs; compare `combined_x`
   and `combined_topk_weights` bitwise.
-- Benchmark: `tirx_kernels/bench/config/deepep/combine/deepep_combine.yaml`
+- Benchmark: `tirx_kernels/deepep/combine/deepep_combine.yaml`
   (`num_gpus: 8`, `timer: kineto`, `default: false`), config
   `t4096_h7168_e256_k6`; gate `source_time / tirx_time > 0.99`.
 
