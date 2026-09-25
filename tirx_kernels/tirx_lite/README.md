@@ -40,7 +40,7 @@ def zero(out: txl.gptr(txl.f32)):
   the resulting `PrimFunc` points to the `@txl.kernel` declaration.
 
 You can learn tirx-lite APIs and complete implementation patterns from the canonical
-modules under `tirx_kernels/`. Do not copy API spellings from historical TIRx
+modules under the root-level task sets. Do not copy API spellings from historical TIRx
 parser kernels.
 
 ## Selecting shared-memory descriptors

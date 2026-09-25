@@ -23,7 +23,7 @@ behind flashinfer.cascade.merge_state.
 
 This non-executable design sketch describes the thread roles, control flow,
 register storage, and PTX-level operations of
-[`tirx_kernels/flashinfer/cascade/merge_state.py`](../../../../tirx_kernels/flashinfer/cascade/merge_state.py).
+[`tirx_kernels/flashinfer/merge_state/b200/merge_state.py`](../../../../tirx_kernels/flashinfer/merge_state/b200/merge_state.py).
 That TIRx module is the authoritative implementation.
 
 The source is fixed at FlashInfer commit

@@ -10,7 +10,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 
 This is a non-executable execution sketch for the single parameterized TIRx
 module
-[`tirx_kernels/cudnn/swiglu/dense_gemm_persistent_swiglu.py`](../../tirx_kernels/cudnn/swiglu/dense_gemm_persistent_swiglu.py).
+[`tirx_kernels/cudnn/dense_gemm_persistent_swiglu/b200/dense_gemm_persistent_swiglu.py`](../../tirx_kernels/cudnn/dense_gemm_persistent_swiglu/b200/dense_gemm_persistent_swiglu.py).
 It freezes the source kernel's storage, six-warp role split, persistent
 scheduler, asynchronous protocols, dense MMA mainloop, paired accumulator
 epilogue, three-output TMA store sequence, and teardown. After the independent

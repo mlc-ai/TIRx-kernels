@@ -17,12 +17,12 @@ from typing import Any
 import check_radix_topk_single_cta_no_tile as no_tile
 
 import tvm
-from tirx_kernels.flashinfer.topk import radix_topk_multi_cta as target
+from tirx_kernels.flashinfer.topk.b200 import radix_topk_multi_cta as target
 
 no_tile.target = target
 no_tile.TARGETS = (
-    no_tile.REPO / "tirx_kernels/flashinfer/topk/radix_topk_multi_cta.py",
-    no_tile.REPO / "tirx_kernels/flashinfer/utils/topk_radix.py",
+    no_tile.REPO / "tirx_kernels/flashinfer/topk/b200/radix_topk_multi_cta.py",
+    no_tile.REPO / "tirx_kernels/flashinfer/_shared/topk_radix.py",
 )
 
 

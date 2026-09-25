@@ -24,7 +24,7 @@ can stage a whole row in shared memory.
 
 This non-executable design sketch describes the storage layout, thread roles,
 control flow, and PTX-level operations of
-[`tirx_kernels/flashinfer/topk/radix_topk_single_cta.py`](../../../../tirx_kernels/flashinfer/topk/radix_topk_single_cta.py).
+[`tirx_kernels/flashinfer/topk/b200/radix_topk_single_cta.py`](../../../../tirx_kernels/flashinfer/topk/b200/radix_topk_single_cta.py).
 That TIRx module is the authoritative implementation.
 
 The instantiations are `DTYPE in {f32, f16, bf16}` x `MODE in {Basic,

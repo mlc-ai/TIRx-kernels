@@ -11,7 +11,7 @@ AddRMSNormFP4QuantKernel. See LICENSE, NOTICE, and licenses/ for applicable term
 
 This non-executable sketch freezes the implementation shape of FlashInfer's
 CuTe-DSL `AddRMSNormFP4QuantKernel` for
-[`tirx_kernels/flashinfer/norm/add_rmsnorm_fp4quant.py`](../../../../tirx_kernels/flashinfer/norm/add_rmsnorm_fp4quant.py).
+[`tirx_kernels/flashinfer/fused_add_rmsnorm_quant/b200/add_rmsnorm_fp4quant.py`](../../../../tirx_kernels/flashinfer/fused_add_rmsnorm_quant/b200/add_rmsnorm_fp4quant.py).
 It records the source execution skeleton rather than a mathematically equivalent
 replacement and is frozen after its first independent reviewer PASS.
 

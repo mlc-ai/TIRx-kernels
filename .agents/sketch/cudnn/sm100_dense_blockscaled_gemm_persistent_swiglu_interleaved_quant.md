@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 # cuDNN SM100 block-scaled persistent GEMM + interleaved SwiGLU quant: coarse WASP pipeline sketch
 
 This is a non-executable execution sketch for the single parameterized module
-[`tirx_kernels/cudnn/swiglu/dense_blockscaled_gemm_persistent_swiglu_interleaved_quant.py`](../../tirx_kernels/cudnn/swiglu/dense_blockscaled_gemm_persistent_swiglu_interleaved_quant.py).
+[`tirx_kernels/cudnn/dense_blockscaled_gemm_persistent_swiglu_interleaved_quant/b200/dense_blockscaled_gemm_persistent_swiglu_interleaved_quant.py`](../../tirx_kernels/cudnn/dense_blockscaled_gemm_persistent_swiglu_interleaved_quant/b200/dense_blockscaled_gemm_persistent_swiglu_interleaved_quant.py).
 It freezes the six-warp split, persistent scheduler, A/B/SFA/SFB block-scaled
 mainloop, paired AB12 stores, interleaved SwiGLU, optional amax, optional SFC
 quantization, C stores, and two-CTA teardown. After its first reviewer PASS this
@@ -807,7 +807,7 @@ PTX opcode belongs to one cited section.
 - Registry name is
   `cudnn_sm100_dense_blockscaled_gemm_persistent_swiglu_interleaved_quant`,
   category `cudnn`, compute capability 10.
-- Device code imports only `tirx_kernels.tirx_lite as txl`, declares one rank-1 dynamic
+- Device code imports only `tirx_lite as txl`, declares one rank-1 dynamic
   `u8` arena, and uses only integer offsets/strides/swizzle bits/raw descriptors.
 - The fixed pointer ABI is `A/B/SFA/SFB/C/AB12/amax/SFC/norm_const/alpha`.
 - The module exports `KERNEL_META`, deterministic pairwise `CONFIGS`,

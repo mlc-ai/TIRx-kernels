@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 
 This file is a non-executable execution sketch. It freezes the implementation
 shape of FlashInfer's CuTe-DSL `QKRMSNormKernel` for the paired target
-[`tirx_kernels/flashinfer/norm/qk_rmsnorm.py`](../../../../tirx_kernels/flashinfer/norm/qk_rmsnorm.py).
+[`tirx_kernels/flashinfer/qk_rmsnorm/b200/qk_rmsnorm.py`](../../../../tirx_kernels/flashinfer/qk_rmsnorm/b200/qk_rmsnorm.py).
 The target module is the source of truth once this sketch has passed its first
 independent source/PTX review.
 

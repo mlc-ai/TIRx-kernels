@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 # cuDNN SM100 dense block-scaled persistent GEMM + sReLU quant: coarse WASP pipeline sketch
 
 This is the non-executable execution sketch for
-[`tirx_kernels/cudnn/srelu/dense_blockscaled_gemm_persistent_srelu_quant.py`](../../tirx_kernels/cudnn/srelu/dense_blockscaled_gemm_persistent_srelu_quant.py).
+[`tirx_kernels/cudnn/dense_blockscaled_gemm_persistent_srelu_quant/b200/dense_blockscaled_gemm_persistent_srelu_quant.py`](../../tirx_kernels/cudnn/dense_blockscaled_gemm_persistent_srelu_quant/b200/dense_blockscaled_gemm_persistent_srelu_quant.py).
 It freezes the six-warp persistent program, the A/B/SFA/SFB block-scaled
 mainloop, the independent C and D store pipelines, `relu(C)^2 * prob`, mandatory
 FP32 amax, and one-/two-CTA TMEM lifetime. After the first reviewer PASS this
@@ -58,7 +58,7 @@ store it and never read it. Independent `true`/`false` anchor exports are
 byte-identical.
 
 No first-class layout, tile, or fragment object may appear in device code.
-The implementation imports only `tirx_kernels.tirx_lite as txl`. Shared memory is one
+The implementation imports only `tirx_lite as txl`. Shared memory is one
 rank-1 `u8` arena. Stages, swizzles, TensorMap coordinates, UMMA descriptors,
 register fragments, and TMEM rows/columns are scalar integer expressions.
 
@@ -684,6 +684,6 @@ the central benchmark API unchanged.
 
 Structural gates reject `TilePrimitiveCall`, `tirx.tile.*`, `tile_primitive`,
 any first-class layout, non-rank-1 shared buffers, or imports other than the
-normal Python/runtime dependencies plus `tirx_kernels.tirx_lite as txl` for device
+normal Python/runtime dependencies plus `tirx_lite as txl` for device
 construction. Generated PTX must retain the instruction-selection and protocol
 edges cited above.

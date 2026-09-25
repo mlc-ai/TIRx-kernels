@@ -22,7 +22,7 @@ edc7c2833327d699d70b616c6f264b6ae92599b2.
 
 This is a non-executable semantic execution sketch for the direct SM100 Flex
 Attention backward main kernel. The executable source of truth becomes
-[`tirx_kernels/cudnn/flex_attention/flex_attention_backward_sm100.py`](../../../tirx_kernels/cudnn/flex_attention/flex_attention_backward_sm100.py)
+[`tirx_kernels/cudnn/flex_attention_backward/b200/flex_attention_backward_sm100.py`](../../../tirx_kernels/cudnn/flex_attention_backward/b200/flex_attention_backward_sm100.py)
 and its private package after this sketch passes review. Planning, forward/LSE
 generation, dPsum preprocessing, accumulator clears, and final gradient casts
 are host/harness responsibilities and are outside the timed kernel.

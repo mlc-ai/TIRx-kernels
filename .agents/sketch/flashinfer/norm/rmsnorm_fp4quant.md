@@ -11,7 +11,7 @@ RMSNormFP4QuantKernel. See LICENSE, NOTICE, and licenses/ for applicable terms.
 
 This non-executable sketch freezes the implementation shape of FlashInfer's
 CuTe-DSL `RMSNormFP4QuantKernel` for
-[`tirx_kernels/flashinfer/norm/rmsnorm_fp4quant.py`](../../../../tirx_kernels/flashinfer/norm/rmsnorm_fp4quant.py).
+[`tirx_kernels/flashinfer/rmsnorm_quant/b200/rmsnorm_fp4quant.py`](../../../../tirx_kernels/flashinfer/rmsnorm_quant/b200/rmsnorm_fp4quant.py).
 It records the source execution skeleton, not a mathematically equivalent
 replacement. The target is implemented only after independent source/PTX
 review, and this file is permanently frozen after its first reviewer PASS.
@@ -803,5 +803,5 @@ against an independent FP32 oracle, verifies input/weight/global-scale
 immutability, output identity and untouched padding/guards.
 
 The required performance matrix is exactly the six pinned FlashInfer sample
-rows. Only one reference-enabled `tirx_kernels.bench_suite` artifact may decide
+rows. Only one reference-enabled `bench` artifact may decide
 performance retention; diagnostic timing or profiler duration is not a gate.

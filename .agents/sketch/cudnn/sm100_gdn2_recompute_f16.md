@@ -13,7 +13,7 @@ aded9909c3c2a897fdbc7b5fd79fa53bc915f4f5.
 This is a non-executable operation sketch, not Python, a builder API, a new IR,
 or a mathematical reference. It freezes the source program before device-code
 transcription. The executable source of truth belongs in
-[`tirx_kernels/cudnn/linear_attention/gdn2_recompute_f16.py`](../../../tirx_kernels/cudnn/linear_attention/gdn2_recompute_f16.py).
+[`tirx_kernels/cudnn/gdn2_recompute_f16/b200/gdn2_recompute_f16.py`](../../../tirx_kernels/cudnn/gdn2_recompute_f16/b200/gdn2_recompute_f16.py).
 
 The frozen source is the standalone `chunk_gdn2_recompute_sm100` two-launch
 entry at the commit above. It is the state/checkpoint-only GDN2 path: BF16 or

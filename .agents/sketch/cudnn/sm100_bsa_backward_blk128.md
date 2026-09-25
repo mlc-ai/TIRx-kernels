@@ -22,11 +22,11 @@ plus its bsa_bwd_preprocess.py and bsa_bwd_postprocess.py launch helpers.
 # cudnn_sm100_bsa_backward_blk128: source-shaped backward sketch
 
 This is the non-executable design for
-`tirx_kernels/cudnn/bsa/block_sparse_attention_backward_sm100_blk128.py`.
-The implementation imports `tirx_kernels.tirx_lite as txl` and nothing else from a
+`tirx_kernels/cudnn/block_sparse_attention_backward/b200/block_sparse_attention_backward_sm100_blk128.py`.
+The implementation imports `tirx_lite as txl` and nothing else from a
 kernel language.  It has no tile primitive, first-class layout, rank-greater-
 than-one shared allocation, CUDA function call, inline CUDA source, or change
-under `tirx_kernels/tirx_lite`.
+under `tirx_lite`.
 
 The public operation preserves the source launch graph:
 
@@ -571,4 +571,4 @@ c08 and c13.
 The low-level representation contract is immutable:
 `inspect_low_level_ir(...).ok`, zero function calls, only rank-1 shared
 allocation, no tile primitive/layout, no inline CUDA source/call, no exemptions,
-and no changes under `tirx_kernels/tirx_lite`, TVM or low-level-IR policy code.
+and no changes under `tirx_lite`, TVM or low-level-IR policy code.

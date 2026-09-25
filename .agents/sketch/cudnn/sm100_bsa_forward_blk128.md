@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 # cuDNN SM100 blk128 block-sparse attention forward: coarse WASP pipeline sketch
 
 This is the non-executable, mechanically translatable sketch for
-[`tirx_kernels/cudnn/bsa/block_sparse_attention_forward_sm100_blk128.py`](../../../tirx_kernels/cudnn/bsa/block_sparse_attention_forward_sm100_blk128.py).
+[`tirx_kernels/cudnn/block_sparse_attention_forward/b200/block_sparse_attention_forward_sm100_blk128.py`](../../../tirx_kernels/cudnn/block_sparse_attention_forward/b200/block_sparse_attention_forward_sm100_blk128.py).
 The authoritative source is
 `python/cudnn/block_sparse_attention/csrc/fwd/sm100_blk128/bsa_fwd_sm100.py`
 at commit `aded9909c3c2a897fdbc7b5fd79fa53bc915f4f5`, SHA256
@@ -910,7 +910,7 @@ occurrence above. Address arithmetic maps to integer functions, never a layout.
 
 The public module exports `KERNEL_META`, `CONFIGS`, `BENCH_CONFIGS`,
 `get_kernel`, `prepare_data`, `run_test`, `prepare_bench`, `run_gpu`, and
-`run_bench`. Device code imports only `tirx_kernels.tirx_lite as txl`; low-level
+`run_bench`. Device code imports only `tirx_lite as txl`; low-level
 instruction families use `txl.ptx[...]`. There is no inline CUDA function call,
 tile primitive, first-class layout or multidimensional SMEM allocation.
 
@@ -923,7 +923,7 @@ outputs. Both are checked against the same FP32 block-sparse oracle: O uses
 exact; NaN is forbidden; empty O is bitwise zero and empty LSE exactly `-inf`;
 no-LSE sentinels remain untouched. No match fraction or skip is valid.
 
-Performance truth is exclusively `python -m tirx_kernels.bench_suite` with the
+Performance truth is exclusively `python -m tirx_kernels.bench suite` with the
 frozen 24-row matrix and pinned cuDNN Frontend reference. Each row must have five
 finite positive Proton samples for both implementations and strict
 `mean(cudnn_frontend)/mean(tirx) > 0.99`.

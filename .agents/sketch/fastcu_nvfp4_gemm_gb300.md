@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 # fast.cu GB300 NVFP4 GEMM r9: coarse WASP pipeline sketch
 
 This is a non-executable operation-level sketch for
-[`tirx_kernels/fastcu/nvfp4_gemm_gb300.py`](../../tirx_kernels/fastcu/nvfp4_gemm_gb300.py),
+[`tirx_kernels/basic/nvfp4_gemm/gb300/nvfp4_gemm_gb300.py`](../../tirx_kernels/basic/nvfp4_gemm/gb300/nvfp4_gemm_gb300.py),
 which becomes the executable source of truth. It freezes the source r9 kernel's
 fixed two-CTA tile, seven-warp split, six-slot A/B feed, seven-slot scale feed,
 two overlapping TMEM accumulators, exact K96/K64 issue order, direct FP16

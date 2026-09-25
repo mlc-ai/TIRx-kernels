@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from tirx_kernels import runner
+from tirx_kernels.bench import runner
 
 
 def test_offline_cuda_compile_defaults_to_nvrtc(monkeypatch) -> None:

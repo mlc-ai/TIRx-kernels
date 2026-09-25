@@ -11,7 +11,7 @@ RMSNormQuantKernel. See LICENSE, NOTICE, and licenses/ for applicable terms.
 
 This file is a non-executable execution sketch. It freezes the implementation
 shape of FlashInfer's CuTe-DSL `RMSNormQuantKernel` for the paired target
-[`tirx_kernels/flashinfer/norm/rmsnorm_quant.py`](../../../../tirx_kernels/flashinfer/norm/rmsnorm_quant.py).
+[`tirx_kernels/flashinfer/rmsnorm_quant/b200/rmsnorm_quant.py`](../../../../tirx_kernels/flashinfer/rmsnorm_quant/b200/rmsnorm_quant.py).
 The target becomes executable only after this sketch passes independent
 source/line-info-PTX review; after the first PASS this file is permanently
 frozen.

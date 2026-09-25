@@ -25,7 +25,7 @@ flashinfer.quantization.mxfp4_quantize(backend="cute-dsl").
 
 This non-executable design sketch describes the thread roles, control flow,
 storage placement, and PTX-level operations of
-[`tirx_kernels/flashinfer/quantization/mxfp4_quantize.py`](../../tirx_kernels/flashinfer/quantization/mxfp4_quantize.py).
+[`tirx_kernels/flashinfer/mxfp4_quantize/b200/mxfp4_quantize.py`](../../tirx_kernels/flashinfer/mxfp4_quantize/b200/mxfp4_quantize.py).
 That TIRx module is the authoritative implementation.
 
 The instantiations are `DTYPE in {f16, bf16}` crossed with

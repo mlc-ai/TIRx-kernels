@@ -12,7 +12,7 @@ terms.
 
 This file is a non-executable execution sketch. It freezes the implementation
 shape of FlashInfer's CUDA `meta_fused_layernorm` for
-[`tirx_kernels/flashinfer/norm/fused_dit_layernorm.py`](../../../../tirx_kernels/flashinfer/norm/fused_dit_layernorm.py).
+[`tirx_kernels/flashinfer/fused_dit_layernorm/b200/fused_dit_layernorm.py`](../../../../tirx_kernels/flashinfer/fused_dit_layernorm/b200/fused_dit_layernorm.py).
 The target may become executable only after independent source/PTX review; this
 file is permanently frozen after its first reviewer PASS.
 

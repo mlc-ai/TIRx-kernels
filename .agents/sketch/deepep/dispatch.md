@@ -22,7 +22,7 @@ to show the two CUDA kernels as:
 - hardware instruction selection stated per key operation.
 
 The implementation represented by this sketch is maintained in
-[`tirx_kernels/deepep/dispatch.py`](../../tirx_kernels/deepep/dispatch.py).
+[`tirx_kernels/deepep/dispatch/b200/dispatch.py`](../../tirx_kernels/deepep/dispatch/b200/dispatch.py).
 That module is the source of truth.
 
 **In scope.** `dispatch_impl` instantiated with `kIsScaleupNVLink=true`
@@ -68,7 +68,7 @@ at every use site.
    `cudaGridDependencySynchronize` map to
    `T.ptx.griddepcontrol.launch_dependents()` / `.wait()` plus the
    `tirx.use_programtic_dependent_launch` kernel-launch tag (precedent:
-   `tirx_kernels/deepgemm/paged_mqa_logits_fp4.py`).
+   `tirx_kernels/deepgemm/paged_mqa_logits/b200/paged_mqa_logits_fp4.py`).
 
 Everything else — warp roles, counting and prefix-sum math, dedup and slot
 allocation, TMA load/store dataflow, barrier protocols, timeout policy — is a
@@ -767,7 +767,7 @@ exit-barrier start).
 
 ### TIRx module and benchmark contract
 
-- Module: `tirx_kernels/deepep/dispatch.py`; `get_kernel` returns the PrimFunc
+- Module: `tirx_kernels/deepep/dispatch/b200/dispatch.py`; `get_kernel` returns the PrimFunc
   pair; per-rank worker launches kernel 1 then kernel 2 on one stream with the
   PDL launch attribute on both.
 - Rank-local inputs from `prepare_data`; symmetric window allocated per rank
@@ -777,7 +777,7 @@ exit-barrier start).
 - Correctness: outputs and handle metadata compared rank-local against the
   source `ElasticBuffer.dispatch` on identical inputs (bf16, do_cpu_sync=false,
   non-cached, non-expand).
-- Benchmark: `tirx_kernels.bench_suite`, `num_gpus: 8`, `timer: kineto`; timed
+- Benchmark: `bench`, `num_gpus: 8`, `timer: kineto`; timed
   scope is the two-kernel sequence on both sides (source:
   `dispatch_impl` + `dispatch_copy_epilogue_impl`).
 

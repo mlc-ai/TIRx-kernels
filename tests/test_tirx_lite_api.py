@@ -115,7 +115,9 @@ def test_sigmoid_tanh_approx_f32_has_materialized_ptx_call_contract():
     names = []
     structural_walk(probe.func.body, (ir.Call, lambda op: names.append(op.op.name)))
     assert [name for name in names if name.startswith("tirx.ptx.")] == [
-        "tirx.ptx.tanh", "tirx.ptx.fma", "tirx.ptx.st"
+        "tirx.ptx.tanh",
+        "tirx.ptx.fma",
+        "tirx.ptx.st",
     ]
 
 
@@ -130,7 +132,11 @@ def test_sigmoid_tanh_approx_f32_preserves_tanh_input():
 
 
 def test_mamba_stochastic_conversion_uses_thor_fallback(monkeypatch):
-    from tirx_kernels.flashinfer.mamba.selective_state_update_mtp_simple import _cvt_rs_f16x2_f32
+    from tirx_kernels.flashinfer.selective_state_update.b200 import (
+        selective_state_update_mtp_simple as mamba,
+    )
+
+    _cvt_rs_f16x2_f32 = mamba._cvt_rs_f16x2_f32
 
     for arch in ("sm_100a", "sm_103a", "sm_107a", "sm_110a"):
         monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", arch)
@@ -168,10 +174,13 @@ def test_stack_alloca_is_bound_exactly_once():
 
     statements = []
     structural_walk(probe.func.body, (tirx.Bind, lambda op: statements.append(op)))
-    assert sum(
-        getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_stack_alloca"
-        for op in statements
-    ) == 1
+    assert (
+        sum(
+            getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_stack_alloca"
+            for op in statements
+        )
+        == 1
+    )
 
 
 def test_call_packed_has_statement_semantics():
@@ -182,10 +191,13 @@ def test_call_packed_has_statement_semantics():
 
     statements = []
     structural_walk(probe.func.body, (tirx.Evaluate, lambda op: statements.append(op)))
-    assert sum(
-        getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_call_packed"
-        for op in statements
-    ) == 1
+    assert (
+        sum(
+            getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_call_packed"
+            for op in statements
+        )
+        == 1
+    )
 
 
 def test_retired_binding_forms_are_rejected_with_guidance():

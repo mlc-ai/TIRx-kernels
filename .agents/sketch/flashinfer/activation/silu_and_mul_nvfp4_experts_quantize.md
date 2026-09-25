@@ -26,7 +26,7 @@ licenses/ for upstream attribution.
 
 This non-executable design sketch describes the thread roles, control flow,
 storage placement, and PTX-level operations of
-[`tirx_kernels/flashinfer/activation/silu_and_mul_nvfp4_experts_quantize.py`](../../tirx_kernels/flashinfer/activation/silu_and_mul_nvfp4_experts_quantize.py).
+[`tirx_kernels/flashinfer/silu_and_mul_nvfp4_experts_quantize/b200/silu_and_mul_nvfp4_experts_quantize.py`](../../tirx_kernels/flashinfer/silu_and_mul_nvfp4_experts_quantize/b200/silu_and_mul_nvfp4_experts_quantize.py).
 That TIRx module is the authoritative implementation.
 
 The two instantiations are `DTYPE in {f16, bf16}` of the default-environment

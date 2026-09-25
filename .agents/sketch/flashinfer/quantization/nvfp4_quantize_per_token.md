@@ -25,7 +25,7 @@ backend="cute-dsl").
 
 This non-executable design sketch describes the thread roles, control flow,
 storage placement, and PTX-level operations of
-[`tirx_kernels/flashinfer/quantization/nvfp4_quantize_per_token.py`](../../tirx_kernels/flashinfer/quantization/nvfp4_quantize_per_token.py).
+[`tirx_kernels/flashinfer/nvfp4_quantize_per_token/b200/nvfp4_quantize_per_token.py`](../../tirx_kernels/flashinfer/nvfp4_quantize_per_token/b200/nvfp4_quantize_per_token.py).
 That TIRx module is the authoritative implementation.
 
 The instantiations are `DTYPE in {f16, bf16}` crossed with

@@ -23,7 +23,7 @@ full-DIM column-tile ring, one-producer/many-consumer warp split, three-phase
 TMA protocol, B/C publication rendezvous, conflict-free shared-column
 permutation, optional Philox conversion, two-lane row reduction, and output
 epilogue that the TIRx port must preserve. The target module is
-[`tirx_kernels/flashinfer/mamba/selective_state_update_stp_horizontal.py`](../../tirx_kernels/flashinfer/mamba/selective_state_update_stp_horizontal.py).
+[`tirx_kernels/flashinfer/selective_state_update/b200/selective_state_update_stp_horizontal.py`](../../tirx_kernels/flashinfer/selective_state_update/b200/selective_state_update_stp_horizontal.py).
 It may become executable only after this sketch passes independent review.
 
 The frozen FlashInfer commit is

@@ -25,7 +25,7 @@ staging buffers and their per-thread strided views, the single CTA barrier that
 separates the two thread-index mappings, the reduction and butterfly orders, and
 the predicated output/checkpoint/orphan paths that the TIRx port must preserve.
 The implementation represented by this sketch is maintained in
-[`tirx_kernels/flashinfer/kda/recurrent_kda_decode_grouped.py`](../../../../tirx_kernels/flashinfer/kda/recurrent_kda_decode_grouped.py),
+[`tirx_kernels/flashinfer/kda_decode/b200/recurrent_kda_decode_grouped.py`](../../../../tirx_kernels/flashinfer/kda_decode/b200/recurrent_kda_decode_grouped.py),
 which becomes the source of truth after this sketch passes review.
 
 The target is SM100a/B200. `D = 128` (`K == V`), `VSPLIT = 4`, `RATIO = 1`,
@@ -615,12 +615,12 @@ if (n == 0) & (vz == 0) & (tid < D):
 
 ## TIRx module and benchmark contract
 
-* Module: `tirx_kernels/flashinfer/kda/recurrent_kda_decode_grouped.py`,
+* Module: `tirx_kernels/flashinfer/kda_decode/b200/recurrent_kda_decode_grouped.py`,
   `KERNEL_META["name"] = "recurrent_kda_decode_grouped"`, `runtime_cuda_archs = ["sm_100a"]`.
 * Helpers (`_ptx_*`, non-FTZ scalar math, BF16 pack/convert, shuffles, guarded
   stores) are imported from the one-warp sibling module rather than duplicated.
 * Every global **and shared** access must go through raw PTX with `ptr_to`:
-  `tirx_lite/low_level_ir.py` forbids `BufferLoad`/`BufferStore` on `global`, `shared`,
+  `tirx_kernels/tirx_lite/low_level_ir.py` forbids `BufferLoad`/`BufferStore` on `global`, `shared`,
   and `shared.dyn` alike.
 * TVM compiles with `--use_fast_math`, so native FP32 arithmetic lowers to
   `.ftz` forms. The source's only `.ftz` instruction is `ex2.approx.ftz.f32`;

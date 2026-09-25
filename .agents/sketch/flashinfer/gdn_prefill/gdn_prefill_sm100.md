@@ -24,7 +24,7 @@ to show the TIRx kernel as:
   and schedule have been stated.
 
 The implementation represented by this sketch is maintained in
-[`tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py`](../../tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py).
+[`tirx_kernels/flashinfer/gdn_prefill/b200/gdn_prefill_sm100.py`](../../tirx_kernels/flashinfer/gdn_prefill/b200/gdn_prefill_sm100.py).
 That module is the source of truth.
 
 The specialization is fixed to FP16 Q/K/V/O and inverse storage, FP32

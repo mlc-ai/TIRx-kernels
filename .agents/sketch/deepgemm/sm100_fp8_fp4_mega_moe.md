@@ -38,9 +38,9 @@ show the TIRx kernel as:
   and schedule have been stated.
 
 The implementation represented by this sketch is maintained in
-[`tirx_kernels/deepgemm/_sm100_fp8_fp4_mega_moe/`](../../tirx_kernels/deepgemm/_sm100_fp8_fp4_mega_moe/__init__.py)
+[`tirx_kernels/deepgemm/_sm100_fp8_fp4_mega_moe/`](../../tirx_kernels/deepgemm/fp8_fp4_mega_moe/b200/_sm100_fp8_fp4_mega_moe/__init__.py)
 with the thin entry module
-[`tirx_kernels/deepgemm/sm100_fp8_fp4_mega_moe.py`](../../tirx_kernels/deepgemm/sm100_fp8_fp4_mega_moe.py).
+[`tirx_kernels/deepgemm/fp8_fp4_mega_moe/b200/sm100_fp8_fp4_mega_moe.py`](../../tirx_kernels/deepgemm/fp8_fp4_mega_moe/b200/sm100_fp8_fp4_mega_moe.py).
 Those modules are the source of truth.
 
 DeepGEMM has one SM100 FP8/FP4 MegaMoE device template. This sketch fixes the

@@ -10,10 +10,12 @@ import sys
 
 import check_gdn_decode_bf16_wide_vec_t1_no_tile as no_tile
 
-from tirx_kernels.flashinfer.gdn_decode import gdn_decode_fp32_mtp_warp as target
+from tirx_kernels.flashinfer.gdn_decode.b200 import gdn_decode_fp32_mtp_warp as target
 
 no_tile.target = target
-no_tile.TARGET = no_tile.REPO / "tirx_kernels/flashinfer/gdn_decode/gdn_decode_fp32_mtp_warp.py"
+no_tile.TARGET = (
+    no_tile.REPO / "tirx_kernels/flashinfer/gdn_decode/b200/gdn_decode_fp32_mtp_warp.py"
+)
 
 
 if __name__ == "__main__":

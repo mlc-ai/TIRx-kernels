@@ -11,7 +11,7 @@ FusedAddRMSNormKernel. See LICENSE, NOTICE, and licenses/ for applicable terms.
 
 This file is a non-executable execution sketch. It freezes the implementation
 shape of FlashInfer's CuTe-DSL `FusedAddRMSNormKernel` for the paired target
-[`tirx_kernels/flashinfer/norm/fused_add_rmsnorm.py`](../../../../tirx_kernels/flashinfer/norm/fused_add_rmsnorm.py).
+[`tirx_kernels/flashinfer/fused_add_rmsnorm/b200/fused_add_rmsnorm.py`](../../../../tirx_kernels/flashinfer/fused_add_rmsnorm/b200/fused_add_rmsnorm.py).
 The target may become executable only after this sketch passes independent
 source/PTX review; after the first PASS this file is permanently frozen.
 
@@ -592,7 +592,7 @@ cluster CTAs write disjoint hidden-column ranges.
 - Static verification rejects `TilePrimitiveCall`, `tirx.tile.*`, imports of
   `tvm.script.tirx.tile`, and tile primitives in every generated PrimFunc.
 - The only final performance authority is `python -m
-  tirx_kernels.bench_suite`; every exact `flashinfer_cutedsl_time / tirx_time`
+  bench`; every exact `flashinfer_cutedsl_time / tirx_time`
   ratio in the complete six-shape matrix must be strictly greater than 0.99.
   PTX, SASS, NCU, and any other timing API are diagnostic only.
 

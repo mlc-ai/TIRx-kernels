@@ -19,12 +19,12 @@ from typing import Any
 from tvm_ffi import structural_walk
 
 import tvm
-from tirx_kernels.flashinfer.topk import radix_topk_single_cta as target
+from tirx_kernels.flashinfer.topk.b200 import radix_topk_single_cta as target
 
 REPO = Path(__file__).resolve().parents[2]
 TARGETS = (
-    REPO / "tirx_kernels/flashinfer/topk/radix_topk_single_cta.py",
-    REPO / "tirx_kernels/flashinfer/utils/topk_radix.py",
+    REPO / "tirx_kernels/flashinfer/topk/b200/radix_topk_single_cta.py",
+    REPO / "tirx_kernels/flashinfer/_shared/topk_radix.py",
 )
 
 _TILE_OPS = {

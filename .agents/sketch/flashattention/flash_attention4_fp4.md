@@ -13,7 +13,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 
 This non-executable design sketch describes the storage layout, warp roles,
 pipelines, control flow, and PTX-level operations of
-[`tirx_kernels/flashattention/flash_attention4_fp4.py`](../../../tirx_kernels/flashattention/flash_attention4_fp4.py).
+[`tirx_kernels/flashattention/attention_forward/gb300/flash_attention4_fp4.py`](../../../tirx_kernels/flashattention/attention_forward/gb300/flash_attention4_fp4.py).
 That TIRx module is the authoritative implementation.
 
 The port covers **one kernel**: `FlashAttentionForwardSm100.kernel`

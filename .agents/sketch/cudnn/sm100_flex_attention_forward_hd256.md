@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 # cuDNN SM100/SM103 FlexAttention forward HD256: operation-level sketch
 
 This is the non-executable sketch for
-[`tirx_kernels/cudnn/flex_attention/forward_hd256_sm100.py`](../../tirx_kernels/cudnn/flex_attention/forward_hd256_sm100.py).
+[`tirx_kernels/cudnn/flex_attention_forward/b200/forward_hd256_sm100.py`](../../tirx_kernels/cudnn/flex_attention_forward/b200/forward_hd256_sm100.py).
 It freezes
 `python/cudnn/flex_attention/kernels/sm100/fwd/forward_hd256.py::
 BlackwellFusedMultiHeadAttentionForward` from cuDNN Frontend commit

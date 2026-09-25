@@ -20,13 +20,13 @@ import sys
 
 import check_radix_topk_single_cta_no_tile as no_tile
 
-from tirx_kernels.flashinfer.topk import fast_topk_clusters as target
+from tirx_kernels.flashinfer.topk.b200 import fast_topk_clusters as target
 
 no_tile.target = target
 
 _CANDIDATE_TARGETS = (
-    "tirx_kernels/flashinfer/topk/fast_topk_clusters.py",
-    "tirx_kernels/flashinfer/utils/topk_radix.py",
+    "tirx_kernels/flashinfer/topk/b200/fast_topk_clusters.py",
+    "tirx_kernels/flashinfer/_shared/topk_radix.py",
 )
 no_tile.TARGETS = tuple(
     no_tile.REPO / rel for rel in _CANDIDATE_TARGETS if (no_tile.REPO / rel).exists()

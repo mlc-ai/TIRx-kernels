@@ -12,7 +12,7 @@ This is a non-executable execution sketch. It freezes the launch contract,
 linear storage, sixteen-warp role split, sparse gather order, asynchronous
 protocols, online row-statistics dataflow, split-P publication, correction
 exchange, output path, singleton-cluster CLC branch, and split-KV combine for
-[`tirx_kernels/cudnn/bsa/block_sparse_attention_forward_sm100_blk64.py`](../../../tirx_kernels/cudnn/bsa/block_sparse_attention_forward_sm100_blk64.py).
+[`tirx_kernels/cudnn/block_sparse_attention_forward/b200/block_sparse_attention_forward_sm100_blk64.py`](../../../tirx_kernels/cudnn/block_sparse_attention_forward/b200/block_sparse_attention_forward_sm100_blk64.py).
 That module and its private implementation package are the executable source of
 truth after the reviewer gate; this sketch remains frozen.
 
@@ -1358,7 +1358,7 @@ axes. Every row must run with no skip. O and LSE are compared both with the prod
 and a gathered FP32 oracle; empty rows require exact O zero and LSE `-inf`.
 Split rows additionally validate producer FP32 partial O/LSE before combine.
 
-Performance truth is only `python -m tirx_kernels.bench_suite`. The frozen
+Performance truth is only `python -m tirx_kernels.bench suite`. The frozen
 23-row matrix covers short/long and batch/head scaling, static/CLC, fixed,
 variable and empty counts, split 2/4/8, i64 K/V addressing, and a grouped-head
 mirror of those axes at ratios 2, 3, 4 and 8. Every row must

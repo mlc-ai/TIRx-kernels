@@ -22,7 +22,7 @@ block_sparse_attention/csrc/fwd/sm100_blk64/bsa_fwd_combine.py.
 This non-executable canonical sketch describes the direct CuTeDSL combine ABI,
 physical storage, thread maps, pipeline, synchronization, and instruction
 selection of
-[`block_sparse_attention_forward_combine_sm100_blk64.py`](../../../tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py).
+[`block_sparse_attention_forward_combine_sm100_blk64.py`](../../../tirx_kernels/cudnn/block_sparse_attention_forward_combine/b200/block_sparse_attention_forward_combine_sm100_blk64.py).
 The module is the authoritative pure-`K` implementation.
 
 Pinned source: `bsa_fwd_combine.py` at cuDNN Frontend commit
@@ -366,6 +366,6 @@ must pass the independent sketch and correctness reviews, all configs,
 memcheck/synccheck guards, low-level IR inspection, `func_calls == ()`, no tile
 primitive/layout, and rank-one-SMEM inspection.
 
-Performance truth is only `python -m tirx_kernels.bench_suite`; every required
+Performance truth is only `python -m tirx_kernels.bench suite`; every required
 row must have five finite positive Proton samples for both implementations and
 strict `mean(cudnn_frontend)/mean(tirx) > 0.99`.

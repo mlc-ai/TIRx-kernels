@@ -13,7 +13,7 @@ aded9909c3c2a897fdbc7b5fd79fa53bc915f4f5.
 This is a non-executable execution sketch, not a Python module, builder API,
 mathematical reference, or alternate implementation.  The implementation it
 describes is maintained in
-[`tirx_kernels/cudnn/linear_attention/gdn2_bprop_f16.py`](../../../tirx_kernels/cudnn/linear_attention/gdn2_bprop_f16.py),
+[`tirx_kernels/cudnn/gdn2_bprop_f16/b200/gdn2_bprop_f16.py`](../../../tirx_kernels/cudnn/gdn2_bprop_f16/b200/gdn2_bprop_f16.py),
 which is the source of truth after the correctness gate.
 
 The source specialization is fixed to `BT=16`, `DK=DV=128`, BF16 or FP16 I/O,
@@ -1196,7 +1196,7 @@ offsets.
 
 ## TIRx module and validation contract
 
-- The module imports only `tirx_kernels.tirx_lite as txl`.  No `T`, `Tx`, `I`, no
+- The module imports only `tirx_lite as txl`.  No `T`, `Tx`, `I`, no
   `tirx.tile.*`, no tile primitive, and no first-class layout anywhere.
 - Every SMEM region is a byte range inside one flat `u8` arena.  `txl.smem_pool`
   may own only the 984-byte barrier header; all data addressing is explicit

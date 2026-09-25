@@ -2,7 +2,7 @@
 
 This is a non-executable semantic execution sketch for the production SM107
 specialization. The corresponding TIRx module
-`tirx_kernels/flashinfer/fused_moe/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin.py`
+`tirx_kernels/flashinfer/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion/rubin/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin.py`
 is the executable source of truth.
 
 The fixed specialization is FP4-E2M1 A/B/C, E4M3 vector-16 scale factors,
@@ -545,7 +545,7 @@ first-class layouts to any storage object.
 
 ## Executable and validation contract
 
-The device definition imports only `tirx_kernels.tirx_lite as txl`, uses one rank-one
+The device definition imports only `tirx_lite as txl`, uses one rank-one
 dynamic `u8` shared arena with scalar offsets, and contains no inline CUDA
 function-call escape. Correctness compares independent TIRx and frozen-source
 outputs at physical-byte precision where the source is deterministic, checks

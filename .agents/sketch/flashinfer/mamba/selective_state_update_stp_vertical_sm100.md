@@ -23,7 +23,7 @@ exact one-producer/four-consumer warp split, three-stage TMA state ring,
 mbarrier protocol, shared bank-word traversal, reduction order, optional state
 paths, and output publication that the TIRx port must preserve. The target
 module is
-[`tirx_kernels/flashinfer/mamba/selective_state_update_stp_vertical.py`](../../tirx_kernels/flashinfer/mamba/selective_state_update_stp_vertical.py),
+[`tirx_kernels/flashinfer/selective_state_update/b200/selective_state_update_stp_vertical.py`](../../tirx_kernels/flashinfer/selective_state_update/b200/selective_state_update_stp_vertical.py),
 which becomes the source of truth only after this sketch passes independent
 review.
 

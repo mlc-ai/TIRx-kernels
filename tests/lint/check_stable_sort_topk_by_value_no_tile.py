@@ -16,14 +16,16 @@ import sys
 
 import check_radix_topk_single_cta_no_tile as no_tile
 
-from tirx_kernels.flashinfer.topk import stable_sort_topk_by_value as target
+from tirx_kernels.flashinfer.stable_sort_topk_by_value.b200 import (
+    stable_sort_topk_by_value as target,
+)
 
 no_tile.target = target
 
 _CANDIDATE_TARGETS = (
-    "tirx_kernels/flashinfer/topk/stable_sort_topk_by_value.py",
-    "tirx_kernels/flashinfer/utils/topk_radix.py",
-    "tirx_kernels/flashinfer/utils/block_radix_sort.py",
+    "tirx_kernels/flashinfer/stable_sort_topk_by_value/b200/stable_sort_topk_by_value.py",
+    "tirx_kernels/flashinfer/_shared/topk_radix.py",
+    "tirx_kernels/flashinfer/_shared/block_radix_sort.py",
 )
 no_tile.TARGETS = tuple(
     no_tile.REPO / rel for rel in _CANDIDATE_TARGETS if (no_tile.REPO / rel).exists()

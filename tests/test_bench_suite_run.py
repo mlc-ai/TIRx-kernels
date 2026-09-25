@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tirx_kernels.bench_suite import ratio_diff
-from tirx_kernels.bench_suite import run as bench_run
+from tirx_kernels.bench import ratio_diff
+from tirx_kernels.bench import suite as bench_run
 
 
 def test_validate_workload_archs_accepts_exact_arch(monkeypatch):

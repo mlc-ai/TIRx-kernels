@@ -11,7 +11,7 @@ RMSNormKernel. See LICENSE, NOTICE, and licenses/ for applicable terms.
 
 This file is a non-executable execution sketch. It freezes the implementation
 shape of FlashInfer's CuTe-DSL `RMSNormKernel` for the paired target
-[`tirx_kernels/flashinfer/norm/rmsnorm.py`](../../../../tirx_kernels/flashinfer/norm/rmsnorm.py).
+[`tirx_kernels/basic/rmsnorm/b200/flashinfer_rmsnorm.py`](../../../../tirx_kernels/basic/rmsnorm/b200/flashinfer_rmsnorm.py).
 The target may become executable only after this sketch passes independent
 source/PTX review; after the first PASS this file is permanently frozen.
 
@@ -623,7 +623,7 @@ columns are disjoint across threads and cluster CTAs.
 - Static verification rejects `TilePrimitiveCall`, `tirx.tile.*`, imports of
   `tvm.script.tirx.tile`, and tile primitives in every generated PrimFunc.
 - The only performance authority is a complete five-workload
-  `python -m tirx_kernels.bench_suite` run. Each exact
+  `python -m tirx_kernels.bench suite` run. Each exact
   `flashinfer_cutedsl_time / tirx_time` ratio must be strictly greater than
   0.99; diagnostic PTX/SASS/NCU results never replace that gate.
 

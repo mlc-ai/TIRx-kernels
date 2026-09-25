@@ -59,6 +59,11 @@ CITATION_RE = re.compile(r"\((https://\S+) @ [0-9a-f]{7,40}\)")
 # Path-bound expectations: project name, upstream URL, and the SPDX expression
 # a port under this bucket must carry.
 PORT_BUCKETS = {
+    "tirx_kernels/basic/rmsnorm/b200/flashinfer_rmsnorm.py": (
+        "FlashInfer",
+        "https://github.com/flashinfer-ai/flashinfer",
+        "Apache-2.0",
+    ),
     "tirx_kernels/cudnn/": (
         "cuDNN Frontend",
         "https://github.com/NVIDIA/cudnn-frontend",
@@ -89,7 +94,7 @@ PORT_BUCKETS = {
         "https://github.com/flashinfer-ai/flashinfer",
         "Apache-2.0",
     ),
-    "tirx_kernels/fastcu/": (
+    "tirx_kernels/basic/nvfp4_gemm/gb300/": (
         "fast.cu",
         "https://github.com/pranjalssh/fast.cu",
         "Apache-2.0 AND MIT",
@@ -104,12 +109,12 @@ FILE_OVERRIDES = {
     # Verbatim copies of SGLang's CuTeDSL paged MQA logits reference (Apache-2.0,
     # NVIDIA copyright); they sit under the DeepGEMM bucket only because they are the
     # DeepGEMM paged-MQA-logits benchmark's second reference.
-    "tirx_kernels/deepgemm/_sglang_cutedsl/cutedsl_fp8_paged_mqa_logits.py": {
+    "tirx_kernels/deepgemm/_shared/_sglang_cutedsl/cutedsl_fp8_paged_mqa_logits.py": {
         "project": "SGLang",
         "url": "https://github.com/sgl-project/sglang",
         "spdx": "Apache-2.0",
     },
-    "tirx_kernels/deepgemm/_sglang_cutedsl/cutedsl_paged_mqa_logits.py": {
+    "tirx_kernels/deepgemm/_shared/_sglang_cutedsl/cutedsl_paged_mqa_logits.py": {
         "project": "SGLang",
         "url": "https://github.com/sgl-project/sglang",
         "spdx": "Apache-2.0",
@@ -117,88 +122,90 @@ FILE_OVERRIDES = {
     # Port of hao-ai-lab/flash-attention-fp4, a fork of Dao-AILab/flash-attention whose
     # LICENSE and flash_attn/cute/AUTHORS are byte-identical to the upstream texts under
     # licenses/; only the canonical URL and commit history differ from the bucket.
-    "tirx_kernels/flashattention/flash_attention4_fp4.py": {
+    "tirx_kernels/flashattention/attention_forward/gb300/flash_attention4_fp4.py": {
         "project": "flash-attention-fp4",
         "url": "https://github.com/hao-ai-lab/flash-attention-fp4",
     },
-    "tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py": {
+    "tirx_kernels/cudnn/block_sparse_attention_forward_combine/b200/"
+    "block_sparse_attention_forward_combine_sm100_blk64.py": {
         "spdx": "Apache-2.0 AND MIT AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
-    "tirx_kernels/cudnn/flex_attention/forward_hd256_sm100.py": {
+    "tirx_kernels/cudnn/flex_attention_forward/b200/forward_hd256_sm100.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
-    "tirx_kernels/cudnn/flex_attention/forward_sm103.py": {
+    "tirx_kernels/cudnn/flex_attention_forward/gb300/forward_sm103.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
-    "tirx_kernels/cudnn/flex_attention/flex_attention_backward_sm100.py": {
+    "tirx_kernels/cudnn/flex_attention_backward/b200/flex_attention_backward_sm100.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
-    "tirx_kernels/cudnn/flex_attention/_flex_attention_backward_sm100/data.py": {
+    "tirx_kernels/cudnn/flex_attention_backward/b200/_flex_attention_backward_sm100/data.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
-    "tirx_kernels/cudnn/flex_attention/_flex_attention_backward_sm100/kernel.py": {
+    "tirx_kernels/cudnn/flex_attention_backward/b200/_flex_attention_backward_sm100/kernel.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
-    "tirx_kernels/cudnn/flex_attention/_flex_attention_backward_sm100/kernel_2cta.py": {
+    "tirx_kernels/cudnn/flex_attention_backward/b200/"
+    "_flex_attention_backward_sm100/kernel_2cta.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
-    "tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py": {
+    "tirx_kernels/flashinfer/gdn_cp_prefill/b200/gdn_cp_prefill_sm100.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
-    "tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py": {
+    "tirx_kernels/flashinfer/gdn_prefill/b200/gdn_prefill_sm100.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
-    "tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py": {
+    "tirx_kernels/flashinfer/bmm_fp8/rubin/bmm_fp8_rubin.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
-    "tirx_kernels/flashinfer/gemm/grouped_gemm_masked_rubin.py": {
+    "tirx_kernels/flashinfer/grouped_gemm_masked/rubin/grouped_gemm_masked_rubin.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
-    "tirx_kernels/flashinfer/fused_moe/"
+    "tirx_kernels/flashinfer/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion/rubin/"
     "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
@@ -206,7 +213,7 @@ FILE_OVERRIDES = {
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
-    "tirx_kernels/flashinfer/gemm/dense_blockscaled_gemm_sm107.py": {
+    "tirx_kernels/flashinfer/dense_blockscaled_gemm/rubin/dense_blockscaled_gemm_sm107.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
@@ -214,7 +221,7 @@ FILE_OVERRIDES = {
         ),
     },
     # Transcribes cub::BlockRadixSort, which FlashInfer's topk kernels instantiate.
-    "tirx_kernels/flashinfer/utils/block_radix_sort.py": {
+    "tirx_kernels/flashinfer/_shared/block_radix_sort.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
@@ -225,14 +232,21 @@ FILE_OVERRIDES = {
 
 # Native modules inside port buckets — package markers and our own harnesses.
 PORT_DIR_EXCEPTIONS = {
-    "tirx_kernels/cudnn/_reference.py",
-    "tirx_kernels/deepep/utils/_buffer.py",
-    "tirx_kernels/deepep/utils/_runtime.py",
-    "tirx_kernels/flashinfer/utils/_flashkda_bench.py",
-    "tirx_kernels/flashinfer/utils/source_checkout.py",
-    "tirx_kernels/flashmla/utils/_flashmla_bench.py",
-    "tirx_kernels/flashmla/utils/_trtllm_gen_bench.py",
-    "tirx_kernels/msa/utils/_msa_bench.py",
+    "tirx_kernels/flashinfer/alphamoe_fp8_blockscale_qwen3next/b200/alphamoe_fp8_blockscale_qwen3next.py",
+    "tirx_kernels/flashinfer/kda_decode/b200/kda_decode_multishape.py",
+    "tirx_kernels/flashinfer/mla_dsv4/b200/mla_dsv4_multishape.py",
+    "tirx_kernels/flashinfer/moe_fp8_blockscale_dsv3/b200/moe_fp8_blockscale_dsv3.py",
+    "tirx_kernels/msa/decode/b200/msa_decode_multishape.py",
+    "tirx_kernels/msa/prefill/b200/msa_prefill_multishape.py",
+    "tirx_kernels/flashinfer/vsa/b200/vsa_multishape.py",
+    "tirx_kernels/cudnn/_shared/_reference.py",
+    "tirx_kernels/deepep/_shared/_buffer.py",
+    "tirx_kernels/deepep/_shared/_runtime.py",
+    "tirx_kernels/flashinfer/_shared/_flashkda_bench.py",
+    "tirx_kernels/flashinfer/_shared/source_checkout.py",
+    "tirx_kernels/flashmla/_shared/_flashmla_bench.py",
+    "tirx_kernels/flashmla/_shared/_trtllm_gen_bench.py",
+    "tirx_kernels/msa/_shared/_msa_bench.py",
 }
 
 # Retired: the old per-file "Modifications" block and the pointer paragraph that
@@ -335,23 +349,30 @@ def self_test() -> int:
     fi = dict(project="FlashInfer", url="https://github.com/flashinfer-ai/flashinfer")
     msa = dict(project="MSA", url="https://github.com/MiniMax-AI/MSA")
     fastcu = dict(project="fast.cu", url="https://github.com/pranjalssh/fast.cu")
-    bsa_combine = "tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py"
-    flex_forward = "tirx_kernels/cudnn/flex_attention/forward_hd256_sm100.py"
-    flex_forward_sm103 = "tirx_kernels/cudnn/flex_attention/forward_sm103.py"
-    flex_backward = "tirx_kernels/cudnn/flex_attention/flex_attention_backward_sm100.py"
-    gdn = "tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py"
-    gdn_cp = "tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py"
-    bmm_fp8_rubin = "tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py"
-    grouped_gemm_masked_rubin = "tirx_kernels/flashinfer/gemm/grouped_gemm_masked_rubin.py"
+    bsa_combine = (
+        "tirx_kernels/cudnn/block_sparse_attention_forward_combine/b200/"
+        "block_sparse_attention_forward_combine_sm100_blk64.py"
+    )
+    flex_forward = "tirx_kernels/cudnn/flex_attention_forward/b200/forward_hd256_sm100.py"
+    flex_forward_sm103 = "tirx_kernels/cudnn/flex_attention_forward/gb300/forward_sm103.py"
+    flex_backward = (
+        "tirx_kernels/cudnn/flex_attention_backward/b200/flex_attention_backward_sm100.py"
+    )
+    gdn = "tirx_kernels/flashinfer/gdn_prefill/b200/gdn_prefill_sm100.py"
+    gdn_cp = "tirx_kernels/flashinfer/gdn_cp_prefill/b200/gdn_cp_prefill_sm100.py"
+    bmm_fp8_rubin = "tirx_kernels/flashinfer/bmm_fp8/rubin/bmm_fp8_rubin.py"
+    grouped_gemm_masked_rubin = (
+        "tirx_kernels/flashinfer/grouped_gemm_masked/rubin/grouped_gemm_masked_rubin.py"
+    )
     fused_moe_rubin = (
-        "tirx_kernels/flashinfer/fused_moe/"
+        "tirx_kernels/flashinfer/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion/rubin/"
         "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin.py"
     )
     fa4 = dict(project="flash-attention", url="https://github.com/Dao-AILab/flash-attention")
     fa4_fp4 = dict(
         project="flash-attention-fp4", url="https://github.com/hao-ai-lab/flash-attention-fp4"
     )
-    fp4_port = "tirx_kernels/flashattention/flash_attention4_fp4.py"
+    fp4_port = "tirx_kernels/flashattention/attention_forward/gb300/flash_attention4_fp4.py"
     bsd_port = (
         "# Copyright (c) 2025 Upstream\n"
         "# Redistribution and use in source and binary forms\n"
@@ -419,19 +440,19 @@ def self_test() -> int:
         ),
         (
             "valid fast.cu port",
-            "tirx_kernels/fastcu/x.py",
+            "tirx_kernels/basic/nvfp4_gemm/gb300/x.py",
             port.format(spdx="Apache-2.0 AND MIT", **fastcu),
             False,
         ),
         (
             "fast.cu tagged plain Apache-2.0",
-            "tirx_kernels/fastcu/x.py",
+            "tirx_kernels/basic/nvfp4_gemm/gb300/x.py",
             port.format(spdx="Apache-2.0", **fastcu),
             True,
         ),
         (
             "fast.cu port citing another upstream URL",
-            "tirx_kernels/fastcu/x.py",
+            "tirx_kernels/basic/nvfp4_gemm/gb300/x.py",
             port.format(
                 spdx="Apache-2.0 AND MIT",
                 project="fast.cu",
@@ -441,7 +462,7 @@ def self_test() -> int:
         ),
         (
             "fast.cu port with no upstream copyright",
-            "tirx_kernels/fastcu/x.py",
+            "tirx_kernels/basic/nvfp4_gemm/gb300/x.py",
             port.format(spdx="Apache-2.0 AND MIT", **fastcu).replace(
                 ", Copyright (c) 2025 Upstream", ""
             ),

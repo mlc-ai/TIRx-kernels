@@ -8,7 +8,7 @@ disagree the TIRx module linked below is what runs.
 
 This non-executable design sketch describes the storage layout, warp roles,
 pipelines, control flow, and PTX-level operations of
-[`tirx_kernels/msa/sparse_atten_fwd_nvfp4_kv.py`](../../../tirx_kernels/msa/sparse_atten_fwd_nvfp4_kv.py).
+[`tirx_kernels/msa/sparse_atten_fwd/b200/sparse_atten_fwd_nvfp4_kv.py`](../../../tirx_kernels/msa/sparse_atten_fwd/b200/sparse_atten_fwd_nvfp4_kv.py).
 That TIRx module is the authoritative implementation.
 
 The port covers **one kernel**: `SparseAttentionForwardNvfp4KvSm100.kernel`

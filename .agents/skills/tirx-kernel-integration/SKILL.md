@@ -13,12 +13,12 @@ preserving transcription from CUDA, CuTeDSL, Gluon, Triton, or another source.
 
 Before editing a kernel, inspect the current versions of:
 
-- `tirx_kernels/runner.py`
-- `tirx_kernels/registry.py`
-- `tirx_kernels/bench/__main__.py`
-- `tirx_kernels/test/__main__.py`
-- `tirx_kernels/bench_suite/README.md` and the relevant file under
-  `tirx_kernels/bench_suite/config/`
+- `tirx_kernels/bench/runner.py`
+- `tirx_kernels/bench/registry.py`
+- `tirx_kernels/bench/run.py`
+- `tirx_kernels/bench/test.py`
+- `tirx_kernels/bench/README.md` and the relevant file under
+  `tirx_kernels/bench/config/`
 - `LICENSE`, `NOTICE`, `licenses/`, and the License section of `README.md`
 - `tests/lint/check_license_headers.py` and the license hook in
   `.pre-commit-config.yaml`
@@ -27,7 +27,7 @@ Before editing a kernel, inspect the current versions of:
 - tests covering the affected CLI or protocol
 - one recently maintained module with similar runtime and reference behavior
 
-Also inspect `tirx_kernels/_protocol.py`, but do not treat it as authoritative when
+Also inspect `tirx_kernels/bench/_protocol.py`, but do not treat it as authoritative when
 it lags the executable code. If sources conflict, follow this order:
 
 1. runner, CLI, and tests
@@ -41,12 +41,12 @@ the live code and update the skill.
 
 ## 2. Standard Module Shape
 
-A discoverable module under `tirx_kernels/<category>/` should normally expose:
+A discoverable module under `tirx_kernels/<task_set>/<task>/<device>/` should normally expose:
 
 ```python
 KERNEL_META = {
     "name": "kernel_name",
-    "category": "gemm",
+    "category": "basic",
     "runtime_cuda_archs": ["sm_100a"],
     "reference_requirements": (
         {
@@ -110,8 +110,11 @@ Important:
   identity skips correctness before GPU compile/run. Once metadata is satisfied,
   reference import or runtime failures are test failures, not skips.
 - `KERNEL_META["name"]` must be globally unique and is the CLI kernel name.
-- `category` is discovered from package directories. A new category needs an
-  `__init__.py`; registry infrastructure directories are intentionally skipped.
+- `category` is the containing task set under `tirx_kernels/`. Kernels import
+  through `tirx_kernels.<task_set>.<task>.<device>.<module>`. JSON task metadata
+  and task-local `tirx_kernels.bench.py` are optional; discovery still reads `KERNEL_META`.
+- Multiple implementations may live side by side in a device directory. Do not
+  add a dispatcher or change configuration formats as part of a directory move.
 - `get_kernel` returns the TIRx `PrimFunc`, or a list for a multi-kernel workload.
 - `run_test` is the correctness entry point used by the runner.
 - `run_bench` is optional and is the benchmark entry point used by the runner.
@@ -143,12 +146,12 @@ Current repository organization is:
 
 The current path-to-license map is:
 
-- native TIRx code, including `tirx_kernels/basic/`: `Apache-2.0`
+- native TIRx code (ported files colocated in `tirx_kernels/basic/` retain their upstream headers): `Apache-2.0`
 - `tirx_kernels/deepgemm/`: `Apache-2.0 AND MIT`
 - `tirx_kernels/flashmla/`: `Apache-2.0 AND MIT`
 - `tirx_kernels/flashattention/`: `Apache-2.0 AND BSD-3-Clause`
 - `tirx_kernels/flashinfer/`: normally `Apache-2.0`
-- `tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py`:
+- `tirx_kernels/flashinfer/gdn_prefill/b200/gdn_prefill_sm100.py`:
   `Apache-2.0 AND BSD-3-Clause`, with the upstream BSD conditions and disclaimer
   retained verbatim in the file header
 
@@ -219,7 +222,7 @@ There are three distinct configuration layers. Do not collapse their roles:
 1. `CONFIGS` is the labeled correctness/default module matrix.
 2. Optional `BENCH_CONFIGS` is the module benchmark matrix. The benchmark CLI
    prefers it and falls back to `CONFIGS` when it is absent.
-3. `tirx_kernels/bench_suite/config/<kernel>.yaml` selects the curated regression
+3. `tirx_kernels/bench/config/<task_set>/<task>/<kernel>.yaml` selects the curated regression
    sweep and marks each benchmark config `default: true|false`.
 
 Every module config must have a stable, meaningful `label`; the runner removes
@@ -276,13 +279,13 @@ a stale free-GPU decision.
 Run one config with:
 
 ```bash
-python -m tirx_kernels.test --kernel <name> --config <label>
+python -m tirx_kernels.bench.test --kernel <name> --config <label>
 ```
 
 Run the default-sweep import gate with:
 
 ```bash
-python -m tirx_kernels.bench_suite --check-imports
+python -m tirx_kernels.bench suite --check-imports
 ```
 
 ## 7. Benchmark Entry Point
@@ -381,7 +384,7 @@ drop-in latency from a kernel-only Proton result.
 Run a local benchmark with:
 
 ```bash
-python -m tirx_kernels.bench \
+python -m tirx_kernels.bench.run \
   --kernel <name> --config <label> \
   --timer proton --rounds 5 --cooldown 1
 ```
@@ -423,15 +426,15 @@ entry includes its own `kernel`.
 Run the default sweep with:
 
 ```bash
-python -m tirx_kernels.bench_suite
+python -m tirx_kernels.bench suite
 ```
 
 Suite rules:
 
 - The suite runs on a kcoral benchmark server (`--server` / `$TIRX_BENCH_SERVER`,
   client via `pip install -e '.[remote]'`); it never touches a local GPU. The
-  local `tirx_kernels/` tree is shipped with every request; TVM and the
-  reference packages are the server worker's.
+  `tirx_kernels/` package, including task sets, `tirx_lite/`, and `bench/`, is
+  shipped with every request; TVM and the reference packages are the server worker's.
 - Multi-GPU workloads cannot run through the suite; keep them `default: false`.
 - The default is five independent rounds with arithmetic-mean aggregation.
 - A workload benchmarks our implementation and every declared reference.
@@ -446,7 +449,7 @@ Suite rules:
 Promote a complete default sweep by replacing the baseline:
 
 ```bash
-python tirx_kernels/bench_suite/promote_baseline.py \
+python tirx_kernels/bench/promote_baseline.py \
   .bench-suite/runs/<id>.json
 ```
 

@@ -13,7 +13,7 @@ aded9909c3c2a897fdbc7b5fd79fa53bc915f4f5.
 This is a non-executable execution sketch, not a Python module, builder API,
 mathematical reference, or alternate implementation.  The implementation it
 describes is maintained in
-[`tirx_kernels/cudnn/linear_attention/kda_bprop_f16.py`](../../../tirx_kernels/cudnn/linear_attention/kda_bprop_f16.py),
+[`tirx_kernels/cudnn/kda_bprop_f16/b200/kda_bprop_f16.py`](../../../tirx_kernels/cudnn/kda_bprop_f16/b200/kda_bprop_f16.py),
 which is the source of truth after the correctness gate.
 
 The source specialization is fixed to `BT=16`, `DK=DV=128`, BF16 I/O,
