@@ -37,8 +37,6 @@ contract and results.
 
 - **KDA forward:**
   [`curated_kda_forward_portfolio_multishape`](tirx_kernels/curated/kda_forward_portfolio_multishape.py) ⟨sm_100a⟩
-- **DeepSeek-V3 FP8 MoE:**
-  [`curated_moe_fp8_blockscale_dsv3`](tirx_kernels/curated/moe_fp8_blockscale_dsv3.py) ⟨sm_100a⟩
 - **Qwen3-Next TP4 Alpha-MoE FP8:**
   [`curated_alphamoe_fp8_blockscale_qwen3next`](tirx_kernels/curated/alphamoe_fp8_blockscale_qwen3next.py) ⟨sm_100a⟩
 - **KDA backward:**
