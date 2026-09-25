@@ -1,0 +1,122 @@
+# Representative cover of the FilteredTopK dispatch domain under the
+# `FLASHINFER_TOPK_ALGO=filtered` pin.  All 54 dtype x mode x
+# (deterministic, tie_break) cells appear, so every kernel instantiation and all
+# three finalize behaviors (no launch / sorting / transform-only) are timed.  The
+# axis sweeps that are orthogonal to the cell -- VEC_SIZE, the k ladder covering
+# every finalize (BLOCK_THREADS, ITEMS_PER_THREAD) rung, end_bit across 2..5 digit
+# passes, and the num_rows occupancy axis -- run on carrier cells rather than
+# being repeated in all 54, which is the difference between this list and a full
+# cross of the domain.
+#
+# The tie_heavy / quantized entries are the only way to reach the data-dependent
+# s_refine_overflow fallbacks, and they are real performance regimes, so they stay
+# in the timed set; both sides consume identical seeded inputs.
+#
+# Deterministic and tie-break configs are a two-kernel pipeline on both sides
+# (unified + FinalizeTopKIndicesKernel); the timed closure launches whatever the
+# dispatcher launches.  Trivial-path-only configs are correctness cases and stay
+# out of this timed matrix.
+kernel: filtered_topk
+selection_rationale: The fp32 Plain non-deterministic column is the base dispatch; r4/l8192/k256 is the smallest shape that still exercises the filter and a full four-round refine, r64/l8192 fills the SM array so the one-CTA-per-row grid is the binding resource, and l524288 is the widest row the upstream benchmark sweeps and the only one reaching a five-pass finalize sort.
+configs:
+  - {config: f32_plain_r4_l8192_k256, default: true, selection_role: small}
+  - {config: f32_plain_tsmall_r4_l8192_k256, default: false}
+  - {config: f32_plain_tlarge_r4_l8192_k256, default: false}
+  - {config: f32_plain_det_r4_l8192_k256, default: false}
+  - {config: f32_plain_det_tsmall_r4_l8192_k256, default: false}
+  - {config: f32_plain_det_tlarge_r4_l8192_k256, default: false}
+  - {config: f32_pt_r4_l8192_k256, default: false}
+  - {config: f32_pt_tsmall_r4_l8192_k256, default: false}
+  - {config: f32_pt_tlarge_r4_l8192_k256, default: false}
+  - {config: f32_pt_det_r4_l8192_k256, default: false}
+  - {config: f32_pt_det_tsmall_r4_l8192_k256, default: false}
+  - {config: f32_pt_det_tlarge_r4_l8192_k256, default: false}
+  - {config: f32_rag_r4_l8192_k256, default: false}
+  - {config: f32_rag_tsmall_r4_l8192_k256, default: false}
+  - {config: f32_rag_tlarge_r4_l8192_k256, default: false}
+  - {config: f32_rag_det_r4_l8192_k256, default: false}
+  - {config: f32_rag_det_tsmall_r4_l8192_k256, default: false}
+  - {config: f32_rag_det_tlarge_r4_l8192_k256, default: false}
+  - {config: f16_plain_r4_l8192_k256, default: false}
+  - {config: f16_plain_tsmall_r4_l8192_k256, default: false}
+  - {config: f16_plain_tlarge_r4_l8192_k256, default: false}
+  - {config: f16_plain_det_r4_l8192_k256, default: false}
+  - {config: f16_plain_det_tsmall_r4_l8192_k256, default: false}
+  - {config: f16_plain_det_tlarge_r4_l8192_k256, default: false}
+  - {config: f16_pt_r4_l8192_k256, default: false}
+  - {config: f16_pt_tsmall_r4_l8192_k256, default: false}
+  - {config: f16_pt_tlarge_r4_l8192_k256, default: false}
+  - {config: f16_pt_det_r4_l8192_k256, default: false}
+  - {config: f16_pt_det_tsmall_r4_l8192_k256, default: false}
+  - {config: f16_pt_det_tlarge_r4_l8192_k256, default: false}
+  - {config: f16_rag_r4_l8192_k256, default: false}
+  - {config: f16_rag_tsmall_r4_l8192_k256, default: false}
+  - {config: f16_rag_tlarge_r4_l8192_k256, default: false}
+  - {config: f16_rag_det_r4_l8192_k256, default: false}
+  - {config: f16_rag_det_tsmall_r4_l8192_k256, default: false}
+  - {config: f16_rag_det_tlarge_r4_l8192_k256, default: false}
+  - {config: bf16_plain_r4_l8192_k256, default: false}
+  - {config: bf16_plain_tsmall_r4_l8192_k256, default: false}
+  - {config: bf16_plain_tlarge_r4_l8192_k256, default: false}
+  - {config: bf16_plain_det_r4_l8192_k256, default: false}
+  - {config: bf16_plain_det_tsmall_r4_l8192_k256, default: false}
+  - {config: bf16_plain_det_tlarge_r4_l8192_k256, default: false}
+  - {config: bf16_pt_r4_l8192_k256, default: false}
+  - {config: bf16_pt_tsmall_r4_l8192_k256, default: false}
+  - {config: bf16_pt_tlarge_r4_l8192_k256, default: false}
+  - {config: bf16_pt_det_r4_l8192_k256, default: false}
+  - {config: bf16_pt_det_tsmall_r4_l8192_k256, default: false}
+  - {config: bf16_pt_det_tlarge_r4_l8192_k256, default: false}
+  - {config: bf16_rag_r4_l8192_k256, default: false}
+  - {config: bf16_rag_tsmall_r4_l8192_k256, default: false}
+  - {config: bf16_rag_tlarge_r4_l8192_k256, default: false}
+  - {config: bf16_rag_det_r4_l8192_k256, default: false}
+  - {config: bf16_rag_det_tsmall_r4_l8192_k256, default: false}
+  - {config: bf16_rag_det_tlarge_r4_l8192_k256, default: false}
+  - {config: f32_plain_r4_l8190_k256_vec, default: false}
+  - {config: f32_plain_r4_l8189_k256_vec, default: false}
+  - {config: f16_plain_r4_l8188_k256_vec, default: false}
+  - {config: f16_plain_r4_l8190_k256_vec, default: false}
+  - {config: f16_plain_r4_l8189_k256_vec, default: false}
+  - {config: bf16_plain_r4_l8188_k256_vec, default: false}
+  - {config: bf16_plain_r4_l8190_k256_vec, default: false}
+  - {config: bf16_plain_r4_l8189_k256_vec, default: false}
+  - {config: f32_plain_r4_l8192_k1, default: false}
+  - {config: f32_plain_r4_l8192_k128, default: false}
+  - {config: f32_plain_r4_l8192_k512, default: false}
+  - {config: f32_plain_r4_l8192_k576, default: false}
+  - {config: f32_plain_r4_l8192_k1024, default: false}
+  - {config: f32_plain_r4_l8192_k2048, default: false}
+  - {config: f32_plain_det_r4_l8192_k1, default: false}
+  - {config: f32_plain_det_r4_l8192_k128, default: false}
+  - {config: f32_plain_det_r4_l8192_k512, default: false}
+  - {config: f32_plain_det_r4_l8192_k576, default: false}
+  - {config: f32_plain_det_r4_l8192_k1024, default: false}
+  - {config: f32_plain_det_r4_l8192_k2048, default: false}
+  - {config: f32_plain_det_r2_l200_k128_endbit, default: false}
+  - {config: f32_plain_det_r2_l4096_k256_endbit, default: false}
+  - {config: f32_plain_det_r2_l65536_k256_endbit, default: false}
+  - {config: f32_plain_det_r2_l524288_k256_endbit, default: true, selection_role: large}
+  - {config: f32_plain_r1_l8192_k256, default: false}
+  - {config: f32_plain_r16_l8192_k256, default: false}
+  - {config: f32_plain_r64_l8192_k256, default: true, selection_role: medium}
+  - {config: f32_plain_r256_l8192_k256, default: false}
+  - {config: f32_plain_r2_l131072_k256_quantized, default: false}
+  - {config: f32_plain_r2_l131072_k256_tie_heavy, default: false}
+  - {config: f32_plain_det_r2_l131072_k256_quantized, default: false}
+  - {config: f32_plain_det_r2_l131072_k256_tie_heavy, default: false}
+  - {config: f32_plain_tsmall_r4_l8192_k256_pivot_tie, default: false}
+  - {config: f32_plain_tlarge_r4_l8192_k256_pivot_tie, default: false}
+  - {config: f16_plain_r2_l131072_k256_quantized, default: false}
+  - {config: f16_plain_r2_l131072_k256_tie_heavy, default: false}
+  - {config: f16_plain_det_r2_l131072_k256_quantized, default: false}
+  - {config: f16_plain_det_r2_l131072_k256_tie_heavy, default: false}
+  - {config: f16_plain_tsmall_r4_l8192_k256_pivot_tie, default: false}
+  - {config: f16_plain_tlarge_r4_l8192_k256_pivot_tie, default: false}
+  - {config: f32_plain_r4_l8192_k256_dsa, default: false}
+  - {config: f32_pt_r4_l8192_k256_dsa, default: false}
+  - {config: f32_rag_r4_l8192_k256_dsa, default: false}
+  - {config: f32_pt_tsmall_r4_l8192_k256_rs, default: false}
+  - {config: f32_rag_r4_l8192_k256_rs, default: false}
+  - {config: f32_pt_tsmall_r4_l8192_k256_rs_pts, default: false}
+  - {config: f32_pt_tsmall_r4_l8192_k256_r2b, default: false}

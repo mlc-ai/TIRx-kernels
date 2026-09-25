@@ -1,0 +1,11 @@
+kernel: flashinfer_rmsnorm_quant
+selection_rationale: The default small and medium rows preserve both active FlashInfer benchmarks, while the largest structural row guards PDL, synchronous copy, and the cluster-16 capacity branch.
+configs:
+  - {config: bf16_e4m3_m32_h4096_xc_yc_pdl0_s1, default: true, selection_role: small}
+  - {config: bf16_e4m3_m64_h8192_xc_yc_pdl0_s1, default: true, selection_role: medium}
+  - {config: fp16_e5m2_m989_h500_xc_yc_pdl0_s0p01, default: false}
+  - {config: bf16_e5m2_m989_h66_xc_yc_pdl1_s10_vec2, default: false}
+  - {config: fp16_e4m3_m989_h111_xs_yc_pdl0_s1, default: false}
+  - {config: fp16_e5m2_m989_h500_xc_ys_pdl1_s1_eps1e4_full_abi, default: false}
+  - {config: fp16_e4m3_m3_h65536_xc_yc_pdl0_s1_cluster1_sync_capacity, default: false}
+  - {config: bf16_e5m2_m3_h1048576_xc_yc_pdl1_s1_cluster16_sync, default: true, selection_role: large}

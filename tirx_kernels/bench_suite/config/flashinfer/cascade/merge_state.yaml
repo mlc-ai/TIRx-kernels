@@ -1,0 +1,11 @@
+kernel: merge_state
+selection_rationale: A decode-sized f16 head_dim-128 merge, the docstring-sized f16 case, and the largest bf16 prefill case span grid scale and dtype; the head_dim 64/256/512 rows cover the other vec_size/bdx specializations without being default.
+configs:
+  - {config: fp16_s128_h32_d128, default: true, selection_role: small}
+  - {config: fp16_s2048_h32_d128, default: true, selection_role: medium}
+  - {config: fp16_s16384_h32_d128, default: false}
+  - {config: bf16_s2048_h32_d128, default: false}
+  - {config: bf16_s16384_h32_d128, default: true, selection_role: large}
+  - {config: fp16_s2048_h32_d64, default: false}
+  - {config: fp16_s2048_h32_d256, default: false}
+  - {config: fp16_s2048_h8_d512, default: false}

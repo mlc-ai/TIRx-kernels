@@ -1,0 +1,9 @@
+kernel: flashinfer_rmsnorm_fp4quant
+selection_rationale: The defaults cover the flattened 3-D launch, the primary NVFP4 shape, and the largest active shape; global-scale, swizzled-scale, and MXFP4 variants remain available on request.
+configs:
+  - {config: bench_nv_bf16_m32_h4096_b16_e4m3_sw0_pdl0_eps1e6_gsnone_preallocated_random, default: true, selection_role: medium}
+  - {config: bench_nv_large_bf16_m64_h8192_b16_e4m3_sw0_pdl0_eps1e6_gsnone_preallocated_random, default: true, selection_role: large}
+  - {config: bench_nv_global_bf16_m32_h4096_b16_e4m3_sw0_pdl0_eps1e6_gsone_preallocated_random, default: false}
+  - {config: bench_nv_swizzled_bf16_m32_h4096_b16_e4m3_sw1_pdl0_eps1e6_gsnone_preallocated_random, default: false}
+  - {config: bench_mx_bf16_m32_h4096_b32_ue8m0_sw0_pdl0_eps1e6_gsnone_preallocated_random, default: false}
+  - {config: bench_nv_3d_bf16_b32_s32_h128_b16_e4m3_sw0_pdl0_eps1e6_gsnone_preallocated_random, default: true, selection_role: small}

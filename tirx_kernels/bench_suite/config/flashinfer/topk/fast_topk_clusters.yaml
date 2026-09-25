@@ -1,0 +1,65 @@
+# Every specialization of the clustered exact top-k family that the port covers:
+# the three source wrappers (plain, page-table transform, ragged transform) crossed
+# with the three dtypes, the four cluster widths the launcher instantiates, and both
+# index widths on the wrapper that supports them.
+#
+# `num_clusters` is not a free parameter. The host derives it from the shape
+# (flashinfer/topk.py:390-400) -- batch<=32 -> 8, <128 -> 4, <256 -> 2, else 1 --
+# and clamps it to 1 whenever the row is shorter than 8192 (:412-413). Cluster
+# coverage is therefore obtained by choosing batch sizes that land on each rung,
+# and the clamp is exercised on its own. Both matter: the cluster-wide threshold
+# sum, the tie rationing, and the output-range allocation all scale with the width,
+# and at one CTA per cluster the first and last of those compile away entirely
+# while the tie rationing does not.
+#
+# The patterns are domain coverage rather than test flavor. Selection is exact, so
+# the only data-dependent behavior is what lands in the boundary bin: `tie_heavy`
+# and `all_equal` are what drive the candidate cache into the global overflow ring
+# and then into the cluster-wide tie race, and `all_equal` at k=2048 puts an entire
+# row in that path. `rowvar` gives the transforms per-row lengths, including rows
+# short enough to take the trivial branch beside full rows in the same launch.
+#
+# `f16`/`bf16` at one shape are a measurement control, not extra coverage: the two
+# differ only in the ordered-bit map and compile to the same instruction sequence,
+# so any spread between them is measurement rather than kernel.
+#
+# Every entry launches exactly one kernel on each side; the reference is the
+# source's own FFI (`fast_topk_clusters_exact` and its two transform siblings),
+# which ships in the same JIT module as the radix path.
+kernel: fast_topk_clusters
+selection_rationale: The fp32 plain column is what `flashinfer.top_k` itself reaches on this path. `b16_l4096_k256` is the short-row clamp, the one shape where the launcher forces a single CTA per cluster and every cluster collective except the tie rationing disappears; `b64_l16384_k256` is the four-cluster mid rung the batch heuristic picks most often; and `b64_l65536_k1024` is the longest row crossed with a large k, where the candidate cache spills to the global overflow ring and the refinement rounds carry the most work.
+configs:
+  - {config: f32_plain_b16_l16384_k256, default: false}
+  - {config: f16_plain_b16_l16384_k256, default: false}
+  - {config: bf16_plain_b16_l16384_k256, default: false}
+  - {config: f32_pt_b16_l16384_k256, default: false}
+  - {config: f16_pt_b16_l16384_k256, default: false}
+  - {config: bf16_pt_b16_l16384_k256, default: false}
+  - {config: f32_rag_b16_l16384_k256, default: false}
+  - {config: f16_rag_b16_l16384_k256, default: false}
+  - {config: bf16_rag_b16_l16384_k256, default: false}
+  - {config: f32_plain_b64_l16384_k256, default: true, selection_role: medium}
+  - {config: f32_plain_b200_l16384_k256, default: false}
+  - {config: f32_plain_b300_l16384_k256, default: false}
+  - {config: f32_plain_b16_l4096_k256, default: true, selection_role: small}
+  - {config: f16_plain_b16_l4096_k256, default: false}
+  - {config: f32_plain_b64_l16384_k1024, default: false}
+  - {config: f32_plain_b64_l16384_k2048, default: false}
+  - {config: f32_plain_b64_l65536_k1024, default: true, selection_role: large}
+  - {config: bf16_plain_b64_l65536_k1024, default: false}
+  - {config: f32_plain_b16_l16384_k256_i64, default: false}
+  - {config: f16_plain_b64_l65536_k2048_i64, default: false}
+  - {config: f32_plain_b8_l4096_k4096, default: false}
+  - {config: f32_pt_b8_l4096_k4096, default: false}
+  - {config: f32_rag_b8_l4096_k4096, default: false}
+  - {config: f32_plain_b16_l16384_k256_tie_heavy, default: false}
+  - {config: f32_plain_b16_l16384_k256_all_equal, default: false}
+  - {config: f32_plain_b16_l16384_k256_neg, default: false}
+  - {config: f32_plain_b16_l16384_k2048_all_equal, default: false}
+  - {config: f32_pt_b16_l16384_k256_rowvar, default: false}
+  - {config: f32_rag_b16_l16384_k256_rowvar, default: false}
+  - {config: f32_plain_b200_l65536_k1024, default: false}
+  - {config: f32_pt_b200_l16384_k256, default: false}
+  - {config: bf16_rag_b300_l16384_k256, default: false}
+  - {config: f16_plain_b64_l16384_k1024_tie_heavy, default: false}
+  - {config: bf16_plain_b64_l16384_k1024_tie_heavy, default: false}

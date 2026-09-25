@@ -1,0 +1,33 @@
+kernel: curated_kda_decode_multishape
+selection_rationale: The thirty official rows split across four dispatch routes, so the defaults cover each one and bracket the cost range - T=1/N=128 is the largest standard-decode row and the only default on the CLC unit ring, T=4/N=128 is the largest row on the dynamic ticket scheduler, T=6/N=128 is the most expensive row overall and the only one on the deferred-publication path, and T=3/N=1 is the smallest row and the only default with the runtime lower-bound gate at HV=16. The remaining rows share those four programs and stay available but off by default.
+configs:
+  - {config: t1_b128_hv32_standard, default: true, selection_role: large, timer: proton}
+  - {config: t4_b128_hv32_spec, default: true, selection_role: medium, timer: proton}
+  - {config: t6_b128_hv32_spec, default: true, selection_role: large, timer: proton}
+  - {config: t3_b1_hv16_lower_bound, default: true, selection_role: small, timer: proton}
+  - {config: t1_b8_hv32_standard, default: false, timer: proton}
+  - {config: t1_b16_hv32_standard, default: false, timer: proton}
+  - {config: t1_b32_hv32_standard, default: false, timer: proton}
+  - {config: t1_b64_hv32_standard, default: false, timer: proton}
+  - {config: t2_b8_hv32_spec, default: false, timer: proton}
+  - {config: t2_b16_hv32_spec, default: false, timer: proton}
+  - {config: t2_b32_hv32_spec, default: false, timer: proton}
+  - {config: t2_b64_hv32_spec, default: false, timer: proton}
+  - {config: t2_b128_hv32_spec, default: false, timer: proton}
+  - {config: t3_b2_hv16_lower_bound, default: false, timer: proton}
+  - {config: t3_b4_hv16_lower_bound, default: false, timer: proton}
+  - {config: t3_b8_hv16_lower_bound, default: false, timer: proton}
+  - {config: t3_b16_hv16_lower_bound, default: false, timer: proton}
+  - {config: t4_b8_hv32_spec, default: false, timer: proton}
+  - {config: t4_b16_hv32_spec, default: false, timer: proton}
+  - {config: t4_b32_hv32_spec, default: false, timer: proton}
+  - {config: t4_b64_hv32_spec, default: false, timer: proton}
+  - {config: t5_b8_hv32_spec, default: false, timer: proton}
+  - {config: t5_b16_hv32_spec, default: false, timer: proton}
+  - {config: t5_b32_hv32_spec, default: false, timer: proton}
+  - {config: t5_b64_hv32_spec, default: false, timer: proton}
+  - {config: t5_b128_hv32_spec, default: false, timer: proton}
+  - {config: t6_b8_hv32_spec, default: false, timer: proton}
+  - {config: t6_b16_hv32_spec, default: false, timer: proton}
+  - {config: t6_b32_hv32_spec, default: false, timer: proton}
+  - {config: t6_b64_hv32_spec, default: false, timer: proton}

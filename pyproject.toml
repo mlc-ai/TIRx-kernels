@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tirx-kernels"
+version = "0.1.0"
+description = "TIRx kernel library — test and benchmark infrastructure for TIR compiler kernels"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0 AND BSD-3-Clause AND MIT"
+license-files = ["LICENSE", "NOTICE", "licenses/*.txt"]
+# tvm, torch, triton are runtime dependencies managed externally (not on PyPI)
+dependencies = ["packaging>=23.0", "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+# Client for the kcoral benchmark server used by `python -m tirx_kernels.bench_suite`.
+remote = ["kcoral @ git+https://github.com/mlc-ai/kcoral"]
+
+[tool.pytest.ini_options]
+addopts = "-n 16"
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["gpu: requires a CUDA GPU"]
+
+[tool.setuptools.packages.find]
+include = ["tirx_kernels*"]
+
+[tool.ruff]
+line-length = 100
+indent-width = 4
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "I",   # isort
+  "UP",  # pyupgrade
+  "RUF", # ruff-specific rules
+]
+ignore = [
+  # pyupgrade (style preference or low-value)
+  "UP028", # yield-in-for-loop
+  "UP030", # format-literals
+  "UP031", # printf-string-formatting
+  # ruff (preview rules, not yet stable)
+  "RUF059", # unused-unpacked-variable
+]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402", "F401", "F403", "F405"]
+"tirx_kernels/**/*.py" = ["E501", "E741", "F821", "F823", "F841", "F842"]
+# Verbatim vendored SGLang reference kernels keep their upstream comments and class layout.
+"tirx_kernels/deepgemm/_sglang_cutedsl/*.py" = ["E501", "E741", "F821", "F823", "F841", "F842", "RUF003", "RUF012"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tvm", "tirx_kernels"]
+split-on-trailing-comma = false
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = true
+line-ending = "auto"
+docstring-code-format = false
+docstring-code-line-length = "dynamic"

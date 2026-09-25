@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+kernel: cudnn_sm100_bsa_forward_blk128
+selection_rationale: The three defaults cross D64 MHA, D96 FP16 packed GQA, and D128 packed MQA; the complete explicit matrix additionally covers both dtypes, every dtype/head-dimension/family combination, fallback GQA, ragged and empty sparse metadata, no-LSE output, batch occupancy, long KV, and 64-bit KV addressing.
+defaults:
+  num_gpus: 1
+configs:
+  - {config: p00_bf16_d64_mha, default: true, selection_role: small}
+  - {config: p01_bf16_d64_gqa, default: false}
+  - {config: p02_bf16_d64_mqa, default: false}
+  - {config: p03_bf16_d96_mha, default: false}
+  - {config: p04_bf16_d96_gqa, default: false}
+  - {config: p05_bf16_d96_mqa, default: false}
+  - {config: p06_bf16_d128_mha, default: false}
+  - {config: p07_bf16_d128_gqa, default: false}
+  - {config: p08_bf16_d128_mqa, default: true, selection_role: large}
+  - {config: p09_fp16_d64_mha, default: false}
+  - {config: p10_fp16_d64_gqa, default: false}
+  - {config: p11_fp16_d64_mqa, default: false}
+  - {config: p12_fp16_d96_mha, default: false}
+  - {config: p13_fp16_d96_gqa, default: true, selection_role: medium}
+  - {config: p14_fp16_d96_mqa, default: false}
+  - {config: p15_fp16_d128_mha, default: false}
+  - {config: p16_fp16_d128_gqa, default: false}
+  - {config: p17_fp16_d128_mqa, default: false}
+  - {config: p18_bf16_d128_mha_tail_var, default: false}
+  - {config: p19_fp16_d96_gqa_tail_empty_nomask, default: false}
+  - {config: p20_bf16_d64_gqa_nopack_longkv, default: false}
+  - {config: p21_fp16_d128_gqa_ratio3_fallback_nolse, default: false}
+  - {config: p22_bf16_d96_mha_b2_h4, default: false}
+  - {config: p23_bf16_d128_mha_i64kv, default: false}

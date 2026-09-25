@@ -1,0 +1,12 @@
+kernel: msa_sparse_atten_fwd_combine_sm100
+default_suite: false
+configs:
+- {config: ring48k_fp32p_qh16_t16, default: false}
+- {config: ulysses384k_fp32p_qh2_t4, default: false}
+- {config: long96k_fp32p_qh2_t16, default: false}
+- {config: varlen_b3_s8192_fp32p_qh4_t16, default: false}
+- {config: ring48k_bf16p_temp_qh16_t16, default: false}
+- {config: fp8p_s16384_qh8_t8, default: false}
+- {config: scale_bf16p_temp_s16384_qh4_t16, default: false}
+- {config: scale_fp32p_s8192_qh8_t8, default: false}
+- {config: edge_b1_s1024_fp32p_qh2_t4, default: false}

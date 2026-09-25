@@ -1,0 +1,42 @@
+# licenses/ holds verbatim upstream license texts — never reformat them.
+exclude: ^(\.txdev/|\.claude/|licenses/)
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+
+  # ---------- Python: ruff ----------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.3
+    hooks:
+      - id: ruff-check
+        types_or: [python, pyi, jupyter]
+        args: [--fix]
+      - id: ruff-format
+        types_or: [python, pyi, jupyter]
+
+  # ---------- C/C++: clang-format ----------
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v19.1.6
+    hooks:
+      - id: clang-format
+        types_or: [c, c++, cuda]
+
+  # ---------- license headers ----------
+  - repo: local
+    hooks:
+      - id: check-license-headers
+        name: check license headers
+        entry: python tests/lint/check_license_headers.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-readme-kernels
+        name: check README kernel listing
+        entry: python tests/lint/check_readme_kernels.py
+        language: system
+        pass_filenames: false
+        always_run: true

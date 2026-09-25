@@ -1,0 +1,33 @@
+# Complete deterministic compact performance-path covering matrix for the
+# parameterized cuDNN Frontend dense block-scaled GEMM+dSReLU port.
+kernel: cudnn_sm100_dense_blockscaled_gemm_persistent_dsrelu_quant
+selection_rationale: The 28-row matrix preserves one representative for every source-verified structural token across AB/SF/C/D dtype and major modes, CTA1/CTA2, N tiles 64/128/192/256, cluster shapes, L=1/2, amax guards, and 1024/2048/4096/8192 square boundaries. Only the anchor structure's 1024, 4096, and 8192 rows are defaults.
+configs:
+  - {config: anchor_m1024_n1024_k1024_l1, default: true, selection_role: small}
+  - {config: anchor_m2048_n2048_k2048_l2, default: false}
+  - {config: anchor_m4096_n4096_k4096_l1, default: true, selection_role: medium}
+  - {config: anchor_m8192_n8192_k8192_l2, default: true, selection_role: large}
+  - {config: cover00_m1024_n1024_k1024_anchor, default: false}
+  - {config: cover01_m2048_n2048_k2048_major_float8_e4m3fn_kn, default: false}
+  - {config: cover02_m4096_n4096_k4096_cluster_cta1_1x1, default: false}
+  - {config: cover03_m8192_n8192_k8192_explicit_amax_fp8, default: false}
+  - {config: cover04_m1024_n1024_k1024_c_bf16_d_f32, default: false}
+  - {config: cover05_m2048_n2048_k2048_c_f16_d_bf16, default: false}
+  - {config: cover06_m4096_n4096_k4096_c_f16_d_f32, default: false}
+  - {config: cover07_m8192_n8192_k8192_c_f32_d_f16, default: false}
+  - {config: cover08_m1024_n1024_k1024_cluster_cta1_1x2, default: false}
+  - {config: cover09_m2048_n2048_k2048_cluster_cta1_1x4, default: false}
+  - {config: cover10_m4096_n4096_k4096_cluster_cta1_2x2, default: false}
+  - {config: cover11_m8192_n8192_k8192_cluster_cta1_2x4, default: false}
+  - {config: cover12_m1024_n1024_k1024_cluster_cta1_4x1, default: false}
+  - {config: cover13_m2048_n2048_k2048_cluster_cta1_4x2, default: false}
+  - {config: cover14_m4096_n4096_k4096_cluster_cta1_4x4, default: false}
+  - {config: cover15_m8192_n8192_k8192_fp4_e4v16, default: false}
+  - {config: cover16_m1024_n1024_k1024_l1, default: false}
+  - {config: cover17_m2048_n2048_k2048_major_float8_e4m3fn_mk, default: false}
+  - {config: cover18_m4096_n4096_k4096_persistent_cta1, default: false}
+  - {config: cover19_m8192_n8192_k8192_persistent_cta2, default: false}
+  - {config: cover20_m1024_n1024_k1024_tail_cta1_n64, default: false}
+  - {config: cover21_m2048_n2048_k2048_tail_cta2_n192, default: false}
+  - {config: cover22_m4096_n4096_k4096_tile_128x192, default: false}
+  - {config: cover23_m8192_n8192_k8192_tile_256x64, default: false}

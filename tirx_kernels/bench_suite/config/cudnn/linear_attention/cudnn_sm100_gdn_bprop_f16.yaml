@@ -1,0 +1,25 @@
+# Complete performance-path matrix for the cuDNN Frontend GDN backward port.
+kernel: cudnn_sm100_gdn_bprop_f16
+selection_rationale: The selected defaults cover an underfilled small launch, the representative 8192-token path, and the largest upstream multi-batch sweep point; the full matrix additionally covers FP16, ragged tails with a zero-length sequence, grouped query/value heads, safe gate, beta sigmoid, state I/O, dynamic scheduling, both prologue ordering modes, and the upstream batch and sequence-length sweeps at 64 heads.
+configs:
+  - {config: perf_basic_b1_s2048_h16, default: true, selection_role: small}
+  - {config: perf_basic_b1_s8192_h16, default: true, selection_role: medium}
+  - {config: perf_fp16_b1_s8192_h16, default: false}
+  - {config: perf_ragged_b3_h16, default: false}
+  - {config: perf_gqa_b1_s8192_hq64_hk16_hv16, default: false}
+  - {config: perf_gva_b1_s8192_hq16_hk16_hv64, default: false}
+  - {config: perf_safe_b1_s8192_h16, default: false}
+  - {config: perf_beta_b1_s8192_h16, default: false}
+  - {config: perf_state_b1_s8192_h16, default: false}
+  - {config: perf_dynamic_b4_s2048_h64, default: false}
+  - {config: perf_order_scratch_b4_s2048_h64, default: false}
+  - {config: perf_order_generate_b4_s2048_h64, default: false}
+  - {config: perf_b4_s2048_h64, default: false}
+  - {config: perf_b4_s4096_h64, default: false}
+  - {config: perf_b4_s8192_h64, default: false}
+  - {config: perf_b4_s16384_h64, default: false}
+  - {config: perf_b4_s32768_h64, default: true, selection_role: large}
+  - {config: perf_b1_s8192_h64, default: false}
+  - {config: perf_b2_s8192_h64, default: false}
+  - {config: perf_b8_s8192_h64, default: false}
+  - {config: perf_b16_s8192_h64, default: false}
