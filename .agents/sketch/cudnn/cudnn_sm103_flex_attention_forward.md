@@ -13,7 +13,7 @@ python/cudnn/flex_attention/kernels/sm100/fwd/forward.py together with the
 reachable qstage1, qstage2, packed-mask, softmax, pipeline, and CLC scheduler
 helpers at cuDNN Frontend commit
 2497bee508e6337c086f0993f68b41cabce97436. The executable source of truth will
-be tirx_kernels/cudnn/flex_attention/forward_sm103.py.
+be tirx_kernels/cudnn/flex_attention_forward/gb300/forward_sm103.py.
 
 The transcription freezes the source's sixteen-warp persistent schedule,
 qstage2 one-CTA and qstage1 one-/two-CTA issue orders, compact partial/full

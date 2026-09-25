@@ -6,7 +6,7 @@ from typing import ClassVar
 import pytest
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import run_kernel_test
+from tirx_kernels.bench.runner import run_kernel_test
 from tirx_kernels.tirx_lite.low_level_ir import LowLevelIRContractError, check_low_level_ir
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
@@ -140,7 +140,7 @@ def test_setmaxnreg_requires_pinned_entry_allocation():
 
 @pytest.mark.parametrize("deterministic,num_q_heads", [(False, 1), (True, 1), (False, 2)])
 def test_flex_backward_cooperative_register_roles_are_valid(deterministic, num_q_heads):
-    from tirx_kernels.registry import load_kernel
+    from tirx_kernels.bench.registry import load_kernel
 
     module = load_kernel("cudnn_sm100_flex_attention_backward")
     config = module._config(
@@ -171,7 +171,7 @@ def test_correctness_runner_does_not_rebuild_an_already_checked_kernel():
 def test_correctness_runner_skips_before_calling_kernel_when_reference_is_unmet(monkeypatch):
     from unittest import SkipTest
 
-    from tirx_kernels import reference_requirements as refs
+    from tirx_kernels.bench import reference_requirements as refs
 
     class KernelModule:
         KERNEL_META: ClassVar[dict[str, object]] = {
@@ -191,7 +191,7 @@ def test_correctness_runner_skips_before_calling_kernel_when_reference_is_unmet(
 
 
 def test_correctness_runner_does_not_hide_runtime_reference_errors(monkeypatch):
-    from tirx_kernels import reference_requirements as refs
+    from tirx_kernels.bench import reference_requirements as refs
 
     class KernelModule:
         KERNEL_META: ClassVar[dict[str, object]] = {

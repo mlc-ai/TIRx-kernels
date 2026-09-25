@@ -15,10 +15,15 @@ import sys
 
 import check_gdn_decode_bf16_wide_vec_t1_no_tile as no_tile
 
-from tirx_kernels.cudnn.dglu import moe_grouped_gemm_dglu_dbias as target
+from tirx_kernels.cudnn.moe_grouped_gemm_dglu_dbias.b200 import (
+    moe_grouped_gemm_dglu_dbias as target,
+)
 
 no_tile.target = target
-no_tile.TARGET = no_tile.REPO / "tirx_kernels/cudnn/dglu/_moe_grouped_gemm_dglu_dbias/kernel.py"
+no_tile.TARGET = (
+    no_tile.REPO
+    / "tirx_kernels/cudnn/moe_grouped_gemm_dglu_dbias/b200/_moe_grouped_gemm_dglu_dbias/kernel.py"
+)
 
 
 def _ir_findings() -> list:

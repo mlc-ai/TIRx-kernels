@@ -23,7 +23,7 @@ SparseAttentionForwardSm100.
 
 This non-executable design sketch describes the storage layout, warp roles,
 pipelines, control flow, and PTX-level operations of
-[`tirx_kernels/msa/sparse_atten_fwd.py`](../../../tirx_kernels/msa/sparse_atten_fwd.py).
+[`tirx_kernels/msa/sparse_atten_fwd/b200/sparse_atten_fwd.py`](../../../tirx_kernels/msa/sparse_atten_fwd/b200/sparse_atten_fwd.py).
 That TIRx module is the authoritative implementation.
 
 The port covers **one kernel**: `SparseAttentionForwardSm100.kernel`
@@ -479,7 +479,7 @@ def msa_sparse_atten_fwd_sm100(
     # (LoadWG), 12/13 (StoreEpilogue + stage), 13 (KvLoad), 14/15 (dequant) --
     # which produces a real collision (see below).  The port renumbers from 8
     # upward, the convention this repository documents at
-    # `tirx_kernels/flashmla/sparse_decode_head64.py:36-39`.
+    # `tirx_kernels/flashmla/sparse_decode/b200/sparse_decode_head64.py:36-39`.
     tmem_alloc_bar   = named_barrier(id=8,  threads=32 * (4 * 2 + 1))   # 288: both softmax WGs + MMA warp
     load_wg_bar      = named_barrier(id=9,  threads=32 * 4)             # the Q-load warpgroup
     kv_load_bar      = named_barrier(id=10, threads=32 * 2)             # fp8 paths only

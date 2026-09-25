@@ -12,7 +12,7 @@ tools/cpusim/examples/bench_gen/
 # eval harness outputs
 /eval_harness_runs/
 
-# bench-suite run artifacts (pinned baselines live under tirx_kernels/bench_suite/)
+# bench-suite run artifacts (pinned baselines live under bench/)
 /.bench-suite/
 /.tir-bench/
 /.reference-deps/

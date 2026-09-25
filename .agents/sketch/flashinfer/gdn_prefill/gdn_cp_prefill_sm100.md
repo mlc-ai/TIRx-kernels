@@ -20,7 +20,7 @@ execution skeleton of FlashInfer's four-launch context-parallel prefill chain:
 4. the tcgen05 CP prefill.
 
 The implementation represented here belongs in
-[`tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py`](../../../../tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py).
+[`tirx_kernels/flashinfer/gdn_cp_prefill/b200/gdn_cp_prefill_sm100.py`](../../../../tirx_kernels/flashinfer/gdn_cp_prefill/b200/gdn_cp_prefill_sm100.py).
 That module becomes the executable source of truth only after this sketch first
 passes review. The sketch itself is then frozen.
 

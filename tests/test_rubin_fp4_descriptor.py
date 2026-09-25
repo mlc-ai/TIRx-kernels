@@ -3,7 +3,7 @@
 
 """FP4 instruction descriptors must encode SM107 v1 even for dense MMA."""
 
-from tirx_kernels.registry import load_kernel
+from tirx_kernels.bench.registry import load_kernel
 
 
 def test_rubin_dense_fp4_descriptors_encode_k128_and_v1():

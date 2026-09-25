@@ -15,10 +15,10 @@ from typing import Any
 from tvm_ffi import structural_walk
 
 import tvm
-from tirx_kernels.flashinfer.gdn_decode import gdn_decode_bf16_wide_vec_t1 as target
+from tirx_kernels.flashinfer.gdn_decode.b200 import gdn_decode_bf16_wide_vec_t1 as target
 
 REPO = Path(__file__).resolve().parents[2]
-TARGET = REPO / "tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_wide_vec_t1.py"
+TARGET = REPO / "tirx_kernels/flashinfer/gdn_decode/b200/gdn_decode_bf16_wide_vec_t1.py"
 
 _TILE_OPS = {
     "add",

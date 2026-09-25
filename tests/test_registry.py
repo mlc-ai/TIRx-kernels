@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tirx_kernels import reference_requirements as refs
-from tirx_kernels import registry
+from tirx_kernels.bench import reference_requirements as refs
+from tirx_kernels.bench import registry
 
 
 def _meta(**updates):
@@ -49,6 +49,52 @@ def test_exact_architectures_are_stored_in_source_index():
     assert index["dense_blockscaled_gemm_sm107"].runtime_cuda_archs == ("sm_107a",)
 
 
+def test_task_discovery_needs_no_json_or_package_markers(monkeypatch, tmp_path):
+    task = tmp_path / "basic" / "example" / "b200"
+    task.mkdir(parents=True)
+    for name in ("persistent", "one_warp"):
+        (task / f"{name}.py").write_text(
+            "raise RuntimeError('discovery must not import kernel code')\n"
+            f"KERNEL_META = {_meta(name=name)!r}\n"
+        )
+    private = task / "_helpers"
+    private.mkdir()
+    (private / "kernel.py").write_text(f"KERNEL_META = {_meta(name='private')!r}\n")
+    (task.parent / "bench.py").write_text(f"KERNEL_META = {_meta(name='harness')!r}\n")
+    monkeypatch.setattr(registry, "_kernels_root", lambda: tmp_path)
+
+    index = registry.kernel_index(strict=True)
+
+    assert set(index) == {"persistent", "one_warp"}
+    assert index["one_warp"].module_name == "tirx_kernels.basic.example.b200.one_warp"
+
+
+def test_colocated_implementations_keep_their_existing_registry_names():
+    index = registry.kernel_index(strict=True)
+    assert index["rmsnorm"].source_path.parent == index["flashinfer_rmsnorm"].source_path.parent
+    kda = (
+        "recurrent_kda_decode_one_warp",
+        "recurrent_kda_decode_grouped",
+        "curated_kda_decode_multishape",
+    )
+    assert len({index[name].source_path.parent for name in kda}) == 1
+    assert "curated" not in registry.discover_categories()
+
+
+def test_extracted_legacy_ab_tree_remains_discoverable(monkeypatch, tmp_path):
+    (tmp_path / "runner.py").write_text("# pre-migration layout\n")
+    category = tmp_path / "basic"
+    category.mkdir()
+    (category / "__init__.py").write_text("")
+    (category / "probe.py").write_text(f"KERNEL_META = {_meta(name='probe')!r}\n")
+    monkeypatch.setattr(registry, "_kernels_root", lambda: tmp_path)
+
+    index = registry.kernel_index(strict=True)
+
+    assert set(index) == {"probe"}
+    assert index["probe"].module_name == "tirx_kernels.basic.probe"
+
+
 def test_reference_requirements_are_stored_in_source_index():
     index = registry.kernel_index(strict=True)
 
@@ -70,17 +116,21 @@ def test_reference_requirements_are_stored_in_source_index():
     for name, record in index.items():
         if name in expected_by_kernel:
             assert packages(name) == expected_by_kernel[name]
-        elif record.category in expected_by_category:
+        elif not name.startswith("curated_") and record.category in expected_by_category:
             assert packages(name) == expected_by_category[record.category]
 
     assert {
-        name: packages(name) for name, record in index.items() if record.category == "basic"
+        name: packages(name)
+        for name, record in index.items()
+        if record.category == "basic" and not name.startswith("curated_")
     } == {
         "allgather_gemm": (),
         "fp16_bf16_gemm": (),
         "gemm_reduce_scatter": (),
         "nvfp4_gemm": ("flashinfer-python", "nvidia-cutlass-dsl"),
         "rmsnorm": ("flashinfer-python", "nvidia-cutlass-dsl"),
+        "flashinfer_rmsnorm": ("flashinfer-python", "nvidia-cutlass-dsl"),
+        "fastcu_nvfp4_gemm_gb300": (),
     }
     assert {
         name: packages(name) for name, record in index.items() if record.category == "flashmla"

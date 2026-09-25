@@ -22,7 +22,7 @@ include/flashinfer/topk.cuh StableSortTopKByValueKernel.
 
 This non-executable design sketch describes the storage layout, thread roles,
 control flow, and PTX-level operations of
-[`tirx_kernels/flashinfer/topk/stable_sort_topk_by_value.py`](../../../../tirx_kernels/flashinfer/topk/stable_sort_topk_by_value.py).
+[`tirx_kernels/flashinfer/stable_sort_topk_by_value/b200/stable_sort_topk_by_value.py`](../../../../tirx_kernels/flashinfer/stable_sort_topk_by_value/b200/stable_sort_topk_by_value.py).
 That TIRx module is the authoritative implementation.
 
 The port covers **one kernel**: `StableSortTopKByValueKernel<BLOCK_THREADS,
@@ -366,7 +366,7 @@ finalize kernel already carries. The byte total must match the column above.
   pipeline FFI launches main(+finalize)+sort. Correctness and the benchmark
   reference therefore both call the source's own `StableSortTopKByValue<DType,
   int32_t>` launcher, compiled through `torch.utils.cpp_extension` with the JIT's
-  own flags (precedent: `tirx_kernels/basic/nvfp4_gemm.py:72-273`), built in
+  own flags (precedent: `tirx_kernels/basic/nvfp4_gemm/b200/nvfp4_gemm.py:72-273`), built in
   `prepare_bench` before the workload owns a GPU. An independent
   `torch.sort(..., descending=True, stable=True)` oracle checks the reference
   itself.

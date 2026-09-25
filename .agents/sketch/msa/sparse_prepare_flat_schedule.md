@@ -23,7 +23,7 @@ SparseAttentionPrepareFlatScheduleSm100.
 
 This non-executable design sketch describes the storage layout, thread roles,
 control flow, and PTX-level operations of
-[`tirx_kernels/msa/sparse_prepare_flat_schedule.py`](../../../tirx_kernels/msa/sparse_prepare_flat_schedule.py).
+[`tirx_kernels/msa/sparse_prepare_flat_schedule/b200/sparse_prepare_flat_schedule.py`](../../../tirx_kernels/msa/sparse_prepare_flat_schedule/b200/sparse_prepare_flat_schedule.py).
 That TIRx module is the authoritative implementation.
 
 The port covers **one kernel**: `SparseAttentionPrepareFlatScheduleSm100.kernel`

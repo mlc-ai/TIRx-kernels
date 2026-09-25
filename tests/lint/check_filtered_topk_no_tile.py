@@ -18,16 +18,16 @@ from typing import Any
 import check_radix_topk_single_cta_no_tile as no_tile
 
 import tvm
-from tirx_kernels.flashinfer.topk import filtered_topk as target
+from tirx_kernels.flashinfer.topk.b200 import filtered_topk as target
 
 no_tile.target = target
 _CANDIDATE_TARGETS = (
-    "tirx_kernels/flashinfer/topk/filtered_topk.py",
-    "tirx_kernels/flashinfer/utils/topk_radix.py",
+    "tirx_kernels/flashinfer/topk/b200/filtered_topk.py",
+    "tirx_kernels/flashinfer/_shared/topk_radix.py",
     # Added when the BlockRadixSort emitters land with the finalize kernel.
-    "tirx_kernels/flashinfer/utils/block_radix_sort.py",
+    "tirx_kernels/flashinfer/_shared/block_radix_sort.py",
     # Traits, row scan, collectors, refine rounds and both overflow fallbacks.
-    "tirx_kernels/flashinfer/utils/filtered_topk_ops.py",
+    "tirx_kernels/flashinfer/_shared/filtered_topk_ops.py",
 )
 no_tile.TARGETS = tuple(
     no_tile.REPO / rel for rel in _CANDIDATE_TARGETS if (no_tile.REPO / rel).exists()

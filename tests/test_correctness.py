@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from tirx_kernels.registry import discover_kernels
+from tirx_kernels.bench.registry import discover_kernels
 
 
 def _correctness_cases() -> list[Any]:
@@ -145,7 +145,7 @@ def test_kernel_correctness(
             [
                 sys.executable,
                 "-m",
-                "tirx_kernels.test",
+                "tirx_kernels.bench.test",
                 "--json",
                 "--kernel",
                 kernel_name,

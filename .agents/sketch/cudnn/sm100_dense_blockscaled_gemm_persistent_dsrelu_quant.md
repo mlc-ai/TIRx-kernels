@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 # cuDNN SM100 dense block-scaled persistent GEMM + dSReLU quant: coarse WASP pipeline sketch
 
 This is the non-executable execution contract for
-[`tirx_kernels/cudnn/dsrelu/dense_blockscaled_gemm_persistent_dsrelu_quant.py`](../../tirx_kernels/cudnn/dsrelu/dense_blockscaled_gemm_persistent_dsrelu_quant.py).
+[`tirx_kernels/cudnn/dense_blockscaled_gemm_persistent_dsrelu_quant/b200/dense_blockscaled_gemm_persistent_dsrelu_quant.py`](../../tirx_kernels/cudnn/dense_blockscaled_gemm_persistent_dsrelu_quant/b200/dense_blockscaled_gemm_persistent_dsrelu_quant.py).
 It freezes the seven-warp persistent program, block-scaled A/B mainloop,
 read-only C load pipeline, D store pipeline, row-wise `dprob` reduction,
 optional FP32 amax, and CTA1/CTA2 TMEM lifetime. After the first reviewer PASS
@@ -60,7 +60,7 @@ into the same `(m,l)` element.
 
 SFD is excluded: the source branch prints `SFD not implemented` instead of
 producing an output. FP8/FP4 D and unproven public-predicate modes are also
-excluded. The target imports only `tirx_kernels.tirx_lite as txl`; device code uses no
+excluded. The target imports only `tirx_lite as txl`; device code uses no
 tile primitive, first-class layout or fragment, multidimensional shared buffer,
 CUDA source/function call, or low-level-IR exemption. Low-level operations are
 spelled only through established `txl.ptx[...]` forms in the target module.

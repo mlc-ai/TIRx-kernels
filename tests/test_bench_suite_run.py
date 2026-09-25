@@ -7,8 +7,56 @@ from types import SimpleNamespace
 
 import pytest
 
-from tirx_kernels.bench_suite import ratio_diff
-from tirx_kernels.bench_suite import run as bench_run
+from tirx_kernels.bench import ratio_diff
+from tirx_kernels.bench import suite as bench_run
+
+
+def test_task_local_configs_support_multiple_implementations(monkeypatch, tmp_path):
+    task = tmp_path / "basic" / "rmsnorm"
+    task.mkdir(parents=True)
+    for name, default in (("rmsnorm", "true"), ("flashinfer_rmsnorm", "false")):
+        (task / f"{name}.yaml").write_text(
+            f"kernel: {name}\ndefault_suite: {default}\n"
+            "defaults: {num_gpus: 1, timer: event}\n"
+            f"configs: [{{config: example, default: {default}}}]\n"
+        )
+    (task / "b200").mkdir()
+    (task / "b200" / "internal.yaml").write_text("not a suite config")
+    (tmp_path / "bench").mkdir()
+    (tmp_path / "bench" / "report.yaml").write_text("not a suite config")
+    monkeypatch.setattr(
+        bench_run, "kernel_index", lambda strict: {"rmsnorm": None, "flashinfer_rmsnorm": None}
+    )
+
+    assert bench_run.load_config_dir(tmp_path) == [
+        {"kernel": "rmsnorm", "config": "example", "num_gpus": 1, "timer": "event"}
+    ]
+    variants = bench_run.load_kernel_configs("flashinfer_rmsnorm", tmp_path)
+    assert variants == [
+        {
+            "kernel": "flashinfer_rmsnorm",
+            "config": "example",
+            "num_gpus": 1,
+            "timer": "event",
+            "default": False,
+        }
+    ]
+
+
+@pytest.mark.parametrize("loader", ["load_config_dir", "load_kernel_configs"])
+def test_task_local_configs_reject_duplicate_kernel_names(tmp_path, loader):
+    for task_set in ("basic", "flashinfer"):
+        task = tmp_path / task_set / "rmsnorm"
+        task.mkdir(parents=True)
+        (task / "rmsnorm.yaml").write_text(
+            "kernel: rmsnorm\nconfigs: [{config: example, default: true}]\n"
+        )
+
+    with pytest.raises(ValueError, match="more than one config file"):
+        if loader == "load_config_dir":
+            bench_run.load_config_dir(tmp_path)
+        else:
+            bench_run.load_kernel_configs("rmsnorm", tmp_path)
 
 
 def test_validate_workload_archs_accepts_exact_arch(monkeypatch):

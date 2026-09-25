@@ -23,7 +23,7 @@ SparseAttentionForwardCombine.
 
 This non-executable design sketch describes the storage layout, thread roles,
 control flow, and PTX-level operations of
-[`tirx_kernels/msa/sparse_atten_fwd_combine.py`](../../../tirx_kernels/msa/sparse_atten_fwd_combine.py).
+[`tirx_kernels/msa/sparse_atten_fwd_combine/b200/sparse_atten_fwd_combine.py`](../../../tirx_kernels/msa/sparse_atten_fwd_combine/b200/sparse_atten_fwd_combine.py).
 That TIRx module is the authoritative implementation.
 
 The port covers **one kernel**: `SparseAttentionForwardCombine.kernel`

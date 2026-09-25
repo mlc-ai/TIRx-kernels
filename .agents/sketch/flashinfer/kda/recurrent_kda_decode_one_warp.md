@@ -25,7 +25,7 @@ split, register-resident state tile, shuffle-only cross-lane protocol, gate
 branch structure, reduction order, and predicated output/state paths that the
 TIRx port must preserve. The implementation represented by this sketch is
 maintained in
-[`tirx_kernels/flashinfer/kda/recurrent_kda_decode_one_warp.py`](../../../../tirx_kernels/flashinfer/kda/recurrent_kda_decode_one_warp.py),
+[`tirx_kernels/flashinfer/kda_decode/b200/recurrent_kda_decode_one_warp.py`](../../../../tirx_kernels/flashinfer/kda_decode/b200/recurrent_kda_decode_one_warp.py),
 which becomes the source of truth after this sketch passes review.
 
 The target is SM100a/B200. `HEAD_DIM = 128` (`K == V`), `NUM_TOKENS = 1`,

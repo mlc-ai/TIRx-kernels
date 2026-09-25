@@ -8,10 +8,10 @@ import sys
 
 import check_gdn_decode_bf16_wide_vec_t1_no_tile as no_tile
 
-from tirx_kernels.flashinfer.norm import rmsnorm as target
+from tirx_kernels.basic.rmsnorm.b200 import flashinfer_rmsnorm as target
 
 no_tile.target = target
-no_tile.TARGET = no_tile.REPO / "tirx_kernels/flashinfer/norm/rmsnorm.py"
+no_tile.TARGET = no_tile.REPO / "tirx_kernels/basic/rmsnorm/b200/flashinfer_rmsnorm.py"
 
 
 if __name__ == "__main__":

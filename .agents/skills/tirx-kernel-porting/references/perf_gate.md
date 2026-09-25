@@ -38,12 +38,12 @@ do not substitute a copied or cached version.
 Every final threshold decision must use the `tirx-kernels` bench-suite tool:
 
 ```bash
-python -m tirx_kernels.bench_suite
+python -m tirx_kernels.bench suite
 ```
 
 Ensure the selected workload set contains every required target shape. Final
 evidence must come from the latest complete bench-suite run. Do not use
-`python -m tirx_kernels.bench`, an ad hoc timer, a partial shape set, selected
+`python -m tirx_kernels.bench.run`, an ad hoc timer, a partial shape set, selected
 profiler counters, or an average ratio as final acceptance evidence.
 
 Targeted bench-suite workloads may be used during an investigation, but final
@@ -60,7 +60,7 @@ Run the complete required-shape bench-suite matrix for the correctness-gate
 implementation. Use:
 
 ```bash
-python -m tirx_kernels.bench_suite
+python -m tirx_kernels.bench suite
 ```
 
 Record every required shape, the paired source and TIRx times, and
@@ -423,7 +423,7 @@ The performance gate is PASS only when all are true:
 - the mandatory preparation report contains valid paired source/TIRx NCU reports
   for the selected worst-performing configs;
 - the ledger records the preparation and performance-investigation history;
-- the latest complete `tirx_kernels.bench_suite` matrix contains every required
+- the latest complete `bench` matrix contains every required
   shape;
 - every required shape has `source_time / tirx_time > 0.99`;
 - the final implementation passes the required correctness checks;

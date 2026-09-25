@@ -10,7 +10,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 
 This is the non-executable execution sketch for the single parameterized TIRx
 module
-[`tirx_kernels/cudnn/proj_rope_mxfp8/gemm_proj_rope_mxfp8_bf16in.py`](../../tirx_kernels/cudnn/proj_rope_mxfp8/gemm_proj_rope_mxfp8_bf16in.py).
+[`tirx_kernels/cudnn/gemm_proj_rope_mxfp8/b200/gemm_proj_rope_mxfp8_bf16in.py`](../../tirx_kernels/cudnn/gemm_proj_rope_mxfp8/b200/gemm_proj_rope_mxfp8_bf16in.py).
 It freezes the source kernel's 14-warp split, persistent scheduler, A/B and
 accumulator pipelines, FP32-TMEM-to-BF16-SMEM drain, YARN RoPE arithmetic, two
 MXFP8 block directions, and TMEM teardown. After the independent reviewer

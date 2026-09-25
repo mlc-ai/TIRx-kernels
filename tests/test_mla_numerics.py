@@ -6,7 +6,7 @@
 import pytest
 import torch
 
-from tirx_kernels.curated import mla_dsv4_multishape as mla
+from tirx_kernels.flashinfer.mla_dsv4.b200 import mla_dsv4_multishape as mla
 
 
 def _case(heads, keys, pattern):

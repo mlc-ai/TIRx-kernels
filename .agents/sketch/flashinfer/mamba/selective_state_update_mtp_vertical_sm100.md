@@ -23,7 +23,7 @@ three independent head groups, one TMA producer per group, four recurrence
 warps per group, shared epilogue warp, one-stage state input, and direct
 intermediate/final-state stores that the TIRx port must preserve.  The target
 module is
-[`tirx_kernels/flashinfer/mamba/selective_state_update_mtp_vertical.py`](../../tirx_kernels/flashinfer/mamba/selective_state_update_mtp_vertical.py).
+[`tirx_kernels/flashinfer/selective_state_update/b200/selective_state_update_mtp_vertical.py`](../../tirx_kernels/flashinfer/selective_state_update/b200/selective_state_update_mtp_vertical.py).
 It remains scaffolding until this sketch passes independent review.
 
 The frozen FlashInfer commit is

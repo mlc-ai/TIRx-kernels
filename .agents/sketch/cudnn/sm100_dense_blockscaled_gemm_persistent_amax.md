@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 This is a non-executable execution sketch. It freezes the storage, six-warp
 role split, persistent scheduling, asynchronous protocols, tile dataflow, C
 epilogue, and FP32 amax path for the single parameterized TIRx module
-[`tirx_kernels/cudnn/amax/dense_blockscaled_gemm_persistent_amax.py`](../../tirx_kernels/cudnn/amax/dense_blockscaled_gemm_persistent_amax.py).
+[`tirx_kernels/cudnn/dense_blockscaled_gemm_persistent_amax/b200/dense_blockscaled_gemm_persistent_amax.py`](../../tirx_kernels/cudnn/dense_blockscaled_gemm_persistent_amax/b200/dense_blockscaled_gemm_persistent_amax.py).
 After the reviewer gate that module is the executable source of truth; this
 sketch remains frozen.
 
@@ -719,7 +719,7 @@ and predicates; no branch may change this role/pipeline skeleton.
 
 - Registry name: `cudnn_sm100_dense_blockscaled_gemm_persistent_amax`, category
   `cudnn`, compute capability 10.
-- The device definition imports only `tirx_kernels.tirx_lite as txl` and uses
+- The device definition imports only `tirx_lite as txl` and uses
   `txl.kernel`, `txl.specialize`, `txl.Pipeline`/barrier state, `txl.TensorMap`, and
   `txl.ptx`. Direct `T`, `Tx`, `I`, tile primitives, and `tirx.tile.*` are absent.
 - The module exports `KERNEL_META`, deterministic `CONFIGS`/`BENCH_CONFIGS`,

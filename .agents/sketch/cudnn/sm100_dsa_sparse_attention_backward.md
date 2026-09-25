@@ -23,7 +23,7 @@ FlashAttentionDSABackwardSm100.
 
 This non-executable design sketch describes the storage layout, warp roles,
 pipelines, control flow, and PTX-level operations of
-[`tirx_kernels/cudnn/dsa/sparse_attention_backward.py`](../../../tirx_kernels/cudnn/dsa/sparse_attention_backward.py)
+[`tirx_kernels/cudnn/sparse_attention_backward/b200/sparse_attention_backward.py`](../../../tirx_kernels/cudnn/sparse_attention_backward/b200/sparse_attention_backward.py)
 and its private implementation package. That TIRx module is the authoritative
 implementation.
 

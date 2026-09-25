@@ -13,7 +13,7 @@ aded9909c3c2a897fdbc7b5fd79fa53bc915f4f5.
 This is a non-executable execution sketch, not Python, a builder API, a
 mathematical reference, or an alternate implementation.  The implementation it
 describes belongs in
-[`tirx_kernels/cudnn/linear_attention/gdn_bprop_f16.py`](../../../tirx_kernels/cudnn/linear_attention/gdn_bprop_f16.py),
+[`tirx_kernels/cudnn/gdn_bprop_f16/b200/gdn_bprop_f16.py`](../../../tirx_kernels/cudnn/gdn_bprop_f16/b200/gdn_bprop_f16.py),
 which becomes the executable source of truth after the correctness gate.
 
 The frozen source is the two-launch `chunk_gdn_bwd_sm100` / `run_bwd` path.

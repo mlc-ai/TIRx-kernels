@@ -10,7 +10,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 
 This document is **not executable**. It fixes the resource allocation, the task
 split across warps, and the per-task tile dataflow for the TIRx port at
-`tirx_kernels/cudnn/dglu/_moe_grouped_gemm_dglu_dbias/kernel.py`, which is the
+`tirx_kernels/cudnn/moe_grouped_gemm_dglu_dbias/b200/_moe_grouped_gemm_dglu_dbias/kernel.py`, which is the
 executable source of truth. The sketch is frozen once the sketch reviewer
 passes it, and neither the correctness gate nor the performance gate may edit
 it.

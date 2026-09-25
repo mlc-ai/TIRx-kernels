@@ -102,14 +102,14 @@ than one mean TIRx is faster.
 For a B200 host, select any registered config explicitly when needed:
 
 ```bash
-python -m tirx_kernels.test --kernel allgather_gemm \
+python -m tirx_kernels.bench.test --kernel allgather_gemm \
   --config tp4_m8192_n51200_k5120_fp16_dynamic
-python -m tirx_kernels.test --kernel gemm_reduce_scatter \
+python -m tirx_kernels.bench.test --kernel gemm_reduce_scatter \
   --config tp4_m8192_n5120_k25600_fp16_dynamic
 
-python -m tirx_kernels.bench --kernel allgather_gemm \
+python -m tirx_kernels.bench.run --kernel allgather_gemm \
   --config tp4_m8192_n51200_k5120_fp16_dynamic --timer kineto --rounds 5 --json
-python -m tirx_kernels.bench --kernel gemm_reduce_scatter \
+python -m tirx_kernels.bench.run --kernel gemm_reduce_scatter \
   --config tp4_m8192_n5120_k25600_fp16_dynamic --timer kineto --rounds 5 --json
 ```
 

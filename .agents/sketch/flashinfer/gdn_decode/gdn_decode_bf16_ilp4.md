@@ -15,7 +15,7 @@ ownership, the T-dependent shared precompute, the four-row register recurrence,
 the packed-FP32x2 dot/update arithmetic, and the 64-bit state addressing of
 FlashInfer's CuTeDSL `gdn_decode_bf16state_mtp_ilp4_kernel`. The corresponding
 TIRx module is
-[`tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_ilp4.py`](../../../../tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_ilp4.py).
+[`tirx_kernels/flashinfer/gdn_decode/b200/gdn_decode_bf16_ilp4.py`](../../../../tirx_kernels/flashinfer/gdn_decode/b200/gdn_decode_bf16_ilp4.py).
 That module may become executable only after this sketch passes independent
 review.
 
@@ -638,7 +638,7 @@ every T>1 precompute pass completes at a CTA barrier before shared consumption.
   four Qwen3-Next `(H,HV)` pairs, and only batch sizes reaching this fallback.
 - T=1 performance enables final state update without dense cache. T>1
   performance enables output and dense cache while disabling final pool update.
-- Only a complete target-filtered `python -m tirx_kernels.bench_suite` run may
+- Only a complete target-filtered `python -m tirx_kernels.bench suite` run may
   accept performance, and every `flashinfer_cutedsl_us / tirx_us` ratio must be
   strictly greater than 0.99.
 

@@ -10,7 +10,7 @@ gdn_decode_mtp.py. See LICENSE, NOTICE, and licenses/ for applicable terms.
 
 This is a non-executable execution sketch for FlashInfer's CuTeDSL
 `gdn_verify_kernel_mtp`.  The target is
-[`tirx_kernels/flashinfer/gdn_decode/gdn_decode_fp32_mtp_warp.py`](../../../tirx_kernels/flashinfer/gdn_decode/gdn_decode_fp32_mtp_warp.py).
+[`tirx_kernels/flashinfer/gdn_decode/b200/gdn_decode_fp32_mtp_warp.py`](../../../tirx_kernels/flashinfer/gdn_decode/b200/gdn_decode_fp32_mtp_warp.py).
 The frozen source commit is
 `f2e04400e330fb2debe0bf8730d9424a1d37927f`; the source SHA256 is
 `657d99af36ace6dffb05f4ff31061ce9c80419468ff948873098c42d6b7ecf50`.
@@ -586,7 +586,7 @@ read/final-write path.
 - Correctness uses the frozen `flashinfer.gdn_decode.gated_delta_rule_mtp`
   source body and independently mutable inputs.
 - Performance is accepted only from a complete target-filtered
-  `python -m tirx_kernels.bench_suite` run, with every exact
+  `python -m tirx_kernels.bench suite` run, with every exact
   `flashinfer_cutedsl_us / tirx_us > 0.99`; direct timing is diagnostic only.
 
 ## Instruction selection is a lowering consequence

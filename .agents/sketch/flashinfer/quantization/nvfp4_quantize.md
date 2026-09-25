@@ -26,7 +26,7 @@ flashinfer.quantization.silu_and_mul_nvfp4_quantize.
 
 This non-executable design sketch describes the thread roles, control flow,
 storage placement, and PTX-level operations of
-[`tirx_kernels/flashinfer/quantization/nvfp4_quantize.py`](../../tirx_kernels/flashinfer/quantization/nvfp4_quantize.py).
+[`tirx_kernels/flashinfer/nvfp4_quantize/b200/nvfp4_quantize.py`](../../tirx_kernels/flashinfer/nvfp4_quantize/b200/nvfp4_quantize.py).
 That TIRx module is the authoritative implementation.
 
 The instantiations are `DTYPE in {f16, bf16}` crossed with

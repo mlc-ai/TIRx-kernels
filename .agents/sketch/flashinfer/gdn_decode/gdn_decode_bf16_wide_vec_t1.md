@@ -14,7 +14,7 @@ This file is a non-executable execution sketch.  It freezes the lane ownership,
 shared publication, register-resident state update, packed-FP32x2 arithmetic,
 and vector state traffic of FlashInfer's CuTeDSL
 `gdn_wide_vec_kernel_t1`.  The target implementation is
-[`tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_wide_vec_t1.py`](../../tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_wide_vec_t1.py),
+[`tirx_kernels/flashinfer/gdn_decode/b200/gdn_decode_bf16_wide_vec_t1.py`](../../tirx_kernels/flashinfer/gdn_decode/b200/gdn_decode_bf16_wide_vec_t1.py),
 which may become executable only after this sketch passes independent review.
 
 The frozen FlashInfer commit is
@@ -517,7 +517,7 @@ would not be a faithful port.
   state, Q/K L2 normalization, state update enabled, cache disabled, and the 18
   Qwen3-Next TP shapes recorded in the module's `BENCH_CONFIGS`.
 - The final performance result is accepted only from a complete unfiltered
-  `python -m tirx_kernels.bench_suite` run and only when every required
+  `python -m tirx_kernels.bench suite` run and only when every required
   `source_us / tirx_us` ratio is strictly greater than 0.99.
 
 ## Instruction selection is a lowering consequence

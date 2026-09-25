@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from tirx_kernels.bench_suite import remote
-from tirx_kernels.bench_suite import run as bench_run
+from tirx_kernels.bench import remote
+from tirx_kernels.bench import suite as bench_run
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 
@@ -161,42 +161,52 @@ def _record(submission, **overrides):
 
 
 def _make_package(root: Path) -> Path:
-    pkg = root / "tirx_kernels"
-    (pkg / "basic").mkdir(parents=True)
-    (pkg / "__init__.py").write_text("")
-    (pkg / "basic" / "rmsnorm.py").write_text("x = 1\n")
-    (pkg / "basic" / "kernel.cu").write_text("// cuda\n")
-    (pkg / "basic" / "__pycache__").mkdir()
-    (pkg / "basic" / "__pycache__" / "rmsnorm.cpython-311.pyc").write_bytes(b"\x00")
-    (pkg / "basic" / "stale.pyc").write_bytes(b"\x00")
-    (pkg / "bench_suite").mkdir()
-    (pkg / "bench_suite" / "baseline.json").write_text("{}")
-    (pkg / "bench_suite" / "config.yaml").write_text("kernel: rmsnorm\n")
-    return pkg
+    (root / "tirx_kernels").mkdir()
+    (root / "tirx_kernels" / "__init__.py").write_text("")
+    kernel_dir = root / "tirx_kernels" / "basic" / "rmsnorm" / "b200"
+    kernel_dir.mkdir(parents=True)
+    (kernel_dir / "rmsnorm.py").write_text("x = 1\n")
+    (kernel_dir / "kernel.cu").write_text("// cuda\n")
+    (kernel_dir / "__pycache__").mkdir()
+    (kernel_dir / "__pycache__" / "rmsnorm.cpython-311.pyc").write_bytes(b"\x00")
+    (kernel_dir / "stale.pyc").write_bytes(b"\x00")
+    (root / "tirx_kernels" / "tirx_lite").mkdir()
+    (root / "tirx_kernels" / "tirx_lite" / "__init__.py").write_text("")
+    (root / "tirx_kernels" / "bench").mkdir()
+    (root / "tirx_kernels" / "bench" / "baseline.json").write_text("{}")
+    (kernel_dir.parent / "rmsnorm.yaml").write_text("kernel: rmsnorm\n")
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("must not ship")
+    return root
 
 
 def test_build_tree_archive_is_deterministic_and_excludes_caches(tmp_path):
     pkg = _make_package(tmp_path)
     first = remote.build_tree_archive(pkg)
-    (pkg / "basic" / "rmsnorm.py").touch()  # mtime changes must not change the archive
+    (
+        pkg / "tirx_kernels" / "basic" / "rmsnorm" / "b200" / "rmsnorm.py"
+    ).touch()  # mtime changes must not change the archive
     second = remote.build_tree_archive(pkg)
     assert first.sha256 == second.sha256
     assert first.data == second.data
     with tarfile.open(fileobj=io.BytesIO(first.data), mode="r:gz") as archive:
         names = archive.getnames()
     assert names == sorted(names)
-    assert "tirx_kernels/basic/rmsnorm.py" in names
-    assert "tirx_kernels/basic/kernel.cu" in names
-    assert "tirx_kernels/bench_suite/config.yaml" in names
+    assert "tirx_kernels/basic/rmsnorm/b200/rmsnorm.py" in names
+    assert "tirx_kernels/basic/rmsnorm/b200/kernel.cu" in names
+    assert "tirx_kernels/basic/rmsnorm/rmsnorm.yaml" in names
+    assert "tirx_kernels/tirx_lite/__init__.py" in names
+    assert "tirx_kernels/__init__.py" in names
+    assert not any(name.startswith(".git/") for name in names)
     assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
-    assert "tirx_kernels/bench_suite/baseline.json" not in names
+    assert "tirx_kernels/bench/baseline.json" not in names
     assert first.file_count == len(names)
 
 
 def test_build_tree_archive_content_change_changes_hash(tmp_path):
     pkg = _make_package(tmp_path)
     first = remote.build_tree_archive(pkg)
-    (pkg / "basic" / "rmsnorm.py").write_text("x = 2\n")
+    (pkg / "tirx_kernels" / "basic" / "rmsnorm" / "b200" / "rmsnorm.py").write_text("x = 2\n")
     assert remote.build_tree_archive(pkg).sha256 != first.sha256
 
 
@@ -488,7 +498,7 @@ def test_main_rejects_multi_gpu_workloads_before_connecting(monkeypatch, tmp_pat
 
 
 def test_run_reexports_provenance_helpers():
-    from tirx_kernels.bench_suite import provenance
+    from tirx_kernels.bench import provenance
 
     assert bench_run.collect_repo_git is provenance.collect_repo_git
     assert bench_run.package_provenance is provenance.package_provenance

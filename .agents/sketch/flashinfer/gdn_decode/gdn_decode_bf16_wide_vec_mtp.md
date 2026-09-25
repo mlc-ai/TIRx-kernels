@@ -14,7 +14,7 @@ This file is a non-executable execution sketch. It freezes the lane ownership,
 shared publication, token-serial register recurrence, packed-FP32x2 arithmetic,
 and 128-bit state traffic of FlashInfer's CuTeDSL `gdn_wide_vec_kernel` for the
 multi-token path. The corresponding TIRx module is
-[`tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_wide_vec_mtp.py`](../../../../tirx_kernels/flashinfer/gdn_decode/gdn_decode_bf16_wide_vec_mtp.py).
+[`tirx_kernels/flashinfer/gdn_decode/b200/gdn_decode_bf16_wide_vec_mtp.py`](../../../../tirx_kernels/flashinfer/gdn_decode/b200/gdn_decode_bf16_wide_vec_mtp.py).
 That module may become executable only after this sketch passes independent
 review.
 

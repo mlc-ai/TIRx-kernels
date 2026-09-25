@@ -10,10 +10,10 @@ from types import ModuleType
 
 import pytest
 
-from tirx_kernels.bench.__main__ import _find_bench_config
-from tirx_kernels.bench_suite import ab
-from tirx_kernels.bench_suite.ratio_diff import build_report
-from tirx_kernels.runner import (
+from tirx_kernels.bench import ab
+from tirx_kernels.bench.ratio_diff import build_report
+from tirx_kernels.bench.run import _find_bench_config
+from tirx_kernels.bench.runner import (
     AB_CURRENT_BENCHMARK_ROOT_ENV,
     ExplicitPreparedBenchmark,
     ab_current_benchmark_module,
@@ -254,6 +254,7 @@ def test_current_contract_uses_after_tirx_lite_without_rebinding_before_tirx_lit
 ):
     monkeypatch.setenv(AB_CURRENT_BENCHMARK_ROOT_ENV, str(tmp_path))
     package_root = tmp_path / "tirx_kernels"
+    package_root.mkdir()
     tirx_lite_root = package_root / "tirx_lite"
     tirx_lite_root.mkdir(parents=True)
     (tirx_lite_root / "__init__.py").write_text("MARKER = 'after'\n")
@@ -272,3 +273,21 @@ def test_current_contract_uses_after_tirx_lite_without_rebinding_before_tirx_lit
 
     assert current_module.TXL_MARKER == "after"
     assert sys.modules["tirx_kernels.tirx_lite"] is before_tirx_lite
+
+
+def test_current_contract_resolves_a_moved_kernel_by_public_name(monkeypatch, tmp_path):
+    monkeypatch.setenv(AB_CURRENT_BENCHMARK_ROOT_ENV, str(tmp_path))
+    (tmp_path / "tirx_kernels").mkdir()
+    task = tmp_path / "tirx_kernels" / "basic" / "probe" / "b200"
+    task.mkdir(parents=True)
+    (task / "renamed.py").write_text(
+        "KERNEL_META = {'name': 'stable_probe', 'category': 'basic', "
+        "'runtime_cuda_archs': ['sm_100a']}\nMARKER = 'after'\n"
+    )
+    old_module = ModuleType("tirx_kernels.curated.old_probe")
+    old_module.KERNEL_META = {"name": "stable_probe"}
+
+    current_module = ab_current_benchmark_module(old_module)
+
+    assert current_module.__name__ == "tirx_kernels.basic.probe.b200.renamed"
+    assert current_module.MARKER == "after"

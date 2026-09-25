@@ -23,7 +23,7 @@ SparseAttentionPrepareFwdSplitAtomicSm100.
 
 This non-executable design sketch describes the storage layout, thread roles,
 control flow, and PTX-level operations of
-[`tirx_kernels/msa/sparse_prepare_fwd_split_atomic.py`](../../../tirx_kernels/msa/sparse_prepare_fwd_split_atomic.py).
+[`tirx_kernels/msa/sparse_prepare_fwd_split_atomic/b200/sparse_prepare_fwd_split_atomic.py`](../../../tirx_kernels/msa/sparse_prepare_fwd_split_atomic/b200/sparse_prepare_fwd_split_atomic.py).
 That TIRx module is the authoritative implementation.
 
 The port covers **one kernel**: `SparseAttentionPrepareFwdSplitAtomicSm100.kernel`

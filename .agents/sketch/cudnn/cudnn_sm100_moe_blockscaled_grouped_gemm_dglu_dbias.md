@@ -12,9 +12,9 @@ This is a non-executable execution sketch. It freezes the storage, eight-warp
 role split, MoE persistent tile scheduling, asynchronous protocols, tile
 dataflow, dGLU backward epilogue, dbias/dprob/amax reductions, and FP8 output
 scale-factor path for the single parameterized TIRx module
-[`tirx_kernels/cudnn/dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py`](../../../tirx_kernels/cudnn/dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py)
+[`tirx_kernels/cudnn/moe_blockscaled_grouped_gemm_dglu_dbias/b200/moe_blockscaled_grouped_gemm_dglu_dbias.py`](../../../tirx_kernels/cudnn/moe_blockscaled_grouped_gemm_dglu_dbias/b200/moe_blockscaled_grouped_gemm_dglu_dbias.py)
 and its device code in
-[`_moe_blockscaled_grouped_gemm_dglu_dbias/kernel.py`](../../../tirx_kernels/cudnn/dglu/_moe_blockscaled_grouped_gemm_dglu_dbias/kernel.py).
+[`_moe_blockscaled_grouped_gemm_dglu_dbias/kernel.py`](../../../tirx_kernels/cudnn/moe_blockscaled_grouped_gemm_dglu_dbias/b200/_moe_blockscaled_grouped_gemm_dglu_dbias/kernel.py).
 After the reviewer gate that module is the executable source of truth; this
 sketch remains frozen.
 
@@ -1607,7 +1607,7 @@ branch emits nothing and `total_tokens` is the `ld.global.b32` at source 2241
 
 - registry name `cudnn_sm100_moe_blockscaled_grouped_gemm_dglu_dbias`, category
   `cudnn`, compute capability 10.
-- the device definition imports only `tirx_kernels.tirx_lite as txl`; every copy,
+- the device definition imports only `tirx_lite as txl`; every copy,
   compute, and synchronization operation above is spelled through `txl.ptx`,
   `txl.specialize`, `txl.smem_pool`, `txl.Pipeline`, and `txl.RingState`.
 - exported symbols: `KERNEL_META`, `CONFIGS`, `BENCH_CONFIGS`, `get_kernel`,
@@ -1621,7 +1621,7 @@ branch emits nothing and `total_tokens` is the `ld.global.b32` at source 2241
   `0.008 * sqrt(tiles per expert)` to absorb BF16 atomic ordering.
 - `prepare_bench` compiles only TIRx; the reference import and JIT happen inside
   `run_gpu`, which validates before timing.
-- the performance gate is one complete `python -m tirx_kernels.bench_suite`
+- the performance gate is one complete `python -m tirx_kernels.bench suite`
   run with references over the 49-row matrix, requiring
   `mean(cudnn_frontend_us) / mean(tirx_us) > 0.99` on every row.
 

@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 # cuDNN SM100 MXFP8-input projection GEMM + YARN RoPE sketch
 
 This is the non-executable execution sketch for
-[`tirx_kernels/cudnn/proj_rope_mxfp8/gemm_proj_rope_mxfp8_mxfp8in.py`](../../tirx_kernels/cudnn/proj_rope_mxfp8/gemm_proj_rope_mxfp8_mxfp8in.py).
+[`tirx_kernels/cudnn/gemm_proj_rope_mxfp8/b200/gemm_proj_rope_mxfp8_mxfp8in.py`](../../tirx_kernels/cudnn/gemm_proj_rope_mxfp8/b200/gemm_proj_rope_mxfp8_mxfp8in.py).
 It freezes the direct TE-native ABI, block-scaled MXFP8 mainloop, 14-warp
 split, static persistent scheduler, dual pipeline, FP32-TMEM-to-BF16-SMEM
 drain, YARN RoPE, dual-direction MXFP8 quantization, and TMEM teardown. Once
@@ -36,7 +36,7 @@ covers the non-persistent x32 T2R branch; the second covers persistent x8.
 
 ## No first-class layout invariant
 
-The executable device body imports only `tirx_kernels.tirx_lite as txl`. It may not
+The executable device body imports only `tirx_lite as txl`. It may not
 construct, pass, return, or store a first-class layout, invoke a tile
 primitive, allocate multidimensional shared memory, call `txl.cuda.func_call`,
 embed CUDA source, or rely on a low-level-IR exemption. All shared storage is

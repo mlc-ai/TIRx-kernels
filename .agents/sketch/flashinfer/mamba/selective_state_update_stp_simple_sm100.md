@@ -22,7 +22,7 @@ This is a non-executable sketch of FlashInfer's CUDA
 split, shared-memory exchange, packed state traversal, reduction order,
 optional state-store paths, and low-occupancy dim tiling that the TIRx port must
 preserve. The implementation represented by this sketch is maintained in
-[`tirx_kernels/flashinfer/mamba/selective_state_update_stp_simple.py`](../../tirx_kernels/flashinfer/mamba/selective_state_update_stp_simple.py),
+[`tirx_kernels/flashinfer/selective_state_update/b200/selective_state_update_stp_simple.py`](../../tirx_kernels/flashinfer/selective_state_update/b200/selective_state_update_stp_simple.py),
 which becomes the source of truth after this sketch passes review.
 
 The target is SM100/B200. Input, B, C, z and output are BF16. State is BF16,

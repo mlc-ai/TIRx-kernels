@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 # cuDNN SM100 CSA compressor forward: coarse execution sketch
 
 This is a non-executable execution sketch for
-[`tirx_kernels/cudnn/csa/compressor_fwd_sm100.py`](../../../tirx_kernels/cudnn/csa/compressor_fwd_sm100.py).
+[`tirx_kernels/cudnn/compressor_fwd/b200/compressor_fwd_sm100.py`](../../../tirx_kernels/cudnn/compressor_fwd/b200/compressor_fwd_sm100.py).
 It freezes the source kernel's one-row/one-column-group CTA mapping, scalar or
 paired lane ownership, APE hoist, ragged segment scan, overlap-window branches,
 serial FP32 reduction order, and BF16 traffic. After the initial sketch review,
@@ -227,7 +227,7 @@ if col < ncol:
 ## TIRx and benchmark contract
 
 - Registry name `cudnn_sm100_csa_compressor_fwd`, category `cudnn`, compute capability 10.
-- Device implementation imports only `tirx_kernels.tirx_lite as txl`; all memory and key arithmetic instructions use plain txl expressions or `txl.ptx`.
+- Device implementation imports only `tirx_lite as txl`; all memory and key arithmetic instructions use plain txl expressions or `txl.ptx`.
 - Correctness includes the source ratio-4 matrix, static-capacity padding, empty output, determinism, and an independent FP32 eager oracle.
 - The performance matrix is exactly `(batch,d) in {(1,128),(3,128),(1,512),(3,512)}` with every sequence length 8192 and coff=2.
 - The only performance gate is a complete bench-suite run with the pinned cuDNN Frontend source reference; every row requires `mean(source_us)/mean(tirx_us) > 0.99`.

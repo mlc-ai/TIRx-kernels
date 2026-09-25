@@ -23,7 +23,7 @@ and its companion FinalizeTopKIndicesKernel.
 
 This non-executable design sketch describes the storage layout, thread roles,
 control flow, and PTX-level operations of
-[`tirx_kernels/flashinfer/topk/filtered_topk.py`](../../../../tirx_kernels/flashinfer/topk/filtered_topk.py).
+[`tirx_kernels/flashinfer/topk/b200/filtered_topk.py`](../../../../tirx_kernels/flashinfer/topk/b200/filtered_topk.py).
 That TIRx module is the authoritative implementation.
 
 The port covers **two kernels**, because the dispatchers launch them as one

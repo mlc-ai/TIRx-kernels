@@ -8,7 +8,7 @@ import signal
 
 import pytest
 
-from tirx_kernels import runner
+from tirx_kernels.bench import runner
 
 
 class _Interrupted(BaseException):
@@ -69,7 +69,9 @@ def test_quiet_critical_section_does_not_redeliver(bench_child_handler):
 def test_flex_backward_defers_interrupt_during_reference_preparation(
     bench_child_handler, monkeypatch
 ):
-    from tirx_kernels.cudnn.flex_attention import flex_attention_backward_sm100 as flex
+    from tirx_kernels.cudnn.flex_attention_backward.b200 import (
+        flex_attention_backward_sm100 as flex,
+    )
 
     survived = []
 

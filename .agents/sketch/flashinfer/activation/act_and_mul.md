@@ -24,7 +24,7 @@ gelu_and_mul, and gelu_tanh_and_mul.
 
 This non-executable design sketch describes the storage layout, thread roles,
 control flow, and PTX-level operations of
-[`tirx_kernels/flashinfer/activation/act_and_mul.py`](../../tirx_kernels/flashinfer/activation/act_and_mul.py).
+[`tirx_kernels/flashinfer/act_and_mul/b200/act_and_mul.py`](../../tirx_kernels/flashinfer/act_and_mul/b200/act_and_mul.py).
 That TIRx module is the authoritative implementation.
 
 The six instantiations are `ACT in {silu, gelu, gelu_tanh}` crossed with

@@ -22,7 +22,7 @@ include/flashinfer/fast_topk_clusters_exact.cuh fast_topk_clusters_exact family.
 
 This non-executable design sketch describes the storage layout, thread roles,
 control flow, and PTX-level operations of
-[`tirx_kernels/flashinfer/topk/fast_topk_clusters.py`](../../../../tirx_kernels/flashinfer/topk/fast_topk_clusters.py).
+[`tirx_kernels/flashinfer/topk/b200/fast_topk_clusters.py`](../../../../tirx_kernels/flashinfer/topk/b200/fast_topk_clusters.py).
 That TIRx module is the authoritative implementation.
 
 The port covers **three kernels**, because they are one program: a single device

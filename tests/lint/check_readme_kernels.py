@@ -24,12 +24,15 @@ README = REPO_ROOT / "README.md"
 ARCH_ORDER = ("sm_100a", "sm_103a", "sm_107a", "sm_110a")
 DEFAULT_ARCHS = ("sm_100a", "sm_103a", "sm_107a")
 
-_LINK = re.compile(r"\[`([^`]+)`\]\((tirx_kernels/[^)]+\.py)\)(?: ⟨([^⟩]*)⟩)?")
+_LINK = re.compile(
+    r"\[`([^`]+)`\]\((tirx_kernels/(?:basic|cudnn|deepep|deepgemm|flashattention|flashinfer|flashmla|msa)"
+    r"/[^)]+\.py)\)(?: ⟨([^⟩]*)⟩)?"
+)
 
 
 def _registry() -> dict[str, tuple[str, tuple[str, ...]]]:
     sys.path.insert(0, str(REPO_ROOT))
-    from tirx_kernels import registry
+    from tirx_kernels.bench import registry
 
     index, diagnostics = registry._build_kernel_index(registry._source_snapshot())
     if diagnostics:

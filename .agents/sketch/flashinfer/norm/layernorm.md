@@ -11,7 +11,7 @@ LayerNormKernel. See LICENSE, NOTICE, and licenses/ for applicable terms.
 
 This file is a non-executable execution sketch. It freezes the implementation
 shape of FlashInfer's CuTe-DSL `LayerNormKernel` for the paired target
-[`tirx_kernels/flashinfer/norm/layernorm.py`](../../../../tirx_kernels/flashinfer/norm/layernorm.py).
+[`tirx_kernels/flashinfer/layernorm/b200/layernorm.py`](../../../../tirx_kernels/flashinfer/layernorm/b200/layernorm.py).
 The target may become executable only after this sketch passes independent
 source/PTX review; after the first PASS this file is permanently frozen.
 

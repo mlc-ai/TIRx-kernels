@@ -12,7 +12,7 @@ terms.
 
 This file is a non-executable execution sketch. It freezes the source-shaped
 execution of FlashInfer's CuTe-DSL `FusedAddRMSNormQuantKernel` for
-[`tirx_kernels/flashinfer/norm/fused_add_rmsnorm_quant.py`](../../../../tirx_kernels/flashinfer/norm/fused_add_rmsnorm_quant.py).
+[`tirx_kernels/flashinfer/fused_add_rmsnorm_quant/b200/fused_add_rmsnorm_quant.py`](../../../../tirx_kernels/flashinfer/fused_add_rmsnorm_quant/b200/fused_add_rmsnorm_quant.py).
 The target becomes executable only after independent source/line-info-PTX
 review; after the first reviewer PASS this file is permanently frozen.
 
@@ -641,7 +641,7 @@ def flashinfer_fused_add_rmsnorm_quant(
 - Every specialization undergoes low-level rejection of `TilePrimitiveCall`,
   `tirx.tile.*`, tile imports/primitives, `T.cuda.func_call`, and
   `cuda_func_call`.
-- Final performance authority is only `python -m tirx_kernels.bench_suite`.
+- Final performance authority is only `python -m tirx_kernels.bench suite`.
   Every one of the three exact `flashinfer_cutedsl_time/tirx_time` ratios must
   be strictly greater than 0.99 in one complete valid reference-enabled run.
 

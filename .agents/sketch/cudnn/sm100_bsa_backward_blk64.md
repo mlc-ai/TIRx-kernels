@@ -21,7 +21,7 @@ python/cudnn/block_sparse_attention/csrc/bwd/sm100_blk64/bsa_bwd_sm100.py.
 # cudnn_sm100_bsa_backward_blk64: source-shaped three-kernel sketch
 
 This is the frozen, non-executable design for
-`tirx_kernels/cudnn/bsa/block_sparse_attention_backward_sm100_blk64.py`.
+`tirx_kernels/cudnn/block_sparse_attention_backward/b200/block_sparse_attention_backward_sm100_blk64.py`.
 The public operation is exactly the source class's direct three-launch ABI:
 
 1. `sum_OdO`: BF16 `O,dO` to two FP32 workspace planes;
@@ -31,7 +31,7 @@ The public operation is exactly the source class's direct three-launch ABI:
 
 Bucketed-CSR construction, the forward O/LSE producer, allocation, zero fill,
 compilation and validation are host work outside the timed closure.  The
-kernel imports only `tirx_kernels.tirx_lite as txl`; it uses no tile primitive, no
+kernel imports only `tirx_lite as txl`; it uses no tile primitive, no
 first-class layout, no multidimensional shared buffer and no CUDA function
 call.
 
@@ -647,5 +647,5 @@ normalization, batch-dependent block sizes, bucket transitions, i64 strides,
 
 The frozen representation contract is: `inspect_low_level_ir(...).ok`, no
 function calls, only rank-1 shared allocation, no tile primitive/layout, no
-inline CUDA source/call, and zero changes under `tirx_kernels/tirx_lite`, TVM or
+inline CUDA source/call, and zero changes under `tirx_lite`, TVM or
 low-level-IR exemptions.

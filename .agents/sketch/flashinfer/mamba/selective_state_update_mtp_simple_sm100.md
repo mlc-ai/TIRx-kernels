@@ -24,7 +24,7 @@ register recurrence, one- or two-stage state traversal, fixed and variable
 length addressing, destination-slot selection, intermediate-cache writes,
 scaled int16 state, Philox conversion, and output epilogue that the TIRx port
 must preserve. The target module is
-[`tirx_kernels/flashinfer/mamba/selective_state_update_mtp_simple.py`](../../tirx_kernels/flashinfer/mamba/selective_state_update_mtp_simple.py).
+[`tirx_kernels/flashinfer/selective_state_update/b200/selective_state_update_mtp_simple.py`](../../tirx_kernels/flashinfer/selective_state_update/b200/selective_state_update_mtp_simple.py).
 It remains an integration scaffold until this sketch passes independent
 review.
 
