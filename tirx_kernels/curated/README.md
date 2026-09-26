@@ -18,94 +18,58 @@ limitations under the License.
 
 This directory contains kernels implemented directly in TIRx and admitted
 through portfolio-wide correctness and performance validation, rather than
-ported from an external kernel library. The table below summarizes their
-registered benchmarks; multi-shape sweeps may use one geometric-mean row. A
-pull request that adds or changes a curated kernel must update its rows from a
-same-run candidate/reference measurement.
+ported from an external kernel library. The table below has one aggregate row
+per kernel and covers every registered benchmark configuration. A pull request
+that adds or changes a curated kernel must update its row from complete,
+same-run candidate/reference measurements.
 
 ## Measured speedups
 
-`Speedup` is `reference GPU time / TIRx GPU time`. Values greater than one mean
-TIRx is faster. The KDA forward rows below use CUDA-event timings around the
-launched GPU work; they exclude compilation and host-side setup, so they are GPU
-kernel-time comparisons, not end-to-end operator latency comparisons. The PR
-kernel and FlashKDA used the same inputs, with five warmups and 30 timed
-iterations per configuration. The reported values are the median timings from
-the B200 run using FlashKDA commit `1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b`.
+`Speedup` is `reference GPU time / TIRx GPU time`; values greater than one mean
+TIRx is faster. Geomean is the unweighted geometric mean of the per-config
+speedups. Min and max are the extrema across those same per-config ratios. All
+ratios are calculated from unrounded arithmetic-mean times before display
+rounding.
 
-| Kernel | Config | GPU | Timer | TIRx (us) | Reference | Reference (us) | Speedup | Evidence |
-|---|---|---|---|---:|---|---:|---:|---|
-| [`curated_kda_forward_portfolio_multishape`](kda_forward_portfolio_multishape.py) | `h96_fixed` | GB200 | CUDA events | 327.711 | FlashKDA | 974.155 | 2.973x | `run_bench`; event timer because the fixed route launches two concurrent kernels |
-| [`curated_kda_forward_portfolio_multishape`](kda_forward_portfolio_multishape.py) | `h96_mixed` | GB200 | CUDA events | 293.909 | FlashKDA | 842.822 | 2.868x | `run_bench`; event timer because the fixed route launches two concurrent kernels |
-| [`curated_kda_forward_portfolio_multishape`](kda_forward_portfolio_multishape.py) | `h96_uniform` | GB200 | CUDA events | 308.971 | FlashKDA | 692.548 | 2.241x | `run_bench`; event timer because the fixed route launches two concurrent kernels |
-| [`curated_kda_forward_portfolio_multishape`](kda_forward_portfolio_multishape.py) | `h64_fixed` | GB200 | CUDA events | 253.103 | FlashKDA | 885.340 | 3.498x | `run_bench`; event timer because the fixed route launches two concurrent kernels |
-| [`curated_kda_forward_portfolio_multishape`](kda_forward_portfolio_multishape.py) | `h64_mixed` | GB200 | CUDA events | 206.077 | FlashKDA | 640.273 | 3.107x | `run_bench`; event timer because the fixed route launches two concurrent kernels |
-| [`curated_kda_forward_portfolio_multishape`](kda_forward_portfolio_multishape.py) | `h64_uniform` | GB200 | CUDA events | 208.772 | FlashKDA | 470.625 | 2.254x | `run_bench`; event timer because the fixed route launches two concurrent kernels |
-| [`curated_kda_forward_portfolio_multishape`](kda_forward_portfolio_multishape.py) | `all-six-geomean` | GB200 | CUDA events | 262.082 | FlashKDA | 730.288 | 2.786x | geometric mean of the six rows above |
-| [`curated_alphamoe_fp8_blockscale_qwen3next`](alphamoe_fp8_blockscale_qwen3next.py) | `m1_official` | GB200 | CUDA event | 10.375 | FlashInfer `trtllm_fp8_block_scale_routed_moe` | 36.239 | 3.4929x | Same-worker 7-round mean, cold L2. Pure GPU (Proton): 6.316 us original BF16 atomic / 6.519 us revised FP32 sum (+3.22%). CUDA-event pair below uses graph-captured FlashInfer. |
-| [`curated_alphamoe_fp8_blockscale_qwen3next`](alphamoe_fp8_blockscale_qwen3next.py) | `m8_official` | GB200 | CUDA event | 20.775 | FlashInfer `trtllm_fp8_block_scale_routed_moe` | 50.431 | 2.4275x | Same-worker 7-round mean, cold L2. Pure GPU (Proton): 16.566 us original BF16 atomic / 17.014 us revised FP32 sum (+2.70%). CUDA-event pair below uses graph-captured FlashInfer. |
-| [`curated_alphamoe_fp8_blockscale_qwen3next`](alphamoe_fp8_blockscale_qwen3next.py) | `m16_official` | GB200 | CUDA event | 28.795 | FlashInfer `trtllm_fp8_block_scale_routed_moe` | 62.625 | 2.1749x | Same-worker 7-round mean, cold L2. Pure GPU (Proton): 23.197 us original BF16 atomic / 24.082 us revised FP32 sum (+3.81%). CUDA-event pair below uses graph-captured FlashInfer. |
-| [`curated_alphamoe_fp8_blockscale_qwen3next`](alphamoe_fp8_blockscale_qwen3next.py) | `m32_official` | GB200 | CUDA event | 41.852 | FlashInfer `trtllm_fp8_block_scale_routed_moe` | 81.551 | 1.9486x | Same-worker 7-round mean, cold L2. Pure GPU (Proton): 35.662 us original BF16 atomic / 37.172 us revised FP32 sum (+4.23%). CUDA-event pair below uses graph-captured FlashInfer. |
-| [`curated_alphamoe_fp8_blockscale_qwen3next`](alphamoe_fp8_blockscale_qwen3next.py) | `m64_official` | GB200 | CUDA event | 57.358 | FlashInfer `trtllm_fp8_block_scale_routed_moe` | 101.126 | 1.7631x | Same-worker 7-round mean, cold L2. Pure GPU (Proton): 50.256 us original BF16 atomic / 52.710 us revised FP32 sum (+4.88%). CUDA-event pair below uses graph-captured FlashInfer. |
-| [`curated_alphamoe_fp8_blockscale_qwen3next`](alphamoe_fp8_blockscale_qwen3next.py) | `m128_official` | GB200 | CUDA event | 68.520 | FlashInfer `trtllm_fp8_block_scale_routed_moe` | 118.180 | 1.7248x | Same-worker 7-round mean, cold L2. Pure GPU (Proton): 61.250 us original BF16 atomic / 64.277 us revised FP32 sum (+4.94%). CUDA-event pair below uses graph-captured FlashInfer. |
-| [`curated_alphamoe_fp8_blockscale_qwen3next`](alphamoe_fp8_blockscale_qwen3next.py) | `all-six-geomean` | GB200 | CUDA event | 31.732 | FlashInfer `trtllm_fp8_block_scale_routed_moe` | 69.381 | 2.1865x | Numerical revision of optimization run `alphamoe-20260916-193749`, member `cluster-split`: unweighted BF16 expert results, fixed-order FP32 weighted FMAs, and one final BF16 rounding. All eight `run_test` configurations pass, including exact cancellation and subnormal arithmetic; repeated outputs are bitwise identical. Every official shape is within the 5% pure-GPU regression limit in this same-worker seven-round measurement (maximum 4.94%); the M=64/128 margin is small. All six shapes pass Memcheck and Synccheck; epoch-wrap and mutable-input stress checks also pass. Racecheck is inconclusive: the M=1 worker exited during a node outage, and the bounded M=64 check timed out after 240 s. These CUDA-event columns measure the FlashInfer speedup, not that acceptance gate. The broad quantized oracle bound allows upstream GEMM/FP8 rounding differences; stagewise arithmetic precision supplies the numerical argument. |
-| [`curated_kda_backward_packed`](kda_backward_packed.py) | `packed_1024x8_h96` | GB200 | Proton | 874.732 | FLA `chunk_kda_bwd` | 7671.740 | 8.770x | PR #206 numerical and synchronization repair sweep; same-run pair, three counter-rotated orders |
-| [`curated_kda_backward_packed`](kda_backward_packed.py) | `all-seventeen-geomean` | GB200 | Proton | 266.822 | FLA `chunk_kda_bwd` | 1830.163 | 6.859x | geometric mean of all seventeen same-run pairs; `p06` uses a clean candidate/reference run that does not launch the hang-prone old baseline |
-| [`curated_msa_prefill_multishape`](msa_prefill_multishape.py) | `flat_bf16_b1_q4096_kv4096_h64` | GB200 | Proton | 189.102 | MiniMax MSA | 567.112 | 2.999x | PR #210 numerical-fix sweep; same-run pair, rounds=5, cooldown=1s |
-| [`curated_msa_prefill_multishape`](msa_prefill_multishape.py) | `flat_fp8_b3_q1024_kv8192_h32` | GB200 | Proton | 146.047 | MiniMax MSA | 173.521 | 1.188x | PR #210 numerical-fix sweep; same-run pair, rounds=5, cooldown=1s |
-| [`curated_msa_prefill_multishape`](msa_prefill_multishape.py) | `paged_bf16_b3_q4096_kv8192_h8` | GB200 | Proton | 93.250 | FlashInfer trtllm-gen | 418.663 | 4.490x | PR #210 numerical-fix sweep; same-run pair, rounds=5, cooldown=1s |
-| [`curated_msa_prefill_multishape`](msa_prefill_multishape.py) | `all-three-geomean` | GB200 | Proton | 137.071 | MiniMax MSA / trtllm-gen | 345.378 | 2.520x | geometric mean of the three same-run pairs in the PR #210 numerical-fix sweep |
-| [`curated_msa_decode_multishape`](msa_decode_multishape.py) | `mtp_bf16_b128_q16_kv4096_h64` | GB200 | Proton | 207.070 | MiniMax MSA | 1207.182 | 5.830x | GB200 same-run pair; Proton, rounds=5, cooldown=1s |
-| [`curated_msa_decode_multishape`](msa_decode_multishape.py) | `decode_fp8_b128_q1_kv4096_h64` | GB200 | Proton | 49.094 | MiniMax MSA | 510.456 | 10.397x | GB200 same-run pair; Proton, rounds=5, cooldown=1s |
-| [`curated_msa_decode_multishape`](msa_decode_multishape.py) | `decode_fp16_b128_q1_kv4096_h64` | GB200 | Proton | 91.542 | FlashInfer trtllm-gen block-sparse | 96.231 | 1.051x | GB200 same-run pair; Proton, rounds=5, cooldown=1s |
-| [`curated_msa_decode_multishape`](msa_decode_multishape.py) | `all-ten-geomean` | GB200 | Proton | 72.142 | MiniMax MSA / trtllm-gen | 289.006 | 4.006x | geometric mean of the ten official rows in that same run |
-| [`curated_kda_decode_multishape`](kda_decode_multishape.py) | `t1_b128_hv32_standard` | GB200 | Proton | 41.424 | FlashInfer `recurrent_kda` | 54.189 | 1.308x | GB200 run; Proton, rounds=5, cooldown=1s |
-| [`curated_kda_decode_multishape`](kda_decode_multishape.py) | `t6_b128_hv32_spec` | GB200 | Proton | 160.250 | FlashInfer `recurrent_kda` | 222.751 | 1.390x | GB200 run; Proton, rounds=5, cooldown=1s |
-| [`curated_kda_decode_multishape`](kda_decode_multishape.py) | `t3_b16_hv16_lower_bound` | GB200 | Proton | 10.075 | FlashInfer `recurrent_kda` | 15.976 | 1.586x | GB200 run; Proton, rounds=5, cooldown=1s |
-| [`curated_kda_decode_multishape`](kda_decode_multishape.py) | `all-thirty-geomean` | GB200 | Proton | 22.153 | FlashInfer `recurrent_kda` | 29.263 | 1.321x | geometric mean of the thirty official rows in that run |
-| [`curated_mla_dsv4_multishape`](mla_dsv4_multishape.py) | `prefill_h128_swa16384_topk4x_c16384_k1024_bf16_hnd` | GB200 | Proton | 79.082 | FlashInfer trtllm-gen DSv4 | 117.353 | 1.484x | PR #207 numerical-fix sweep; same-run pair, rounds=5, cooldown=1s |
-| [`curated_mla_dsv4_multishape`](mla_dsv4_multishape.py) | `decode_h16_swa512_topk128x_c128_k132_fp8_hnd` | GB200 | Proton | 7.000 | FlashInfer trtllm-gen DSv4 | 15.388 | 2.198x | PR #207 numerical-fix sweep; same-run pair, rounds=5, cooldown=1s |
-| [`curated_mla_dsv4_multishape`](mla_dsv4_multishape.py) | `prefill_h128_swa16384_topk4x_c16384_k1024_fp8_hnd` | GB200 | Proton | 88.025 | FlashInfer trtllm-gen DSv4 | 78.358 | 0.890x | PR #207 numerical-fix sweep; same-run pair, rounds=5, cooldown=1s |
-| [`curated_mla_dsv4_multishape`](mla_dsv4_multishape.py) | `all-ninety-four-geomean` | GB200 | Proton | 9.621 | FlashInfer trtllm-gen DSv4 | 16.503 | 1.715x | geometric mean of all 94 same-run pairs in the PR #207 numerical-fix sweep |
-| [`curated_vsa_multishape`](vsa_multishape.py) | `pooled_blk128_s80000_topk156` | GB200 | Proton | 4523.323 | FlashInfer `bsa_attn_fwd` | 7045.071 | 1.558x | GB200 run; Proton, rounds=5, cooldown=1s |
-| [`curated_vsa_multishape`](vsa_multishape.py) | `bsr_blk64_s4096_topk32` | GB200 | Proton | 34.869 | FlashInfer `bsa_attn_blk64_fwd` | 58.166 | 1.668x | GB200 run; Proton, rounds=5, cooldown=1s |
-| [`curated_vsa_multishape`](vsa_multishape.py) | `fastwan_blk64_s26624_h12_topk84_partial` | GB200 | Proton | 764.725 | FlashInfer `bsa_attn_blk64_fwd` | 938.857 | 1.228x | GB200 run; Proton, rounds=5, cooldown=1s |
-| [`curated_vsa_multishape`](vsa_multishape.py) | `all-eighteen-geomean` | GB200 | Proton | 92.210 | FlashInfer BSA | 154.753 | 1.678x | geometric mean of the eighteen official rows in that run |
+These results cover the 184 configurations that remain after the
+DeepSeek-V3 FP8 MoE kernel was removed. They come from the 2026-09-25–26 full
+curated sweep on NVIDIA GB200 (`sm_100a`). Each candidate/reference pair used
+five independent timer rounds with a one-second cooldown before every
+implementation in every round. The 149 FlashInfer-backed pairs used FlashInfer
+`0.6.18.dev20260909` at commit
+`13099a68b2f663cea0400a2c161d5264010dfc9c` and NVIDIA CUTLASS DSL `4.7.0`.
+The remaining 35 pairs used their declared FLA, FlashKDA, or MiniMax MSA
+reference. These are GPU-kernel-time comparisons, not end-to-end operator
+latencies.
 
-The MLA rows measure the kernel after the FP8 numerical repairs (BF16 split
-partials and P scaled by 448), against FlashInfer 0.6.18.post1 on GB200 with Proton. Each of
-the 94 configurations uses five same-run candidate/reference rounds and
-arithmetic-mean times; the aggregate row divides their geometric means.
-GPU execution was serialized by the benchmark server's per-GPU lease.
-Source and measurement details are recorded in [PR #207](https://github.com/mlc-ai/TIRx-kernels/pull/207).
-
-For `kcoral` rows the timer is the optimization harness's benchmark server, which
-reports GPU-only latency for candidate and reference in one run. Geomean rows
-divide the two geometric means; they are not means of per-workload ratios.
-
-The KDA backward rows use Proton GPU-kernel time with 30 ms warmup and 100 ms
-repeat budgets in each of three counter-rotated candidate/reference orders.
-All seventeen rows passed correctness against FLA commit
-`9c8e42e762fce087c27b673af4922795d9edb85e`. The old `p06` merge-base kernel
-can hang intermittently, so its published pair comes from the clean PR/FLA run;
-it measured 398.105 us against 3260.885 us (8.191x).
+| Kernel | Configs | GPU | Timer | Reference | Geomean | Min | Max |
+|---|---:|---|---|---|---:|---:|---:|
+| [`curated_alphamoe_fp8_blockscale_qwen3next`](alphamoe_fp8_blockscale_qwen3next.py) | 6 | GB200 | CUDA event | FlashInfer `trtllm_fp8_block_scale_routed_moe` | 2.1881x | 1.7156x | 3.5527x |
+| [`curated_kda_backward_packed`](kda_backward_packed.py) | 17 | GB200 | Proton | FLA `chunk_kda_bwd` | 6.8392x | 5.2177x | 8.8062x |
+| [`curated_kda_decode_multishape`](kda_decode_multishape.py) | 30 | GB200 | Proton | FlashInfer `recurrent_kda` | 1.3261x | 1.0862x | 1.5894x |
+| [`curated_kda_forward_portfolio_multishape`](kda_forward_portfolio_multishape.py) | 6 | GB200 | CUDA event | FlashKDA | 2.7873x | 2.2443x | 3.4193x |
+| [`curated_mla_dsv4_multishape`](mla_dsv4_multishape.py) | 94 | GB200 | Proton | FlashInfer TRT-LLM DSv4 | 1.7124x | 0.8659x | 2.3419x |
+| [`curated_msa_decode_multishape`](msa_decode_multishape.py) | 10 | GB200 | Proton | MiniMax MSA | 3.9878x | 1.0616x | 10.1356x |
+| [`curated_msa_prefill_multishape`](msa_prefill_multishape.py) | 3 | GB200 | Proton | MiniMax MSA / FlashInfer TRT-LLM bridge | 2.5853x | 1.1983x | 4.4804x |
+| [`curated_vsa_multishape`](vsa_multishape.py) | 18 | GB200 | Proton | FlashInfer BSA | 1.6824x | 1.1827x | 2.4299x |
 
 ## Updating the table
 
-Run all registered curated native TIRx workloads and their references through the
-bench suite:
+Run every benchmark config, including entries marked `default: false`, through
+the bench suite with external references enabled. A plain `--filter curated`
+run is insufficient because it keeps only the pinned `default: true` subset;
+provide an explicit all-config workload file instead:
 
 ```bash
 python -m tirx_kernels.bench_suite \
-  --filter curated \
+  --workloads .bench-suite/curated-all-configs.yaml \
   --with-references \
   --rounds 5 \
   --cooldown 1
 ```
 
-For each accepted result, require the workload's declared timer, an empty
-`errors` mapping, and a successful interference check. Copy the arithmetic
-means from `impls`, compute the ratio from those unrounded values, and round
-displayed times and speedups to three decimals. Never combine candidate and
-reference times from different runs, GPUs, configs, timers, or dependency
-revisions.
+Require every workload to use its declared timer, report an empty `errors`
+mapping, and contain five samples for both TIRx and its reference. Compute each
+config's ratio from the unrounded arithmetic means, then report the geometric
+mean, minimum, and maximum of those ratios. Keep one aggregate row per kernel;
+do not add individual-config measurements to this README.
