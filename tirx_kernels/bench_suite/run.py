@@ -156,14 +156,14 @@ def _read_kernel_config(path: Path) -> tuple[str, list[dict], str | None]:
     if len(entries) > MAX_DEFAULT_CONFIGS_PER_KERNEL and default_count == 3:
         if selection_rationale is None:
             raise ValueError(
-                f"{path.name}: curated three-point default selection requires selection_rationale"
+                f"{path.name}: three-point default selection requires selection_rationale"
             )
         default_roles = {
             entry.get("selection_role") for entry in entries if entry.get("default", False)
         }
         if default_roles != set(DEFAULT_SELECTION_ROLES):
             raise ValueError(
-                f"{path.name}: curated defaults must have exactly the roles "
+                f"{path.name}: defaults must have exactly the roles "
                 f"{DEFAULT_SELECTION_ROLES}, got {sorted(default_roles, key=str)}"
             )
         nondefault_roles = [
@@ -177,13 +177,11 @@ def _read_kernel_config(path: Path) -> tuple[str, list[dict], str | None]:
             )
     elif selection_rationale is not None:
         raise ValueError(
-            f"{path.name}: selection_rationale is only valid for a curated "
-            "three-of-many default selection"
+            f"{path.name}: selection_rationale is only valid for a three-of-many default selection"
         )
     elif any(entry.get("selection_role") is not None for entry in entries):
         raise ValueError(
-            f"{path.name}: selection_role is only valid for a curated "
-            "three-of-many default selection"
+            f"{path.name}: selection_role is only valid for a three-of-many default selection"
         )
     return kernel, entries, selection_rationale
 

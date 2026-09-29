@@ -3,12 +3,32 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from tirx_kernels.bench_suite import ratio_diff
 from tirx_kernels.bench_suite import run as bench_run
+
+
+def test_pinned_baseline_rows_resolve_to_configured_workloads():
+    baseline = json.loads(bench_run.DEFAULT_BASELINE.read_text())
+    records = bench_run.kernel_index(strict=True)
+    rows = baseline["results"]
+    keys = [(row["kernel"], row.get("label") or row["config"]) for row in rows]
+    selection = [tuple(key) for key in baseline["selection"]["keys"]]
+
+    assert len(set(keys)) == len(keys)
+    assert len(set(selection)) == len(selection)
+    assert set(selection) == set(keys)
+    for kernel in {kernel for kernel, _ in keys}:
+        assert kernel in records, f"baseline kernel is not registered: {kernel}"
+        configured = {row["config"] for row in bench_run.load_kernel_configs(kernel)}
+        measured = {config for name, config in keys if name == kernel}
+        assert measured <= configured, (
+            f"{kernel}: unconfigured baseline labels {measured - configured}"
+        )
 
 
 def test_validate_workload_archs_accepts_exact_arch(monkeypatch):
@@ -53,7 +73,7 @@ def test_expected_keys_scopes_default_roster_to_arch(monkeypatch):
     assert keys == {("rubin", "rubin_config")}
 
 
-def test_default_roster_includes_curated_rubin_bmm():
+def test_default_roster_includes_rubin_bmm():
     workloads = bench_run.load_config_dir()
     labels = {workload["config"] for workload in workloads if workload["kernel"] == "bmm_fp8_rubin"}
 
@@ -64,7 +84,7 @@ def test_default_roster_includes_curated_rubin_bmm():
     }
 
 
-def test_default_roster_includes_curated_dense_blockscaled_gemm_sm107():
+def test_default_roster_includes_dense_blockscaled_gemm_sm107():
     workloads = bench_run.load_config_dir()
     labels = {
         workload["config"]

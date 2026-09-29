@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Curated native TIRx SM100a DeepSeek-V4 sparse MLA, every official shape.
+"""Native TIRx SM100a DeepSeek-V4 sparse MLA, every official shape.
 
-This replaces `curated_mla_dsv4_prefill_b2`, which covered the pinned
-`mla-dsv4-prefill-h128-swa16384-topk4x-c16384-k1024-bf16-hnd` row, with the
+The multishape path extends the original implementation for the pinned
+`mla-dsv4-prefill-h128-swa16384-topk4x-c16384-k1024-bf16-hnd` row using the
 `layoutg-regreduce` frontier member of the 2026-09-13 multi-shape DSv4
 sparse-MLA optimization run. It covers all ninety-four official rows: decode and
 prefill, varlen and dense query packing, bf16 and fp8-E4M3 storage, HND and NHD
@@ -22,9 +22,9 @@ double-buffered S fits beside it. A planner chooses the split count, blocks per
 CTA, stage depth and tail schedule from the row's head count, token count,
 top-k and dtype -- never from tensor values.
 
-A second device program rides along: the single-shape `dual-issuer` kernel that
-`curated_mla_dsv4_prefill_b2` shipped. The multishape program is weakest
-on H=128 prefill -- NCU puts those rows at one CTA per SM with 232.7 KB of
+A second device program rides along: the original single-shape `dual-issuer`
+kernel. The multishape program is weakest on H=128 prefill -- NCU puts those
+rows at one CTA per SM with 232.7 KB of
 shared memory and 0.29 eligible warps per scheduler, so they are latency-bound
 at an occupancy the datapath cannot raise -- and on the bf16 ones it loses to
 that kernel outright. `_use_h128_bf16_prefill` therefore routes H=128 bf16
@@ -1612,9 +1612,9 @@ def _multishape_setup(data, Q, Kt):
 def _make_h128_bf16_prefill():
     """The shipped single-shape "dual-issuer" kernel, kept for H=128 bf16 prefill.
 
-    This is byte-for-byte the device program and argument binding that
-    ``curated_mla_dsv4_prefill_b2`` shipped, wrapped in a factory so its
-    module-level names stay out of the multishape program's namespace. The
+    This retains the original single-shape prefill device program and argument
+    binding byte for byte, wrapped in a factory so its module-level names stay
+    out of the multishape program's namespace. The
     multishape route loses to it on the H=128 bf16 prefill shapes (0.94x versus
     1.49x against the same baseline), so the dispatch sends exactly those rows
     here and everything else to the multishape program.
@@ -2930,7 +2930,7 @@ def _candidate_setup(data, Q, Kt):
 # ---------------------------------------------------------------------------
 
 KERNEL_META = {
-    "name": "curated_mla_dsv4_multishape",
+    "name": "mla_dsv4_multishape",
     "category": "mla",
     "runtime_cuda_archs": ["sm_100a"],
     "reference_requirements": (
@@ -3102,12 +3102,12 @@ def _config(**config: Any) -> dict[str, Any]:
 
 def _assert_supported_arch() -> None:
     if not torch.cuda.is_available():
-        raise SkipTest("CUDA is required for curated native TIRx DSv4 sparse MLA")
+        raise SkipTest("CUDA is required for native TIRx DSv4 sparse MLA")
     capability = torch.cuda.get_device_capability()
     runtime_arch = f"sm_{capability[0]}{capability[1]}a"
     if runtime_arch not in KERNEL_META["runtime_cuda_archs"]:
         raise SkipTest(
-            "curated native TIRx DSv4 sparse MLA requires one of "
+            "native TIRx DSv4 sparse MLA requires one of "
             f"{KERNEL_META['runtime_cuda_archs']}, got {runtime_arch}"
         )
 

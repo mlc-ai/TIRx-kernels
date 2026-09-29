@@ -137,7 +137,7 @@ def test_reference_requirements_are_stored_in_source_index():
         "sparse_flashmla_prefill_head64_phase1": (),
     }
 
-    fla = index["curated_kda_forward_portfolio_multishape"].reference_requirements
+    fla = index["kda_forward_portfolio_multishape"].reference_requirements
     assert [(item.package, item.import_name) for item in fla] == [("flash-linear-attention", "fla")]
     assert fla[0].git.commit == "9c8e42e762fce087c27b673af4922795d9edb85e"
 

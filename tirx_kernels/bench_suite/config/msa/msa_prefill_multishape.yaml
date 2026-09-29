@@ -1,4 +1,4 @@
-kernel: curated_msa_prefill_multishape
+kernel: msa_prefill_multishape
 defaults:
   num_gpus: 1
   timer: proton

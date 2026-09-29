@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Curated native TIRx Alpha-MoE FP8 block-scale megakernel for SM100 (Qwen3-Next TP4).
+"""Native TIRx Alpha-MoE FP8 block-scale megakernel for SM100 (Qwen3-Next TP4).
 
 Supported shapes: M in {1, 8, 16, 32, 64, 128}, hidden size 2048,
 intermediate size 128, 512 experts, top-10 routing, block-128 FP32 scales,
@@ -2361,7 +2361,7 @@ def make_wide_runner(executable, data, M):
 # ---------------------------------------------------------------------------
 
 KERNEL_META = {
-    "name": "curated_alphamoe_fp8_blockscale_qwen3next",
+    "name": "alphamoe_fp8_blockscale_qwen3next",
     "category": "moe",
     "runtime_cuda_archs": ["sm_100a"],
     "provenance": {
@@ -2474,12 +2474,12 @@ def get_kernel(**kwargs: Any):
 
 def _assert_supported_arch() -> None:
     if not torch.cuda.is_available():
-        raise SkipTest("CUDA is required for curated native TIRx Alpha-MoE")
+        raise SkipTest("CUDA is required for native TIRx Alpha-MoE")
     capability = torch.cuda.get_device_capability()
     runtime_arch = f"sm_{capability[0]}{capability[1]}a"
     if runtime_arch not in KERNEL_META["runtime_cuda_archs"]:
         raise SkipTest(
-            "curated native TIRx Alpha-MoE requires one of "
+            "native TIRx Alpha-MoE requires one of "
             f"{KERNEL_META['runtime_cuda_archs']}, got {runtime_arch}"
         )
 
@@ -2527,7 +2527,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     cfg = _cfg(**kwargs)
     device = torch.device(kwargs.get("device", "cuda"))
     if device.type != "cuda" or not torch.cuda.is_available():
-        raise SkipTest("CUDA is required for curated native TIRx Alpha-MoE")
+        raise SkipTest("CUDA is required for native TIRx Alpha-MoE")
     num_tokens = int(cfg.num_tokens)
     num_ctas = _num_ctas(**kwargs)
     actual_sms = torch.cuda.get_device_properties(device).multi_processor_count

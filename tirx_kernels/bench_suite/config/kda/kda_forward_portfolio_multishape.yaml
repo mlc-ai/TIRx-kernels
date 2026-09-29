@@ -1,4 +1,4 @@
-kernel: curated_kda_forward_portfolio_multishape
+kernel: kda_forward_portfolio_multishape
 selection_rationale: All six rows pack 8192 tokens; the defaults step up from 64 heads over eight uniform 1024-token sequences, to 96 heads over the same packing, to 96 heads over one 8192-token sequence, which carries the longest per-sequence recurrence.
 configs:
   # Fixed kernels overlap on two streams; sum-of-kernel Proton time double-counts them.

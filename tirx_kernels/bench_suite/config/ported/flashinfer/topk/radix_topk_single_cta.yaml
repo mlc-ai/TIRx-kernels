@@ -3,7 +3,7 @@
 # (small, mid-size multi-row, and the largest chunk the shared-memory budget
 # still keeps on one CTA per row).  The performance gate requires every entry
 # here to beat 0.99x the FlashInfer source, so the list is the full domain
-# rather than a curated subset; the three `default: true` rows are only the
+# rather than a selected subset; the three `default: true` rows are only the
 # representatives carried into the repository-wide default sweep.
 kernel: radix_topk_single_cta
 selection_rationale: The fp32 Basic column is the base dispatch; 8x8192 anchors the small single-CTA shape, 64x32768 the mid-range where the grid still fits one row per SM, and 256x57592 the largest chunk the smem budget allows with rows restriding the grid.

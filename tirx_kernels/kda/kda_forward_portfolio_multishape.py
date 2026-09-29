@@ -4024,7 +4024,7 @@ CONFIGS += [
     {"label": "h8_global_items_high_offset", "num_heads": 8, "seq_lens": (65537, 2), "seed": 9},
 ]
 KERNEL_META = {
-    "name": "curated_kda_forward_portfolio_multishape",
+    "name": "kda_forward_portfolio_multishape",
     "category": "kda",
     "runtime_cuda_archs": ["sm_100a"],
     "reference_requirements": (
@@ -4142,7 +4142,7 @@ def _make_case(cfg: KDAForwardPortfolioConfig, device: torch.device) -> dict[str
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     if not torch.cuda.is_available():
-        raise SkipTest("CUDA is required for curated native TIRx KDA forward")
+        raise SkipTest("CUDA is required for native TIRx KDA forward")
     cfg = _cfg(**kwargs)
     case = _make_case(cfg, torch.device(kwargs.get("device", "cuda")))
     case["output"] = torch.empty_like(case["q"])

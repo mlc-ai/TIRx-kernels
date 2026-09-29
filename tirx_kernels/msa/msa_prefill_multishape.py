@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Curated native TIRx SM100a MiniMax sparse-attention (MSA) prefill, all official shapes.
+"""Native TIRx SM100a MiniMax sparse-attention (MSA) prefill, all official shapes.
 
 Covers every official MSA prefill row: flat bf16 (B=1, Q=KV=4096, Hq=64,
 Hkv=4, top-k 16), flat FP8-E4M3 K/V under a bf16 q (B=3, Q=1024, KV=8192,
@@ -3365,7 +3365,7 @@ def setup(data, total_q, B):
 # ---------------------------------------------------------------------------
 
 KERNEL_META = {
-    "name": "curated_msa_prefill_multishape",
+    "name": "msa_prefill_multishape",
     "category": "msa",
     "runtime_cuda_archs": ["sm_100a"],
     "reference_requirements": (
@@ -3462,12 +3462,12 @@ def _config(**config: Any) -> dict[str, Any]:
 
 def _assert_supported_arch() -> None:
     if not torch.cuda.is_available():
-        raise SkipTest("CUDA is required for curated native TIRx MSA prefill")
+        raise SkipTest("CUDA is required for native TIRx MSA prefill")
     capability = torch.cuda.get_device_capability()
     runtime_arch = f"sm_{capability[0]}{capability[1]}a"
     if runtime_arch not in KERNEL_META["runtime_cuda_archs"]:
         raise SkipTest(
-            "curated native TIRx MSA prefill requires one of "
+            "native TIRx MSA prefill requires one of "
             f"{KERNEL_META['runtime_cuda_archs']}, got {runtime_arch}"
         )
 

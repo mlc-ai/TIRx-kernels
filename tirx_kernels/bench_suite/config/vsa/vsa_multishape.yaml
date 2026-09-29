@@ -1,4 +1,4 @@
-kernel: curated_vsa_multishape
+kernel: vsa_multishape
 defaults:
   num_gpus: 1
   timer: proton

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Curated native TIRx SM100a recurrent Kimi Delta Attention (KDA) decode, every official shape.
+"""Native TIRx SM100a recurrent Kimi Delta Attention (KDA) decode, every official shape.
 
 This replaces the pinned `kda-decode-d128-t1-b128-h16-hv32` kernel with the
 `colreg-clc-ring` frontier member of the 2026-09-13 multi-shape KDA-decode
@@ -4997,7 +4997,7 @@ def _candidate_setup(data, N, T):
 # ---------------------------------------------------------------------------
 
 KERNEL_META = {
-    "name": "curated_kda_decode_multishape",
+    "name": "kda_decode_multishape",
     "category": "kda",
     "runtime_cuda_archs": ["sm_100a"],
     "reference_requirements": (
@@ -5064,12 +5064,12 @@ def _config(**config: Any) -> dict[str, Any]:
 
 def _assert_supported_arch() -> None:
     if not torch.cuda.is_available():
-        raise SkipTest("CUDA is required for curated native TIRx KDA decode")
+        raise SkipTest("CUDA is required for native TIRx KDA decode")
     capability = torch.cuda.get_device_capability()
     runtime_arch = f"sm_{capability[0]}{capability[1]}a"
     if runtime_arch not in KERNEL_META["runtime_cuda_archs"]:
         raise SkipTest(
-            "curated native TIRx KDA decode requires one of "
+            "native TIRx KDA decode requires one of "
             f"{KERNEL_META['runtime_cuda_archs']}, got {runtime_arch}"
         )
 
@@ -5083,7 +5083,7 @@ def get_kernel(**config: Any):
     """
     resolved = _config(**config)
     raise SkipTest(
-        "curated native TIRx KDA decode builds its device programs inside the shape "
+        "native TIRx KDA decode builds its device programs inside the shape "
         f"dispatch; inspect them through prepare_bench for {resolved['num_tokens']} "
         f"token(s) x {resolved['num_seqs']} sequence(s)"
     )

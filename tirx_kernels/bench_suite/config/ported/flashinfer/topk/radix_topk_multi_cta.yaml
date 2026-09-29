@@ -5,7 +5,7 @@
 # reachable VEC_SIZE, the k sweep through 4096, all four group topologies, and
 # every runtime pointer branch.  The performance gate requires every entry here
 # to beat 0.99x the FlashInfer source, so the list is the full domain rather
-# than a curated subset; the three `default: true` rows are only the
+# than a selected subset; the three `default: true` rows are only the
 # representatives carried into the repository-wide default sweep.
 #
 # Trivial-branch, short-row and workspace-reuse configs are correctness cases

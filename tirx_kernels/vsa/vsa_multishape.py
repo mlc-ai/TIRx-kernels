@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Curated native TIRx SM100a Video Sparse Attention (VSA) forward, all official shapes.
+"""Native TIRx SM100a Video Sparse Attention (VSA) forward, all official shapes.
 
 This supersedes the single-shape `vsa_s80000_h8_topk156` port: it covers every
 official VSA row rather than the one pinned blk128 shape, at the same measured
@@ -2559,7 +2559,7 @@ def _get_executable(
 # ---------------------------------------------------------------------------
 
 KERNEL_META = {
-    "name": "curated_vsa_multishape",
+    "name": "vsa_multishape",
     "category": "vsa",
     "runtime_cuda_archs": ["sm_100a"],
     "reference_requirements": (
@@ -2650,12 +2650,12 @@ def _config(**config: Any) -> dict[str, Any]:
 
 def _assert_supported_arch() -> None:
     if not torch.cuda.is_available():
-        raise SkipTest("CUDA is required for curated native TIRx VSA forward")
+        raise SkipTest("CUDA is required for native TIRx VSA forward")
     capability = torch.cuda.get_device_capability()
     runtime_arch = f"sm_{capability[0]}{capability[1]}a"
     if runtime_arch not in KERNEL_META["runtime_cuda_archs"]:
         raise SkipTest(
-            "curated native TIRx VSA forward requires one of "
+            "native TIRx VSA forward requires one of "
             f"{KERNEL_META['runtime_cuda_archs']}, got {runtime_arch}"
         )
 

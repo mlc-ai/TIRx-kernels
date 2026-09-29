@@ -1,4 +1,4 @@
-kernel: curated_alphamoe_fp8_blockscale_qwen3next
+kernel: alphamoe_fp8_blockscale_qwen3next
 selection_rationale: >-
   M=1 covers the per-route wide-cluster kernel, M=16 covers the persistent
   two-CTA kernel with quantized activation exchange, and M=128 covers FP32

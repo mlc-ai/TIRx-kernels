@@ -1,5 +1,5 @@
 kernel: cudnn_sm100_bsa_backward_blk128
-selection_rationale: The curated rows span the smallest D64 direct launch, a production multi-head D128 direct case, and the largest multi-group Q workload; all other required porting-gate rows remain explicitly benchable.
+selection_rationale: The selected rows span the smallest D64 direct launch, a production multi-head D128 direct case, and the largest multi-group Q workload; all other required porting-gate rows remain explicitly benchable.
 configs:
   - {config: p00_b1_h1_d64_sq128_skv4096_kv16, default: true, selection_role: small}
   - {config: p01_b1_h1_d128_sq512_skv4096_kv16, default: false}

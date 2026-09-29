@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Curated native TIRx SM100a MiniMax sparse-attention (MSA) decode, every official shape.
+"""Native TIRx SM100a MiniMax sparse-attention (MSA) decode, every official shape.
 
 This replaces the pinned `mtp_bf16_b128_q16_kv4096_h64` kernel with the
 `rowmajor-tmem-probability` frontier member of the 2026-09-13 multi-shape
@@ -7938,7 +7938,7 @@ def _candidate_setup(data, B, seqlen_q):
 # ---------------------------------------------------------------------------
 
 KERNEL_META = {
-    "name": "curated_msa_decode_multishape",
+    "name": "msa_decode_multishape",
     "category": "msa",
     "runtime_cuda_archs": ["sm_100a"],
     "reference_requirements": (
@@ -8043,12 +8043,12 @@ def _config(**config: Any) -> dict[str, Any]:
 
 def _assert_supported_arch() -> None:
     if not torch.cuda.is_available():
-        raise SkipTest("CUDA is required for curated native TIRx MSA decode")
+        raise SkipTest("CUDA is required for native TIRx MSA decode")
     capability = torch.cuda.get_device_capability()
     runtime_arch = f"sm_{capability[0]}{capability[1]}a"
     if runtime_arch not in KERNEL_META["runtime_cuda_archs"]:
         raise SkipTest(
-            "curated native TIRx MSA decode requires one of "
+            "native TIRx MSA decode requires one of "
             f"{KERNEL_META['runtime_cuda_archs']}, got {runtime_arch}"
         )
 

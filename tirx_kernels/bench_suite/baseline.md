@@ -3,7 +3,7 @@
 - Timestamp: `4`
 - Label:     `remote-baseline`
 - Git:       `{'tir': '7a8c0703', 'tirx-kernels': '52d04aed', 'tirx-bench-ci': None}`
-- Workloads: 238 ok, 0 failed
+- Workloads: 232 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -14,30 +14,6 @@ Grouped workloads show one row per config and one timing column per implementati
 | `gelu_tanh_fp16_d11008_t8192` | tirx | 97.5791 | flashinfer | 85.4028 | 0.875 | — |
 | `silu_bf16_d16384_t32768` | tirx | 454.3756 | flashinfer | 469.3271 | 1.033 | — |
 | `silu_fp16_d4096_t1` | tirx | 2.1158 | flashinfer | 2.9639 | 1.401 | — |
-
-## curated_kda_backward_packed
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `p04_hq2_hv4_t18432` | tirx | 150.5622 | fla_chunk_kda_bwd | 916.3090 | 6.086 | — |
-| `p05_hq4_hv8_t18432` | tirx | 244.7955 | fla_chunk_kda_bwd | 1723.5605 | 7.041 | — |
-| `packed_1024x8_h96` | tirx | 922.1302 | fla_chunk_kda_bwd | 8176.3468 | 8.867 | — |
-
-## curated_kda_forward_b1_t8192
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `h64_uniform` | tirx | 191.4043 | flash_kda | 494.0019 | 2.581 | — |
-| `h96_fixed` | tirx | 311.5623 | flash_kda | 1066.3652 | 3.423 | — |
-| `h96_uniform` | tirx | 275.3779 | flash_kda | 729.4685 | 2.649 | — |
-
-## curated_moe_fp8_blockscale_dsv3
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `t1` | tirx | 49.3324 | flashinfer_trtllm_fp8_block_scale_moe | 64.8516 | 1.315 | — |
-| `t14107` | tirx | 675.0185 | flashinfer_trtllm_fp8_block_scale_moe | 2318.1395 | 3.434 | — |
-| `t901` | tirx | 271.0422 | flashinfer_trtllm_fp8_block_scale_moe | 341.5536 | 1.260 | — |
 
 ## cudnn_sm100_bsa_backward_blk128
 
@@ -457,6 +433,14 @@ Grouped workloads show one row per config and one timing column per implementati
 | `hq16_hv64_s1x8192` | tirx | 239.6501 | flashinfer_cutedsl | 250.6522 | 1.046 | — |
 | `hq32_hv32_s8192x16` | tirx | 1086.0588 | flashinfer_cutedsl | 1116.3724 | 1.028 | — |
 | `hq8_hv32_s1024x8` | tirx | 90.3195 | flashinfer_cutedsl | 96.2150 | 1.065 | — |
+
+## kda_backward_packed
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `p04_hq2_hv4_t18432` | tirx | 150.5622 | fla_chunk_kda_bwd | 916.3090 | 6.086 | — |
+| `p05_hq4_hv8_t18432` | tirx | 244.7955 | fla_chunk_kda_bwd | 1723.5605 | 7.041 | — |
+| `packed_1024x8_h96` | tirx | 922.1302 | fla_chunk_kda_bwd | 8176.3468 | 8.867 | — |
 
 ## merge_state
 

@@ -28,21 +28,21 @@ keeps them in sync.
   [`allgather_gemm`](tirx_kernels/gemm/allgather_gemm.py) ⟨sm_100a⟩,
   [`gemm_reduce_scatter`](tirx_kernels/gemm/gemm_reduce_scatter.py) ⟨sm_100a⟩
 - **KDA forward:**
-  [`curated_kda_forward_portfolio_multishape`](tirx_kernels/kda/kda_forward_portfolio_multishape.py) ⟨sm_100a⟩
+  [`kda_forward_portfolio_multishape`](tirx_kernels/kda/kda_forward_portfolio_multishape.py) ⟨sm_100a⟩
 - **Qwen3-Next TP4 Alpha-MoE FP8:**
-  [`curated_alphamoe_fp8_blockscale_qwen3next`](tirx_kernels/moe/alphamoe_fp8_blockscale_qwen3next.py) ⟨sm_100a⟩
+  [`alphamoe_fp8_blockscale_qwen3next`](tirx_kernels/moe/alphamoe_fp8_blockscale_qwen3next.py) ⟨sm_100a⟩
 - **KDA backward:**
-  [`curated_kda_backward_packed`](tirx_kernels/kda/kda_backward_packed.py) ⟨sm_100a⟩
+  [`kda_backward_packed`](tirx_kernels/kda/kda_backward_packed.py) ⟨sm_100a⟩
 - **KDA decode:**
-  [`curated_kda_decode_multishape`](tirx_kernels/kda/kda_decode_multishape.py) ⟨sm_100a⟩
+  [`kda_decode_multishape`](tirx_kernels/kda/kda_decode_multishape.py) ⟨sm_100a⟩
 - **MSA prefill:**
-  [`curated_msa_prefill_multishape`](tirx_kernels/msa/msa_prefill_multishape.py) ⟨sm_100a⟩
+  [`msa_prefill_multishape`](tirx_kernels/msa/msa_prefill_multishape.py) ⟨sm_100a⟩
 - **MSA decode:**
-  [`curated_msa_decode_multishape`](tirx_kernels/msa/msa_decode_multishape.py) ⟨sm_100a⟩
+  [`msa_decode_multishape`](tirx_kernels/msa/msa_decode_multishape.py) ⟨sm_100a⟩
 - **VSA forward:**
-  [`curated_vsa_multishape`](tirx_kernels/vsa/vsa_multishape.py) ⟨sm_100a⟩
+  [`vsa_multishape`](tirx_kernels/vsa/vsa_multishape.py) ⟨sm_100a⟩
 - **DeepSeek-V4 sparse MLA:**
-  [`curated_mla_dsv4_multishape`](tirx_kernels/mla/mla_dsv4_multishape.py) ⟨sm_100a⟩
+  [`mla_dsv4_multishape`](tirx_kernels/mla/mla_dsv4_multishape.py) ⟨sm_100a⟩
 
 ### cuDNN Frontend ports
 
@@ -274,8 +274,8 @@ remain externally managed runtime/compiler dependencies.
 | SGLang CuTeDSL kernels (vendored, + CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | `sglang_cutedsl` benchmark reference; copied into `tirx_kernels/ported/deepgemm/_sglang_cutedsl/`, no SGLang install needed. |
 | `flash_mla`      | `sparse_flashmla_*` / `flash_mla_sparse_fwd` baselines | Reference impls. |
 | `deep_ep`        | `deepep_*` correctness and baselines | Reference implementation. |
-| `flash-linear-attention` | the `curated_kda_forward_*` kernels and `curated_kda_backward_packed` correctness | Independent FLA BF16/Triton chunk reference. |
-| `flash_kda`      | `flashkda_*` and `curated_kda_forward_*` optional baselines | Raw FlashKDA benchmark peer. |
+| `flash-linear-attention` | `kda_forward_portfolio_multishape` and `kda_backward_packed` correctness | Independent FLA BF16/Triton chunk reference. |
+| `flash_kda`      | `flashkda_*` and `kda_forward_portfolio_multishape` optional baselines | Raw FlashKDA benchmark peer. |
 | `fmha_sm100` (MSA) | `msa_*` correctness and baselines | Reference implementation; set `MSA_PATH` to use a checkout elsewhere. |
 | NVSHMEM          | `allgather_gemm`, `gemm_reduce_scatter` | Required to compile/run the GemmComm kernels. |
 

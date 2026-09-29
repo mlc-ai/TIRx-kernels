@@ -1542,7 +1542,7 @@ zero tolerance for masked/empty invariants where representable, and the
 tightest empirically defensible FP16/BF16 ULP/absolute bounds against the
 same source execution.
 
-The curated bench-suite matrix is the sole final performance authority. Source
+The bench-suite matrix is the sole final performance authority. Source
 and TIRx both compile as PTX 9.3 on GB300. The timed closures include only the
 production source forward launch or the production TIRx launch; plan building,
 TensorMap encoding, compilation, allocation, initialization, validation, and

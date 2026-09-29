@@ -15,7 +15,7 @@ replace the direct verdict. The same flag exists on
 registered kernel has one file. Paths mirror the module categories: native
 workloads use `config/kda/`, `config/gemm/`, etc.; ports use
 `config/ported/<upstream>/`, including any entry-point subpackages. Files with `default_suite: true` select one to
-three representative single-GPU rows with `default: true`; curated three-row
+three representative single-GPU rows with `default: true`; three-row
 files label them `small`, `medium`, and `large`. The current default roster is
 274 rows across 93 device kernels: 241 rows from 82 kernels validated on
 `sm_100a`, `sm_103a`, and `sm_107a`, three rows each from eight

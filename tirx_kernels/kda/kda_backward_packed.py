@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Curated native TIRx SM100a KDA backward for the packed Kimi K3 workload portfolio.
+"""Native TIRx SM100a KDA backward for the packed Kimi K3 workload portfolio.
 
 The fused path has a schedule tuned for 152 CTAs; the grouped-head megakernel
 uses the detected SM count.
@@ -12593,7 +12593,7 @@ def debug_state():
 # ----------------------------------------------------------------------------
 
 KERNEL_META = {
-    "name": "curated_kda_backward_packed",
+    "name": "kda_backward_packed",
     "category": "kda",
     "runtime_cuda_archs": ["sm_100a"],
     "reference_requirements": (
@@ -12874,7 +12874,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     cfg = _cfg(**kwargs)
     device = torch.device(kwargs.get("device", "cuda"))
     if device.type != "cuda" or not torch.cuda.is_available():
-        raise SkipTest("CUDA is required for curated native TIRx KDA backward")
+        raise SkipTest("CUDA is required for native TIRx KDA backward")
 
     generator = torch.Generator(device=device)
     generator.manual_seed(cfg.seed)
@@ -12996,12 +12996,12 @@ _RMS_LIMITS = (8e-3, 8e-3, 8e-3, 2e-2, 2e-2, 8e-3)
 
 def _assert_supported_arch() -> None:
     if not torch.cuda.is_available():
-        raise SkipTest("CUDA is required for curated native TIRx KDA backward")
+        raise SkipTest("CUDA is required for native TIRx KDA backward")
     capability = torch.cuda.get_device_capability()
     runtime_arch = f"sm_{capability[0]}{capability[1]}a"
     if runtime_arch not in KERNEL_META["runtime_cuda_archs"]:
         raise SkipTest(
-            "curated native TIRx KDA backward requires one of "
+            "native TIRx KDA backward requires one of "
             f"{KERNEL_META['runtime_cuda_archs']}, got {runtime_arch}"
         )
 

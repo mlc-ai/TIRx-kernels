@@ -1,4 +1,4 @@
-kernel: curated_mla_dsv4_multishape
+kernel: mla_dsv4_multishape
 selection_rationale: >-
   The ninety-four official rows cover decode and prefill, varlen and dense query
   packing, bf16 and fp8 storage, HND and NHD pools, and rows with and without a

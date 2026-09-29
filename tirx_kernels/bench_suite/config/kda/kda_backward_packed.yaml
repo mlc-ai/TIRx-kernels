@@ -1,4 +1,4 @@
-kernel: curated_kda_backward_packed
+kernel: kda_backward_packed
 selection_rationale: The seventeen official workloads split into two dispatch paths, so the defaults cover both and bracket the cost range - the H=96 whole-chunk row is the only one that takes the fused chain kernel and is also the most expensive, while the two portfolio defaults take the megakernel and span its extremes (Hqk=4/Hv=8 over 18432 tokens is the widest head layout, Hqk=2/Hv=4 over 18432 tokens the smallest). The remaining shapes stay explicitly benchable but off by default to keep the routine sweep bounded.
 configs:
   - {config: packed_1024x8_h96, default: true, selection_role: large, timer: proton}

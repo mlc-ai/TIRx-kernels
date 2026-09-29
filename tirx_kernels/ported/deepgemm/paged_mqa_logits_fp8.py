@@ -188,7 +188,7 @@ DSA_INDEXER_LIKE_COVERAGE = [
 # The Cartesian product contains 9 * 4 * 5 = 180 configs. Extending the same
 # grid to num_heads = (32, 64) contains 360 configs.
 #
-# SGLANG_BENCH_CONFIGS is currently a curated 80-config kernel-only subset:
+# SGLANG_BENCH_CONFIGS is currently a selected 80-config kernel-only subset:
 #   decode: H=(32,64) x B=(1,2,4,8,16) x every context_len = 50
 #   target verify: H=(32,64) x next_n=(2,4,6) x the five paired (B, pages)
 #                  points below = 30

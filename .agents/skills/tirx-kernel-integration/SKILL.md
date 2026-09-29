@@ -223,7 +223,7 @@ There are three distinct configuration layers. Do not collapse their roles:
 1. `CONFIGS` is the labeled correctness/default module matrix.
 2. Optional `BENCH_CONFIGS` is the module benchmark matrix. The benchmark CLI
    prefers it and falls back to `CONFIGS` when it is absent.
-3. `tirx_kernels/bench_suite/config/<category path>/<kernel>.yaml` selects the curated regression
+3. `tirx_kernels/bench_suite/config/<category path>/<kernel>.yaml` selects the regression
    sweep and marks each benchmark config `default: true|false`.
 
 Every module config must have a stable, meaningful `label`; the runner removes
@@ -408,7 +408,7 @@ helps. State exactly which one each result represents.
 
 ## 10. Bench Suite
 
-The curated sweep is defined by one file per kernel:
+The regression sweep is defined by one file per kernel:
 
 ```yaml
 kernel: kernel_name

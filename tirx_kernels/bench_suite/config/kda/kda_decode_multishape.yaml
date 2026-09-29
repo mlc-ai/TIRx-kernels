@@ -1,4 +1,4 @@
-kernel: curated_kda_decode_multishape
+kernel: kda_decode_multishape
 selection_rationale: >-
   The three defaults cover standard decode, speculative decode, and runtime
   lower-bound gates. T=3/N=1 is the small row with the lower-bound gate at HV=16;
