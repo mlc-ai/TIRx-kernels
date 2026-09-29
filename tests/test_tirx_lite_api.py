@@ -198,6 +198,46 @@ def test_call_packed_has_statement_semantics():
     )
 
 
+def test_cu_tensor_map_encode_tiled_emits_typed_encode():
+    @txl.kernel(warps=1, arch="sm_100a", grid=False, check_ir=False)
+    def probe(out: txl.gptr("float32")):
+        descriptor = txl.stack_alloca("tensormap", 1)
+        # rank 2: dims, one byte stride, box, element strides, then four modes.
+        txl.cu_tensor_map_encode_tiled(
+            descriptor, "bfloat16", 2, out.ptr_to([0]), 64, 32, 128, 64, 32, 1, 1, 0, 3, 2, 0
+        )
+        txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
+
+    values = []
+    structural_walk(probe.func.body, (tirx.Evaluate, lambda op: values.append(op.value)))
+    encodes = [
+        value
+        for value in values
+        if getattr(getattr(value, "op", None), "name", None) == "tirx.tensormap_encode_tiled"
+    ]
+    assert len(encodes) == 1
+    attrs = encodes[0].attrs
+    assert str(attrs.descriptor_dtype) == "bfloat16"
+    assert (attrs.rank, attrs.interleave, attrs.swizzle, attrs.l2_promotion, attrs.oob_fill) == (
+        2,
+        0,
+        3,
+        2,
+        0,
+    )
+    assert attrs.force_cu_dtype == -1
+    assert len(encodes[0].args) == 4 * 2 + 1
+
+
+def test_cu_tensor_map_encode_tiled_rejects_wrong_operand_count():
+    with pytest.raises(ValueError, match="rank-2 tensor map"):
+
+        @txl.kernel(warps=1, arch="sm_100a", grid=False, check_ir=False)
+        def probe(out: txl.gptr("float32")):
+            descriptor = txl.stack_alloca("tensormap", 1)
+            txl.cu_tensor_map_encode_tiled(descriptor, "bfloat16", 2, out.ptr_to([0]), 64, 32)
+
+
 def test_retired_binding_forms_are_rejected_with_guidance():
     import pytest
 

@@ -190,9 +190,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
         d_map = txl.stack_alloca("tensormap", 1)
 
         def encode(descriptor, rank, data, *shape):
-            txl.call_packed(
-                "runtime.cuTensorMapEncodeTiled", descriptor, AB_DTYPE, rank, data, *shape
-            )
+            txl.cu_tensor_map_encode_tiled(descriptor, AB_DTYPE, rank, data, *shape)
 
         # A and B encode identically apart from their map, data pointer, row count
         # and block tile.
