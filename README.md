@@ -203,48 +203,12 @@ and how to refresh the baseline.
 ## Installation
 
 ```bash
-pip install tirx-kernels==0.1.0
+pip install tirx-kernels
 # or, from a checkout:
 pip install -e .
 ```
 
 The kcoral client for remote benchmarking is installed automatically.
-
-### Packaging and releases
-
-Versions come from Git tags through `setuptools-scm`, as in kcoral. A clean
-checkout of `v0.1.0` builds version `0.1.0`; commits after a tag get a
-development version automatically. Build both the source distribution and a
-pure-Python wheel with:
-
-```bash
-python -m pip install build twine
-python -m build
-python -m twine check --strict dist/*
-```
-
-The build workflow checks the installed wheel on Python 3.10 and 3.12, including
-kernel discovery and packaged benchmark configurations, baselines, and CUDA
-reference sources. The wheel does not compile GPU code during installation.
-
-To publish, tag the release commit (for example, `v0.1.0`) and publish a
-GitHub Release for that tag, marking release candidates as prereleases.
-`.github/workflows/publish_pypi.yml` builds and validates that exact tag, then
-uploads the wheel and source distribution using PyPI Trusted Publishing.
-The PyPI publisher for `tirx-kernels` must use owner `mlc-ai`, repository
-`TIRx-kernels`, workflow `publish_pypi.yml`, and environment `pypi`. Configure it
-in the [PyPI publishing settings](https://pypi.org/manage/project/tirx-kernels/settings/publishing/).
-Alternatively, as in kcoral, set a `PYPI_API_TOKEN` Actions secret on the
-repository or its `pypi` environment; when present, the workflow uses that token
-and disables OIDC attestations. The token must have permission to publish
-`tirx-kernels`.
-
-The workflow can also be run manually with an existing release tag. For example,
-after configuring publishing credentials:
-
-```bash
-gh workflow run publish_pypi.yml --repo mlc-ai/TIRx-kernels --ref main -f ref=v0.1.0
-```
 
 ### External dependencies
 
