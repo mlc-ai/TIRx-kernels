@@ -1,8 +1,7 @@
 # TIRx kernels
 
-High-performance GPU kernels authored in
-[tirx-lite](tirx_kernels/tirx_lite/README.md) and compiled through
-[TIRx](https://github.com/apache/tvm).
+Curated high-performance [TIRx](https://github.com/apache/tvm) GPU kernels,
+with support for [tirx-harness](https://github.com/mlc-ai/TIRx-harness).
 
 ## Kernels
 
