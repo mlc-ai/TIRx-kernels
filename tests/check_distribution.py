@@ -4,7 +4,7 @@
 """Smoke-test a wheel installed in an isolated environment, without GPU runtimes.
 
 Run with ``python -I tests/check_distribution.py`` to exclude the checkout from
-Python's import path. Optionally pass ``--expected-version v0.1.0rc0``.
+Python's import path. Optionally pass ``--expected-version v0.1.0``.
 """
 
 import argparse

@@ -203,20 +203,17 @@ and how to refresh the baseline.
 ## Installation
 
 ```bash
-pip install tirx-kernels==0.1.0rc0
+pip install tirx-kernels==0.1.0
 # or, from a checkout:
 pip install -e .
 ```
 
 The kcoral client for remote benchmarking is installed automatically.
 
-Pin `0.1.0rc0` explicitly: PyPI also contains older uploads numbered `0.1.1`,
-which pip considers newer than this prerelease.
-
 ### Packaging and releases
 
 Versions come from Git tags through `setuptools-scm`, as in kcoral. A clean
-checkout of `v0.1.0rc0` builds version `0.1.0rc0`; commits after a tag get a
+checkout of `v0.1.0` builds version `0.1.0`; commits after a tag get a
 development version automatically. Build both the source distribution and a
 pure-Python wheel with:
 
@@ -230,7 +227,7 @@ The build workflow checks the installed wheel on Python 3.10 and 3.12, including
 kernel discovery and packaged benchmark configurations, baselines, and CUDA
 reference sources. The wheel does not compile GPU code during installation.
 
-To publish, tag the release commit (for example, `v0.1.0rc0`) and publish a
+To publish, tag the release commit (for example, `v0.1.0`) and publish a
 GitHub Release for that tag, marking release candidates as prereleases.
 `.github/workflows/publish_pypi.yml` builds and validates that exact tag, then
 uploads the wheel and source distribution using PyPI Trusted Publishing.
@@ -246,7 +243,7 @@ The workflow can also be run manually with an existing release tag. For example,
 after configuring publishing credentials:
 
 ```bash
-gh workflow run publish_pypi.yml --repo mlc-ai/TIRx-kernels --ref main -f ref=v0.1.0rc0
+gh workflow run publish_pypi.yml --repo mlc-ai/TIRx-kernels --ref main -f ref=v0.1.0
 ```
 
 ### External dependencies
