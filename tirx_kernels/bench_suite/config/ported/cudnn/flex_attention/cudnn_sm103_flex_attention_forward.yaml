@@ -1,0 +1,21 @@
+# The registry retains the complete performance-gate matrix. Three default
+# points keep the ordinary suite bounded while spanning qstage2, qstage1 1CTA,
+# and qstage1 2CTA execution; every other reviewed point remains selectable.
+kernel: cudnn_sm103_flex_attention_forward
+selection_rationale: The small, medium, and large defaults span qstage2 1CTA, split-mask GQA qstage1 1CTA, and long-context qstage1 2CTA, while the full listed matrix also covers FP16/BF16, fixed/varlen, packed/unpacked GQA/MQA/MHA, D/Dv padding, LSE omission, and D192 overlap.
+configs:
+  - {config: p_qs2_1cta_bf16_d64_full_b1_sq1024_sk384_h8, default: true, selection_role: small}
+  - {config: p_qs2_1cta_bf16_d128_full_b1_sq4096_sk512_h8, default: false}
+  - {config: p_qs2_1cta_fp16_d80_dv48_causal_b2_sq2048_sk384_h8_nolse, default: false}
+  - {config: p_qs2_1cta_bf16_d192_dv128_split_b1_sq2048_sk384_h4, default: false}
+  - {config: p_varlen_qs2_1cta_bf16_d128_full_gqa_pack_b4_h8kv2, default: false}
+  - {config: p_qs1_1cta_bf16_d64_causal_mqa_b1_sq2048_sk4096_h8kv1_nolse, default: false}
+  - {config: p_qs1_1cta_bf16_d128_full_b1_sq4096_sk8192_h8, default: false}
+  - {config: p_qs1_1cta_bf16_d128_dv64_split_gqa_b1_sq4096_sk4096_h8kv2, default: true, selection_role: medium}
+  - {config: p_qs1_1cta_fp16_d128_full_gqa_pack_b1_sq4096_sk8192_h8kv2, default: false}
+  - {config: p_qs1_1cta_bf16_d192_dv128_split_b1_sq2048_sk4096_h4, default: false}
+  - {config: p_qs1_2cta_bf16_d64_full_b1_sq4096_sk4096_h8, default: false}
+  - {config: p_qs1_2cta_bf16_d128_full_b1_sq4096_sk8192_h8, default: true, selection_role: large}
+  - {config: p_qs1_2cta_fp16_d64_split_gqa_pack_b1_sq4096_sk384_h8kv2, default: false}
+  - {config: p_qs1_2cta_bf16_d192_dv128_full_b1_sq2048_sk4096_h4, default: false}
+  - {config: p_varlen_qs1_2cta_bf16_d128_split_gqa_pack_b4_h8kv2, default: false}

@@ -1,0 +1,117 @@
+# Select address lowering by shape
+
+**Symptoms:** `excess_address_math`, `long_scoreboard`, `register_pressure`, `schedule_regression`
+
+## Symptom
+
+Excess integer address ops, register pressure, or scheduling regressions traced
+to address lowering, with no single lowering best across the shape matrix.
+
+## What to change
+
+Keep native `[base+imm]` offsets and explicit pointer arithmetic as alternatives
+until a full shape picker is measured. Put both lowerings behind one helper flag
+so a specialization can choose:
+
+```python
+def _global_load_u16_ptr_offset(ptr, byte_offset: int, native_offset: bool = True):
+    if not native_offset:
+        # Explicit pointer arithmetic.
+        return _global_load_u16_ptr(T.ptr_byte_offset(ptr, byte_offset, "bfloat16"))
+    # Native [base+imm]: the offset is baked into the instruction operand.
+    out = T.alloc_local((1,), "uint16")
+    T.evaluate(T.ptx.ld.global_.b16(out[0], T.ptx.addr(ptr, byte_offset)))
+    return out[0]
+```
+
+The choice is then a per-shape constexpr passed at specialization, not a global
+preference:
+
+```python
+USE_NATIVE_OFFSETS=_HAS_NATIVE_PTX_ADDR and (seq_len == 2 or 3 < seq_len < 8),
+```
+
+Retain cursor induction only when the emitted address chain and the affected
+shapes demonstrate a gain.
+
+For an unrolled gathered copy, one alternative is to materialize the absolute
+source row pointers and the invariant swizzled shared-memory base once per
+output tile. Inside the staged loop, form one warp-uniform byte offset and add
+it to each row pointer; keep the destination row-group offsets as compile-time
+immediates. Select this form only for specializations whose profile localizes
+the stall to the repeated gather-address chain.
+
+## Rationale
+
+Native `[base+imm]` addressing removes explicit pointer arithmetic only when the
+byte offset is a compile-time immediate. It can still alter scheduling,
+allocation, dependency chains, or pointer lifetimes. One FP32 MTP matrix
+selected native offsets for 56 of 97 configurations and explicit arithmetic for
+the other 41; neither form was globally best.
+
+Likewise, replacing `step * stride` with a moving cursor is not intrinsically
+cheaper. Five live cursors in one recurrent specialization increased registers
+from 58 to 60 and static SASS from 1072 to 1080 instructions, with no spill and
+no consistent full-matrix gain. ptxas had already strength-reduced much of the
+original indexing, while the explicit cursors extended five live ranges and
+added loop-back updates.
+
+The reverse static win can also lose. One grouped native-offset rewrite issued
+eight asynchronous copies from one base plus immediates, removed 16 static SASS
+instructions, and moved the first copy earlier without changing the floating
+point, copy, or store counts. It still measured only 0.980x, so the shorter
+instruction stream did not translate to a shorter timed path and the rewrite
+was reverted.
+
+The opposite result appeared after paired profiling localized long-scoreboard
+stalls to an eight-row gathered-copy address chain. Materializing eight
+absolute row pointers, one invariant swizzled destination base, and one
+warp-uniform stage offset replaced eight repeated `IMAD.WIDE` chains and seven
+repeated swizzles with eight 64-bit adds and immediate 2 KiB destination
+offsets. The isolated specialization improved from approximately 104.5 us to
+103.25 us (about 1.2%), passed exact full-allocation correctness, and survived
+the final complete matrix. Applying the same lowering broadly had already
+shown no material gain on three other regimes, so the profile-localized
+specialization is part of the result.
+
+A measured block-scaled epilogue showed the same choice within one store helper.
+Hoisting every output base across the epilogue produced 69 registers and 976
+static instructions. Forming the complete row, swizzle, and stage offset at the
+use site only for the wider FP32 output reduced that specialization to 64
+registers and 960 instructions with zero spill, while narrower outputs retained
+the hoisted form. All 41 correctness configurations passed. The 136-row
+targeted result reached a 0.97877 minimum and 1.00850 geometric mean, but the
+30-row validation still had four failures at a 0.97928 minimum. The reusable
+result is the shape-selective live-range reduction; the static improvement alone
+is not a performance verdict.
+
+In a nine-record polling tail, materializing one 64-bit byte address before
+adding constant route offsets changed nine separately formed pointers into
+`LDG` base-plus-immediate accesses and reduced allocation from 58 to 42
+registers with zero stack. Same-worker pure GPU time changed only from 6.559
+to 6.543 us over nine rounds, with a second measurement flat. The register
+reduction enabled a later staged-load experiment, but alone it did not remove
+the remaining latency gap.
+
+## Boundary
+
+Native offsets, explicit arithmetic, and cursor induction are alternative
+dependency graphs, not an ordering from worse to better. Do not retain one from
+instruction count or first-issue position alone.
+
+Compile-time shape knowledge can change the allocation tradeoff too. Replacing
+a runtime sequence count with its known setup-time value removed 41 integer
+multiply/address sites and 22 branches in one persistent specialization, but
+changed unrolling and increased its stack from 16 to 136 bytes, with local
+load/store sites rising from 26/36 to 55/69. Four paired profiles retained all
+output bytes; the two active paths improved only 0.55–0.60%, and the controls
+were flat. That limited gain did not justify adding sequence count to the
+production specialization key. Counts of static load sites across differently
+unrolled bodies are not counts of executed loads. Only stable shape facts,
+not unchecked input values, may become such specialization constants.
+
+## Verification
+
+Confirm normalized PTX/SASS addresses, register counts, integer address ops,
+spills, and latency per specialization. Require the affected performance path
+and its guard shapes to agree with the static diagnosis.

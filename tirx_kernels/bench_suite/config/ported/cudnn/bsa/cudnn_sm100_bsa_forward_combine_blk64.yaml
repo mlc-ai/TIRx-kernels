@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+kernel: cudnn_sm100_bsa_forward_combine_blk64
+selection_rationale: The selected defaults cross ordinary split-2 occupancy, split-4 pipelining, and the largest production split-8 grid; the full matrix additionally covers a ragged split-2 query tail plus split-3 and split-256 specialization guards.
+defaults:
+  num_gpus: 1
+configs:
+  - {config: b1_h4_sq1024_s2, default: true, selection_role: small}
+  - {config: b1_h4_sq4097_s2_tail, default: false}
+  - {config: b1_h4_sq2048_s4, default: true, selection_role: medium}
+  - {config: b1_h8_sq2048_s8, default: true, selection_role: large}
+  - {config: b1_h1_sq17_s3_guard, default: false}
+  - {config: b1_h1_sq65_s256_guard, default: false}

@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "python_requirements": [
+    "nvidia-cutlass-dsl[cu13]==4.7.0",
+    "nvidia-cuda-cccl==13.2.75",
+    "quack-kernels==0.6.4"
+  ],
+  "test_requirements": [
+    "pytest==9.0.2",
+    "pytest-xdist==3.8.0"
+  ],
+  "isolated_python_requirements": {
+    "msa-cutedsl": [
+      "nvidia-cutlass-dsl==4.5.3",
+      "nvidia-cutlass-dsl-libs-base==4.5.3",
+      "nvidia-cutlass-dsl-libs-cu13==4.5.3",
+      "quack-kernels==0.5.0"
+    ]
+  },
+  "sources": [
+    {
+      "name": "deep-gemm",
+      "import_name": "deep_gemm",
+      "url": "https://github.com/deepseek-ai/DeepGEMM.git",
+      "revision": "559d79fb6994a58b8a15b4b93bf13ccc16edf247",
+      "install_subdirectory": ".",
+      "source_links": [
+        {
+          "source": "third-party/cutlass/include/cutlass",
+          "target": "deep_gemm/include/cutlass"
+        },
+        {
+          "source": "third-party/cutlass/include/cute",
+          "target": "deep_gemm/include/cute"
+        }
+      ]
+    },
+    {
+      "name": "flashinfer",
+      "import_name": "flashinfer",
+      "url": "https://github.com/flashinfer-ai/flashinfer.git",
+      "revision": "13099a68b2f663cea0400a2c161d5264010dfc9c",
+      "install_subdirectory": "."
+    },
+    {
+      "name": "flash-attention",
+      "import_name": "flash_attn.cute",
+      "url": "https://github.com/Dao-AILab/flash-attention.git",
+      "revision": "0251105a2fb19d2957484b7f023cd8c115286ced",
+      "install_subdirectory": "flash_attn/cute"
+    },
+    {
+      "name": "flash-attention-fp4",
+      "import_name": "flash_attn.cute",
+      "url": "https://github.com/hao-ai-lab/flash-attention-fp4.git",
+      "revision": "5aa37a9680f7b76a11799b5f4846100ed5a3e6d8",
+      "install_subdirectory": "flash_attn/cute"
+    },
+    {
+      "name": "flash-mla",
+      "import_name": "flash_mla",
+      "url": "https://github.com/deepseek-ai/FlashMLA.git",
+      "revision": "9241ae3ef9bac614dd25e45e507e089f888280e0",
+      "install_subdirectory": "."
+    },
+    {
+      "name": "deep-ep",
+      "import_name": "deep_ep",
+      "url": "https://github.com/deepseek-ai/DeepEP.git",
+      "revision": "01dc3aaac82068020353dce2c302e38153c0bfaa",
+      "install_subdirectory": "."
+    },
+    {
+      "name": "flash-kda",
+      "import_name": "flash_kda",
+      "url": "https://github.com/MoonshotAI/FlashKDA.git",
+      "revision": "1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b",
+      "install_subdirectory": "."
+    },
+    {
+      "name": "flash-linear-attention",
+      "import_name": "fla",
+      "url": "https://github.com/fla-org/flash-linear-attention.git",
+      "revision": "9c8e42e762fce087c27b673af4922795d9edb85e",
+      "install_subdirectory": "."
+    },
+    {
+      "name": "msa",
+      "import_name": "fmha_sm100",
+      "url": "https://github.com/MiniMax-AI/MSA.git",
+      "revision": "80434d7f67877c6570ca19cac444b84bc9855dac",
+      "install_subdirectory": "."
+    },
+    {
+      "name": "cudnn-frontend",
+      "import_name": "cudnn",
+      "url": "https://github.com/NVIDIA/cudnn-frontend.git",
+      "revision": "1dbd2c09432dfd6cbf13a0ad85a071446398c082",
+      "install_subdirectory": ".",
+      "build_requirements": [
+        "pybind11==2.13.6",
+        "pybind11-global==2.13.6"
+      ]
+    }
+  ]
+}

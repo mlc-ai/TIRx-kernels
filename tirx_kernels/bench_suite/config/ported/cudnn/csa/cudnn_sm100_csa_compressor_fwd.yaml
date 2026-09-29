@@ -1,0 +1,9 @@
+# Complete performance-path matrix for the cuDNN Frontend SM100 CSA
+# compressor forward port.
+kernel: cudnn_sm100_csa_compressor_fwd
+selection_rationale: The matrix crosses single- and three-sequence occupancy with both two-column-group d128 and large-head d512 source specializations; the defaults retain small, medium, and large representatives.
+configs:
+  - {config: perf_b1_s8192_d128_c2, default: true, selection_role: small}
+  - {config: perf_b3_s8192_d128_c2, default: true, selection_role: medium}
+  - {config: perf_b1_s8192_d512_c2, default: false}
+  - {config: perf_b3_s8192_d512_c2, default: true, selection_role: large}

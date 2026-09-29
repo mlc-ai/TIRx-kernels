@@ -1,0 +1,35 @@
+# Complete deterministic compact performance-path covering matrix for the
+# parameterized cuDNN Frontend dense block-scaled GEMM+sReLU port.
+kernel: cudnn_sm100_dense_blockscaled_gemm_persistent_srelu_quant
+selection_rationale: The 30-row matrix retains all 23 independently source-verified structural representatives and seven size/L boundary guards, including every admitted AB/SF/C/D dtype and major, CTA1/CTA2, N tiles 64/128/192/256, cluster shapes, TMA/MMA/store paths, seven stage tuples, mandatory amax, and the single vector_f32 representative whose true/false source PTX is byte-identical.
+configs:
+  - {config: perf00_m4096_n4096_k4096_l1_e4_e8v32_bf16_bf16_mn_n_t256x256_c2x1_vf32_l1, default: true, selection_role: medium}
+  - {config: perf00_m8192_n8192_k8192_l1_e4_e8v32_bf16_bf16_mn_n_t256x256_c2x1_vf32_l1, default: false}
+  - {config: perf01_m8192_n8192_k8192_l1_f4_e8v16_f32_f16_kk_n_t256x256_c2x1_vf32_l1, default: false}
+  - {config: perf02_m1024_n1024_k1024_l1_f4_e8v16_bf16_bf16_kk_n_t128x128_c1x1_vf32_l1, default: true, selection_role: small}
+  - {config: perf02_m8192_n8192_k8192_l1_f4_e8v16_bf16_bf16_kk_n_t128x128_c1x1_vf32_l1, default: false}
+  - {config: perf03_m1024_n1024_k1024_l1_f4_e8v16_e4_f32_kk_n_t256x256_c2x1_vf32_l1, default: false}
+  - {config: perf03_m2048_n2048_k2048_l2_f4_e8v16_e4_f32_kk_n_t256x256_c2x1_vf32_l2, default: false}
+  - {config: perf03_m4096_n4096_k4096_l1_f4_e8v16_e4_f32_kk_n_t256x256_c2x1_vf32_l1, default: false}
+  - {config: perf03_m4096_n4096_k4096_l2_f4_e8v16_e4_f32_kk_n_t256x256_c2x1_vf32_l2, default: false}
+  - {config: perf03_m8192_n8192_k8192_l2_f4_e8v16_e4_f32_kk_n_t256x256_c2x1_vf32_l2, default: false}
+  - {config: perf04_m8192_n8192_k8192_l1_f4_e8v16_f16_bf16_kk_n_t256x256_c2x1_vf32_l1, default: false}
+  - {config: perf05_m4096_n4096_k4096_l2_f4_e8v16_e5_bf16_kk_n_t256x256_c2x1_vf32_l2, default: false}
+  - {config: perf06_m4096_n4096_k4096_l1_f4_e8v16_bf16_bf16_kk_n_t128x256_c1x2_vf32_l1, default: false}
+  - {config: perf07_m1024_n1024_k1024_l2_f4_e4v16_bf16_bf16_kk_n_t256x256_c2x1_vf32_l2, default: false}
+  - {config: perf08_m4096_n4096_k4096_l2_e5_e8v32_bf16_bf16_mn_n_t256x256_c2x1_vf32_l2, default: false}
+  - {config: perf09_m8192_n8192_k8192_l1_f4_e8v16_bf16_bf16_kk_n_t128x192_c1x1_vf32_l1, default: false}
+  - {config: perf10_m8192_n8192_k8192_l2_f4_e8v16_bf16_bf16_kk_n_t128x64_c1x1_vf32_l2, default: false}
+  - {config: perf11_m8192_n8192_k8192_l2_f4_e8v16_f32_bf16_kk_n_t256x256_c2x1_vf32_l2, default: false}
+  - {config: perf12_m4096_n4096_k4096_l2_f4_e8v16_e4_bf16_kk_n_t256x256_c2x1_vf32_l2, default: false}
+  - {config: perf13_m4096_n4096_k4096_l1_f4_e8v16_bf16_bf16_kk_n_t128x256_c1x4_vf32_l1, default: false}
+  - {config: perf14_m8192_n8192_k8192_l2_f4_e8v16_bf16_bf16_kk_n_t128x256_c2x2_vf32_l2, default: false}
+  - {config: perf15_m4096_n4096_k4096_l2_f4_e8v16_bf16_bf16_kk_n_t128x256_c2x4_vf32_l2, default: false}
+  - {config: perf16_m4096_n4096_k4096_l2_f4_e8v16_bf16_bf16_kk_n_t128x256_c4x1_vf32_l2, default: false}
+  - {config: perf17_m2048_n2048_k2048_l2_f4_e8v16_bf16_bf16_kk_n_t128x256_c4x2_vf32_l2, default: false}
+  - {config: perf18_m4096_n4096_k4096_l1_f4_e8v16_bf16_bf16_kk_n_t128x256_c4x4_vf32_l1, default: false}
+  - {config: perf19_m4096_n4096_k4096_l1_f4_e8v16_bf16_f16_kk_n_t256x256_c2x1_vf32_l1, default: false}
+  - {config: perf20_m4096_n4096_k4096_l2_f4_e8v16_bf16_f32_kk_n_t256x256_c2x1_vf32_l2, default: false}
+  - {config: perf21_m4096_n4096_k4096_l2_f4_e8v32_bf16_bf16_kk_n_t256x256_c2x1_vf32_l2, default: false}
+  - {config: perf22_m4096_n4096_k4096_l1_f4_e8v16_bf16_bf16_kk_n_t256x64_c2x1_vf32_l1, default: false}
+  - {config: perf22_m8192_n8192_k8192_l2_f4_e8v16_bf16_bf16_kk_n_t256x64_c2x1_vf32_l2, default: true, selection_role: large}

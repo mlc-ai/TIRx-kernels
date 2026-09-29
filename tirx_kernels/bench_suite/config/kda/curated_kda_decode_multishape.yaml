@@ -1,0 +1,39 @@
+kernel: curated_kda_decode_multishape
+selection_rationale: >-
+  The three defaults cover standard decode, speculative decode, and runtime
+  lower-bound gates. T=3/N=1 is the small row with the lower-bound gate at HV=16;
+  T=1/N=128 is the medium row and covers the standard-decode CLC unit ring;
+  T=6/N=128 is the large row and covers deferred publication at the largest token
+  count. The remaining rows, including the T=4/N=128 dynamic-ticket case, stay
+  available for explicit runs.
+configs:
+  - {config: t1_b128_hv32_standard, default: true, selection_role: medium, timer: proton}
+  - {config: t4_b128_hv32_spec, default: false, timer: proton}
+  - {config: t6_b128_hv32_spec, default: true, selection_role: large, timer: proton}
+  - {config: t3_b1_hv16_lower_bound, default: true, selection_role: small, timer: proton}
+  - {config: t1_b8_hv32_standard, default: false, timer: proton}
+  - {config: t1_b16_hv32_standard, default: false, timer: proton}
+  - {config: t1_b32_hv32_standard, default: false, timer: proton}
+  - {config: t1_b64_hv32_standard, default: false, timer: proton}
+  - {config: t2_b8_hv32_spec, default: false, timer: proton}
+  - {config: t2_b16_hv32_spec, default: false, timer: proton}
+  - {config: t2_b32_hv32_spec, default: false, timer: proton}
+  - {config: t2_b64_hv32_spec, default: false, timer: proton}
+  - {config: t2_b128_hv32_spec, default: false, timer: proton}
+  - {config: t3_b2_hv16_lower_bound, default: false, timer: proton}
+  - {config: t3_b4_hv16_lower_bound, default: false, timer: proton}
+  - {config: t3_b8_hv16_lower_bound, default: false, timer: proton}
+  - {config: t3_b16_hv16_lower_bound, default: false, timer: proton}
+  - {config: t4_b8_hv32_spec, default: false, timer: proton}
+  - {config: t4_b16_hv32_spec, default: false, timer: proton}
+  - {config: t4_b32_hv32_spec, default: false, timer: proton}
+  - {config: t4_b64_hv32_spec, default: false, timer: proton}
+  - {config: t5_b8_hv32_spec, default: false, timer: proton}
+  - {config: t5_b16_hv32_spec, default: false, timer: proton}
+  - {config: t5_b32_hv32_spec, default: false, timer: proton}
+  - {config: t5_b64_hv32_spec, default: false, timer: proton}
+  - {config: t5_b128_hv32_spec, default: false, timer: proton}
+  - {config: t6_b8_hv32_spec, default: false, timer: proton}
+  - {config: t6_b16_hv32_spec, default: false, timer: proton}
+  - {config: t6_b32_hv32_spec, default: false, timer: proton}
+  - {config: t6_b64_hv32_spec, default: false, timer: proton}

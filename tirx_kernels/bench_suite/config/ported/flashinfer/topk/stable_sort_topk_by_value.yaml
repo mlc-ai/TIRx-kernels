@@ -1,0 +1,75 @@
+# Every reachable specialization of StableSortTopKByValueKernel: the six
+# (BLOCK_THREADS, ITEMS_PER_THREAD) rungs of the launcher ladder (topk.cuh:3154-3166)
+# crossed with the three dtypes, which is all 18 the source can instantiate, plus
+# both digit-pass counts (8 for fp32, 4 for the 16-bit dtypes), the num_rows
+# occupancy axis, and the input patterns.
+#
+# The patterns are domain coverage rather than test flavor: this kernel's output is
+# a function of its input order, so `tie_heavy` and `all_equal` are the only entries
+# that exercise a fully-tied digit distribution, and `neg` is the only one that takes
+# the other half of the monotone-flip sign branch.
+#
+# The k ladder is swept at 4 rows and the occupancy axis at k=256, so the matrix is
+# a cover rather than a full cross. The rows axis is not independent of the dtype,
+# however: at k=512 the fp32 ratio is flat across 4/32/256 rows (1.031, 1.035,
+# 1.031) while float16 runs 0.979, 1.021, 0.990, because four single-warp CTAs on
+# 148 SMs leave each CTA's latency chain fully exposed and a four-pass kernel has
+# half as much work to hide it behind. Both regimes are therefore carried for both
+# pass counts: `f32_r64_k2048` is the widest rung against a saturated SM array, and
+# `f16_r64_k256`/`f16_r64_k512` are the four-pass family against one -- without them
+# the matrix would report only the latency-bound end of that axis.
+#
+# Every entry launches exactly one kernel on each side; the reference is the
+# source's own StableSortTopKByValue launcher, compiled directly, since FlashInfer
+# exposes no FFI for this kernel alone.
+kernel: stable_sort_topk_by_value
+selection_rationale: The fp32 column is the 8-pass family and the one the Python layer reaches by default; r4/k128 is the smallest launchable shape on the narrowest rung, r64/k256 fills the SM array at the rung the dispatcher picks most often, and r64/k2048 is the widest rung (256 threads, 8 items) against that same full grid, which is the largest block-local sort the kernel can perform.
+configs:
+  - {config: f32_r4_k128, default: true, selection_role: small}
+  - {config: f32_r4_k256, default: false}
+  - {config: f32_r4_k512, default: false}
+  - {config: f32_r4_k576, default: false}
+  - {config: f32_r4_k1024, default: false}
+  - {config: f32_r4_k2048, default: false}
+  - {config: f16_r4_k128, default: false}
+  - {config: f16_r4_k256, default: false}
+  - {config: f16_r4_k512, default: false}
+  - {config: f16_r4_k576, default: false}
+  - {config: f16_r4_k1024, default: false}
+  - {config: f16_r4_k2048, default: false}
+  - {config: bf16_r4_k128, default: false}
+  - {config: bf16_r4_k256, default: false}
+  - {config: bf16_r4_k512, default: false}
+  - {config: bf16_r4_k576, default: false}
+  - {config: bf16_r4_k1024, default: false}
+  - {config: bf16_r4_k2048, default: false}
+  - {config: f32_r4_k2, default: false}
+  - {config: f32_r4_k300, default: false}
+  - {config: f16_r4_k2, default: false}
+  - {config: f16_r4_k300, default: false}
+  - {config: bf16_r4_k2, default: false}
+  - {config: bf16_r4_k300, default: false}
+  - {config: f32_r1_k256, default: false}
+  - {config: f32_r16_k256, default: false}
+  - {config: f32_r64_k256, default: true, selection_role: medium}
+  - {config: f32_r256_k256, default: false}
+  - {config: f32_r64_k2048, default: true, selection_role: large}
+  - {config: f16_r64_k256, default: false}
+  - {config: f16_r64_k512, default: false}
+  - {config: f32_r4_k256_tie_heavy, default: false}
+  - {config: f32_r4_k256_all_equal, default: false}
+  - {config: f32_r4_k256_neg, default: false}
+  - {config: f32_r4_k256_padded, default: false}
+  - {config: f32_r4_k256_pipeline, default: false}
+  - {config: f16_r4_k256_tie_heavy, default: false}
+  - {config: f16_r4_k256_all_equal, default: false}
+  - {config: f16_r4_k256_neg, default: false}
+  - {config: f16_r4_k256_padded, default: false}
+  - {config: f16_r4_k256_pipeline, default: false}
+  - {config: f32_r4_k512_tie_heavy, default: false}
+  - {config: f32_r4_k512_neg, default: false}
+  - {config: f16_r4_k512_tie_heavy, default: false}
+  - {config: f16_r4_k512_neg, default: false}
+  - {config: bf16_r4_k512_tie_heavy, default: false}
+  - {config: bf16_r4_k512_neg, default: false}
+  - {config: f32_r2_k2048_tie_heavy, default: false}

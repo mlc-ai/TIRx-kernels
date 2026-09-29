@@ -1,0 +1,11 @@
+# FlashInfer SM100 chunk-parallel delta-rule prefill specialization matrix.
+kernel: gdn_cp_prefill_sm100
+selection_rationale: The selected rows span the SIMT-row4, UTCMMA-row64, and UTCMMA-row128 fixup dispatches while increasing token and state-head parallelism.
+configs:
+  - {config: fp16_q1_k1_v1_s2048_none_i32, default: true, selection_role: small}
+  - {config: bf16_q4_k1_v1_s8193_final_f32_i64, default: false}
+  - {config: bf16_q1_k1_v4_s9999+65530_initfinal_bf16_i32, default: false}
+  - {config: fp16_q16_k16_v16_s4096+4096_init_f16_i64, default: true, selection_role: medium}
+  - {config: bf16_q2_k2_v8_s2048x4_final_f32_i32, default: false}
+  - {config: bf16_q16_k16_v16_s128+192_indexed_bf16_i32, default: false}
+  - {config: fp16_q16_k16_v64_s192+64_initfinal_f16_i64, default: true, selection_role: large}

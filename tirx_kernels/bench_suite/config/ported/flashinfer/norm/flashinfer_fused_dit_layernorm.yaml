@@ -1,0 +1,27 @@
+kernel: flashinfer_fused_dit_layernorm
+selection_rationale: The defaults cover the shortest official single-batch RSS launch, the larger single-batch GRGB affine path, and the largest official batched GRSS runtime loop.
+configs:
+  - {config: grgb_bf16_b1_r1920, default: true, selection_role: medium}
+  - {config: grgb_bf16_b1_r768, default: false}
+  - {config: grgb_bf16_b2_r1920, default: false}
+  - {config: grgb_bf16_b2_r768, default: false}
+  - {config: grgb_bf16_b4_r1920, default: false}
+  - {config: rss_bf16_b1_r1920, default: false}
+  - {config: rss_bf16_b1_r768, default: true, selection_role: small}
+  - {config: rss_bf16_b2_r1920, default: false}
+  - {config: rss_bf16_b2_r768, default: false}
+  - {config: rss_bf16_b4_r1920, default: false}
+  - {config: grss_bf16_b1_r1920, default: false}
+  - {config: grss_bf16_b1_r768, default: false}
+  - {config: grss_bf16_b2_r1920, default: false}
+  - {config: grss_bf16_b2_r768, default: false}
+  - {config: grss_bf16_b4_r1920, default: true, selection_role: large}
+  - {config: grgb_nvfp4_b1_r768, default: false}
+  - {config: grgb_mxfp8_b1_r768, default: false}
+  - {config: rss_nvfp4_b1_r768, default: false}
+  - {config: rss_mxfp8_b1_r768, default: false}
+  - {config: grss_nvfp4_b1_r768, default: false}
+  - {config: grss_mxfp8_b1_r768, default: false}
+  - {config: grgb_bf16_b1_r768_inputsf0p75, default: false}
+  - {config: rss_bf16_b1_r768_inputsf0p75, default: false}
+  - {config: grss_bf16_b1_r768_inputsf0p75, default: false}

@@ -1,0 +1,5 @@
+kernel: flashinfer_qk_rmsnorm
+configs:
+  - {config: rms_bf16_b32_n32_h128_xc_yc_pdl0, default: true}
+  - {config: rms_f16_b16_n64_h128_xc_yc_pdl0, default: true}
+  - {config: gemma_bf16_b32_n32_h128_xc_yc_pdl0, default: true}

@@ -1,0 +1,8 @@
+kernel: fastcu_nvfp4_gemm_gb300
+selection_rationale: Square GEMMs at 1024, 4096, and 16384 bound the GB300 NVFP4 scaling curve; all five registered squares remain available for the port performance gate.
+configs:
+  - {config: square_1024, default: true, selection_role: small, timer: proton}
+  - {config: square_2048, default: false, timer: proton}
+  - {config: square_4096, default: true, selection_role: medium, timer: proton}
+  - {config: square_8192, default: false, timer: proton}
+  - {config: square_16384, default: true, selection_role: large, timer: proton}

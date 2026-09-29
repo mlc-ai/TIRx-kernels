@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+# Complete performance-path matrix for the cuDNN Frontend SM100 FlexAttention
+# backward port. The production-mask rows reproduce the pinned source's 128K
+# benchmark builders exactly; the remaining rows span one-/two-CTA programs,
+# DQK/DV shapes, FP16/BF16, fixed/variable length, MHA/GQA, deterministic
+# accumulation, ragged tails, and mask scheduling modes.
+kernel: cudnn_sm100_flex_attention_backward
+selection_rationale: The selected defaults cover the smallest one-CTA head shape, a representative deterministic two-CTA D64 path, and the source's 128K causal production workload. The full matrix additionally covers all eight production masks at D128 and D192, asymmetric dimensions, FP16/BF16, fixed and variable length, MHA/GQA, deterministic accumulation, ragged tails, and per-head mask scheduling.
+defaults:
+  num_gpus: 1
+configs:
+  - {config: p00_d128_dv128_causal_128k, default: true, selection_role: large}
+  - {config: p01_d128_dv128_document_causal_128k, default: false}
+  - {config: p02_d128_dv128_local_128k, default: false}
+  - {config: p03_d128_dv128_sink_local_128k, default: false}
+  - {config: p04_d128_dv128_tree_dfs_128k, default: false}
+  - {config: p05_d128_dv128_tree_bfs_128k, default: false}
+  - {config: p06_d128_dv128_longformer_128k, default: false}
+  - {config: p07_d128_dv128_hstu_128k, default: false}
+  - {config: p08_d192_dv128_causal_128k, default: false}
+  - {config: p09_d192_dv128_document_causal_128k, default: false}
+  - {config: p10_d192_dv128_local_128k, default: false}
+  - {config: p11_d192_dv128_sink_local_128k, default: false}
+  - {config: p12_d192_dv128_tree_dfs_128k, default: false}
+  - {config: p13_d192_dv128_tree_bfs_128k, default: false}
+  - {config: p14_d192_dv128_longformer_128k, default: false}
+  - {config: p15_d192_dv128_hstu_128k, default: false}
+  - {config: p16_d8_dv8_float16_fixed_causal, default: true, selection_role: small}
+  - {config: p17_d8_dv8_float16_varlen_det_gqa4_causal, default: false}
+  - {config: p18_d8_dv128_bfloat16_fixed_document_causal, default: false}
+  - {config: p19_d8_dv128_bfloat16_varlen_det_gqa4_document_causal, default: false}
+  - {config: p20_d40_dv72_float16_fixed_local, default: false}
+  - {config: p21_d40_dv72_float16_varlen_det_gqa4_local, default: false}
+  - {config: p22_d64_dv64_bfloat16_fixed_sink_local, default: false}
+  - {config: p23_d64_dv64_bfloat16_varlen_det_gqa4_sink_local, default: false}
+  - {config: p24_d72_dv40_bfloat16_fixed_tree_dfs, default: false}
+  - {config: p25_d72_dv40_bfloat16_varlen_det_gqa4_tree_dfs, default: false}
+  - {config: p26_d104_dv120_float16_fixed_tree_bfs, default: false}
+  - {config: p27_d104_dv120_float16_varlen_det_gqa4_tree_bfs, default: false}
+  - {config: p28_d120_dv104_bfloat16_fixed_longformer, default: false}
+  - {config: p29_d120_dv104_bfloat16_varlen_det_gqa4_longformer, default: false}
+  - {config: p30_d128_dv8_float16_fixed_hstu, default: false}
+  - {config: p31_d128_dv8_float16_varlen_det_gqa4_hstu, default: false}
+  - {config: p32_d64_dv64_coverage0, default: true, selection_role: medium}
+  - {config: p33_d64_dv64_coverage1, default: false}
+  - {config: p34_d64_dv64_coverage2, default: false}
+  - {config: p35_d64_dv64_coverage3, default: false}
+  - {config: p36_d72_dv40_coverage0, default: false}
+  - {config: p37_d72_dv40_coverage1, default: false}
+  - {config: p38_d72_dv40_coverage2, default: false}
+  - {config: p39_d72_dv40_coverage3, default: false}
+  - {config: p40_d128_dv128_coverage0, default: false}
+  - {config: p41_d128_dv128_coverage1, default: false}
+  - {config: p42_d128_dv128_coverage2, default: false}
+  - {config: p43_d128_dv128_coverage3, default: false}
+  - {config: p44_d192_dv128_coverage0, default: false}
+  - {config: p45_d192_dv128_coverage1, default: false}
+  - {config: p46_d192_dv128_coverage2, default: false}
+  - {config: p47_d192_dv128_coverage3, default: false}

@@ -1,0 +1,13 @@
+kernel: flashinfer_add_rmsnorm_fp4quant
+selection_rationale: The defaults cover the flattened 3-D launch, the primary NVFP4 shape, and the largest active shape; global-scale, swizzled-scale, MXFP4, and dual-scale variants remain available on request.
+configs:
+  - {config: bench_nv_bf16_m32_h4096_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random, default: true, selection_role: medium}
+  - {config: bench_nv_large_bf16_m64_h8192_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random, default: true, selection_role: large}
+  - {config: bench_nv_global_bf16_m32_h4096_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsone_preallocated_random, default: false}
+  - {config: bench_nv_swizzled_bf16_m32_h4096_b16_e4m3_sw1_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random, default: false}
+  - {config: bench_mx_bf16_m32_h4096_b32_ue8m0_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random, default: false}
+  - {config: bench_nv_3d_bf16_b32_s32_h128_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random, default: true, selection_role: small}
+  - {config: bench_nv_both_bf16_m32_h4096_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random, default: false}
+  - {config: bench_nv_both_large_bf16_m64_h8192_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random, default: false}
+  - {config: bench_nv_both_global_bf16_m32_h4096_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsone_preallocated_random, default: false}
+  - {config: bench_mx_both_bf16_m32_h4096_b32_ue8m0_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random, default: false}

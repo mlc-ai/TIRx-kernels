@@ -1,0 +1,55 @@
+kernel: blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin
+default_suite: true
+selection_rationale: The full 51-row matrix is the pinned FlashInfer production workload sweep and uses only the production Rubin tactic-0 specialization. Three defaults span the smallest, middle, and largest aggregate routed-token loads; the porting performance gate measures all 51 rows explicitly.
+configs:
+  - {config: bench_g6_m1024_n4096_k7168, default: false}
+  - {config: bench_g6_m512_n4096_k7168, default: false}
+  - {config: bench_g1_m1024_n4096_k7168, default: false}
+  - {config: bench_g2_m512_n4096_k7168, default: false}
+  - {config: bench_g4_m256_n4096_k7168, default: false}
+  - {config: bench_g72_m7_n4096_k7168, default: true, selection_role: small}
+  - {config: bench_g72_m14_n4096_k7168, default: false}
+  - {config: bench_g72_m28_n4096_k7168, default: false}
+  - {config: bench_g72_m42_n4096_k7168, default: false}
+  - {config: bench_g72_m56_n4096_k7168, default: false}
+  - {config: bench_g72_m85_n4096_k7168, default: false}
+  - {config: bench_g72_m113_n4096_k7168, default: false}
+  - {config: bench_g36_m14_n4096_k7168, default: false}
+  - {config: bench_g36_m28_n4096_k7168, default: false}
+  - {config: bench_g36_m56_n4096_k7168, default: false}
+  - {config: bench_g36_m85_n4096_k7168, default: false}
+  - {config: bench_g36_m113_n4096_k7168, default: false}
+  - {config: bench_g36_m170_n4096_k7168, default: false}
+  - {config: bench_g36_m227_n4096_k7168, default: false}
+  - {config: bench_g18_m28_n4096_k7168, default: false}
+  - {config: bench_g18_m56_n4096_k7168, default: false}
+  - {config: bench_g18_m113_n4096_k7168, default: false}
+  - {config: bench_g18_m170_n4096_k7168, default: false}
+  - {config: bench_g18_m227_n4096_k7168, default: false}
+  - {config: bench_g18_m341_n4096_k7168, default: false}
+  - {config: bench_g18_m455_n4096_k7168, default: false}
+  - {config: bench_g9_m56_n4096_k7168, default: false}
+  - {config: bench_g9_m113_n4096_k7168, default: false}
+  - {config: bench_g9_m227_n4096_k7168, default: false}
+  - {config: bench_g9_m341_n4096_k7168, default: false}
+  - {config: bench_g9_m455_n4096_k7168, default: false}
+  - {config: bench_g9_m682_n4096_k7168, default: false}
+  - {config: bench_g9_m910_n4096_k7168, default: false}
+  - {config: bench_g8_m64_n4096_k7168, default: false}
+  - {config: bench_g8_m128_n4096_k7168, default: false}
+  - {config: bench_g8_m256_n4096_k7168, default: false}
+  - {config: bench_g8_m384_n4096_k7168, default: true, selection_role: medium}
+  - {config: bench_g8_m512_n4096_k7168, default: false}
+  - {config: bench_g8_m768_n4096_k7168, default: false}
+  - {config: bench_g8_m1024_n4096_k7168, default: false}
+  - {config: bench_g6_m85_n4096_k7168, default: false}
+  - {config: bench_g6_m170_n4096_k7168, default: false}
+  - {config: bench_g6_m341_n4096_k7168, default: false}
+  - {config: bench_g6_m682_n4096_k7168, default: false}
+  - {config: bench_g6_m1365_n4096_k7168, default: false}
+  - {config: bench_g4_m128_n4096_k7168, default: false}
+  - {config: bench_g4_m512_n4096_k7168, default: false}
+  - {config: bench_g4_m768_n4096_k7168, default: false}
+  - {config: bench_g4_m1024_n4096_k7168, default: false}
+  - {config: bench_g4_m1536_n4096_k7168, default: false}
+  - {config: bench_g4_m2048_n4096_k7168, default: true, selection_role: large}

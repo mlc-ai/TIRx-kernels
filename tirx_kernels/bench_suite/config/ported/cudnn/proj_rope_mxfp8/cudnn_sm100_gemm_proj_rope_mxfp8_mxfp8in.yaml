@@ -1,0 +1,6 @@
+# Complete production matrix for the cuDNN Frontend MXFP8-input projection
+# GEMM + YARN RoPE + dual-direction MXFP8 port.
+kernel: cudnn_sm100_gemm_proj_rope_mxfp8_mxfp8in
+configs:
+  - {config: t2048_k1536_h128, default: true}
+  - {config: t4096_k1536_h128, default: true}

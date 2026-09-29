@@ -1,0 +1,48 @@
+# Complete deterministic performance-path covering matrix for the cuDNN Frontend
+# MoE BF16 grouped GEMM + dGLU backward port.
+kernel: cudnn_sm100_moe_grouped_gemm_dglu_dbias
+selection_rationale: The selected defaults sweep the headline production mode (dense weights, static scheduling, dSwiGLU, BF16 C and D, k-major B, 256x256 tile, 2x1 cluster, packed-f32 epilogue, dBias on) across small/medium/large MoE shapes, while the complete matrix covers every weight mode, scheduler, activation, C/D dtype, B major, tile, cluster and optional-output path the port gate requires, plus the upstream benchmark's own expert/token/K sweep.
+configs:
+  - {config: perf00_e4_t4096_n2048_k2048_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: true, selection_role: small}
+  - {config: perf00_e8_t16384_n4096_k8192_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: true, selection_role: medium}
+  - {config: perf00_e8_t32768_n4096_k7168_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: true, selection_role: large}
+  - {config: perf01_e4_t4096_n2048_k2048_dndy_ge_cf16_df16_bn_t128x256_c2x8_s, default: false}
+  - {config: perf01_e8_t16384_n4096_k8192_dndy_ge_cf16_df16_bn_t128x256_c2x8_s, default: false}
+  - {config: perf01_e8_t32768_n4096_k7168_dndy_ge_cf16_df16_bn_t128x256_c2x8_s, default: false}
+  - {config: perf02_e4_t4096_n2048_k2048_dcst_ge_cf32_df32_bn_t256x256_c2x2_s, default: false}
+  - {config: perf02_e8_t16384_n4096_k8192_dcst_ge_cf32_df32_bn_t256x256_c2x2_s, default: false}
+  - {config: perf02_e8_t32768_n4096_k7168_dcst_ge_cf32_df32_bn_t256x256_c2x2_s, default: false}
+  - {config: perf03_e4_t4096_n2048_k2048_dnst_sw_cbf16_dbf16_bk_t128x64_c1x1_vb, default: false}
+  - {config: perf03_e8_t16384_n4096_k8192_dnst_sw_cbf16_dbf16_bk_t128x64_c1x1_vb, default: false}
+  - {config: perf03_e8_t32768_n4096_k7168_dnst_sw_cbf16_dbf16_bk_t128x64_c1x1_vb, default: false}
+  - {config: perf04_e4_t4096_n2048_k2048_dnst_sw_cf32_df32_bk_t128x256_c2x4_s, default: false}
+  - {config: perf04_e8_t16384_n4096_k8192_dnst_sw_cf32_df32_bk_t128x256_c2x4_s, default: false}
+  - {config: perf04_e8_t32768_n4096_k7168_dnst_sw_cf32_df32_bk_t128x256_c2x4_s, default: false}
+  - {config: perf05_e4_t4096_n2048_k2048_dnst_sw_cf16_df16_bk_t128x256_c1x4_sb, default: false}
+  - {config: perf05_e8_t16384_n4096_k8192_dnst_sw_cf16_df16_bk_t128x256_c1x4_sb, default: false}
+  - {config: perf05_e8_t32768_n4096_k7168_dnst_sw_cf16_df16_bk_t128x256_c1x4_sb, default: false}
+  - {config: perf06_e4_t4096_n2048_k2048_dnst_sw_cbf16_dbf16_bk_t128x256_c1x16_vb, default: false}
+  - {config: perf06_e8_t16384_n4096_k8192_dnst_sw_cbf16_dbf16_bk_t128x256_c1x16_vb, default: false}
+  - {config: perf06_e8_t32768_n4096_k7168_dnst_sw_cbf16_dbf16_bk_t128x256_c1x16_vb, default: false}
+  - {config: perf07_e4_t4096_n2048_k2048_dnst_ge_cf32_df16_bk_t128x256_c1x2_v, default: false}
+  - {config: perf07_e8_t16384_n4096_k8192_dnst_ge_cf32_df16_bk_t128x256_c1x2_v, default: false}
+  - {config: perf07_e8_t32768_n4096_k7168_dnst_ge_cf32_df16_bk_t128x256_c1x2_v, default: false}
+  - {config: perf08_e4_t4096_n2048_k2048_dndy_sw_cf16_df16_bk_t128x256_c1x8_s, default: false}
+  - {config: perf08_e8_t16384_n4096_k8192_dndy_sw_cf16_df16_bk_t128x256_c1x8_s, default: false}
+  - {config: perf08_e8_t32768_n4096_k7168_dndy_sw_cf16_df16_bk_t128x256_c1x8_s, default: false}
+  - {config: sweep00_e4_t2048_n4096_k2048_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e4_t2048_n4096_k8192_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e4_t4096_n4096_k2048_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e4_t4096_n4096_k8192_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e4_t8192_n4096_k2048_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e4_t8192_n4096_k8192_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e4_t16384_n4096_k2048_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e4_t16384_n4096_k8192_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e8_t4096_n4096_k2048_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e8_t4096_n4096_k8192_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e8_t8192_n4096_k2048_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e8_t8192_n4096_k8192_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e8_t16384_n4096_k2048_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e8_t16384_n4096_k8192_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e8_t32768_n4096_k2048_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}
+  - {config: sweep00_e8_t32768_n4096_k8192_dnst_sw_cbf16_dbf16_bk_t256x256_c2x1_vb, default: false}

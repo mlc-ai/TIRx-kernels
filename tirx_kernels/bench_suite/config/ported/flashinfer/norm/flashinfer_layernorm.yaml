@@ -1,0 +1,19 @@
+kernel: flashinfer_layernorm
+selection_rationale: The default rows anchor the one-warp launch floor, a saturated one-vector-block multi-warp case, and the largest two-vector-block source specialization.
+configs:
+  - {config: bf16_m1_h128_xc_yc_pdl0_eps1e6, default: true, selection_role: small}
+  - {config: bf16_m1_h129_xc_yc_pdl0_eps1e6, default: false}
+  - {config: bf16_m1_h1024_xc_yc_pdl0_eps1e6, default: false}
+  - {config: bf16_m1_h16384_xc_yc_pdl0_eps1e6, default: false}
+  - {config: bf16_m2_h128_xc_yc_pdl0_eps1e6, default: false}
+  - {config: bf16_m2_h129_xc_yc_pdl0_eps1e6, default: false}
+  - {config: bf16_m2_h1024_xc_yc_pdl0_eps1e6, default: false}
+  - {config: bf16_m2_h16384_xc_yc_pdl0_eps1e6, default: false}
+  - {config: bf16_m3_h128_xc_yc_pdl0_eps1e6, default: false}
+  - {config: bf16_m3_h129_xc_yc_pdl0_eps1e6, default: false}
+  - {config: bf16_m3_h1024_xc_yc_pdl0_eps1e6, default: false}
+  - {config: bf16_m3_h16384_xc_yc_pdl0_eps1e6, default: false}
+  - {config: bf16_m128_h128_xc_yc_pdl0_eps1e6, default: false}
+  - {config: bf16_m128_h129_xc_yc_pdl0_eps1e6, default: false}
+  - {config: bf16_m128_h1024_xc_yc_pdl0_eps1e6, default: true, selection_role: medium}
+  - {config: bf16_m128_h16384_xc_yc_pdl0_eps1e6, default: true, selection_role: large}

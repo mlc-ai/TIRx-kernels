@@ -1,0 +1,81 @@
+# Three reviewed default points span the launch-latency regime (s=1024: 8x16 tiles, below one
+# 152-SM wave), the causal GQA LPT-scheduled regime, and the MMA/softmax-bound persistent
+# regime, across both QK formats and the bf16/fp8 PV paths. Every other point of the upstream
+# GB300 headline table and causal-GQA sweep stays benchable on request.
+kernel: flash_attention4_fp4
+selection_rationale: Sequence length grows from 1024 (launch-latency bound, tile count below one 152-SM wave) through the causal GQA s=4096 LPT-scheduled point to the s=32768 h=24 MMA-bound persistent point, while spanning NVFP4 and MXFP8 QK and the bf16/fp8 PV paths.
+configs:
+  - {config: nvfp4_bf16_b1_s256_h16kv16_d128, default: false}
+  - {config: nvfp4_bf16_b1_s1024_h16kv16_d128, default: true, selection_role: small}
+  - {config: nvfp4_bf16_b4_s4096_h16kv16_d128, default: false}
+  - {config: nvfp4_bf16_b1_s32768_h16kv16_d128, default: false}
+  - {config: nvfp4_bf16_b4_s4096_h32kv32_d128, default: false}
+  - {config: nvfp4_bf16_b1_s4096_h12kv12_d128, default: false}
+  - {config: nvfp4_bf16_b1_s32768_h12kv12_d128, default: false}
+  - {config: nvfp4_bf16_b1_s4096_h24kv24_d128, default: false}
+  - {config: nvfp4_bf16_b1_s32768_h24kv24_d128, default: false}
+  - {config: nvfp4_fp8_b1_s256_h16kv16_d128, default: false}
+  - {config: nvfp4_fp8_b1_s1024_h16kv16_d128, default: false}
+  - {config: nvfp4_fp8_b4_s4096_h16kv16_d128, default: false}
+  - {config: nvfp4_fp8_b1_s32768_h16kv16_d128, default: false}
+  - {config: nvfp4_fp8_b4_s4096_h32kv32_d128, default: false}
+  - {config: nvfp4_fp8_b1_s4096_h12kv12_d128, default: false}
+  - {config: nvfp4_fp8_b1_s32768_h12kv12_d128, default: false}
+  - {config: nvfp4_fp8_b1_s4096_h24kv24_d128, default: false}
+  - {config: nvfp4_fp8_b1_s32768_h24kv24_d128, default: true, selection_role: large}
+  - {config: nvfp4_nvfp4_b1_s256_h16kv16_d128, default: false}
+  - {config: nvfp4_nvfp4_b1_s1024_h16kv16_d128, default: false}
+  - {config: nvfp4_nvfp4_b4_s4096_h16kv16_d128, default: false}
+  - {config: nvfp4_nvfp4_b1_s32768_h16kv16_d128, default: false}
+  - {config: nvfp4_nvfp4_b4_s4096_h32kv32_d128, default: false}
+  - {config: nvfp4_nvfp4_b1_s4096_h12kv12_d128, default: false}
+  - {config: nvfp4_nvfp4_b1_s32768_h12kv12_d128, default: false}
+  - {config: nvfp4_nvfp4_b1_s4096_h24kv24_d128, default: false}
+  - {config: nvfp4_nvfp4_b1_s32768_h24kv24_d128, default: false}
+  - {config: nvfp4_mxfp8_b1_s256_h16kv16_d128, default: false}
+  - {config: nvfp4_mxfp8_b1_s1024_h16kv16_d128, default: false}
+  - {config: nvfp4_mxfp8_b4_s4096_h16kv16_d128, default: false}
+  - {config: nvfp4_mxfp8_b1_s32768_h16kv16_d128, default: false}
+  - {config: nvfp4_mxfp8_b4_s4096_h32kv32_d128, default: false}
+  - {config: nvfp4_mxfp8_b1_s4096_h12kv12_d128, default: false}
+  - {config: nvfp4_mxfp8_b1_s32768_h12kv12_d128, default: false}
+  - {config: nvfp4_mxfp8_b1_s4096_h24kv24_d128, default: false}
+  - {config: nvfp4_mxfp8_b1_s32768_h24kv24_d128, default: false}
+  - {config: mxfp8_bf16_b1_s256_h16kv16_d128, default: false}
+  - {config: mxfp8_bf16_b1_s1024_h16kv16_d128, default: false}
+  - {config: mxfp8_bf16_b4_s4096_h16kv16_d128, default: false}
+  - {config: mxfp8_bf16_b1_s32768_h16kv16_d128, default: false}
+  - {config: mxfp8_bf16_b4_s4096_h32kv32_d128, default: false}
+  - {config: mxfp8_bf16_b1_s4096_h12kv12_d128, default: false}
+  - {config: mxfp8_bf16_b1_s32768_h12kv12_d128, default: false}
+  - {config: mxfp8_bf16_b1_s4096_h24kv24_d128, default: false}
+  - {config: mxfp8_bf16_b1_s32768_h24kv24_d128, default: false}
+  - {config: mxfp8_fp8_b1_s256_h16kv16_d128, default: false}
+  - {config: mxfp8_fp8_b1_s1024_h16kv16_d128, default: false}
+  - {config: mxfp8_fp8_b4_s4096_h16kv16_d128, default: false}
+  - {config: mxfp8_fp8_b1_s32768_h16kv16_d128, default: false}
+  - {config: mxfp8_fp8_b4_s4096_h32kv32_d128, default: false}
+  - {config: mxfp8_fp8_b1_s4096_h12kv12_d128, default: false}
+  - {config: mxfp8_fp8_b1_s32768_h12kv12_d128, default: false}
+  - {config: mxfp8_fp8_b1_s4096_h24kv24_d128, default: false}
+  - {config: mxfp8_fp8_b1_s32768_h24kv24_d128, default: false}
+  - {config: nvfp4_bf16_b1_s32768_h24kv24_d64, default: false}
+  - {config: nvfp4_fp8_b1_s32768_h24kv24_d64, default: false}
+  - {config: nvfp4_bf16_b1_s1024_h32kv8_d128_causal, default: false}
+  - {config: nvfp4_bf16_b1_s2048_h32kv8_d128_causal, default: false}
+  - {config: nvfp4_bf16_b1_s4096_h32kv8_d128_causal, default: false}
+  - {config: nvfp4_bf16_b1_s8192_h32kv8_d128_causal, default: false}
+  - {config: nvfp4_bf16_b1_s16384_h32kv8_d128_causal, default: false}
+  - {config: nvfp4_bf16_b1_s32768_h32kv8_d128_causal, default: false}
+  - {config: nvfp4_fp8_b1_s1024_h32kv8_d128_causal, default: false}
+  - {config: nvfp4_fp8_b1_s2048_h32kv8_d128_causal, default: false}
+  - {config: nvfp4_fp8_b1_s4096_h32kv8_d128_causal, default: false}
+  - {config: nvfp4_fp8_b1_s8192_h32kv8_d128_causal, default: false}
+  - {config: nvfp4_fp8_b1_s16384_h32kv8_d128_causal, default: false}
+  - {config: nvfp4_fp8_b1_s32768_h32kv8_d128_causal, default: false}
+  - {config: mxfp8_fp8_b1_s1024_h32kv8_d128_causal, default: false}
+  - {config: mxfp8_fp8_b1_s2048_h32kv8_d128_causal, default: false}
+  - {config: mxfp8_fp8_b1_s4096_h32kv8_d128_causal, default: true, selection_role: medium}
+  - {config: mxfp8_fp8_b1_s8192_h32kv8_d128_causal, default: false}
+  - {config: mxfp8_fp8_b1_s16384_h32kv8_d128_causal, default: false}
+  - {config: mxfp8_fp8_b1_s32768_h32kv8_d128_causal, default: false}

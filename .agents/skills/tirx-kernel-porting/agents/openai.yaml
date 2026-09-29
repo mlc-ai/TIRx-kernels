@@ -1,0 +1,4 @@
+interface:
+  display_name: "TIRx Kernel Porting"
+  short_description: "Port optimized CUDA kernels to TIRx faithfully"
+  default_prompt: "Use $tirx-kernel-porting to port this optimized CUDA kernel to TIRx while preserving its implementation and performance structure."

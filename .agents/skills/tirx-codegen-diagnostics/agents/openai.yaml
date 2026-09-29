@@ -1,0 +1,4 @@
+interface:
+  display_name: "TIRx Codegen Diagnostics"
+  short_description: "Symptom-indexed fixes for low-level TIRx codegen problems"
+  default_prompt: "Use $tirx-codegen-diagnostics to diagnose this low-level TIRx codegen problem."

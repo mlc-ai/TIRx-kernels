@@ -1,0 +1,330 @@
+# Expose predication and uniform control
+
+**Symptoms:** `branch_reconvergence`, `excess_control_instructions`, `branch_in_hot_loop`, `excess_guard_math`, `serialized_stores`
+
+## Symptom
+
+Excess BRA/BSYNC and reconvergence against the reference, a branch in a hot
+loop, or stores issued too sparsely to saturate DRAM at identical occupancy with
+no spill.
+
+## What to change
+
+- For one isolated load or store, express the predicate on the PTX instruction
+  when an outer branch blocks if-conversion. The `pred=` keyword is the `@p`
+  guard on the instruction; `T.ptx.pred(x)` is a different thing, a
+  predicate-typed *operand* such as an accumulate or select flag.
+
+  ```python
+  # before: a real branch plus a BSYNC reconvergence per CTA.
+  if cond:
+      T.evaluate(T.ptx.st.global_.b16(buffer.ptr_to([index]), bits))
+
+  # after: one genuinely predicated store.
+  T.evaluate(T.ptx.st.global_.b16(buffer.ptr_to([index]), bits, pred=cond))
+  ```
+
+- For a loop-invariant uniform condition, hoist it and duplicate the hot loop
+  only when that exposes a dense path without changing recurrence state.
+- When compile-time launch and tiling facts prove complete rows and vectors,
+  expose a separate guard-free specialization instead of carrying the generic
+  row, column, and zero-byte-copy predicates into every unrolled issue. Keep the
+  guarded path for partial rows and columns.
+
+  ```python
+  # before: the complete-vector specialization still materializes both guards.
+  source_bytes = T.if_then_else(row_valid and col_valid, COPY_BYTES, 0)
+  _copy_async(src, dst, source_bytes)
+
+  # after: launch and tiling proofs make the complete path literal.
+  if ROWS_PER_CTA == 1 and FULL_COLUMNS:
+      _copy_async(src, dst, T.uint32(COPY_BYTES))
+  else:
+      source_bytes = T.if_then_else(row_valid and col_valid, COPY_BYTES, 0)
+      _copy_async(src, dst, source_bytes)
+  ```
+- When the condition is runtime at kernel entry but constant throughout the CTA,
+  an inline TIRx helper with a `T.constexpr` mode can force the two branch
+  bodies to specialize independently: dispatch once on the runtime condition,
+  then call the helper with `True` or `False`. This is a control-flow lowering
+  tool, not permission to change dispatch semantics.
+
+  ```python
+  @T.inline
+  def run_body(IS_PAD: T.constexpr):
+      # Inside, IS_PAD is a literal, so each copy folds away the other path.
+      if not IS_PAD and member_col < DSTATE:
+          ...
+
+  if is_pad != 0:
+      run_body(True)
+  else:
+      run_body(False)
+  ```
+
+- For a whole elected-lane region in a warp-specialized mainloop, flatten the
+  region and predicate each single-issue matrix and copy instruction
+  individually instead of guarding the block.
+
+  ```python
+  # before: branching on the elected lane costs a BSSY/BSYNC pair per K block.
+  if elected:
+      for c in T.unroll(0, num_chunks):
+          T.evaluate(T.ptx[utccp_chain](tmem_addr(c), desc_sf))
+
+  # after: the warp never diverges; each issue carries the guard.
+  for c in T.unroll(0, num_chunks):
+      T.evaluate(
+          T.ptx[utccp_chain](tmem_addr(c), desc_sf, pred=elected == T.uint32(1))
+      )
+  ```
+
+- When such a region also contains barrier *waits*, split it by what actually
+  needs one lane instead of predicating everything in it. A wait is safe
+  warp-wide -- every lane spins on the same barrier and phase -- so it leaves
+  the guard entirely, while the arrivals and transfer issues keep it as `@p`.
+  Electing once above the region and dropping the branch is what removes the
+  reconvergence; predicating the issues is what preserves single-lane
+  semantics.
+
+  ```python
+  # before: one elected region holds the waits, the arrivals and the issues.
+  with txl.If(_elected()), txl.Then():
+      _wait_barrier(...)
+      _expect_tx(...)
+      _issue_transfer(...)
+
+  # after: the waits run warp-wide; only what must be single-lane is predicated.
+  leader = txl.cuda.elect_sync()
+  _wait_barrier(...)
+  _expect_tx(..., pred=leader)
+  _issue_transfer(..., pred=leader)
+  ```
+
+- When complementary lane groups choose between two pure arithmetic results,
+  and both results are defined for every lane, match a reference that uses
+  exact zero/one weights instead of duplicating a long unrolled body under a
+  divergent branch.
+
+  ```python
+  # before: both unrolled arithmetic bodies survive behind half-warp control.
+  with txl.If(lane < HALF), txl.Then():
+      result = _left_path(inputs)
+  with txl.Else():
+      result = _right_path(inputs)
+
+  # after: one straight-line body selects with exact arithmetic identities.
+  right_weight = txl.cast(lane // HALF, "float32")
+  left_weight = txl.float32(1.0) - right_weight
+  left = _left_path(inputs)
+  right = _right_path(inputs)
+  scaled_left = _packed_mul(left, left_weight)
+  result = _packed_fma(right, right_weight, scaled_left)
+  ```
+
+## Rationale
+
+- Replacing repeated pad checks with the `T.constexpr` specialization removed
+  262,144 dynamic `CS2R` instructions in the profiled specialization by letting
+  each copy dead-code-eliminate the opposite path.
+- One store-heavy recurrence carried the predicate per row and issued stores too
+  sparsely to saturate DRAM -- 61.1% against the reference's 62.5%, at identical
+  occupancy with no spill. Hoisting the predicate and duplicating the loop
+  matched the reference's static counts exactly and moved the largest shapes
+  from 0.988x, 1.000x and 1.003x to 1.013x, 1.023x and 1.026x.
+- One output store written as a guarded branch cost a real branch plus a
+  reconvergence per CTA; reissuing it as a predicated store matched the
+  reference exactly at BSYNC 9216 to 6144 and BRA 7680 to 6144, and moved two
+  shapes from 0.982x and 0.988x to 1.007-1.019x and 1.012x.
+- In a measured 128-thread dependency-protocol path, moving the same tail guard
+  from an outer C++ branch onto the vector stores removed the remaining BSSY and
+  BSYNC, reduced registers from 105 to 96 with no spill, and moved the gate from
+  0.959x to 0.976x. The change was useful even though another register-budget
+  change was still needed to clear the final threshold.
+- Guarding a block of single-issue matrix and copy instructions on the elected
+  lane costs a reconvergence pair per iteration, measured at 4.53 instructions
+  per K block against the reference's roughly zero, because the reference's
+  compiler predicates those instructions individually instead. Flattening the
+  region and predicating each issue -- in the mainloop and in both epilogue
+  store paths -- took reconvergence-marked BSSY and BSYNC from 494,814 and
+  989,628 to 222 and 444, the kernel from 58.81M to 55.64M instructions, and the
+  tensor pipe from 67.3% to 74.2% of cycles against the reference's 73.5%. On
+  the gate the mainloop half is what moved the family, from 0.939-0.983x to
+  0.995-1.035x.
+- A transfer warp's per-chunk block -- ten barrier waits, eight expect-tx
+  arrivals and eight tensor-copy issues inside one elected region entered every
+  chunk -- was the single largest divergent region left in a warp-specialized
+  backward kernel, which carried `ELECT` 80 against the reference's 52, `PLOP3`
+  96 against 28, and `WARPSYNC.COLLECTIVE`/`ENDCOLLECTIVE`/`BSSY`/`BSYNC` at
+  8/8/20/20 against zero, worth 3928 branch-resolving samples. Letting the waits
+  run warp-wide and predicating the sixteen single-lane issues moved the
+  tightest shape by +0.0116 to 1.0016 and five more by +0.0057 to +0.0099,
+  taking the required matrix from one failing shape to none with the worst shape
+  at 0.993x. It was the last change the gate needed, after twelve expansions
+  that had each moved a required shape by 0.002 or less.
+
+- A sparse K/V transfer loop supplied the same mechanism with a global sparse-ID
+  load, an expect-tx arrival, coordinate formation, and 4D tensor-copy issues in
+  one elected-lane branch. Two branch PCs each produced 2,580 divergent branches
+  while the reference produced 150 in total. Hoisting the warp-uniform work and
+  predicating only the load, arrival, and copies kept all 18 tensor-copy sites,
+  reduced static `BSSY.RECONVERGENT` from 8 to 2, predicated-false branch sites
+  from 102 to 84, and `ELECT` from 12 to 11. The latency-bound tail moved from
+  0.9575x to 0.9912x; all 32 correctness configurations passed, and three clean
+  complete 24-row matrices subsequently passed with minima of 0.9979x, 0.9965x,
+  and 0.9907x.
+
+- In a rows-one, full-vector specialization, making the launch proof explicit
+  removed eight asynchronous-copy row/source-byte guards, eight weight-column
+  guards, and eight output-row guards. Static SASS fell from 693 to 669
+  instructions, `BRA` from 9 to 1, and `ISETP` from 17 to 1 while the eight
+  copies, eight loads, and eight stores were unchanged. Two affected ratios
+  moved from 0.9794 to 0.9895 and from 0.9869 to 0.9955; a neighboring multi-row
+  shape stayed flat at 0.9836 to 0.9834.
+
+- A half-warp arithmetic branch around two 32-step unrolled bodies measured
+  94.53% branch efficiency against the reference's 99.96%. Replacing it with
+  the reference's exact zero/one packed blend kept 102 registers and zero stack
+  use, while static SASS fell from 2775 to 2352 instructions. Two production
+  workloads moved from 97.32/191.57 us to 92.72/186.00 us, and a one-work guard
+  moved from 21.62 to 16.77 us; all output orientations retained full numerical
+  agreement.
+
+The reference's source text does not reveal whether it wants this. nvcc
+routinely duplicates a loop around a store predicate the reference wrote per
+iteration, so transcribing the text faithfully keeps a per-iteration branch the
+reference never compiles to. Detect it by counting static arithmetic against the
+reference: a recurrence block appearing an odd multiple of its logical count is
+duplicated, and matching that multiple is the target.
+
+A monotone decay reduction also benefited from peeling the few boundary
+iterations whose diagonal and row predicates vary. The remaining backward
+scan is strictly before every output row, and the remaining forward scan is
+strictly after every row, so the two later loops need neither per-row diagonal
+selects nor conditional decay advances. Six paired cases passed with every
+output exactly equal. Mixed/strong cases improved from 671/634 to 643/617 us
+in one specialization and from 6731/6253 to 6189/5729 us in another. Ordinary
+controls changed by about 0.8% and 0.1%. The first specialization's stack grew
+from 8 to 16 bytes and local-load/store sites from 32/31 to 38/46, limiting the
+benefit; the second kept its allocation. Keep the original boundary loop and
+runtime tail limits, and verify that early zero termination prevents both
+loops from executing when all later products vanish.
+
+The same peeling survived a later fast-path composition with compensated
+operands and sparse channel cooperation: ten paired cases retained every output
+bitwise. Dense controls improved from6565 to5757 us and665 to624 us; sparse
+controls improved2.5-2.9%. Ordinary controls changed by+0.5%/-2.6%. One
+specialization's stack decreased96->48 bytes despite more source loop bodies.
+Those results support checking the assembled live ranges after peeling, rather
+than assuming that duplicated boundary bodies increase register pressure.
+
+## Boundary
+
+Predication is not a general replacement for a uniform cold-path branch. In a
+measured unrolled numerical correction, replacing repeated launch-uniform
+branches with predicated shared loads, conversions, multiplies, subtracts and
+adds preserved the risky-path result, but made two complete grouped workloads
+50.33% and 53.12% slower. Keeping the same correction behind ordinary uniform
+branches cost 5.31% and 4.44%. Predicate isolated memory or issue instructions
+when that removes actual divergent reconvergence; do not flatten a substantial
+false-path arithmetic chain merely because its predicate is uniform.
+
+In a mixed-lane state-gradient epilogue, strong lanes loaded an immutable gate
+and evaluated an exponential while weak lanes used a cached reciprocal. Reading
+the valid gate for every lane, masking each arithmetic operand to a finite
+identity, and selecting the original result removed repeated lane branches.
+Static branch sites fell from 549 to 531 and local load/store sites from
+55/35 to 43/23, with the same register allocation and 96-byte stack. Five
+paired cases retained all six outputs bitwise; mixed and dense cases improved
+by 1.5–4.8%, with the ordinary control essentially unchanged. Purely weak
+warps retained their separate path. This result applies only when every lane's
+extra load is valid; an arithmetic select cannot legalize an invalid address.
+
+The same rewrite did not transfer to a later epilogue with separate FP32 intra
+gates and bf16-rounded state reciprocals. Masking the inactive operands and
+selecting the original arithmetic kept all six outputs bitwise equal, but
+three paired profiles using the same inputs and workspace addresses regressed
+0.2–1.1%. Static branch sites decreased from 534 to 520 and local load/store
+sites from 44/26 to 42/24, with the same 168-register allocation and 96-byte
+stack. The extra weak-lane loads and eager arithmetic can outweigh the removed
+branches; remeasure after changing the operand representation, and retain the
+branched form when the complete operation gets slower.
+
+Do not predicate substantial computation or duplicate a body that causes
+instruction-cache pressure, spills, or lower occupancy.
+
+A complete-row proof must follow from the specialization's launch identity, not
+only from a favorite runtime sample. Preserve the generic guards for tail rows,
+partial vectors, strided layouts, and any ABI whose runtime extent can differ
+from the compile-time tile. Removing guard instructions is mechanism evidence,
+not a timing result: a separate divisible-row proof removed control and address
+instructions but still failed its affected performance shape.
+
+Not every predicate is worth rewriting. Rebuilding an integer-materialized
+condition as a boolean conjunction, aimed at an excess of logic ops and
+reconvergence, changed nothing: both forms lowered identically, down to equal
+totals. Check the lowering before assuming the written form survived.
+
+In the elected-lane case, extending the rewrite to the epilogue produced no
+separation from run-to-run drift; that is where to stop.
+
+Hoisting a uniform guard can be execution-path-specific. Replacing eight
+repeated asynchronous-copy branches with one outer branch improved the
+non-protocol path but moved the dependency-protocol path from 3.386 to 3.425
+microseconds, so the shared rewrite was reverted. Match the source topology,
+then retain the hoist only on the paths where the gate confirms it.
+
+The grouping width itself is a scheduling parameter. In one asynchronous-copy
+path, merging guards across the complete copy group reduced control and address
+instructions but regressed every guarded shape by roughly 4.6-8.1%. Grouping
+only two adjacent copies still removed dynamic instructions and preserved
+logical memory traffic, but regressed the affected shapes by roughly 5.3-10.3%
+because more addresses and predicates stayed live together. Compare the
+smallest legal group, intermediate groups, and the original per-issue form;
+fewer reconvergence instructions do not prove that a broader branch is useful.
+
+Encoding a row predicate as an asynchronous copy's zero-fill source size is
+also path-sensitive. One measured rewrite removed more than two million dynamic
+warp instructions, removed more than sixty million predicated-on thread
+instructions, and lowered the allocation without spilling, yet both
+dependency-protocol shapes fell to about 0.987x while their non-protocol guards
+held. Source-size predication changes issue and dependency behavior, not just
+branch syntax, so preserve protocol-on and protocol-off shapes as separate
+performance guards.
+
+The payoff scales with what the region holds and how often it runs, not with
+how many guards exist. In the same kernel whose per-chunk transfer block was
+worth +0.0116, predicating seven elected regions that each wrapped exactly ONE
+barrier arrival was worth nothing twice: on the first protocol the target shape
+fell 0.0016, and on a clean re-measurement it gained 0.0002 while a passing
+shape lost 0.0007, merely moving which shape failed. Those arrivals ran a couple
+of times per CTA against the transfer block's once per chunk. Count the dynamic
+executions of the region and the instructions inside it before rewriting a guard.
+
+Flattening also makes formerly leader-only arithmetic execute warp-wide. In the
+sparse-transfer experiment above, a work-richer guard moved from 1.2178x to
+1.1954x even though the short divergent tail crossed the gate. Keep coordinate
+formation and descriptor selection small, and require both branch-dominated
+targets and work-dominated guards before applying the rewrite to a shared path.
+
+Predication pays where a branch DIVERGES, not wherever a branch exists. In a
+gather whose validity flag is row-uniform -- every lane of the warp takes the
+same arm -- replacing the if/else with a predicated copy and a predicated
+zero-fill measured neutral at +0.4%, +0.0%, -0.1%, -0.4%, because those branches
+never diverged in the first place. Check that the guard actually varies across
+the warp before rewriting it; divergent-branch counters separate the two cases
+where branch counts do not.
+
+An identity-weighted arithmetic blend is legal only when both arms are pure and
+defined for every lane. It cannot replace guarded memory accesses, barriers, or
+other side effects, and inactive-arm NaNs or infinities can defeat the zero
+weight. Preserve the reference's rounding sequence and test both lane groups.
+
+## Verification
+
+Confirm predicate polarity and inactive-lane memory behavior, then compare BRA,
+BSYNC, reconvergence, code size, registers, and both control-flow outcomes. For
+the `T.constexpr` specialization, test both copies and compare code size,
+registers, and every affected workload. For identity-weighted arithmetic,
+confirm the long body is no longer duplicated in SASS and validate both lane
+groups with asymmetric finite inputs.

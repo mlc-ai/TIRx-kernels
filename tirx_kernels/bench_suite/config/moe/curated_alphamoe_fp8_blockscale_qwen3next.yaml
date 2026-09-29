@@ -1,0 +1,16 @@
+kernel: curated_alphamoe_fp8_blockscale_qwen3next
+selection_rationale: >-
+  M=1 covers the per-route wide-cluster kernel, M=16 covers the persistent
+  two-CTA kernel with quantized activation exchange, and M=128 covers FP32
+  exchange and the eight-token consumer path at the largest supported shape.
+  The other official token counts remain available for explicit runs.
+defaults:
+  # The FlashInfer reference uses CUDA Graph replay; compare with CUDA events.
+  timer: event
+configs:
+  - {config: m1_official, default: true, selection_role: small}
+  - {config: m8_official, default: false}
+  - {config: m16_official, default: true, selection_role: medium}
+  - {config: m32_official, default: false}
+  - {config: m64_official, default: false}
+  - {config: m128_official, default: true, selection_role: large}

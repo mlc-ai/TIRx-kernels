@@ -1,0 +1,30 @@
+tirx-kernels
+Copyright (c) 2026 TIRx authors
+
+This product includes modified software from cuDNN Frontend
+(https://github.com/NVIDIA/cudnn-frontend):
+
+cuDNN Frontend
+Copyright (c) 2020-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This product includes modified software from FlashInfer
+(https://github.com/flashinfer-ai/flashinfer):
+
+FlashInfer
+Copyright 2025-2026 NVIDIA
+Copyright 2023-2026 FlashInfer community (https://flashinfer.ai/)
+
+This product includes modified software from DeepEP
+(https://github.com/deepseek-ai/DeepEP):
+
+DeepEP
+Copyright (c) 2025 DeepSeek
+
+This product includes software from SGLang
+(https://github.com/sgl-project/sglang):
+
+SGLang CuTeDSL FP8 paged MQA logits kernels
+Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+Additional third-party copyright notices and license terms are provided in
+the LICENSE file and the licenses/ directory.

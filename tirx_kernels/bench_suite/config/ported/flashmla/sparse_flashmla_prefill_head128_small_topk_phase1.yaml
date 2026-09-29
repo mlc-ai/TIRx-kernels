@@ -1,0 +1,5 @@
+kernel: sparse_flashmla_prefill_head128_small_topk_phase1
+configs:
+  - {config: bench_smalltopk_dqk512_hq128_s4096_kv8192_topk1280, default: true}
+  - {config: bench_smalltopk_dqk512_hq128_s4096_kv32768_topk1280, default: true}
+  - {config: bench_smalltopk_dqk512_hq128_s4096_kv65536_topk1280, default: true}

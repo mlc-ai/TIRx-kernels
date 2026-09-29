@@ -1,0 +1,21 @@
+.local/
+.claude/
+
+__pycache__/
+*.pyc
+tirx_kernels.egg-info/
+/build/
+/dist/
+tools/cpusim/examples/bench_gen/
+.porting/
+
+# eval harness outputs
+/eval_harness_runs/
+
+# bench-suite run artifacts (pinned baselines live under tirx_kernels/bench_suite/)
+/.bench-suite/
+/.tir-bench/
+/.reference-deps/
+
+# /file-bug skill backlog — transient per-machine bug folders
+/bugs/

@@ -1,0 +1,13 @@
+kernel: curated_msa_decode_multishape
+selection_rationale: The ten official rows exercise three dispatch routes, so the defaults cover each one and bracket the cost range - the q16 bf16 row is the most expensive flat shape and takes the two-query-tile Q-major specialization, the q1 bf16 row takes the KV-major route that most rows share, and the fp8 paged row takes the f8f6f4 KV-major path whose storage dtype differs from every other row. The 65536-token paged row is the longest and stays available but off by default because one run dominates suite wall time.
+configs:
+  - {config: mtp_bf16_b128_q16_kv4096_h64, default: true, selection_role: large, timer: proton}
+  - {config: decode_bf16_b128_q1_kv4096_h64, default: true, selection_role: small, timer: proton}
+  - {config: decode_fp8_b128_q1_kv4096_h64, default: true, selection_role: medium, timer: proton}
+  - {config: speculative_bf16_b128_q4_kv4096_h64, default: false, timer: proton}
+  - {config: decode_fp16_b128_q1_kv4096_h64, default: false, timer: proton}
+  - {config: official_decode_bf16_b32_q8_kv8192_h64_hkv4_k16_paged, default: false, timer: proton}
+  - {config: official_decode_bf16_b64_q8_kv65536_h64_hkv4_k32_paged, default: false, timer: proton}
+  - {config: coverage_decode_fp16_b32_q4_kv8192_h64_hkv4_k16_paged, default: false, timer: proton}
+  - {config: coverage_decode_mixed_fp8_b32_q1_kv8192_h64_hkv4_k16_flat, default: false, timer: proton}
+  - {config: boundary_decode_bf16_b2_q1_kv257_h8_hkv1_k4_paged, default: false, timer: proton}

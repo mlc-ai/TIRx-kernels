@@ -1,0 +1,3 @@
+prune .agents
+prune .github
+global-exclude __pycache__ *.py[cod]
