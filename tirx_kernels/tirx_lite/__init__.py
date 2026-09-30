@@ -123,6 +123,39 @@ def call_packed(*args):
     _I.evaluate(_T.call_packed(*args))
 
 
+def cu_tensor_map_encode_tiled(descriptor, dtype, rank, data, *operands):
+    """Encode a tiled tensor map with ``cuTensorMapEncodeTiled``'s operand order.
+
+    ``operands`` are the global dimensions (``rank``), byte strides
+    (``rank - 1``), box dimensions (``rank``) and element strides (``rank``),
+    then the interleave, swizzle, L2-promotion and OOB-fill modes and an
+    optional forced CUDA dtype. The typed ``tensormap_encode_tiled`` op lets a
+    ``cuda_host`` build encode directly; other hosts lower it to the packed
+    runtime encoder with these same operands.
+    """
+    shape, modes = operands[: 4 * rank - 1], operands[4 * rank - 1 :]
+    if len(modes) not in (4, 5):
+        raise ValueError(
+            f"rank-{rank} tensor map expects {4 * rank - 1} shape operands and 4 or 5 modes, "
+            f"got {len(operands)} operands"
+        )
+    interleave, swizzle, l2_promotion, oob_fill, *force_cu_dtype = modes
+    _I.evaluate(
+        _T.tensormap_encode_tiled(
+            descriptor,
+            data,
+            *shape,
+            descriptor_dtype=dtype,
+            rank=rank,
+            interleave=interleave,
+            swizzle=swizzle,
+            l2_promotion=l2_promotion,
+            oob_fill=oob_fill,
+            force_cu_dtype=force_cu_dtype[0] if force_cu_dtype else -1,
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # The one instruction txl makes stricter than the table
 # ---------------------------------------------------------------------------

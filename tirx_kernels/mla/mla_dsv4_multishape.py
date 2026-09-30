@@ -240,8 +240,7 @@ def make_kernel(
     def host_prelude(params):
         descriptor = txl.stack_alloca("tensormap", 1)
         if q_in_tmem:
-            txl.call_packed(
-                "runtime.cuTensorMapEncodeTiled",
+            txl.cu_tensor_map_encode_tiled(
                 descriptor, tmap_dtype, 4, txl.handle_add_byte_offset(params["q"].data, 0),
                 64, h_total, D // 64, q_tokens,
                 row_bytes, 64 * esize, h_total * row_bytes,
@@ -249,14 +248,12 @@ def make_kernel(
                 1, 1, 1, 1, 0, 3, 3, 0,
             )
         else:
-            txl.call_packed(
-                "runtime.cuTensorMapEncodeTiled",
+            txl.cu_tensor_map_encode_tiled(
                 descriptor, tmap_dtype, 2, txl.handle_add_byte_offset(params["q"].data, 0),
                 D, q_rows, row_bytes, atom, BM, 1, 1, 0, 3, 3, 0,
             )
         out_desc = txl.stack_alloca("tensormap", 1)
-        txl.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
+        txl.cu_tensor_map_encode_tiled(
             out_desc, "bfloat16", 2, txl.handle_add_byte_offset(params["out"].data, 0),
             D, q_rows, D * 2, 64, h_valid, 1, 1, 0, 3, 0, 0,
         )
@@ -1696,9 +1693,7 @@ def _make_h128_bf16_prefill():
 
             def encode(data, rank, *shape):
                 descriptor = txl.stack_alloca("tensormap", 1)
-                txl.call_packed(
-                    "runtime.cuTensorMapEncodeTiled", descriptor, "bfloat16", rank, data, *shape
-                )
+                txl.cu_tensor_map_encode_tiled(descriptor, "bfloat16", rank, data, *shape)
                 return descriptor
 
             def pool_map(buf, rows):
