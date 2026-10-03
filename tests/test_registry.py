@@ -244,6 +244,25 @@ def test_probe_reference_requirement_checks_distribution_version(monkeypatch):
     assert "installed version is 4.8.0.dev0" in refs.probe_reference_requirement(requirement)
 
 
+@pytest.mark.parametrize(
+    ("version", "accepted"),
+    [("4.8.0.dev0", True), ("4.8.0", True), ("4.7.0", False), ("4.8.1", False)],
+)
+def test_flash_attention4_reference_accepts_cutlass_48_release(monkeypatch, version, accepted):
+    requirement = next(
+        item
+        for item in registry.kernel_index(strict=True)["flash_attention4"].reference_requirements
+        if item.package == "nvidia-cutlass-dsl"
+    )
+    refs.probe_reference_requirement.cache_clear()
+    monkeypatch.setattr(refs.importlib.util, "find_spec", lambda _name: SimpleNamespace())
+    monkeypatch.setattr(refs.importlib.metadata, "version", lambda _name: version)
+    try:
+        assert (refs.probe_reference_requirement(requirement) is None) == accepted
+    finally:
+        refs.probe_reference_requirement.cache_clear()
+
+
 def test_probe_reference_requirement_checks_git_identity(monkeypatch):
     requirement = refs.ReferenceRequirement(
         package="example",
