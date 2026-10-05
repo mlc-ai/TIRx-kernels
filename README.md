@@ -150,7 +150,7 @@ Grouped by the FlashInfer Python entry point each port backs.
 - **Sparse decode:**
   [`sparse_flashmla_decode_head64`](tirx_kernels/ported/flashmla/sparse_decode_head64.py)
 - **Sparse forward:**
-  [`flash_mla_sparse_fwd`](tirx_kernels/ported/flashmla/flash_mla_sparse_fwd.py) ⟨sm_100a⟩
+  [`flash_mla_sparse_fwd`](tirx_kernels/ported/flashmla/flash_mla_sparse_fwd.py)
 
 ### DeepGEMM ports
 

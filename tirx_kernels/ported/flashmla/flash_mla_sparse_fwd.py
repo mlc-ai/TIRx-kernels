@@ -9,7 +9,7 @@ FlashMLA exposes sparse prefill as ``flash_mla.flash_mla_sparse_fwd`` in Python,
 which calls the extension symbol ``sparse_prefill_fwd`` and dispatches through
 ``sparse_attn_prefill_interface`` in ``csrc/api/sparse_fwd.h``. This module keeps
 that public API name for the TIRx registry entry and forwards to the three
-ported SM100 phase1 implementations by shape.
+ported phase1 implementations by shape.
 
 Run ``python -m tirx_kernels.ported.flashmla.flash_mla_sparse_fwd`` to profile one
 representative of each dispatch with NVIDIA IKET.
@@ -34,7 +34,7 @@ from tvm.tirx.cuda import iket
 KERNEL_META = {
     "name": "flash_mla_sparse_fwd",
     "category": "ported.flashmla",
-    "runtime_cuda_archs": ["sm_100a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
 }
 _HEAD64_NAME = _head64.KERNEL_META["name"]
 _HEAD128_NAME = _head128.KERNEL_META["name"]
@@ -184,7 +184,7 @@ def run_bench(
 
 def _parse_iket_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Profile the three SM100 sparse FlashMLA prefill kernels with NVIDIA IKET"
+        description="Profile the three sparse FlashMLA prefill kernels with NVIDIA IKET"
     )
     parser.add_argument(
         "--kernel",
@@ -270,7 +270,9 @@ def _profile_iket_workload(args: argparse.Namespace) -> None:
     if args.repeat <= 0:
         raise ValueError("--repeat must be positive")
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    from tirx_kernels.runner import cuda_target
+
+    target = cuda_target()
     launches = []
     for _name, config in _iket_configs(args):
         executable = iket.IketProfiler().compile(
