@@ -244,7 +244,7 @@ def _arrive_remote_u64(barrier_ptr, remote_cta):
 
 
 def int_var(name: str, scope="local", dtype="int32", align=4):
-    buf = txl.alloc_buffer([1], dtype, scope=scope, align=align)
+    buf = txl.alloc_tensor([1], dtype, scope=scope, align=align)
     return buf
 
 
@@ -252,7 +252,7 @@ class Semaphore:
     def __init__(self, cnt, buffer):
         self.cnt = cnt
         self.sem = buffer
-        self.state = txl.alloc_buffer([1], "uint64", scope="local", align=8)
+        self.state = txl.alloc_tensor([1], "uint64", scope="local", align=8)
 
     def semaphore_wait(self, *coord):
         # The semaphore is a declared synchronization word. One `ld` and then
@@ -272,9 +272,9 @@ class MPMCQueue:
     def __init__(
         self,
         capacity: int,
-        task_types: txl.Buffer,
-        task_idxs: txl.Buffer,
-        head: txl.Buffer,
+        task_types: tvm.ir.Var,
+        task_idxs: tvm.ir.Var,
+        head: tvm.ir.Var,
         num_tot_tasks: int,
     ):
         if capacity & (capacity - 1):
@@ -291,9 +291,9 @@ class MPMCQueue:
 class GEMMMPMCQueue(MPMCQueue):
     def dequeue(
         self,
-        fetched_task_type: txl.Buffer,
-        fetched_task_idx0: txl.Buffer,
-        fetched_task_idx1: txl.Buffer,
+        fetched_task_type: tvm.ir.Var,
+        fetched_task_idx0: tvm.ir.Var,
+        fetched_task_idx1: tvm.ir.Var,
         sem: Semaphore,
         rank,
     ):
@@ -317,9 +317,7 @@ class GEMMMPMCQueue(MPMCQueue):
                     txl.ptx.ld.global_.acquire.gpu.b32(
                         fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
                     )
-                txl.ptx.st.global_.s32(
-                    self.task_types.ptr_to([self.masked_pos[0]]), txl.int32(-1)
-                )
+                txl.ptx.st.global_.s32(self.task_types.ptr_to([self.masked_pos[0]]), txl.int32(-1))
                 txl.ptx.ld.global_.s32(
                     fetched_task_idx0[0], self.task_idxs.ptr_to([self.masked_pos[0], 0])
                 )
@@ -334,7 +332,7 @@ class SingleDynamicTileScheduler:
     def __init__(
         self,
         queue: MPMCQueue,
-        packed_value: txl.Buffer,
+        packed_value: tvm.ir.Var,
         sch_pipe,
         producer_state,
         consumer_state,
@@ -607,7 +605,7 @@ def _make_device_kernel():
         packed_ptr = txl.reinterpret(
             PointerType(PrimType("uint64")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)
         )
-        packed_value = txl.decl_buffer([1], "uint64", data=packed_ptr, scope="shared")
+        packed_value = txl.decl_tensor([1], "uint64", data=packed_ptr, scope="shared")
         # Initialize in source order after the packed-value mapa.
         ab_pipe.full.leader = tid == 0
         ab_pipe.empty.leader = tid == 0
@@ -620,7 +618,7 @@ def _make_device_kernel():
         ptr = txl.reinterpret(
             PointerType(PrimType("uint64")), _mapa_u64_tx(ab_pipe.full.ptr_to([0]), 0)
         )
-        tma_finished = txl.decl_buffer([PIPELINE_DEPTH], "uint64", data=ptr, scope="shared")
+        tma_finished = txl.decl_tensor([PIPELINE_DEPTH], "uint64", data=ptr, scope="shared")
         ab_state = txl.PipelineState(1, phase=0)
         out_state = txl.PipelineState(1, phase=0)
         sch_producer_state = txl.PipelineState(1, phase=0)
@@ -896,8 +894,8 @@ def _make_device_kernel():
 
                     with consumer:
                         consumer_regs.emit()
-                        reg = txl.alloc_buffer((TMEM_LD_SIZE,), "float32", scope="local")
-                        reg_fp16 = txl.alloc_buffer(
+                        reg = txl.alloc_tensor((TMEM_LD_SIZE,), "float32", scope="local")
+                        reg_fp16 = txl.alloc_tensor(
                             (TMEM_LD_SIZE // 2,), "uint32", scope="local", align=16
                         )
 

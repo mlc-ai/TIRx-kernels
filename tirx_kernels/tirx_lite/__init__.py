@@ -43,7 +43,7 @@ import tvm
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
 from tvm.script import tirx as _T
 from tvm.script.ir_builder import IRBuilder
-from tvm.tirx.script.builder import ir as _I
+from tvm.tirx.script import ir_builder as _I
 
 from . import idioms
 from .entry import Kernel, TensorMap, cta_id, gptr, kernel, lane_id, thread_id, warp_id
@@ -111,6 +111,11 @@ def keep_alive(value):
     the parameter is dead-code-eliminated and the launch ABI changes.
     """
     _I.evaluate(value)
+
+
+def reinterpret(dtype, value):
+    """Reinterpret the bits of a value as the requested scalar or vector type."""
+    return _T.reinterpret(value, ty=dtype)
 
 
 def call_packed(*args):
@@ -309,7 +314,7 @@ cuda = _CUDAProxy(_T.cuda)
 # ---------------------------------------------------------------------------
 
 
-def alloc_buffer(
+def alloc_tensor(
     shape,
     dtype="float32",
     data=None,
@@ -331,7 +336,7 @@ def alloc_buffer(
             'tirx-lite does not support scope="tmem" buffers; use raw tcgen05 column '
             "operands and txl.cuda.get_tmem_addr(...)"
         )
-    return _I.alloc_buffer(
+    return _I.alloc_tensor(
         shape,
         dtype,
         data=data,
@@ -343,14 +348,8 @@ def alloc_buffer(
     )
 
 
-def decl_buffer(
-    shape,
-    dtype="float32",
-    data=None,
-    elem_offset=None,
-    byte_offset=None,
-    scope="global",
-    align=0,
+def decl_tensor(
+    shape, dtype="float32", data=None, elem_offset=None, byte_offset=None, scope="global", align=0
 ):
     """Declare an ordinary tensor using TIRx's default layout."""
     if scope == "tmem":
@@ -358,7 +357,7 @@ def decl_buffer(
             'tirx-lite does not support scope="tmem" buffers; use raw tcgen05 column '
             "operands and txl.cuda.get_tmem_addr(...)"
         )
-    return _I.decl_buffer(
+    return _I.decl_tensor(
         shape,
         dtype,
         data=data,
@@ -371,7 +370,7 @@ def decl_buffer(
 
 def alloc_local(shape, dtype="float32", *, align=-1, annotations=None):
     """Allocate a default-layout register tensor."""
-    return alloc_buffer(shape, dtype, scope="local", align=align, annotations=annotations)
+    return alloc_tensor(shape, dtype, scope="local", align=align, annotations=annotations)
 
 
 def local_scalar(dtype="float32", init=None, *, name=None):
@@ -382,12 +381,10 @@ def local_scalar(dtype="float32", init=None, *, name=None):
     ``name`` supplies the source name that a parser would infer from the
     assignment target; tracing cannot recover that name on its own.
     """
-    if name is None:
-        element = alloc_local([1], dtype)[0]
-    else:
-        buffer = tvm.tirx.decl_buffer([1], dtype, name=name, scope="local")
-        _I.add_to_parent(tvm.tirx.AllocBuffer(buffer))
-        element = buffer[0]
+    tensor = alloc_local([1], dtype)
+    if name is not None:
+        IRBuilder.name(name, tensor)
+    element = tensor[0]
     if init is not None:
         assign(element, init)
     return element
@@ -400,16 +397,18 @@ def stack_alloca(kind, size=1):
     allocation, so it must be materialized as a single binding rather than
     re-evaluated per use.
     """
-    return _I.Bind(_T.tvm_stack_alloca(kind, size))
+    return _I.bind(_T.tvm_stack_alloca(kind, size))
 
 
 def assign(dst, value):
     """Store into one writable scalar element of a local register tensor."""
     if not isinstance(dst, tvm.ir.TensorLoad):
-        raise TypeError(f"txl.assign destination must be a writable scalar, got {type(dst).__name__}")
-    if not isinstance(dst.source, tvm.tirx.Buffer) or dst.source.scope() != "local":
+        raise TypeError(
+            f"txl.assign destination must be a writable scalar, got {type(dst).__name__}"
+        )
+    if not tvm.tirx.is_tensor_var(dst.source) or dst.source.scope() != "local":
         raise TypeError("txl.assign destination must be a local scalar element")
-    return _I.buffer_store(dst.source, value, list(dst.indices))
+    return _I.tensor_store(dst.source, value, list(dst.indices))
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +424,7 @@ def uniform(x, *, width=32, lane=0):
     here, not where the result is read::
 
         t = txl.alloc_local([1], <dtype of x>)
-        t[0] = txl.cuda._shfl_sync(txl.uint32(0xFFFFFFFF), x, lane, width)
+        t[0] = txl.tvm_warp_shuffle(txl.uint32(0xFFFFFFFF), x, lane, width, 32)
         return t[0]
 
     ``threadIdx.x >> 5`` is already the same in every lane of a warp, but ptxas
@@ -446,14 +445,21 @@ def uniform(x, *, width=32, lane=0):
     *used*, which inside a guard means the excluded lanes never arrive and the
     CTA hangs.
     """
-    out = _T.alloc_local([1], str(x.ty.dtype))
-    _I.buffer_store(out, _T.cuda._shfl_sync(_T.uint32(0xFFFFFFFF), x, lane, width), [0])
+    out = alloc_local([1], str(x.ty.dtype))
+    _I.tensor_store(out, _T.tvm_warp_shuffle(_T.uint32(0xFFFFFFFF), x, lane, width, 32), [0])
     return out[0]
 
 
 # ---------------------------------------------------------------------------
 # everything else is tirx
 # ---------------------------------------------------------------------------
+
+If = _I.if_
+Then = _I.then_
+Else = _I.else_
+While = _I.while_
+Break = _I.break_
+Return = _I.return_
 
 
 _FORBIDDEN_TIRX_NAMES = {
@@ -469,6 +475,8 @@ _FORBIDDEN_TIRX_NAMES = {
     "alloc_shared",
     "alloc_tcgen05_ldst_frag",
     "device_entry",
+    "function",
+    "function_",
     "inline",
     "jit",
     "match_buffer",
@@ -481,11 +489,11 @@ _FORBIDDEN_TIRX_NAMES = {
     "wg_reg_tile",
 }
 
-_FORBIDDEN_ESCAPE_NAMES = {"ir", "parser"}
+_FORBIDDEN_ESCAPE_NAMES = {"ir", "ir_builder", "parser"}
 
 # Binding forms retired by measurement: every kernel migrated to the two direct
 # spellings, and the mis-read-prone middle forms are rejected at the API.
-_FORBIDDEN_BINDING_NAMES = {"Bind", "Let", "let"}
+_FORBIDDEN_BINDING_NAMES = {"Bind", "Let", "bind", "let"}
 
 _BINDING_HELP = (
     "tirx-lite rejects {name!r}: bindings use exactly two spellings.\n"
@@ -567,12 +575,12 @@ __all__ = [
     "TCGen05Bar",
     "TMABar",
     "TensorMap",
-    "alloc_buffer",
     "alloc_local",
+    "alloc_tensor",
     "bf16",
     "cta_id",
     "cuda",
-    "decl_buffer",
+    "decl_tensor",
     "f16",
     "f32",
     "gptr",

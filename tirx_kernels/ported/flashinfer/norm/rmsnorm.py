@@ -10,7 +10,6 @@ The source implementation is ``RMSNormKernel`` plus its 2-D host dispatch in
 ``rmsnorm`` and ``gemma_rmsnorm`` in ``flashinfer/norm/__init__.py``.
 """
 
-import contextlib
 import os
 from typing import Any
 
@@ -550,9 +549,8 @@ def get_kernel(
             max_registers = 64 if enable_pdl else (96 if H == 8192 else 93)
 
     def entry_registers():
-        if max_registers is None:
-            return contextlib.nullcontext()
-        return txl.attr({"tirx.max_registers": max_registers})
+        if max_registers is not None:
+            txl.cuda.max_registers_per_thread(max_registers)
 
     def kernel_body(x, weight, y, runtime_M, runtime_eps, x_row_stride, y_row_stride):
         # TIRX_TRANSCRIBE_START flashinfer_rmsnorm
@@ -941,8 +939,8 @@ def get_kernel(
             runtime_M: txl.i64,
             runtime_eps: txl.f32,
         ):
-            with entry_registers():
-                kernel_body(x, weight, y, runtime_M, runtime_eps, txl.int64(H), txl.int64(H))
+            entry_registers()
+            kernel_body(x, weight, y, runtime_M, runtime_eps, txl.int64(H), txl.int64(H))
 
         kernel = flashinfer_rmsnorm_compact.func
     else:
@@ -957,8 +955,8 @@ def get_kernel(
             x_row_stride: txl.i64,
             y_row_stride: txl.i64,
         ):
-            with entry_registers():
-                kernel_body(x, weight, y, runtime_M, runtime_eps, x_row_stride, y_row_stride)
+            entry_registers()
+            kernel_body(x, weight, y, runtime_M, runtime_eps, x_row_stride, y_row_stride)
 
         kernel = flashinfer_rmsnorm_strided.func
 

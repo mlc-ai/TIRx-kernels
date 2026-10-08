@@ -90,14 +90,13 @@ def load_acq_u32(dst, address):
 
 def wait_acq_u32(dst, address, predicate):
     """``ld.acquire.gpu.global.b32`` in a do-while, as the loop spelled it."""
-    return txl.cuda.wait_until(
-        dst, address, predicate, scope="gpu", ptx_type="b32"
-    )
+    return txl.cuda.wait_until(dst, address, predicate, scope="gpu", ptx_type="b32")
 
 
 def grid_sync_done_u32(new_value, old_value):
     return txl.cast(
-        txl.bitwise_and(txl.bitwise_xor(new_value, old_value), txl.uint32(0x80000000)) != txl.uint32(0),
+        txl.bitwise_and(txl.bitwise_xor(new_value, old_value), txl.uint32(0x80000000))
+        != txl.uint32(0),
         "uint32",
     )
 
@@ -143,7 +142,8 @@ def mbarrier_wait_phase(barrier_ptr, phase):
 def replace_smem_desc_addr(desc, smem_ptr):
     start_addr = txl.cast(
         txl.bitwise_and(
-            txl.shift_right(txl.cuda.cvta_generic_to_shared(smem_ptr), txl.uint32(4)), txl.uint32(0x3FFF)
+            txl.shift_right(txl.cuda.cvta_generic_to_shared(smem_ptr), txl.uint32(4)),
+            txl.uint32(0x3FFF),
         ),
         "uint64",
     )
@@ -302,7 +302,9 @@ def bf16x2_lo(packed):
 
 
 def bf16x2_hi(packed):
-    return txl.cast(txl.bitwise_and(txl.shift_right(packed, txl.uint32(16)), txl.uint32(0xFFFF)), "uint16")
+    return txl.cast(
+        txl.bitwise_and(txl.shift_right(packed, txl.uint32(16)), txl.uint32(0xFFFF)), "uint16"
+    )
 
 
 def cast_into_bf16_and_pack(v0, v1):
@@ -311,8 +313,12 @@ def cast_into_bf16_and_pack(v0, v1):
 
 def make_runtime_instr_desc_with_sf_id(desc, sfa_id, sfb_id):
     runtime_desc = txl.bitwise_and(desc, txl.uint32(0x9FFFFFCF))
-    runtime_desc = txl.bitwise_or(runtime_desc, txl.shift_left(txl.cast(sfa_id, "uint32"), txl.uint32(29)))
-    runtime_desc = txl.bitwise_or(runtime_desc, txl.shift_left(txl.cast(sfb_id, "uint32"), txl.uint32(4)))
+    runtime_desc = txl.bitwise_or(
+        runtime_desc, txl.shift_left(txl.cast(sfa_id, "uint32"), txl.uint32(29))
+    )
+    runtime_desc = txl.bitwise_or(
+        runtime_desc, txl.shift_left(txl.cast(sfb_id, "uint32"), txl.uint32(4))
+    )
     return runtime_desc
 
 
@@ -497,7 +503,8 @@ def get_kernel(
                     txl.cast(txl.shift_right(scaled_bits[dim], txl.uint32(23)), "int32")
                     - txl.int32(127)
                     + txl.Select(
-                        txl.bitwise_and(scaled_bits[dim], txl.uint32((1 << 23) - 1)) != txl.uint32(0),
+                        txl.bitwise_and(scaled_bits[dim], txl.uint32((1 << 23) - 1))
+                        != txl.uint32(0),
                         txl.int32(1),
                         txl.int32(0),
                     )
@@ -595,7 +602,9 @@ def get_kernel(
                     ),
                 ),
                 txl.Select(
-                    block_phase_value == 1, txl.address_of(tensor_map_l1), txl.address_of(tensor_map_l2)
+                    block_phase_value == 1,
+                    txl.address_of(tensor_map_l1),
+                    txl.address_of(tensor_map_l2),
                 ),
             ),
             coord0,
@@ -618,7 +627,9 @@ def get_kernel(
         gate_x = txl.cuda.float2_x(gate)
         gate_y = txl.cuda.float2_y(gate)
         neg_gate_exp = txl.cuda.make_float2(txl.exp(-gate_x), txl.exp(-gate_y))
-        denom = txl.cuda.fadd2_rn(txl.cuda.make_float2(txl.float32(1.0), txl.float32(1.0)), neg_gate_exp)
+        denom = txl.cuda.fadd2_rn(
+            txl.cuda.make_float2(txl.float32(1.0), txl.float32(1.0)), neg_gate_exp
+        )
         with txl.If(kernel_fast_math):
             with txl.Then():
                 rcp_x = txl.local_scalar("float32")
@@ -680,7 +691,8 @@ def get_kernel(
         txl.assign(pool_block_offset_sum[0], txl.int32(0))
         for expert_lane_idx in range(num_experts_per_lane):
             expert_num_blocks_u32 = (
-                stored_num_tokens_per_expert[expert_lane_idx] + txl.uint32(kernel_config.block_m - 1)
+                stored_num_tokens_per_expert[expert_lane_idx]
+                + txl.uint32(kernel_config.block_m - 1)
             ) // txl.uint32(kernel_config.block_m)
             txl.assign(
                 pool_block_offset_sum[0],
@@ -1066,7 +1078,7 @@ def get_kernel(
                 prefetch_tensormap(tensor_map_shared_l2_weights)
                 prefetch_tensormap(tensor_map_shared_l2_weights_sf)
 
-        input_topk_idx = txl.decl_buffer(
+        input_topk_idx = txl.decl_tensor(
             (workspace_layout.num_max_tokens_per_rank, num_topk),
             "int64",
             data=txl.reinterpret(
@@ -1076,21 +1088,21 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        l1_acts = txl.decl_buffer(
+        l1_acts = txl.decl_tensor(
             (num_ring_tokens, hidden),
             "int8",
             data=symm_buffer.data,
             scope="global",
             elem_offset=symm_buffer_layout.l1_token_offset,
         )
-        l1_acts_sf = txl.decl_buffer(
+        l1_acts_sf = txl.decl_tensor(
             (hidden // 128, workspace_layout.num_sf_ring_tokens),
             "int32",
             data=symm_buffer.data,
             scope="global",
             elem_offset=symm_buffer_layout.l1_sf_offset // 4,
         )
-        workspace_expert_send_count = txl.decl_buffer(
+        workspace_expert_send_count = txl.decl_tensor(
             (num_experts,),
             "uint64",
             data=txl.reinterpret(
@@ -1100,7 +1112,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_grid_sync_count = txl.decl_buffer(
+        workspace_grid_sync_count = txl.decl_tensor(
             (4,),
             "uint32",
             data=txl.reinterpret(
@@ -1110,7 +1122,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_nvl_barrier_counter = txl.decl_buffer(
+        workspace_nvl_barrier_counter = txl.decl_tensor(
             (1,),
             "uint32",
             data=txl.reinterpret(
@@ -1120,7 +1132,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_nvl_barrier_signal = txl.decl_buffer(
+        workspace_nvl_barrier_signal = txl.decl_tensor(
             (2,),
             "int32",
             data=txl.reinterpret(
@@ -1130,7 +1142,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_expert_recv_count = txl.decl_buffer(
+        workspace_expert_recv_count = txl.decl_tensor(
             (num_processes, num_experts_per_rank),
             "uint64",
             data=txl.reinterpret(
@@ -1140,7 +1152,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_expert_recv_count_sum = txl.decl_buffer(
+        workspace_expert_recv_count_sum = txl.decl_tensor(
             (num_experts_per_rank,),
             "uint64",
             data=txl.reinterpret(
@@ -1150,7 +1162,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_src_token_topk_idx = txl.decl_buffer(
+        workspace_src_token_topk_idx = txl.decl_tensor(
             (num_experts_per_rank, num_processes, workspace_layout.num_max_recv_tokens_per_expert),
             "uint32",
             data=txl.reinterpret(
@@ -1160,7 +1172,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_token_src_metadata = txl.decl_buffer(
+        workspace_token_src_metadata = txl.decl_tensor(
             (workspace_layout.num_max_pool_tokens, 3),
             "uint32",
             data=txl.reinterpret(
@@ -1170,7 +1182,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_l1_full_count = txl.decl_buffer(
+        workspace_l1_full_count = txl.decl_tensor(
             (workspace_layout.num_ring_blocks,),
             "uint32",
             data=txl.reinterpret(
@@ -1180,7 +1192,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_l1_empty_count = txl.decl_buffer(
+        workspace_l1_empty_count = txl.decl_tensor(
             (workspace_layout.num_ring_blocks,),
             "uint32",
             data=txl.reinterpret(
@@ -1190,7 +1202,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_l2_full_count = txl.decl_buffer(
+        workspace_l2_full_count = txl.decl_tensor(
             (workspace_layout.num_ring_blocks,),
             "uint32",
             data=txl.reinterpret(
@@ -1200,7 +1212,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_l2_empty_count = txl.decl_buffer(
+        workspace_l2_empty_count = txl.decl_tensor(
             (workspace_layout.num_ring_blocks,),
             "uint32",
             data=txl.reinterpret(
@@ -1210,7 +1222,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_l1_task_count = txl.decl_buffer(
+        workspace_l1_task_count = txl.decl_tensor(
             (1,),
             "uint32",
             data=txl.reinterpret(
@@ -1220,7 +1232,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_l2_task_count = txl.decl_buffer(
+        workspace_l2_task_count = txl.decl_tensor(
             (1,),
             "uint32",
             data=txl.reinterpret(
@@ -1230,7 +1242,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_shared_l1_task_count = txl.decl_buffer(
+        workspace_shared_l1_task_count = txl.decl_tensor(
             (1,),
             "uint32",
             data=txl.reinterpret(
@@ -1240,7 +1252,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_shared_l2_task_count = txl.decl_buffer(
+        workspace_shared_l2_task_count = txl.decl_tensor(
             (1,),
             "uint32",
             data=txl.reinterpret(
@@ -1250,7 +1262,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        workspace_shared_l2_full_count = txl.decl_buffer(
+        workspace_shared_l2_full_count = txl.decl_tensor(
             (workspace_layout.num_shared_l2_pool_blocks,),
             "uint32",
             data=txl.reinterpret(
@@ -1260,7 +1272,7 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        l1_topk_weights = txl.decl_buffer(
+        l1_topk_weights = txl.decl_tensor(
             (num_ring_tokens,),
             "float32",
             data=txl.reinterpret(
@@ -1270,21 +1282,21 @@ def get_kernel(
             scope="global",
             elem_offset=0,
         )
-        l2_acts = txl.decl_buffer(
+        l2_acts = txl.decl_tensor(
             (num_ring_tokens, intermediate_hidden),
             "int8",
             data=symm_buffer.data,
             scope="global",
             elem_offset=symm_buffer_layout.l2_token_offset,
         )
-        l2_sf_buffer = txl.decl_buffer(
+        l2_sf_buffer = txl.decl_tensor(
             (intermediate_hidden // 128 * workspace_layout.num_sf_ring_tokens * 4,),
             "int8",
             data=symm_buffer.data,
             scope="global",
             elem_offset=symm_buffer_layout.l2_sf_offset,
         )
-        combine_tokens = txl.decl_buffer(
+        combine_tokens = txl.decl_tensor(
             (num_combine_slots, workspace_layout.num_max_tokens_per_rank, hidden),
             "uint16",
             data=txl.reinterpret(
@@ -1322,7 +1334,7 @@ def get_kernel(
         smem_sfa_data = txl.reinterpret(
             PointerType(PrimType("uint32")), smem_sfa_i32.ptr_to([0, 0, 0])
         )
-        smem_sfa = txl.decl_buffer(
+        smem_sfa = txl.decl_tensor(
             (num_stages, sf_block_m * sf_smem_outer_dim),
             "uint32",
             data=smem_sfa_data,
@@ -1336,7 +1348,7 @@ def get_kernel(
         smem_sfb_data = txl.reinterpret(
             PointerType(PrimType("uint32")), smem_sfb_i32.ptr_to([0, 0, 0])
         )
-        smem_sfb = txl.decl_buffer(
+        smem_sfb = txl.decl_tensor(
             (num_stages, kernel_config.block_n * sf_smem_outer_dim),
             "uint32",
             data=smem_sfb_data,
@@ -1365,7 +1377,7 @@ def get_kernel(
             smem_symm_rank_bases_data = txl.reinterpret(
                 PointerType(PrimType("uint64")), tmem_ptr_in_smem.ptr_to([0])
             )
-            smem_symm_rank_bases = txl.decl_buffer(
+            smem_symm_rank_bases = txl.decl_tensor(
                 (1,),
                 "uint64",
                 data=smem_symm_rank_bases_data,
@@ -1380,7 +1392,7 @@ def get_kernel(
         smem.commit()
 
         # Aliases must retain the pool allocation offset; sharing only `data` rebases to SMEM 0.
-        smem_cd_l1 = txl.decl_buffer(
+        smem_cd_l1 = txl.decl_tensor(
             (num_tma_store_stages, num_epilogue_wgs, kernel_config.store_block_m, l1_out_block_n),
             "int8",
             data=smem_cd_raw.data,
@@ -1388,7 +1400,7 @@ def get_kernel(
             elem_offset=smem_cd_raw.elem_offset,
             align=16,
         )
-        smem_cd_l2 = txl.decl_buffer(
+        smem_cd_l2 = txl.decl_tensor(
             (num_epilogue_wgs, kernel_config.store_block_m * kernel_config.block_n),
             "uint16",
             data=smem_cd_raw.data,
@@ -1397,7 +1409,7 @@ def get_kernel(
             elem_offset=smem_cd_raw.elem_offset // 2,
             align=16,
         )
-        combine_chunks = txl.decl_buffer(
+        combine_chunks = txl.decl_tensor(
             (num_chunk_slots, kernel_config.num_epilogue_warps, num_chunk_uint4, 4),
             "uint32",
             data=smem_expert_count.data,
@@ -1637,8 +1649,12 @@ def get_kernel(
                             barrier_status,
                             txl.cast(txl.bitwise_and(nvl_counter_value, txl.uint32(3)), "int32"),
                         )
-                        txl.assign(barrier_signal_phase, txl.bitwise_and(barrier_status, txl.int32(1)))
-                        txl.assign(barrier_signal_sign, txl.shift_right(barrier_status, txl.int32(1)))
+                        txl.assign(
+                            barrier_signal_phase, txl.bitwise_and(barrier_status, txl.int32(1))
+                        )
+                        txl.assign(
+                            barrier_signal_sign, txl.shift_right(barrier_status, txl.int32(1))
+                        )
                         with txl.If(sync_thread_idx < txl.int32(num_processes)), txl.Then():
                             txl.assign(barrier_target, txl.int32(1))
                             with txl.If(barrier_signal_sign != 0), txl.Then():
@@ -1658,7 +1674,9 @@ def get_kernel(
                             )
                         txl.ptx.bar.sync(txl.uint32(sync_barrier_idx), txl.uint32(sync_num_threads))
                         with txl.If(sync_thread_idx == 0), txl.Then():
-                            red_add_gpu_u32(workspace_nvl_barrier_counter.ptr_to([0]), txl.uint32(1))
+                            red_add_gpu_u32(
+                                workspace_nvl_barrier_counter.ptr_to([0]), txl.uint32(1)
+                            )
                             txl.assign(barrier_target, txl.int32(num_processes))
                             with txl.If(barrier_signal_sign != 0), txl.Then():
                                 txl.assign(barrier_target, txl.int32(0))
@@ -1757,7 +1775,9 @@ def get_kernel(
                     )
                 txl.ptx.mov.b32(
                     stored_num_tokens_per_expert[expert_lane_idx],
-                    txl.cast(txl.bitwise_and(scheduler_cached_status, txl.uint64(0xFFFFFFFF)), "uint32"),
+                    txl.cast(
+                        txl.bitwise_and(scheduler_cached_status, txl.uint64(0xFFFFFFFF)), "uint32"
+                    ),
                 )
             txl.cuda.warp_sync()
             # `num_total_m_blocks = get_num_total_pool_blocks()` plus the L1 warmup
@@ -1783,7 +1803,9 @@ def get_kernel(
             sched_min_l1_warmup_waves = txl.max(
                 txl.uint32(sched_l1_warmup_first_l2_wave), sched_warmup_interleave
             )
-            txl.assign(sched_num_l1_waves, txl.min(sched_min_l1_warmup_waves, sched_num_total_l1_waves))
+            txl.assign(
+                sched_num_l1_waves, txl.min(sched_min_l1_warmup_waves, sched_num_total_l1_waves)
+            )
 
         def sched_advance_pipeline():
             sched_state.advance()
@@ -1844,11 +1866,17 @@ def get_kernel(
                     txl.assign(
                         sched_inclusive_sum,
                         txl.tvm_warp_shuffle_up(
-                            txl.uint32(0xFFFFFFFF), sched_inclusive_vals, 1 << shuffle_offset, 32, 32
+                            txl.uint32(0xFFFFFFFF),
+                            sched_inclusive_vals,
+                            1 << shuffle_offset,
+                            32,
+                            32,
                         ),
                     )
                     with txl.If(lane_idx >= (1 << shuffle_offset)), txl.Then():
-                        txl.assign(sched_inclusive_vals, (sched_inclusive_vals + sched_inclusive_sum))
+                        txl.assign(
+                            sched_inclusive_vals, (sched_inclusive_vals + sched_inclusive_sum)
+                        )
                 txl.assign(
                     sched_lane_pool_block_offset,
                     (sched_block_offset + sched_inclusive_vals - sched_expert_num_m_blocks),
@@ -1901,7 +1929,11 @@ def get_kernel(
                     txl.ptx.mov.b32(
                         task_info_regs[5],
                         txl.tvm_warp_shuffle(
-                            txl.uint32(0xFFFFFFFF), sched_owner_valid_m, sched_owner_lane_idx, 32, 32
+                            txl.uint32(0xFFFFFFFF),
+                            sched_owner_valid_m,
+                            sched_owner_lane_idx,
+                            32,
+                            32,
                         ),
                     )
                 txl.assign(
@@ -1970,7 +2002,10 @@ def get_kernel(
                             txl.Then(),
                         ):
                             txl.Break()
-                        with txl.If(sched_num_l1_waves != txl.uint32(sched_l1_waves_done)), txl.Then():
+                        with (
+                            txl.If(sched_num_l1_waves != txl.uint32(sched_l1_waves_done)),
+                            txl.Then(),
+                        ):
                             txl.assign(sched_num_l1_waves, txl.uint32(1))
                         producer_create_task(2, num_l2_clusters, hidden, intermediate_hidden)
                         # Wait until all required L1 tasks are fetched
@@ -1994,7 +2029,9 @@ def get_kernel(
             with txl.If(lane_idx < txl.int32(2)), txl.Then():
                 _rem_ti = txl.local_scalar("uint64")
                 txl.ptx.mapa.shared__cluster.u64(
-                    _rem_ti, task_info_full_barriers.ptr_to([sched_state.stage]), txl.uint32(lane_idx)
+                    _rem_ti,
+                    task_info_full_barriers.ptr_to([sched_state.stage]),
+                    txl.uint32(lane_idx),
                 )
                 txl.ptx.mbarrier.arrive.expect_tx.release.cluster.b64(
                     _rem_ti, txl.uint32(task_info_bytes), pred=txl.bool(True)
@@ -2034,14 +2071,17 @@ def get_kernel(
                     atomic_add_u32(sched_task_idx, task_count_ptr, txl.uint32(1))
                 txl.assign(
                     sched_task_idx,
-                    txl.tvm_warp_shuffle(txl.uint32(0xFFFFFFFF), sched_task_idx, txl.int32(0), 32, 32),
+                    txl.tvm_warp_shuffle(
+                        txl.uint32(0xFFFFFFFF), sched_task_idx, txl.int32(0), 32, 32
+                    ),
                 )
                 with txl.If(sched_task_idx >= sched_shared_num_tasks):
                     with txl.Then():
                         txl.assign(sched_shared_running, txl.int32(0))
                     with txl.Else():
                         txl.assign(
-                            sched_shared_m_block_idx, sched_task_idx // txl.uint32(task_num_clusters)
+                            sched_shared_m_block_idx,
+                            sched_task_idx // txl.uint32(task_num_clusters),
                         )
                         txl.assign(
                             sched_shared_valid_m,
@@ -2067,8 +2107,12 @@ def get_kernel(
             valid_m_u32 = txl.cast(valid_m, "uint32")
             get_valid_m_true_u32 = (valid_m_u32 + txl.uint32(15)) // txl.uint32(16) * txl.uint32(16)
             txl.assign(get_valid_m_true, txl.cast(get_valid_m_true_u32, "int32"))
-            txl.assign(get_valid_m_true_half, txl.cast(get_valid_m_true_u32 // txl.uint32(2), "int32"))
-            txl.assign(get_valid_m_true_eighth, txl.cast(get_valid_m_true_u32 // txl.uint32(8), "int32"))
+            txl.assign(
+                get_valid_m_true_half, txl.cast(get_valid_m_true_u32 // txl.uint32(2), "int32")
+            )
+            txl.assign(
+                get_valid_m_true_eighth, txl.cast(get_valid_m_true_u32 // txl.uint32(8), "int32")
+            )
 
         def advance_pipeline():
             pipeline_state.advance()
@@ -2211,8 +2255,6 @@ def get_kernel(
                 b_dtype="float8_e4m3fn",
                 sfa_dtype="float8_e8m0fnu",
                 sfb_dtype="float8_e8m0fnu",
-                sfa_tmem_addr=0,
-                sfb_tmem_addr=0,
                 M=umma_m,
                 N=umma_n,
                 K=umma_k,
@@ -2229,8 +2271,6 @@ def get_kernel(
                 b_dtype="float8_e4m3fn",
                 sfa_dtype="float8_e8m0fnu",
                 sfb_dtype="float8_e8m0fnu",
-                sfa_tmem_addr=0,
-                sfb_tmem_addr=0,
                 M=umma_m,
                 N=umma_n,
                 K=umma_k,
@@ -2250,7 +2290,11 @@ def get_kernel(
             # kernel also forwards per-stage low halves across lanes to preserve the
             # exact encoder/update instruction sequence.
             txl.cuda.tcgen05.encode_matrix_descriptor(
-                txl.address_of(desc_a), smem_a_fp8.ptr_to([0, 0, 0]), ldo=0, sdo=a_desc_sdo, swizzle=3
+                txl.address_of(desc_a),
+                smem_a_fp8.ptr_to([0, 0, 0]),
+                ldo=0,
+                sdo=a_desc_sdo,
+                swizzle=3,
             )
 
         def make_umma_desc_b():
@@ -2351,7 +2395,9 @@ def get_kernel(
                                                 empty_barriers.ptr_to([dispatch_expert_idx]),
                                                 txl.uint32(1),
                                             )
-                                            txl.assign(dispatch_expert_idx, (dispatch_expert_idx + 1))
+                                            txl.assign(
+                                                dispatch_expert_idx, (dispatch_expert_idx + 1)
+                                            )
                                         txl.assign(dispatch_expert_idx, txl.int32(0))
                                         with txl.While(dispatch_expert_idx < num_epilogue_stages):
                                             txl.ptx.mbarrier.init.shared.b64(
@@ -2362,7 +2408,9 @@ def get_kernel(
                                                 tmem_empty_barriers.ptr_to([dispatch_expert_idx]),
                                                 txl.uint32(tmem_empty_barrier_init_count),
                                             )
-                                            txl.assign(dispatch_expert_idx, (dispatch_expert_idx + 1))
+                                            txl.assign(
+                                                dispatch_expert_idx, (dispatch_expert_idx + 1)
+                                            )
                                         txl.assign(dispatch_expert_idx, txl.int32(0))
                                         with txl.While(
                                             dispatch_expert_idx
@@ -2372,7 +2420,9 @@ def get_kernel(
                                                 combine_barriers.ptr_to([dispatch_expert_idx]),
                                                 txl.uint32(1),
                                             )
-                                            txl.assign(dispatch_expert_idx, (dispatch_expert_idx + 1))
+                                            txl.assign(
+                                                dispatch_expert_idx, (dispatch_expert_idx + 1)
+                                            )
                                         txl.assign(dispatch_expert_idx, txl.int32(0))
                                         with txl.While(dispatch_expert_idx < num_schedule_stages):
                                             txl.ptx.mbarrier.init.shared.b64(
@@ -2387,11 +2437,15 @@ def get_kernel(
                                                 ),
                                                 txl.uint32(num_schedule_consumer_threads),
                                             )
-                                            txl.assign(dispatch_expert_idx, (dispatch_expert_idx + 1))
+                                            txl.assign(
+                                                dispatch_expert_idx, (dispatch_expert_idx + 1)
+                                            )
                                     fence_barrier_init()
                                 with txl.Else():
                                     with (
-                                        txl.If(flat_warp_idx == kernel_config.num_dispatch_warps - 1),
+                                        txl.If(
+                                            flat_warp_idx == kernel_config.num_dispatch_warps - 1
+                                        ),
                                         txl.Then(),
                                     ):
                                         txl.ptx[
@@ -2412,13 +2466,18 @@ def get_kernel(
                 (sm_idx * kernel_config.num_dispatch_warps + role_warp_idx)
                 * kernel_config.num_tokens_per_warp,
             )
-            with txl.While(txl.cast(dispatch_token_iter, "uint32") < txl.cast(num_tokens, "uint32")):
+            with txl.While(
+                txl.cast(dispatch_token_iter, "uint32") < txl.cast(num_tokens, "uint32")
+            ):
                 with txl.If(lane_idx < kernel_config.num_activate_lanes), txl.Then():
                     lane_idx_u32 = txl.cast(lane_idx, "uint32")
                     token_idx = dispatch_token_iter + txl.cast(
                         lane_idx_u32 // txl.uint32(num_topk), "int32"
                     )
-                    with txl.If(txl.cast(token_idx, "uint32") < txl.cast(num_tokens, "uint32")), txl.Then():
+                    with (
+                        txl.If(txl.cast(token_idx, "uint32") < txl.cast(num_tokens, "uint32")),
+                        txl.Then(),
+                    ):
                         topk_idx = txl.cast(lane_idx_u32 % txl.uint32(num_topk), "int32")
                         load_global_s64(
                             ordinary_global_s64, input_topk_idx.ptr_to([token_idx, topk_idx])
@@ -2440,7 +2499,8 @@ def get_kernel(
                 )
 
             txl.ptx.bar.sync(
-                txl.uint32(dispatch_sync_barrier_idx), txl.uint32(kernel_config.num_dispatch_threads)
+                txl.uint32(dispatch_sync_barrier_idx),
+                txl.uint32(kernel_config.num_dispatch_threads),
             )
             txl.assign(dispatch_expert_idx, role_thread_idx)
             with txl.While(txl.cast(dispatch_expert_idx, "uint32") < txl.uint32(num_experts)):
@@ -2464,20 +2524,26 @@ def get_kernel(
                     dispatch_expert_idx, (dispatch_expert_idx + kernel_config.num_dispatch_threads)
                 )
             txl.ptx.bar.sync(
-                txl.uint32(dispatch_sync_barrier_idx), txl.uint32(kernel_config.num_dispatch_threads)
+                txl.uint32(dispatch_sync_barrier_idx),
+                txl.uint32(kernel_config.num_dispatch_threads),
             )
             txl.assign(
                 dispatch_token_iter,
                 (sm_idx * kernel_config.num_dispatch_warps + role_warp_idx)
                 * kernel_config.num_tokens_per_warp,
             )
-            with txl.While(txl.cast(dispatch_token_iter, "uint32") < txl.cast(num_tokens, "uint32")):
+            with txl.While(
+                txl.cast(dispatch_token_iter, "uint32") < txl.cast(num_tokens, "uint32")
+            ):
                 with txl.If(lane_idx < kernel_config.num_activate_lanes), txl.Then():
                     lane_idx_u32 = txl.cast(lane_idx, "uint32")
                     token_idx = dispatch_token_iter + txl.cast(
                         lane_idx_u32 // txl.uint32(num_topk), "int32"
                     )
-                    with txl.If(txl.cast(token_idx, "uint32") < txl.cast(num_tokens, "uint32")), txl.Then():
+                    with (
+                        txl.If(txl.cast(token_idx, "uint32") < txl.cast(num_tokens, "uint32")),
+                        txl.Then(),
+                    ):
                         topk_idx = txl.cast(lane_idx_u32 % txl.uint32(num_topk), "int32")
                         txl.assign(dispatch_token_topk_idx, token_idx * num_topk + topk_idx)
                         load_global_s64(
@@ -2550,11 +2616,15 @@ def get_kernel(
                     dispatch_expert_idx_u32 = txl.cast(dispatch_expert_idx, "uint32")
                     txl.assign(
                         dispatch_dst_rank_idx,
-                        txl.cast(dispatch_expert_idx_u32 // txl.uint32(num_experts_per_rank), "int32"),
+                        txl.cast(
+                            dispatch_expert_idx_u32 // txl.uint32(num_experts_per_rank), "int32"
+                        ),
                     )
                     txl.assign(
                         dispatch_dst_local_expert_idx,
-                        txl.cast(dispatch_expert_idx_u32 % txl.uint32(num_experts_per_rank), "int32"),
+                        txl.cast(
+                            dispatch_expert_idx_u32 % txl.uint32(num_experts_per_rank), "int32"
+                        ),
                     )
                     load_global_u64(
                         scheduler_cached_status,
@@ -2593,7 +2663,8 @@ def get_kernel(
                         (dispatch_expert_idx + kernel_config.num_dispatch_threads),
                     )
             txl.ptx.bar.sync(
-                txl.uint32(dispatch_sync_barrier_idx), txl.uint32(kernel_config.num_dispatch_threads)
+                txl.uint32(dispatch_sync_barrier_idx),
+                txl.uint32(kernel_config.num_dispatch_threads),
             )
             dispatch_nvlink_barrier_before_pull(role_thread_idx)
             sync_unaligned(
@@ -2608,7 +2679,9 @@ def get_kernel(
             txl.assign(pull_pool_block_offset, txl.int32(0))
             # Wait token data arrival
             scheduler_fetch_expert_recv_count()
-            txl.assign(dispatch_token_iter, sm_idx * kernel_config.num_dispatch_warps + role_warp_idx)
+            txl.assign(
+                dispatch_token_iter, sm_idx * kernel_config.num_dispatch_warps + role_warp_idx
+            )
             with txl.While(True):
                 txl.assign(old_expert_idx, current_expert_idx)
                 with txl.While(
@@ -2617,7 +2690,8 @@ def get_kernel(
                     txl.assign(current_expert_idx, current_expert_idx + txl.int32(1))
                     with (
                         txl.If(
-                            txl.cast(current_expert_idx, "uint32") >= txl.uint32(num_experts_per_rank)
+                            txl.cast(current_expert_idx, "uint32")
+                            >= txl.uint32(num_experts_per_rank)
                         ),
                         txl.Then(),
                     ):
@@ -2639,7 +2713,9 @@ def get_kernel(
                     )
                     txl.assign(expert_end_idx, expert_end_idx + selected_num_tokens[0])
                 with (
-                    txl.If(txl.cast(current_expert_idx, "uint32") >= txl.uint32(num_experts_per_rank)),
+                    txl.If(
+                        txl.cast(current_expert_idx, "uint32") >= txl.uint32(num_experts_per_rank)
+                    ),
                     txl.Then(),
                 ):
                     txl.Break()
@@ -2649,7 +2725,10 @@ def get_kernel(
                         txl.assign(dispatch_dst_rank_idx, rank_lane_idx * 32 + lane_idx)
                         txl.ptx.mov.b32(stored_rank_counts[rank_lane_idx], txl.uint32(0))
                         with (
-                            txl.If(txl.cast(dispatch_dst_rank_idx, "uint32") < txl.uint32(num_processes)),
+                            txl.If(
+                                txl.cast(dispatch_dst_rank_idx, "uint32")
+                                < txl.uint32(num_processes)
+                            ),
                             txl.Then(),
                         ):
                             load_global_u64(
@@ -2673,7 +2752,10 @@ def get_kernel(
                     txl.assign(min_in_lane, txl.uint32(0xFFFFFFFF))
                     txl.assign(num_actives_in_lane, txl.int32(0))
                     with txl.unroll(0, num_ranks_per_lane) as rank_lane_idx:
-                        with txl.If(remaining_rank_counts[rank_lane_idx] > txl.uint32(0)), txl.Then():
+                        with (
+                            txl.If(remaining_rank_counts[rank_lane_idx] > txl.uint32(0)),
+                            txl.Then(),
+                        ):
                             txl.assign(num_actives_in_lane, num_actives_in_lane + txl.int32(1))
                             txl.assign(
                                 min_in_lane,
@@ -2790,7 +2872,8 @@ def get_kernel(
                 with txl.If(txl.cuda.elect_sync()), txl.Then():
                     with txl.unroll(0, num_pull_chunks) as pull_chunk_idx:
                         txl.assign(
-                            symm_rank_base, sym_buffer_base + txl.cast(symm_rank_offsets[0], "uint64")
+                            symm_rank_base,
+                            sym_buffer_base + txl.cast(symm_rank_offsets[0], "uint64"),
                         )
                         load_symm_rank_base(
                             symm_rank_base, smem_symm_rank_bases, current_rank_in_expert_idx
@@ -2899,7 +2982,8 @@ def get_kernel(
                         workspace_l1_full_count.ptr_to([pull_ring_block_idx]),
                         txl.Select(
                             dispatch_token_iter == expert_end_idx - txl.int32(1),
-                            txl.uint32(kernel_config.block_m) - txl.cast(token_idx_in_block, "uint32"),
+                            txl.uint32(kernel_config.block_m)
+                            - txl.cast(token_idx_in_block, "uint32"),
                             txl.uint32(1),
                         ),
                     )
@@ -2943,7 +3027,9 @@ def get_kernel(
                         store_global_u32(workspace_shared_l2_task_count.ptr_to([0]), txl.uint32(0))
                     txl.cuda.warp_sync()
                     txl.assign(dispatch_expert_idx, role_thread_idx)
-                    with txl.While(dispatch_expert_idx < workspace_layout.num_shared_l2_pool_blocks):
+                    with txl.While(
+                        dispatch_expert_idx < workspace_layout.num_shared_l2_pool_blocks
+                    ):
                         store_global_u32(
                             workspace_shared_l2_full_count.ptr_to([dispatch_expert_idx]),
                             txl.uint32(0),
@@ -3022,13 +3108,15 @@ def get_kernel(
                                 workspace_l1_full_count.ptr_to([pull_ring_block_idx]), txl.uint32(0)
                             )
                             store_global_u32(
-                                workspace_l1_empty_count.ptr_to([pull_ring_block_idx]), txl.uint32(0)
+                                workspace_l1_empty_count.ptr_to([pull_ring_block_idx]),
+                                txl.uint32(0),
                             )
                             store_global_u32(
                                 workspace_l2_full_count.ptr_to([pull_ring_block_idx]), txl.uint32(0)
                             )
                             store_global_u32(
-                                workspace_l2_empty_count.ptr_to([pull_ring_block_idx]), txl.uint32(0)
+                                workspace_l2_empty_count.ptr_to([pull_ring_block_idx]),
+                                txl.uint32(0),
                             )
                             txl.assign(
                                 dispatch_dst_slot_idx,
@@ -3169,11 +3257,13 @@ def get_kernel(
                     txl.Break()
                 shape_k_u32 = txl.cast(shape_k, "uint32")
                 txl.assign(
-                    shape_sfb_k, txl.cast((shape_k_u32 + txl.uint32(127)) // txl.uint32(128), "int32")
+                    shape_sfb_k,
+                    txl.cast((shape_k_u32 + txl.uint32(127)) // txl.uint32(128), "int32"),
                 )
                 txl.assign(
                     n_block_idx,
-                    n_cluster_idx * 2 + txl.Select(cta_idx_in_cluster == 0, txl.int32(0), txl.int32(1)),
+                    n_cluster_idx * 2
+                    + txl.Select(cta_idx_in_cluster == 0, txl.int32(0), txl.int32(1)),
                 )
                 txl.assign(
                     num_k_blocks,
@@ -3303,7 +3393,8 @@ def get_kernel(
                     txl.assign(
                         num_k_blocks,
                         txl.cast(
-                            txl.cast(shape_k, "uint32") // txl.uint32(kernel_config.block_k), "int32"
+                            txl.cast(shape_k, "uint32") // txl.uint32(kernel_config.block_k),
+                            "int32",
                         ),
                     )
                     txl.assign(accum_stage_idx, accum_state.stage)
@@ -3554,7 +3645,8 @@ def get_kernel(
                 # scheduler result, but broadcasting it lets the CUDA compiler treat
                 # the valid-row early exit as warp-uniform instead of divergent.
                 txl.assign(
-                    valid_m, txl.tvm_warp_shuffle(txl.uint32(0xFFFFFFFF), valid_m, txl.int32(0), 32, 32)
+                    valid_m,
+                    txl.tvm_warp_shuffle(txl.uint32(0xFFFFFFFF), valid_m, txl.int32(0), 32, 32),
                 )
                 txl.assign(ring_block_idx, pool_block_idx % num_ring_blocks)
                 if has_shared:
@@ -3571,7 +3663,8 @@ def get_kernel(
                 txl.assign(pool_m_idx, pool_block_idx * kernel_config.block_m)
                 txl.assign(
                     n_block_idx,
-                    n_cluster_idx * 2 + txl.Select(cta_idx_in_cluster == 0, txl.int32(0), txl.int32(1)),
+                    n_cluster_idx * 2
+                    + txl.Select(cta_idx_in_cluster == 0, txl.int32(0), txl.int32(1)),
                 )
                 valid_rows_in_wg = txl.max(
                     txl.min(valid_m - epilogue_wg_idx * wg_block_m, wg_block_m), txl.int32(0)
@@ -3690,7 +3783,11 @@ def get_kernel(
                                     ),
                                 )
                                 txl.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
-                                    values[0], values[1], values[2], values[3], txl.uint32(tmem_addr)
+                                    values[0],
+                                    values[1],
+                                    values[2],
+                                    values[3],
+                                    txl.uint32(tmem_addr),
                                 )
                                 txl.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
                                     values[4],
@@ -3722,13 +3819,15 @@ def get_kernel(
                                     txl.ptx.mov.b32(
                                         thread_local_amax[0],
                                         txl.max(
-                                            thread_local_amax[0], txl.fabs(activation_values[i, k, 0])
+                                            thread_local_amax[0],
+                                            txl.fabs(activation_values[i, k, 0]),
                                         ),
                                     )
                                     txl.ptx.mov.b32(
                                         thread_local_amax[1],
                                         txl.max(
-                                            thread_local_amax[1], txl.fabs(activation_values[i, k, 1])
+                                            thread_local_amax[1],
+                                            txl.fabs(activation_values[i, k, 1]),
                                         ),
                                     )
                                 txl.ptx.mov.b32(amax_values[i, 0], thread_local_amax[0])
@@ -3750,7 +3849,8 @@ def get_kernel(
                             tma_stage_idx = s % num_tma_store_stages
                             tma_store_wait(1)
                             txl.ptx.bar.sync(
-                                txl.uint32(epilogue_wg_sync_barrier_start_idx + epilogue_wg_idx), 128
+                                txl.uint32(epilogue_wg_sync_barrier_start_idx + epilogue_wg_idx),
+                                128,
                             )
                             with txl.unroll(0, num_atoms_per_store) as i:
                                 j = s * num_atoms_per_store + i
@@ -3802,7 +3902,10 @@ def get_kernel(
                                     ]
                                 )
                                 sm100_u8x4_stsm_t_copy(epilogue_fp8_packed[0], smem_ptr)
-                                with txl.If(txl.And(warp_idx_in_wg % 2 == 0, lane_idx < 4)), txl.Then():
+                                with (
+                                    txl.If(txl.And(warp_idx_in_wg % 2 == 0, lane_idx < 4)),
+                                    txl.Then(),
+                                ):
                                     # Factored form of upstream 891d57b: token_base_idx is < BLOCK_M so
                                     # `m_block_idx * BLOCK_M` factors out as `m_block_idx * SF_BLOCK_M`
                                     # past `transform_sf_token_idx` (which is bitwise-independent in
@@ -3872,13 +3975,19 @@ def get_kernel(
                                                 )
                                             ]
                                         ),
-                                        txl.cast(txl.shift_right(sf_bits_hi, txl.uint32(23)), "uint8"),
+                                        txl.cast(
+                                            txl.shift_right(sf_bits_hi, txl.uint32(23)), "uint8"
+                                        ),
                                     )
                             txl.cuda.warp_sync()
                             txl.ptx.bar.sync(
-                                txl.uint32(epilogue_wg_sync_barrier_start_idx + epilogue_wg_idx), 128
+                                txl.uint32(epilogue_wg_sync_barrier_start_idx + epilogue_wg_idx),
+                                128,
                             )
-                            with txl.If((warp_idx_in_wg == 0) & txl.cuda.elect_sync() != 0), txl.Then():
+                            with (
+                                txl.If((warp_idx_in_wg == 0) & txl.cuda.elect_sync() != 0),
+                                txl.Then(),
+                            ):
                                 tma_store_fence()
                                 sm90_tma_store_2d_copy_select(
                                     smem_cd_l1.ptr_to([tma_stage_idx, epilogue_wg_idx, 0, 0]),
@@ -3899,7 +4008,10 @@ def get_kernel(
                             txl.uint32(epilogue_full_sync_barrier_idx),
                             txl.uint32(kernel_config.num_epilogue_threads),
                         )
-                        with txl.If((epilogue_warp_idx == 0) & txl.cuda.elect_sync() != 0), txl.Then():
+                        with (
+                            txl.If((epilogue_warp_idx == 0) & txl.cuda.elect_sync() != 0),
+                            txl.Then(),
+                        ):
                             # Shared L1 only signals its own full-size consumer; it has
                             # no L1 ring slot to release (impls .cuh:1179-1189).
                             if has_shared:
@@ -3961,7 +4073,11 @@ def get_kernel(
                                     ),
                                 )
                                 txl.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
-                                    values[0], values[1], values[2], values[3], txl.uint32(tmem_addr)
+                                    values[0],
+                                    values[1],
+                                    values[2],
+                                    values[3],
+                                    txl.uint32(tmem_addr),
                                 )
                                 txl.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
                                     values[4],
@@ -4026,7 +4142,8 @@ def get_kernel(
                                 smem_ptr = smem_cd_l2.ptr_to([epilogue_wg_idx, l2_cd_elem_offset])
                                 sm90_u32x4_stsm_t_copy(epilogue_bf16_packed, smem_ptr)
                             txl.ptx.bar.sync(
-                                txl.uint32(epilogue_wg_sync_barrier_start_idx + epilogue_wg_idx), 128
+                                txl.uint32(epilogue_wg_sync_barrier_start_idx + epilogue_wg_idx),
+                                128,
                             )
                             row_in_atom = (warp_idx_in_wg * 2 + lane_idx // 16) % atom_m
                             bank_group_idx = lane_idx % 8
@@ -4039,7 +4156,8 @@ def get_kernel(
                                 )
                                 with (
                                     txl.If(
-                                        txl.cast(m_idx_in_block, "uint32") < txl.cast(valid_m, "uint32")
+                                        txl.cast(m_idx_in_block, "uint32")
+                                        < txl.cast(valid_m, "uint32")
                                     ),
                                     txl.Then(),
                                 ):
@@ -4050,7 +4168,9 @@ def get_kernel(
                                     # NVLink hop (impls .cuh:1275-1284).
                                     with txl.If(txl.And(has_shared, block_phase > txl.int32(2))):
                                         with txl.Then():
-                                            txl.assign(dst_rank_idx_u32, txl.cast(rank_idx, "uint32"))
+                                            txl.assign(
+                                                dst_rank_idx_u32, txl.cast(rank_idx, "uint32")
+                                            )
                                             txl.assign(
                                                 dst_token_idx_u32,
                                                 txl.cast(src_metadata_idx, "uint32"),
@@ -4080,7 +4200,9 @@ def get_kernel(
                                         dst_topk_idx_u32, "uint64"
                                     ) * txl.uint64(
                                         workspace_layout.num_max_tokens_per_rank * hidden * 2
-                                    ) + txl.cast(dst_token_idx_u32, "uint64") * txl.uint64(hidden * 2)
+                                    ) + txl.cast(dst_token_idx_u32, "uint64") * txl.uint64(
+                                        hidden * 2
+                                    )
                                     dst_col_byte_offset = txl.cast(n_idx * 2, "uint64")
                                     lane_byte_offset = txl.cast((lane_idx % 16) * 16, "uint64")
                                     dst_ptr = (
@@ -4201,7 +4323,9 @@ def get_kernel(
                                 combine_slot_mask,
                                 txl.bitwise_xor(
                                     combine_slot_mask,
-                                    txl.shift_left(txl.uint32(1), txl.cast(combine_slot_idx, "uint32")),
+                                    txl.shift_left(
+                                        txl.uint32(1), txl.cast(combine_slot_idx, "uint32")
+                                    ),
                                 ),
                             )
                             with txl.If(txl.cuda.elect_sync()), txl.Then():

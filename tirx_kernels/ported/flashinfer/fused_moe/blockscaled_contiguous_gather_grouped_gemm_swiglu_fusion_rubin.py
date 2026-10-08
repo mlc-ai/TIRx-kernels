@@ -178,7 +178,8 @@ def _descriptor_base(ldo, sdo, swizzle):
 
 def _descriptor_with_address(base, shared_address):
     field = txl.cast(
-        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x7FFF)), "uint64"
+        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x7FFF)),
+        "uint64",
     )
     return txl.bitwise_or(txl.uint64(base), field)
 
@@ -360,8 +361,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
         host,
     ):
         del b, sfb, c
-        required_block_size = txl.attr({"tirx.required_block_size": 1})
-        required_block_size.__enter__()
+        txl.cuda.required_block_size(640, 1, 1, 1, 1, 1)
         b_map, sfb_map, c_map = host
         _bx, _by, work_id = txl.cta_id()
         cluster_x, cluster_y = txl.cta_id_in_cluster([1, 1], preferred=[1, 1])
@@ -383,7 +383,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
         gather_sfa_role = roles.role("gather_sfa", warps=[12, 13, 14, 15], regs=80)
         transform_role = roles.role("transform_sfa", warps=[16, 17, 18, 19], regs=48)
 
-        smem = txl.alloc_buffer((_SMEM_BYTES,), txl.u8, scope="shared.dyn", align=1024)
+        smem = txl.alloc_tensor((_SMEM_BYTES,), txl.u8, scope="shared.dyn", align=1024)
         pool = txl.smem_pool(base=smem)
         info = pool.alloc((10,), txl.i32, align=4)
         a_pipe = txl.Pipeline(pool, 8, full="mbar", empty="tcgen05", leader=txl.bool(False))
@@ -485,7 +485,9 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
                         txl.ptx.st.shared.b32(info.ptr_to([base + 4]), limit)
                 txl.ptx.fence.proxy.async_.shared__cta()
                 txl.ptx.bar.sync(txl.uint32(4), txl.uint32(32))
-                txl.ptx.mbarrier.arrive.shared.b64(tile_pipe.full.ptr_to([state.stage]), txl.uint32(1))
+                txl.ptx.mbarrier.arrive.shared.b64(
+                    tile_pipe.full.ptr_to([state.stage]), txl.uint32(1)
+                )
                 _advance(state)
                 txl.assign(work, work + num_clusters)
             _wait(tile_pipe.empty.ptr_to([state.stage]), state.phase)
@@ -632,12 +634,15 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
                 source_row = txl.local_scalar(
                     "int32", init=txl.if_then_else(global_row < mn_limit, token // 8, 0)
                 )
-                predicate = txl.local_scalar("uint32", init=txl.cast(global_row < mn_limit, "uint32"))
+                predicate = txl.local_scalar(
+                    "uint32", init=txl.cast(global_row < mn_limit, "uint32")
+                )
                 count = txl.local_scalar("int32", init=0)
                 with txl.While(count < k_tiles):
                     _wait(sfa_pipe.empty.ptr_to([producer.stage]), producer.phase)
                     source = (
-                        txl.cast(source_row, "int64") * (K_dim // 16) + txl.cast(count, "int64") * 16
+                        txl.cast(source_row, "int64") * (K_dim // 16)
+                        + txl.cast(count, "int64") * 16
                     )
                     txl.ptx["cp.async.cg.shared.global.L2::128B"](
                         smem.ptr_to([_SFA_OFFSET + producer.stage * 2048 + thread * 16]),
@@ -767,10 +772,14 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
             def runtime_descriptor(sfa_addr, sfb_addr):
                 desc = txl.bitwise_and(txl.uint32(instr_desc), txl.uint32(0x9FFFFFCF))
                 desc = txl.bitwise_or(
-                    desc, txl.bitwise_and(txl.shift_right(sfa_addr, txl.uint32(1)), txl.uint32(0x60000000))
+                    desc,
+                    txl.bitwise_and(
+                        txl.shift_right(sfa_addr, txl.uint32(1)), txl.uint32(0x60000000)
+                    ),
                 )
                 return txl.bitwise_or(
-                    desc, txl.bitwise_and(txl.shift_right(sfb_addr, txl.uint32(26)), txl.uint32(0x30))
+                    desc,
+                    txl.bitwise_and(txl.shift_right(sfb_addr, txl.uint32(26)), txl.uint32(0x30)),
                 )
 
             tile_state = txl.PipelineState(2, phase=0)
@@ -823,7 +832,9 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
                                     sfb_addr,
                                     txl.ptx.pred(
                                         txl.cast(
-                                            txl.if_then_else(kblock == 0, accumulate, txl.uint32(1)),
+                                            txl.if_then_else(
+                                                kblock == 0, accumulate, txl.uint32(1)
+                                            ),
                                             "bool",
                                         )
                                     ),
@@ -1007,7 +1018,9 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
                     txl.ptx.cvt.rn.f16x2.e4m3x2(decoded_pairs[pair], scale_pairs[pair])
                     txl.ptx.cvt.f32.f16(
                         decoded_scales[pair * 2],
-                        txl.cast(txl.bitwise_and(decoded_pairs[pair], txl.uint32(0xFFFF)), "uint16"),
+                        txl.cast(
+                            txl.bitwise_and(decoded_pairs[pair], txl.uint32(0xFFFF)), "uint16"
+                        ),
                     )
                     txl.ptx.cvt.f32.f16(
                         decoded_scales[pair * 2 + 1],
@@ -1121,8 +1134,6 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
 
         if use_pdl:
             txl.ptx.griddepcontrol.launch_dependents()
-
-        required_block_size.__exit__(None, None, None)
 
     kernel.__annotations__ = {
         "a": txl.gptr[txl.u8, (seq_len * K_dim // 2,)],

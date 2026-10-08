@@ -52,7 +52,7 @@ from tvm.backend.cuda.cpp.descriptors import _INSTR_DESC_FORMAT_MAP, _TCGEN05_MM
 from tvm.backend.cuda.ptx.table import TABLE as _PTX_TABLE
 from tvm.backend.cuda.ptx.table import _tcgen05_mma_mask_lanes
 from tvm.script import tirx as T
-from tvm.tirx.script.builder import ir as _I
+from tvm.tirx.script import ir_builder as _I
 
 from .smem import KTileView
 
@@ -708,7 +708,7 @@ def mma_chain(mma, d, *, a, b, idesc, pred, accumulate, guard, dol=None, k_range
         # encodes (already emitted above) and the MMAs. A refactor that lifts
         # this If above the encode calls silently restores the losing cell --
         # the placement is pinned by test.
-        with T.If(pred != 0), T.Then():
+        with _I.if_(pred != 0), _I.then_():
             _emit(None)
     else:
         _emit(pred)
@@ -831,7 +831,7 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
 
         for i in range(1, n):
             carry = txl.alloc_local([1], <dtype>)
-            carry[0] = txl.cuda._shfl_sync(txl.uint32(0xFFFFFFFF), vals[i-1], width-1, width)
+            carry[0] = txl.tvm_warp_shuffle(txl.uint32(0xFFFFFFFF), vals[i-1], width-1, width, 32)
             vals[i] = vals[i] + carry[0]
 
     Why this form
@@ -870,20 +870,22 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
         delta = 1 << step
         prior = T.alloc_local([n], dtype)
         for i in range(n):
-            _I.buffer_store(
+            _I.tensor_store(
                 prior, T.tvm_warp_shuffle_up(T.uint32(FULL_MASK), vals[i], delta, width, width), [i]
             )
-        with T.If(lane >= delta), T.Then():
+        with _I.if_(lane >= delta), _I.then_():
             for i in range(n):
-                _I.buffer_store(vals, vals[i] + prior[i], [i])
+                _I.tensor_store(vals, vals[i] + prior[i], [i])
 
     if chain:
         for i in range(1, n):
             carry = T.alloc_local([1], dtype)
-            _I.buffer_store(
-                carry, T.cuda._shfl_sync(T.uint32(FULL_MASK), vals[i - 1], width - 1, width), [0]
+            _I.tensor_store(
+                carry,
+                T.tvm_warp_shuffle(T.uint32(FULL_MASK), vals[i - 1], width - 1, width, 32),
+                [0],
             )
-            _I.buffer_store(vals, vals[i] + carry[0], [i])
+            _I.tensor_store(vals, vals[i] + carry[0], [i])
 
 
 __all__ = [

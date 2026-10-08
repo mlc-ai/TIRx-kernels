@@ -101,7 +101,8 @@ def _descriptor_with_address(base, shared_address):
         txl.shift_left(txl.uint64(base >> 32), txl.uint64(32)), txl.uint64(base & 0xFFFFFFFF)
     )
     address_field = txl.cast(
-        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)), "uint64"
+        txl.bitwise_and(txl.shift_right(shared_address, txl.uint32(4)), txl.uint32(0x3FFF)),
+        "uint64",
     )
     return txl.bitwise_or(base_value, address_field)
 
@@ -686,7 +687,9 @@ def _make_kernel(
         d_map = txl.stack_alloca("tensormap", 1)
 
         def encode(descriptor, dtype, rank, data, *fields):
-            txl.call_packed("runtime.cuTensorMapEncodeTiled", descriptor, dtype, rank, data, *fields)
+            txl.call_packed(
+                "runtime.cuTensorMapEncodeTiled", descriptor, dtype, rank, data, *fields
+            )
 
         a_contiguous_bytes = (M if a_major == "m" else K_dim) * ab_bits // 8
         b_contiguous_bytes = (N if b_major == "n" else K_dim) * ab_bits // 8
@@ -822,8 +825,8 @@ def _make_kernel(
         if entry_max_registers is None:
             _block_x, _block_y, cluster_work_id = txl.cta_id()
         else:
-            with txl.attr({"tirx.max_registers": entry_max_registers}):
-                _block_x, _block_y, cluster_work_id = txl.cta_id()
+            txl.cuda.max_registers_per_thread(entry_max_registers)
+            _block_x, _block_y, cluster_work_id = txl.cta_id()
         cluster_x_scope, cluster_y_scope = txl.cta_id_in_cluster(
             [cluster_m, cluster_n], preferred=[cluster_m, cluster_n]
         )
@@ -845,7 +848,7 @@ def _make_kernel(
         tma_role = roles.role("tma", warps=[5])
         c_role = roles.role("c_load", warps=[6])
 
-        smem = txl.alloc_buffer((shared_bytes,), txl.u8, scope="shared.dyn", align=1024)
+        smem = txl.alloc_tensor((shared_bytes,), txl.u8, scope="shared.dyn", align=1024)
         protocol_pool = txl.smem_pool(base=smem)
         ab_pipe = txl.Pipeline(
             protocol_pool,
@@ -914,7 +917,9 @@ def _make_kernel(
                 with txl.If(_elected()):
                     with txl.Then():
                         with txl.unroll(0, c_stages) as stage:
-                            txl.ptx.mbarrier.init.shared.b64(c_pipe.full.ptr_to([stage]), txl.uint32(1))
+                            txl.ptx.mbarrier.init.shared.b64(
+                                c_pipe.full.ptr_to([stage]), txl.uint32(1)
+                            )
                 with txl.If(_elected()):
                     with txl.Then():
                         with txl.unroll(0, c_stages) as stage:
@@ -930,7 +935,9 @@ def _make_kernel(
                 with txl.Then():
                     with txl.If(_elected()):
                         with txl.Then():
-                            txl.ptx.mbarrier.init.shared.b64(tmem_dealloc.ptr_to([0]), txl.uint32(32))
+                            txl.ptx.mbarrier.init.shared.b64(
+                                tmem_dealloc.ptr_to([0]), txl.uint32(32)
+                            )
             txl.ptx.fence.mbarrier_init.release.cluster()
 
         txl.ptx.fence.mbarrier_init.release.cluster()
@@ -961,7 +968,8 @@ def _make_kernel(
             txl.assign(
                 a_mcast_mask,
                 txl.bitwise_or(
-                    a_mcast_mask, txl.uint32(1) << txl.cast(cluster_x + cluster_m * peer_n, "uint32")
+                    a_mcast_mask,
+                    txl.uint32(1) << txl.cast(cluster_x + cluster_m * peer_n, "uint32"),
                 ),
             )
         b_mcast_mask = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -970,7 +978,8 @@ def _make_kernel(
             txl.assign(
                 b_mcast_mask,
                 txl.bitwise_or(
-                    b_mcast_mask, txl.uint32(1) << txl.cast(peer_x + cluster_m * cluster_y, "uint32")
+                    b_mcast_mask,
+                    txl.uint32(1) << txl.cast(peer_x + cluster_m * cluster_y, "uint32"),
                 ),
             )
         ab_consumer_mask = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -1480,7 +1489,8 @@ def _make_kernel(
                                 runtime_instr_desc = txl.bitwise_or(
                                     runtime_instr_desc,
                                     txl.bitwise_and(
-                                        txl.shift_right(sfb_tmem_addr, txl.uint32(26)), txl.uint32(0x30)
+                                        txl.shift_right(sfb_tmem_addr, txl.uint32(26)),
+                                        txl.uint32(0x30),
                                     ),
                                 )
                                 with txl.If(_elected()):
@@ -1504,7 +1514,9 @@ def _make_kernel(
                                             + ".block_scale.block"
                                             + str(sf_vec_size)
                                         ](
-                                            txl.cast(tmem_base + acc_state.stage * n_tile, "uint32"),
+                                            txl.cast(
+                                                tmem_base + acc_state.stage * n_tile, "uint32"
+                                            ),
                                             a_descriptor
                                             + txl.cast(
                                                 mma_state.stage * (a_stage_bytes // 16)
@@ -1755,7 +1767,9 @@ def _make_kernel(
                 del row_offset
 
             def tma_store_d(stage, subtile):
-                txl.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group.L2::cache_hint"](
+                txl.ptx[
+                    "cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group.L2::cache_hint"
+                ](
                     txl.address_of(d_map),
                     txl.cast(tile_n_idx * n_tile + subtile * epi_n, "int32"),
                     txl.cast(tile_m_idx * cta_m, "int32"),

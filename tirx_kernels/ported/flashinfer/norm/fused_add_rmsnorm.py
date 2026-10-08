@@ -11,7 +11,6 @@ points are ``fused_add_rmsnorm`` and ``gemma_fused_add_rmsnorm`` in
 ``flashinfer/norm/__init__.py``.
 """
 
-import contextlib
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
@@ -402,9 +401,8 @@ def get_kernel(
     max_registers = 125 if compact and enable_pdl and H == 4096 else None
 
     def entry_registers():
-        if max_registers is None:
-            return contextlib.nullcontext()
-        return txl.attr({"tirx.max_registers": max_registers})
+        if max_registers is not None:
+            txl.cuda.max_registers_per_thread(max_registers)
 
     def kernel_body(
         input_buffer, residual, weight, runtime_M, runtime_eps, x_row_stride, residual_row_stride
@@ -416,7 +414,9 @@ def get_kernel(
             )
             _, cta_rank_raw = txl.cta_id_in_cluster([1, cluster_n], preferred=[1, cluster_n])
             block_y = txl.local_scalar(txl.i32, init=txl.cast(block_y_raw, "int32"), name="block_y")
-            cta_rank = txl.local_scalar(txl.i32, init=txl.cast(cta_rank_raw, "int32"), name="cta_rank")
+            cta_rank = txl.local_scalar(
+                txl.i32, init=txl.cast(cta_rank_raw, "int32"), name="cta_rank"
+            )
         else:
             block_x_raw = txl.cta_id([txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32")])
             block_y = txl.local_scalar(txl.i32, init=txl.int32(0), name="block_y")
@@ -470,7 +470,9 @@ def get_kernel(
             )
             col_valid = txl.local_scalar("bool", init=absolute_col < H, name="col_valid")
             if compact:
-                x_offset = txl.local_scalar(txl.i32, init=row_i32 * H + absolute_col, name="x_offset")
+                x_offset = txl.local_scalar(
+                    txl.i32, init=row_i32 * H + absolute_col, name="x_offset"
+                )
             else:
                 x_offset = txl.local_scalar(
                     txl.i64,
@@ -685,7 +687,9 @@ def get_kernel(
                     name="peer_reduce",
                 )
                 peer_mbar = txl.local_scalar(
-                    txl.u32, init=_mapa_u32(shared_raw.ptr_to([mbar_offset]), lane), name="peer_mbar"
+                    txl.u32,
+                    init=_mapa_u32(shared_raw.ptr_to([mbar_offset]), lane),
+                    name="peer_mbar",
                 )
                 txl.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.f32(
                     peer_reduce, warp_sum, peer_mbar
@@ -723,7 +727,9 @@ def get_kernel(
                 txl.f32, init=_fma_rn_f32(sum_sq, txl.float32(1.0 / H), runtime_eps), name="shifted"
             )
         else:
-            mean_sq = txl.local_scalar(txl.f32, init=_div_rn_f32(sum_sq, txl.float32(H)), name="mean_sq")
+            mean_sq = txl.local_scalar(
+                txl.f32, init=_div_rn_f32(sum_sq, txl.float32(H)), name="mean_sq"
+            )
             shifted = txl.local_scalar(txl.f32, init=_add_f32(mean_sq, runtime_eps), name="shifted")
         rstd = txl.local_scalar(txl.f32, init=_rsqrt_approx_ftz(shifted), name="rstd")
 
@@ -792,7 +798,9 @@ def get_kernel(
             )
             col_valid = txl.local_scalar("bool", init=absolute_col < H, name="col_valid")
             if compact:
-                x_offset = txl.local_scalar(txl.i32, init=row_i32 * H + absolute_col, name="x_offset")
+                x_offset = txl.local_scalar(
+                    txl.i32, init=row_i32 * H + absolute_col, name="x_offset"
+                )
             else:
                 x_offset = txl.local_scalar(
                     txl.i64,
@@ -824,10 +832,10 @@ def get_kernel(
             runtime_M: txl.i64,
             runtime_eps: txl.f32,
         ):
-            with entry_registers():
-                kernel_body(
-                    input_buffer, residual, weight, runtime_M, runtime_eps, txl.int64(H), txl.int64(H)
-                )
+            entry_registers()
+            kernel_body(
+                input_buffer, residual, weight, runtime_M, runtime_eps, txl.int64(H), txl.int64(H)
+            )
 
         kernel = flashinfer_fused_add_rmsnorm_compact.func
     else:
@@ -842,16 +850,16 @@ def get_kernel(
             x_row_stride: txl.i64,
             residual_row_stride: txl.i64,
         ):
-            with entry_registers():
-                kernel_body(
-                    input_buffer,
-                    residual,
-                    weight,
-                    runtime_M,
-                    runtime_eps,
-                    x_row_stride,
-                    residual_row_stride,
-                )
+            entry_registers()
+            kernel_body(
+                input_buffer,
+                residual,
+                weight,
+                runtime_M,
+                runtime_eps,
+                x_row_stride,
+                residual_row_stride,
+            )
 
         kernel = flashinfer_fused_add_rmsnorm_strided.func
 

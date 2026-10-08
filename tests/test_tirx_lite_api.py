@@ -106,6 +106,64 @@ def test_local_scalar_accepts_explicit_trace_name():
     assert seen == ["counter"]
 
 
+def test_warp_scan_keeps_collectives_outside_guards():
+    @txl.kernel(warps=1, arch="sm_100a")
+    def probe(out: txl.gptr("float32")):
+        values = txl.alloc_local((2,), "float32")
+        txl.assign(values[0], txl.float32(1))
+        txl.assign(values[1], txl.float32(2))
+        txl.idioms.warp_scan_add(values, 2, txl.lane_id())
+        txl.ptx.st.global_.f32(out.ptr_to([txl.lane_id()]), values[0])
+
+    branches = []
+    structural_walk(probe.func.body, (tirx.IfThenElse, branches.append))
+    assert len(branches) == 5
+    assert len(_calls_named(probe.func, "tirx.tvm_warp_shuffle_up")) == 10
+    assert len(_calls_named(probe.func, "tirx.tvm_warp_shuffle")) == 1
+    for branch in branches:
+        calls = []
+        structural_walk(branch.then_case, (ir.Call, calls.append))
+        assert not any("warp_shuffle" in call.op.name for call in calls)
+
+
+def test_mma_chain_encodes_descriptor_before_branch_guard():
+    from tvm.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
+
+    idesc = encode_instr_descriptor_dense_uint32(
+        64, 64, 16, "float32", "float16", "float16", False, False
+    )
+
+    @txl.kernel(warps=1, arch="sm_100a")
+    def probe():
+        tile = txl.smem_pool().alloc((1, 64, 64), txl.f16, swizzle=txl.SW128B)
+        view = tile[0]
+        txl.idioms.mma_chain(
+            "tcgen05.mma.cta_group::1.kind::f16",
+            txl.uint32(0),
+            a=view,
+            b=view,
+            idesc=idesc,
+            pred=txl.lane_id() == 0,
+            accumulate=False,
+            guard="branch",
+        )
+
+    events = []
+    structural_walk(
+        probe.func.body,
+        [
+            (ir.Call, lambda call: events.append(call.op.name)),
+            (tirx.IfThenElse, lambda _: events.append("branch")),
+        ],
+        order="pre",
+    )
+    descriptor = "tirx.cuda.tcgen05_encode_matrix_descriptor"
+    mma = "tirx.ptx.tcgen05_mma_ss"
+    assert events.count(descriptor) == events.count("branch") == 1
+    assert events.index(descriptor) < events.index("branch") < events.index(mma)
+    assert events.count(mma) == 4
+
+
 def test_sigmoid_tanh_approx_f32_has_materialized_ptx_call_contract():
     @txl.kernel(warps=1, arch="sm_100a", grid=False)
     def probe(out: txl.gptr("float32")):
@@ -257,8 +315,8 @@ def test_kernel_build_runs_low_level_ir_check_by_default():
         @txl.kernel(warps=1, arch="sm_100a", grid=False, **kw)
         def probe(out: txl.gptr("float32")):
             # a direct shared-memory buffer store is a contract violation
-            smem = txl.alloc_buffer([4], "float32", scope="shared")
-            txl.buffer_store(smem, txl.float32(1.0), [0])
+            smem = txl.alloc_tensor([4], "float32", scope="shared")
+            txl.tensor_store(smem, txl.float32(1.0), [0])
             txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
         return probe
@@ -292,26 +350,26 @@ def test_unsupported_tmem_buffer_scope_is_rejected():
     import pytest
 
     with pytest.raises(ValueError, match='scope="tmem"'):
-        txl.alloc_buffer((1,), txl.u32, scope="tmem")
+        txl.alloc_tensor((1,), txl.u32, scope="tmem")
     with pytest.raises(ValueError, match='scope="tmem"'):
-        txl.decl_buffer((1,), txl.u32, scope="tmem")
+        txl.decl_tensor((1,), txl.u32, scope="tmem")
 
     with pytest.raises(AttributeError, match="deliberately does not expose"):
         txl.TMEMPool
 
 
-@pytest.mark.parametrize("buffer_api", [txl.alloc_buffer, txl.decl_buffer])
+@pytest.mark.parametrize("buffer_api", [txl.alloc_tensor, txl.decl_tensor])
 @pytest.mark.parametrize("removed", ["strides", "offset_factor", "allocated_addr"])
 def test_buffer_removed_options_are_rejected(buffer_api, removed):
     with pytest.raises(TypeError, match=removed):
         buffer_api((1,), txl.u32, **{removed: None})
 
 
-def test_alloc_buffer_preserves_defaults_and_positional_options():
+def test_alloc_tensor_preserves_defaults_and_positional_options():
     def build(out):
-        region = txl.alloc_buffer((2,), scope="local")
+        region = txl.alloc_tensor((2,), scope="local")
         assert region.dtype == "float32"
-        view = txl.alloc_buffer((1,), txl.f32, region.data, 1, None, "local", 16)
+        view = txl.alloc_tensor((1,), txl.f32, region.data, 1, None, "local", 16)
         assert int(view.elem_offset) == 1
         assert view.scope() == "local"
         assert view.data_alignment == 16
@@ -321,11 +379,11 @@ def test_alloc_buffer_preserves_defaults_and_positional_options():
     _tir(build)
 
 
-def test_decl_buffer_preserves_defaults_and_positional_options():
+def test_decl_tensor_preserves_defaults_and_positional_options():
     def build(out):
-        region = txl.decl_buffer((2,), scope="local")
+        region = txl.decl_tensor((2,), scope="local")
         assert region.dtype == "float32"
-        view = txl.decl_buffer((1,), txl.f32, region.data, 1, None, "local", 16)
+        view = txl.decl_tensor((1,), txl.f32, region.data, 1, None, "local", 16)
         assert int(view.elem_offset) == 1
         assert view.scope() == "local"
         assert view.data_alignment == 16
@@ -335,7 +393,7 @@ def test_decl_buffer_preserves_defaults_and_positional_options():
     _tir(build)
 
 
-def test_decl_buffer_strided_shared_alias_is_rejected():
+def test_decl_tensor_strided_shared_alias_is_rejected():
     # The original #8 shape must fail while tracing, before CUDA can be emitted.
     with pytest.raises(TypeError, match="strides"):
 
@@ -343,7 +401,7 @@ def test_decl_buffer_strided_shared_alias_is_rejected():
         def probe():
             smem = txl.smem_pool()
             region = smem.pool.alloc((2, 4, 512), "uint32", align=128)
-            txl.decl_buffer(
+            txl.decl_tensor(
                 (2, 4, 32),
                 txl.f32,
                 data=region.data,
@@ -356,8 +414,8 @@ def test_decl_buffer_strided_shared_alias_is_rejected():
 
 def test_default_buffer_strides_preserve_layout():
     def build(out):
-        region = txl.alloc_buffer((2, 4, 512), txl.f32, scope="local")
-        view = txl.decl_buffer((2, 4, 512), txl.f32, data=region.data, scope="local")
+        region = txl.alloc_tensor((2, 4, 512), txl.f32, scope="local")
+        view = txl.decl_tensor((2, 4, 512), txl.f32, data=region.data, scope="local")
         ir.assert_structural_equal(view.layout, region.layout)
         assert not view.strides
         txl.assign(view[0, 2, 7], txl.float32(1))
@@ -491,8 +549,16 @@ def test_kernel_records_python_source_spans():
         probe.func.span.source_name.name, probe.func.span.line
     )
 
-    statements = probe.func.body.body.seq
-    stores = [stmt for stmt in statements if type(stmt).__name__ == "Evaluate"]
+    stores = []
+    structural_walk(
+        probe.func.body,
+        (
+            tirx.Evaluate,
+            lambda stmt: stores.append(stmt)
+            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tirx.ptx.st"
+            else None,
+        ),
+    )
     assert len(stores) == 2
     source_lines = []
     for store in stores:

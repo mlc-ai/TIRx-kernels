@@ -138,11 +138,15 @@ def _load_two_byte_vector(buffer, index, count: int, scope: str):
         words = txl.alloc_local((4,), "uint32")
         txl.ptx[f"{prefix}.v4.b32"](words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
         for pair in range(4):
-            txl.buffer_store(
-                bits, txl.cast(txl.bitwise_and(words[pair], txl.uint32(0xFFFF)), "uint16"), [2 * pair]
+            txl.tensor_store(
+                bits,
+                txl.cast(txl.bitwise_and(words[pair], txl.uint32(0xFFFF)), "uint16"),
+                [2 * pair],
             )
-            txl.buffer_store(
-                bits, txl.cast(txl.shift_right(words[pair], txl.uint32(16)), "uint16"), [2 * pair + 1]
+            txl.tensor_store(
+                bits,
+                txl.cast(txl.shift_right(words[pair], txl.uint32(16)), "uint16"),
+                [2 * pair + 1],
             )
     return bits
 
@@ -159,7 +163,7 @@ def _store_two_byte_vector(buffer, index, bits, count: int, scope: str = "global
     else:
         words = txl.alloc_local((4,), "uint32")
         for pair in range(4):
-            txl.buffer_store(
+            txl.tensor_store(
                 words,
                 txl.bitwise_or(
                     txl.cast(bits[2 * pair], "uint32"),
@@ -418,7 +422,9 @@ def get_kernel(**kwargs: Any):
         s_c = smem.alloc((spec["DSTATE"],), txl.bf16, align=16)
         s_out = smem.alloc((spec["ROWS_PER_BLOCK"],), txl.f32, align=4)
         s_scale = (
-            smem.alloc((spec["ROWS_PER_BLOCK"],), txl.f32, align=16) if spec["SCALE_STATE"] else s_out
+            smem.alloc((spec["ROWS_PER_BLOCK"],), txl.f32, align=16)
+            if spec["SCALE_STATE"]
+            else s_out
         )
         roles = txl.specialize()
         load_x = roles.role("load_x_and_scale", warps=[0])
@@ -482,8 +488,8 @@ def get_kernel(**kwargs: Any):
             scale_head_offset: txl.int64 = state_batch * state_scale_stride_batch + txl.cast(
                 head * DIM, "int64"
             )
-            dst_scale_head_offset: txl.int64 = dst_state_batch * state_scale_stride_batch + txl.cast(
-                head * DIM, "int64"
+            dst_scale_head_offset: txl.int64 = (
+                dst_state_batch * state_scale_stride_batch + txl.cast(head * DIM, "int64")
             )
 
             gload_4 = txl.local_scalar("uint32")
@@ -495,7 +501,9 @@ def get_kernel(**kwargs: Any):
                 _load_weight(dt, txl.cast(batch_i, "int64") * dt_stride_batch + head, WEIGHT_DTYPE),
             )
             if HAS_DT_BIAS:
-                txl.ptx["add.ftz.f32"](dt_value, dt_value, _load_weight(dt_bias, head, WEIGHT_DTYPE))
+                txl.ptx["add.ftz.f32"](
+                    dt_value, dt_value, _load_weight(dt_bias, head, WEIGHT_DTYPE)
+                )
             with txl.If(dt_softplus != 0), txl.Then():
                 with txl.If(dt_value <= txl.float32(20.0)), txl.Then():
                     mul_0 = txl.local_scalar("float32")
@@ -539,7 +547,9 @@ def get_kernel(**kwargs: Any):
                     gload_5 = txl.local_scalar("uint16")
                     txl.ptx.ld.global_.b16(
                         gload_5,
-                        x.ptr_to([txl.cast(batch_i, "int64") * x_stride_batch + head * DIM + row_d]),
+                        x.ptr_to(
+                            [txl.cast(batch_i, "int64") * x_stride_batch + head * DIM + row_d]
+                        ),
                     )
                     x_bits: txl.uint16 = gload_5
                     txl.ptx.st.shared.b16(s_x.ptr_to([local_row]), x_bits)
@@ -660,14 +670,18 @@ def get_kernel(**kwargs: Any):
                         with txl.unroll(STATE_VECTOR) as e:
                             with (
                                 txl.If(
-                                    txl.And(txl.And(PHILOX_ROUNDS > 0, txl.Not(SCALE_STATE)), e % 4 == 0)
+                                    txl.And(
+                                        txl.And(PHILOX_ROUNDS > 0, txl.Not(SCALE_STATE)), e % 4 == 0
+                                    )
                                 ),
                                 txl.Then(),
                             ):
                                 random_offset: txl.uint64 = txl.cast(
                                     state_head_offset + row_d * DSTATE + state_i + e, "uint64"
                                 )
-                                c0 = txl.local_scalar("uint32", init=txl.cast(random_offset, "uint32"))
+                                c0 = txl.local_scalar(
+                                    "uint32", init=txl.cast(random_offset, "uint32")
+                                )
                                 c1 = txl.local_scalar(
                                     "uint32",
                                     init=txl.cast(
@@ -695,11 +709,15 @@ def get_kernel(**kwargs: Any):
                                     mul_hi_0 = txl.local_scalar("uint32")
                                     txl.ptx["mul.hi.u32"](mul_hi_0, txl.uint32(0xCD9E8D57), old_c2)
                                     hi_b: txl.uint32 = mul_hi_0
-                                    next_c0: txl.uint32 = txl.bitwise_xor(txl.bitwise_xor(hi_b, c1), k0)
+                                    next_c0: txl.uint32 = txl.bitwise_xor(
+                                        txl.bitwise_xor(hi_b, c1), k0
+                                    )
                                     mul_hi_1 = txl.local_scalar("uint32")
                                     txl.ptx["mul.hi.u32"](mul_hi_1, txl.uint32(0xD2511F53), old_c0)
                                     hi_a: txl.uint32 = mul_hi_1
-                                    next_c2: txl.uint32 = txl.bitwise_xor(txl.bitwise_xor(hi_a, c3), k1)
+                                    next_c2: txl.uint32 = txl.bitwise_xor(
+                                        txl.bitwise_xor(hi_a, c3), k1
+                                    )
                                     mul_lo_0 = txl.local_scalar("int32")
                                     txl.ptx["mul.lo.s32"](
                                         mul_lo_0,
@@ -716,12 +734,16 @@ def get_kernel(**kwargs: Any):
                                     next_c3_s: txl.int32 = mul_lo_1
                                     add_s32_0 = txl.local_scalar("int32")
                                     txl.ptx["add.s32"](
-                                        add_s32_0, txl.reinterpret("int32", k0), txl.int32(-1640531527)
+                                        add_s32_0,
+                                        txl.reinterpret("int32", k0),
+                                        txl.int32(-1640531527),
                                     )
                                     next_k0_s: txl.int32 = add_s32_0
                                     add_s32_1 = txl.local_scalar("int32")
                                     txl.ptx["add.s32"](
-                                        add_s32_1, txl.reinterpret("int32", k1), txl.int32(-1150833019)
+                                        add_s32_1,
+                                        txl.reinterpret("int32", k1),
+                                        txl.int32(-1150833019),
                                     )
                                     next_k1_s: txl.int32 = add_s32_1
                                     txl.assign(c0, next_c0)
@@ -782,7 +804,9 @@ def get_kernel(**kwargs: Any):
                                 txl.ptx["abs.ftz.f32"](abs_0, new_state)
                                 magnitude: txl.float32 = abs_0
                                 txl.ptx["max.ftz.f32"](new_state_max, new_state_max, magnitude)
-                                txl.ptx.mov.b32(new_states[state_iter * STATE_VECTOR + e], new_state)
+                                txl.ptx.mov.b32(
+                                    new_states[state_iter * STATE_VECTOR + e], new_state
+                                )
                             elif PHILOX_ROUNDS > 0:
                                 random13: txl.uint32 = txl.bitwise_and(
                                     random_words[e % 4], txl.uint32(0x1FFF)
@@ -852,7 +876,9 @@ def get_kernel(**kwargs: Any):
 
                     with txl.unroll(5) as delta_i:
                         delta: txl.int32 = txl.shift_right(txl.int32(16), delta_i)
-                        txl.ptx["add.ftz.f32"](out_value, out_value, _shfl_down_f32(out_value, delta))
+                        txl.ptx["add.ftz.f32"](
+                            out_value, out_value, _shfl_down_f32(out_value, delta)
+                        )
                     with txl.If(lane == 0), txl.Then():
                         txl.ptx.st.shared.b32(
                             s_out.ptr_to([local_row]), txl.reinterpret("uint32", out_value)
@@ -903,7 +929,9 @@ def get_kernel(**kwargs: Any):
                                 prmt_1 = txl.local_scalar("uint32")
                                 txl.ptx["prmt.b32"](
                                     prmt_1,
-                                    txl.cast(txl.reinterpret("uint32", quantized[2 * pair]), "uint32"),
+                                    txl.cast(
+                                        txl.reinterpret("uint32", quantized[2 * pair]), "uint32"
+                                    ),
                                     txl.cast(
                                         txl.reinterpret("uint32", quantized[2 * pair + 1]), "uint32"
                                     ),

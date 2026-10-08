@@ -131,7 +131,8 @@ def _desc_add_16B_offset(desc, offset):
 def _replace_smem_desc_addr(desc, smem_ptr):
     start_addr = txl.cast(
         txl.bitwise_and(
-            txl.shift_right(txl.cuda.cvta_generic_to_shared(smem_ptr), txl.uint32(4)), txl.uint32(0x3FFF)
+            txl.shift_right(txl.cuda.cvta_generic_to_shared(smem_ptr), txl.uint32(4)),
+            txl.uint32(0x3FFF),
         ),
         "uint64",
     )
@@ -445,12 +446,20 @@ def make_main_kernel(model_type, presence, use_pdl=False):
         pv_a_hi_desc.init(s_smem_gemm.ptr_to([0, 0]), ldo=64, sdo=8, swizzle=0)
         q_main_cp_desc = txl.local_scalar("uint64")
         txl.cuda.tcgen05.encode_matrix_descriptor(
-            txl.address_of(q_main_cp_desc), txl.reinterpret(txl.handle().ty, txl.uint64(0)), 1, 64, 3
+            txl.address_of(q_main_cp_desc),
+            txl.reinterpret(txl.handle().ty, txl.uint64(0)),
+            1,
+            64,
+            3,
         )
         if is_v32:
             q_tail_cp_desc = txl.local_scalar("uint64")
             txl.cuda.tcgen05.encode_matrix_descriptor(
-                txl.address_of(q_tail_cp_desc), txl.reinterpret(txl.handle().ty, txl.uint64(0)), 1, 32, 2
+                txl.address_of(q_tail_cp_desc),
+                txl.reinterpret(txl.handle().ty, txl.uint64(0)),
+                1,
+                32,
+                2,
             )
         rowwise_buf = pool.alloc((128,), "float32", align=16)
         is_token_valid = pool.alloc((NUM_INDEX_BUFS, B_TOPK // 8), "int8", align=16)
@@ -533,18 +542,28 @@ def make_main_kernel(model_type, presence, use_pdl=False):
             # candidates, matching the source's normal-only KV prefetch.
             with txl.If(warp_idx == 0), txl.Then():
                 with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
-                    txl.ptx.mbarrier.init.shared.b64(bar_last_store_done.ptr_to([0]), txl.uint32(128))
+                    txl.ptx.mbarrier.init.shared.b64(
+                        bar_last_store_done.ptr_to([0]), txl.uint32(128)
+                    )
                     txl.ptx.mbarrier.init.shared.b64(bar_q_tma.ptr_to([0]), txl.uint32(1))
                     txl.ptx.mbarrier.init.shared.b64(bar_q_utccp.ptr_to([0]), txl.uint32(1))
                     with txl.unroll(NUM_BUFS) as stage:
-                        txl.ptx.mbarrier.init.shared.b64(bar_rope_ready.ptr_to([stage]), txl.uint32(1))
+                        txl.ptx.mbarrier.init.shared.b64(
+                            bar_rope_ready.ptr_to([stage]), txl.uint32(1)
+                        )
                         txl.ptx.mbarrier.init.shared.b64(
                             bar_nope_ready.ptr_to([stage]), txl.uint32(128)
                         )
-                        txl.ptx.mbarrier.init.shared.b64(bar_raw_ready.ptr_to([stage]), txl.uint32(1))
-                        txl.ptx.mbarrier.init.shared.b64(bar_raw_free.ptr_to([stage]), txl.uint32(128))
+                        txl.ptx.mbarrier.init.shared.b64(
+                            bar_raw_ready.ptr_to([stage]), txl.uint32(1)
+                        )
+                        txl.ptx.mbarrier.init.shared.b64(
+                            bar_raw_free.ptr_to([stage]), txl.uint32(128)
+                        )
                         txl.ptx.mbarrier.init.shared.b64(bar_qk_done.ptr_to([stage]), txl.uint32(1))
-                        txl.ptx.mbarrier.init.shared.b64(bar_so_ready.ptr_to([stage]), txl.uint32(128))
+                        txl.ptx.mbarrier.init.shared.b64(
+                            bar_so_ready.ptr_to([stage]), txl.uint32(128)
+                        )
                         txl.ptx.mbarrier.init.shared.b64(bar_sv_done.ptr_to([stage]), txl.uint32(1))
                     with txl.unroll(NUM_INDEX_BUFS) as index_stage:
                         txl.ptx.mbarrier.init.shared.b64(
@@ -744,7 +763,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                         txl.assign(real_mi, txl.max(real_mi, cur_pi_max))
                         should_scale_o = txl.local_scalar("uint32")
                         txl.ptx.vote_sync.any.pred(
-                            should_scale_o, cur_pi_max - mi > txl.float32(6.0), txl.uint32(0xFFFFFFFF)
+                            should_scale_o,
+                            cur_pi_max - mi > txl.float32(6.0),
+                            txl.uint32(0xFFFFFFFF),
                         )
                         new_max = txl.local_scalar("float32")
                         scale_for_old = txl.local_scalar("float32")
@@ -759,7 +780,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
 
                         s_frag = txl.alloc_local((B_TOPK // 2,), "bfloat16")
                         s_pack = s_frag.view("uint32")
-                        cur_sum_pair = txl.local_scalar("uint64", init=txl.cuda.make_float2(0.0, 0.0))
+                        cur_sum_pair = txl.local_scalar(
+                            "uint64", init=txl.cuda.make_float2(0.0, 0.0)
+                        )
                         neg_max_pair = txl.cuda.make_float2(-new_max, -new_max)
                         with txl.unroll((B_TOPK // 2) // 2) as s_i:
                             p_pair = txl.cuda.make_float2(p[s_i * 2], p[s_i * 2 + 1])
@@ -769,7 +792,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             sy = txl.local_scalar("float32")
                             txl.ptx.ex2.approx.ftz.f32(sx, txl.cuda.float2_x(soft_pair))
                             txl.ptx.ex2.approx.ftz.f32(sy, txl.cuda.float2_y(soft_pair))
-                            txl.ptx.add.f32x2(cur_sum_pair, cur_sum_pair, txl.cuda.make_float2(sx, sy))
+                            txl.ptx.add.f32x2(
+                                cur_sum_pair, cur_sum_pair, txl.cuda.make_float2(sx, sy)
+                            )
                             txl.ptx.mov.b32(s_pack[s_i], txl.cuda.float22bfloat162_rn(sx, sy))
                         cur_sum = txl.cuda.float2_x(cur_sum_pair) + txl.cuda.float2_y(cur_sum_pair)
                         li_next = txl.local_scalar("float32")
@@ -793,7 +818,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 s_words[s_word + 3],
                             )
                         with (
-                            txl.If(txl.And(block_idx != start_block, should_scale_o != txl.uint32(0))),
+                            txl.If(
+                                txl.And(block_idx != start_block, should_scale_o != txl.uint32(0))
+                            ),
                             txl.Then(),
                         ):
                             scale_for_old_pair = txl.cuda.make_float2(scale_for_old, scale_for_old)
@@ -806,7 +833,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     scale_for_old_pair,
                                 )
                                 _tmem_store(
-                                    o_rescale, txl.cuda.get_tmem_addr(txl.uint32(0), 0, o_chunk * 64)
+                                    o_rescale,
+                                    txl.cuda.get_tmem_addr(txl.uint32(0), 0, o_chunk * 64),
                                 )
                                 txl.ptx.tcgen05.wait__st.sync.aligned()
                             txl.ptx.tcgen05.fence__before_thread_sync()
@@ -1037,7 +1065,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                     txl.ptx.barrier.sync(txl.uint32(BAR_EVERYONE_SYNC), txl.uint32(NUM_THREADS))
 
             with txl.If(warp_idx == 0), txl.Then():
-                txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(txl.uint32(0), txl.uint32(512))
+                txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
+                    txl.uint32(0), txl.uint32(512)
+                )
 
         def producer_mma(selected_wg1_role):
             # kernel.cuh:431-746.  Mirror each CUDA run_main_loop(lambda)
@@ -1214,7 +1244,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                 "bool",
                                                 txl.Or(
                                                     qk_nope_ki != 0,
-                                                    txl.cast(txl.uint32(1 if is_v32 else 0), "bool"),
+                                                    txl.cast(
+                                                        txl.uint32(1 if is_v32 else 0), "bool"
+                                                    ),
                                                 ),
                                             )
                                         ),
@@ -1427,7 +1459,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                             )
                                         txl.ptx[_TMA_GATHER4_2D_CACHE](
                                             rope_tma_dst,
-                                            txl.reinterpret(txl.handle().ty, selected_rope_tensormap),
+                                            txl.reinterpret(
+                                                txl.handle().ty, selected_rope_tensormap
+                                            ),
                                             txl.cast(rope_part * rope_tile, "int32"),
                                             cur_indices[0],
                                             cur_indices[1],
@@ -1675,7 +1709,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 txl.assign(
                                     valid_mask,
                                     txl.cast(
-                                        txl.bitwise_or(txl.cast(valid_mask, "int32"), peer_valid_mask),
+                                        txl.bitwise_or(
+                                            txl.cast(valid_mask, "int32"), peer_valid_mask
+                                        ),
                                         "int8",
                                     ),
                                 )
@@ -1690,7 +1726,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 txl.assign(
                                     valid_mask,
                                     txl.cast(
-                                        txl.bitwise_or(txl.cast(valid_mask, "int32"), peer_valid_mask),
+                                        txl.bitwise_or(
+                                            txl.cast(valid_mask, "int32"), peer_valid_mask
+                                        ),
                                         "int8",
                                     ),
                                 )
@@ -1843,7 +1881,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         converted_pair,
                                         txl.cast(
                                             txl.shift_right(
-                                                packed_scales, txl.cast(scale_pair_idx * 16, "uint32")
+                                                packed_scales,
+                                                txl.cast(scale_pair_idx * 16, "uint32"),
                                             ),
                                             "uint16",
                                         ),
@@ -1855,7 +1894,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     txl.ptx.mov.b16(
                                         scales_bf16_bits[scale_pair_idx * 2 + 1],
                                         txl.cast(
-                                            txl.shift_right(converted_pair, txl.uint32(16)), "uint16"
+                                            txl.shift_right(converted_pair, txl.uint32(16)),
+                                            "uint16",
                                         ),
                                     )
                             else:
@@ -1870,7 +1910,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         converted_pair,
                                         txl.cast(
                                             txl.shift_right(
-                                                packed_scales, txl.cast(scale_pair_idx * 16, "uint64")
+                                                packed_scales,
+                                                txl.cast(scale_pair_idx * 16, "uint64"),
                                             ),
                                             "uint16",
                                         ),
@@ -1882,7 +1923,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     txl.ptx.mov.b16(
                                         scales_bf16_bits[scale_pair_idx * 2 + 1],
                                         txl.cast(
-                                            txl.shift_right(converted_pair, txl.uint32(16)), "uint16"
+                                            txl.shift_right(converted_pair, txl.uint32(16)),
+                                            "uint16",
                                         ),
                                     )
 
@@ -2025,14 +2067,14 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
         g_lse_offset = txl.local_scalar(
             "int32", init=batch_idx * stride_lse_b + query_idx * stride_lse_s_q + h_block_base
         )
-        g_lse_accum = txl.decl_buffer(
+        g_lse_accum = txl.decl_tensor(
             (max_splits * stride_lse_accum_split + 8,),
             "float32",
             data=lse_accum.data,
             scope="global",
             elem_offset=g_lse_accum_offset,
         )
-        g_lse = txl.decl_buffer(
+        g_lse = txl.decl_tensor(
             (8,), "float32", data=lse.data, scope="global", elem_offset=g_lse_offset
         )
 
@@ -2047,7 +2089,7 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
                 + head_idx * stride_o_accum_h_q
             ),
         )
-        oaccum_ptr = txl.decl_buffer(
+        oaccum_ptr = txl.decl_tensor(
             (num_sm_parts * stride_o_accum_split + D_V,),
             "float32",
             data=o_accum.data,
@@ -2093,7 +2135,9 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
             txl.assign(max_lse[0], txl.max(max_lse[0], peer_max_lse))
         txl.assign(
             max_lse[0],
-            txl.if_then_else(max_lse[0] == txl.float32(-float("inf")), txl.float32(0.0), max_lse[0]),
+            txl.if_then_else(
+                max_lse[0] == txl.float32(-float("inf")), txl.float32(0.0), max_lse[0]
+            ),
         )
         sum_lse = txl.alloc_local((1,), "float32")
         lse_exp = txl.alloc_local((1,), "float32")
@@ -2179,7 +2223,7 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
             "int32",
             init=batch_idx * stride_o_b + query_idx * stride_o_s_q + head_idx * stride_o_h_q,
         )
-        o_ptr = txl.decl_buffer(
+        o_ptr = txl.decl_tensor(
             (D_V,), "bfloat16", data=out.data, scope="global", elem_offset=out_offset
         )
         with txl.unroll(D_V // (32 * 4)) as elem_i:

@@ -404,7 +404,7 @@ def make_kernel(
         smem.commit()
 
         buffer_11 = k_smem.view(4, 64, 4, 64)
-        buffer_12 = txl.decl_buffer(
+        buffer_12 = txl.decl_tensor(
             (4, 64, 4, 64),
             "bfloat16",
             data=buffer_11.data,
@@ -452,7 +452,9 @@ def make_kernel(
                     remote_empty, txl.address_of(clc_empty.buf[0]), txl.uint32(0)
                 )
                 txl.ptx["mbarrier.arrive.b64"](
-                    txl.reinterpret(txl.handle().ty, remote_empty), txl.uint32(1), pred=txl.bool(True)
+                    txl.reinterpret(txl.handle().ty, remote_empty),
+                    txl.uint32(1),
+                    pred=txl.bool(True),
                 )
                 with txl.If(next_job == txl.uint32(4294967295)):
                     with txl.Then():
@@ -671,7 +673,9 @@ def make_kernel(
                             0,
                             0,
                             jobs.block_idx // 2,
-                            txl.cuda.cvta_generic_to_shared(txl.reinterpret(txl.handle().ty, buffer_17)),
+                            txl.cuda.cvta_generic_to_shared(
+                                txl.reinterpret(txl.handle().ty, buffer_17)
+                            ),
                             txl.uint64(1364590687093260288),
                         )
                         with txl.If(cta_idx == 0), txl.Then():
@@ -699,7 +703,9 @@ def make_kernel(
                                 txl.ptx["tcgen05.cp.cta_group::2.128x256b"](
                                     txl.Cast("uint32", 256 + (flat % 4 * 32 + flat // 4 % 4 * 8)),
                                     txl.bitwise_or(
-                                        txl.bitwise_and(cp_desc, txl.bitwise_not(txl.uint64(16383))),
+                                        txl.bitwise_and(
+                                            cp_desc, txl.bitwise_not(txl.uint64(16383))
+                                        ),
                                         txl.Cast(
                                             "uint64",
                                             txl.bitwise_and(
@@ -709,7 +715,7 @@ def make_kernel(
                                                             q_smem.ptr_to([0, 0]),
                                                             (flat % 4 * 1024 + flat // 4 % 4 * 2)
                                                             * 16,
-                                                            txl.type_annotation("bfloat16"),
+                                                            "bfloat16",
                                                         )
                                                     ),
                                                     txl.uint32(4),
@@ -763,7 +769,9 @@ def make_kernel(
                     launch_dependents=True,
                 )
             with txl.If(warp_idx == 0), txl.Then():
-                txl.ptx["tcgen05.dealloc.cta_group::2.sync.aligned.b32"](txl.uint32(0), txl.uint32(512))
+                txl.ptx["tcgen05.dealloc.cta_group::2.sync.aligned.b32"](
+                    txl.uint32(0), txl.uint32(512)
+                )
             txl.cuda.iket.range_end(q_o_token[0])
 
         def kv_gather():
@@ -784,7 +792,7 @@ def make_kernel(
                         with txl.unroll(2) as local_row:
                             row = local_row * 32 + wg1_warp_idx * 8
                             row_base = wg1_g_indices_base + k * 64 + row
-                            buffer_13 = txl.decl_buffer(
+                            buffer_13 = txl.decl_tensor(
                                 (16,), "int32", data=cur_indices.data, scope="local"
                             )
                             buffer_14 = buffer_13.view("uint32")
@@ -793,14 +801,17 @@ def make_kernel(
                                 txl.address_of(indices[row_base]),
                             )
                         txl.cuda.mbarrier_wait(
-                            txl.address_of(k_empty.buf[k_pipe.stage]), txl.bitwise_xor(k_pipe.phase, 1)
+                            txl.address_of(k_empty.buf[k_pipe.stage]),
+                            txl.bitwise_xor(k_pipe.phase, 1),
                         )
                         src_col = cta_idx * 256
                         with txl.unroll(4) as row_group:
                             with txl.unroll(4) as col_atom:
                                 buffer_16 = txl.local_scalar("uint64")
                                 txl.ptx["mapa.u64"](
-                                    buffer_16, txl.address_of(k_ready.buf[k_pipe.stage]), txl.uint32(0)
+                                    buffer_16,
+                                    txl.address_of(k_ready.buf[k_pipe.stage]),
+                                    txl.uint32(0),
                                 )
                                 kv_dst_offset = (
                                     k_pipe.stage * 16384
@@ -814,12 +825,12 @@ def make_kernel(
                                 ](
                                     txl.cuda.cvta_generic_to_shared(
                                         txl.ptr_byte_offset(
-                                            txl.address_of(k_smem[0, 0]),
-                                            kv_dst_offset,
-                                            txl.type_annotation("bfloat16"),
+                                            txl.address_of(k_smem[0, 0]), kv_dst_offset, "bfloat16"
                                         )
                                     ),
-                                    txl.reinterpret(txl.handle().ty, txl.address_of(kv_tma_tensormap)),
+                                    txl.reinterpret(
+                                        txl.handle().ty, txl.address_of(kv_tma_tensormap)
+                                    ),
                                     src_col + col_atom * 64,
                                     cur_indices[row_group * 4],
                                     cur_indices[row_group * 4 + 1],
@@ -849,7 +860,9 @@ def make_kernel(
                                     umma_topk_len, topk_length.ptr_to([umma_s_q_idx])
                                 )
                             umma_num_k_blocks = txl.max((umma_topk_len + 64 - 1) // 64, 1)
-                            txl.cuda.mbarrier_wait(txl.address_of(q_consumed.buf[0]), jobs.epoch.phase)
+                            txl.cuda.mbarrier_wait(
+                                txl.address_of(q_consumed.buf[0]), jobs.epoch.phase
+                            )
                             with txl.serial(umma_num_k_blocks + 1, unroll=False) as k:
                                 with txl.If(k < umma_num_k_blocks), txl.Then():
                                     txl.cuda.mbarrier_wait(
@@ -905,7 +918,9 @@ def make_kernel(
                                                     txl.uint32(0),
                                                     txl.uint32(0),
                                                     txl.uint32(0),
-                                                    txl.Or(ki != 0, txl.Cast("bool", qk_accumulate)),
+                                                    txl.Or(
+                                                        ki != 0, txl.Cast("bool", qk_accumulate)
+                                                    ),
                                                 )
                                     txl.assign(qk_accumulate, txl.uint32(1))
                                     txl.ptx[
@@ -940,7 +955,9 @@ def make_kernel(
                                     txl.ptx["tcgen05.fence::after_thread_sync"]()
                                     o_accumulate = txl.local_scalar(
                                         "uint32",
-                                        init=txl.if_then_else(prev_k == 0, txl.uint32(0), txl.uint32(1)),
+                                        init=txl.if_then_else(
+                                            prev_k == 0, txl.uint32(0), txl.uint32(1)
+                                        ),
                                     )
                                     # The two PV MMA issues differ only in the N-half they accumulate
                                     # into and the matching 8KB descB offset.
@@ -999,7 +1016,9 @@ def make_kernel(
                                                         txl.uint32(0),
                                                         txl.uint32(0),
                                                         txl.uint32(0),
-                                                        txl.Or(ki != 0, txl.Cast("bool", o_accumulate)),
+                                                        txl.Or(
+                                                            ki != 0, txl.Cast("bool", o_accumulate)
+                                                        ),
                                                     )
                                     txl.assign(o_accumulate, txl.uint32(1))
                                     txl.ptx[
@@ -1048,7 +1067,7 @@ def make_kernel(
                                     valid_g_indices_base = valid_s_q_idx * stride_indices_s_q
                                     with txl.serial(valid_num_k_blocks, unroll=False) as k:
                                         row_base = valid_g_indices_base + k * 64 + lane_idx * 8
-                                        buffer_13 = txl.decl_buffer(
+                                        buffer_13 = txl.decl_tensor(
                                             (8,), "int32", data=lane_indices.data, scope="local"
                                         )
                                         buffer_14 = buffer_13.view("uint32")
@@ -1105,7 +1124,9 @@ def make_kernel(
                         with txl.Else():
                             with txl.If(role >= 2), txl.Then():
                                 clc_token = txl.alloc_local((1,), "uint32")
-                                txl.assign(clc_token[0], txl.cuda.iket.sentinel_token("h128-small-clc"))
+                                txl.assign(
+                                    clc_token[0], txl.cuda.iket.sentinel_token("h128-small-clc")
+                                )
                                 with txl.If(role == 2), txl.Then():
                                     txl.assign(
                                         clc_token[0], txl.cuda.iket.range_start("h128-small-clc")
@@ -1129,7 +1150,9 @@ def make_kernel(
                 with txl.If(have_topk_length), txl.Then():
                     txl.ptx.ld.global_.s32(wg3_topk_len, topk_length.ptr_to([wg3_s_q_idx]))
                 wg3_num_k_blocks = txl.max((wg3_topk_len + 64 - 1) // 64, 1)
-                mi = txl.local_scalar("float32", init=txl.float32(-1000000000000000019884624838656.0))
+                mi = txl.local_scalar(
+                    "float32", init=txl.float32(-1000000000000000019884624838656.0)
+                )
                 li = txl.local_scalar("float32", init=txl.float32(0.0))
                 real_mi = txl.local_scalar("float32", init=txl.float32("-inf"))
                 scale_pair = txl.local_scalar(
@@ -1179,7 +1202,7 @@ def make_kernel(
                     )
                     txl.ptx["mbarrier.arrive.shared::cluster.b64"](buffer_17)
                     valid_word_offset = txl.if_then_else(local_warp_idx >= 2, 1, 0)
-                    buffer_18 = txl.decl_buffer(
+                    buffer_18 = txl.decl_tensor(
                         (4, 2),
                         "uint32",
                         data=is_k_valid.data,
@@ -1243,7 +1266,8 @@ def make_kernel(
                             p[exchange_i * 4], txl.cuda.float_as_uint(txl.cuda.float2_x(sum_pair0))
                         )
                         txl.ptx.mov.b32(
-                            p[exchange_i * 4 + 1], txl.cuda.float_as_uint(txl.cuda.float2_y(sum_pair0))
+                            p[exchange_i * 4 + 1],
+                            txl.cuda.float_as_uint(txl.cuda.float2_y(sum_pair0)),
                         )
                         p_pair1 = txl.cuda.make_float2(
                             txl.cuda.uint_as_float(p[exchange_i * 4 + 2]),
@@ -1255,10 +1279,12 @@ def make_kernel(
                         )
                         txl.ptx["add.rn.f32x2"](sum_pair1, p_pair1, peer_pair1)
                         txl.ptx.mov.b32(
-                            p[exchange_i * 4 + 2], txl.cuda.float_as_uint(txl.cuda.float2_x(sum_pair1))
+                            p[exchange_i * 4 + 2],
+                            txl.cuda.float_as_uint(txl.cuda.float2_x(sum_pair1)),
                         )
                         txl.ptx.mov.b32(
-                            p[exchange_i * 4 + 3], txl.cuda.float_as_uint(txl.cuda.float2_y(sum_pair1))
+                            p[exchange_i * 4 + 3],
+                            txl.cuda.float_as_uint(txl.cuda.float2_y(sum_pair1)),
                         )
                     cur_pi_max = txl.local_scalar("float32", init=txl.float32("-inf"))
                     with txl.unroll(32) as p_i:
@@ -1302,7 +1328,8 @@ def make_kernel(
                     fma_pair = txl.local_scalar("uint64")
                     with txl.unroll(16) as s_i:
                         p_pair = txl.cuda.make_float2(
-                            txl.cuda.uint_as_float(p[s_i * 2]), txl.cuda.uint_as_float(p[s_i * 2 + 1])
+                            txl.cuda.uint_as_float(p[s_i * 2]),
+                            txl.cuda.uint_as_float(p[s_i * 2 + 1]),
                         )
                         txl.ptx["fma.rn.f32x2"](fma_pair, p_pair, scale_pair, neg_new_max_pair)
                         s_x = txl.local_scalar("float32")
@@ -1327,7 +1354,9 @@ def make_kernel(
                         ds: txl.int32 = f % 4 * 512
                         dr: txl.int32 = f % 4 * 8
                         s_ptr = txl.ptr_byte_offset(
-                            txl.address_of(s_smem_gemm[0, 0]), (s_base + ds) * BF16_BYTES, "bfloat16"
+                            txl.address_of(s_smem_gemm[0, 0]),
+                            (s_base + ds) * BF16_BYTES,
+                            "bfloat16",
                         )
                         r_w: txl.int32 = dr // 2
                         txl.ptx["st.shared.v4.u32"](
@@ -1337,7 +1366,10 @@ def make_kernel(
                             r_words[r_w + 2],
                             r_words[r_w + 3],
                         )
-                    with txl.If(txl.bitwise_and(k > 0, should_scale_o != txl.uint32(0))), txl.Then():
+                    with (
+                        txl.If(txl.bitwise_and(k > 0, should_scale_o != txl.uint32(0))),
+                        txl.Then(),
+                    ):
                         txl.ptx["tcgen05.fence::after_thread_sync"]()
                         o_rescale = txl.alloc_local((32,), "float32")
                         with txl.unroll(8) as chunk_idx:
@@ -1403,13 +1435,18 @@ def make_kernel(
                         txl.if_then_else(li == txl.float32(0.0), txl.float32(0.0), output_scale),
                     )
                     txl.ptx["mbarrier.arrive.shared.b64"](
-                        txl.cuda.cvta_generic_to_shared(txl.address_of(li_full.buf[0])), txl.uint32(1)
+                        txl.cuda.cvta_generic_to_shared(txl.address_of(li_full.buf[0])),
+                        txl.uint32(1),
                     )
                     cur_lse = txl.local_scalar("float32")
-                    txl.ptx["fma.rn.f32"](cur_lse, mi, txl.float32(0.69314718055994529), txl.log(li))
+                    txl.ptx["fma.rn.f32"](
+                        cur_lse, mi, txl.float32(0.69314718055994529), txl.log(li)
+                    )
                     txl.assign(
                         cur_lse,
-                        txl.if_then_else(cur_lse == txl.float32("-inf"), txl.float32("inf"), cur_lse),
+                        txl.if_then_else(
+                            cur_lse == txl.float32("-inf"), txl.float32("inf"), cur_lse
+                        ),
                     )
                     txl.ptx.st.global_.f32(
                         max_logits.ptr_to([wg3_s_q_idx, head_idx]),

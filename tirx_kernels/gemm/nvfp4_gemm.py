@@ -577,7 +577,9 @@ def make_kernel(M, N, KDIM):
                             txl.int32(0),
                             txl.Cast("int32", sf_k // 4),
                             txl.Cast("int32", sf_n // 128),
-                            txl.cuda.cvta_generic_to_shared(txl.reinterpret("handle", mapped_sfb_bar)),
+                            txl.cuda.cvta_generic_to_shared(
+                                txl.reinterpret("handle", mapped_sfb_bar)
+                            ),
                             txl.Cast("uint16", pair_mask),
                             txl.uint64(_EVICT_NORMAL_L2_POLICY),
                         )
@@ -674,8 +676,6 @@ def make_kernel(M, N, KDIM):
                         b_dtype="float4_e2m1fn",
                         sfa_dtype="float8_e4m3fn",
                         sfb_dtype="float8_e4m3fn",
-                        sfa_tmem_addr=sfa_tmem_col,
-                        sfb_tmem_addr=sfb_tmem_col,
                         M=CTA_M * CTA_GROUP,
                         N=MMA_N,
                         K=MMA_K,

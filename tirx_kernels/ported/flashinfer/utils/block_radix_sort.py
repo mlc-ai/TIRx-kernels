@@ -171,7 +171,7 @@ def alloc_sort_smem_static(block_threads, items_per_thread):
     assert exchange_elements(block_threads, items_per_thread) <= words, (
         "exchange must fit inside the rank grid for the union to hold"
     )
-    counters32 = txl.alloc_buffer((words,), "uint32", scope="shared")
+    counters32 = txl.alloc_tensor((words,), "uint32", scope="shared")
     counters16 = counters32.view("uint16")
     # Both exchange buffers alias the rank grid, exactly as cub's inner union
     # does: a barrier separates the rank phase from each scatter, and the ranks
@@ -181,7 +181,7 @@ def alloc_sort_smem_static(block_threads, items_per_thread):
     # The block-scan scratch sits outside that union, as in cub -- a separate
     # `__shared__` array rather than an offset view, so its indices stay
     # zero-based for the emitters.
-    scan = txl.alloc_buffer((scan_words(block_threads),), "uint32", scope="shared")
+    scan = txl.alloc_tensor((scan_words(block_threads),), "uint32", scope="shared")
     return counters32, counters16, xchg_keys, xchg_values, scan
 
 
@@ -240,8 +240,12 @@ def _scan_warp_inclusive(out, incl, tx, value):
     lane = txl.local_scalar("int32", init=tx % WARP_THREADS)
     txl.assign(incl[0], value)
     with txl.unroll(5) as step:
-        peer = txl.local_scalar("uint32", init=shfl_up_u32(incl[0], txl.shift_left(txl.int32(1), step)))
-        txl.assign(incl[0], txl.Select(lane >= txl.shift_left(txl.int32(1), step), incl[0] + peer, incl[0]))
+        peer = txl.local_scalar(
+            "uint32", init=shfl_up_u32(incl[0], txl.shift_left(txl.int32(1), step))
+        )
+        txl.assign(
+            incl[0], txl.Select(lane >= txl.shift_left(txl.int32(1), step), incl[0] + peer, incl[0])
+        )
     txl.assign(out[0], incl[0] - value)
 
 
@@ -448,7 +452,9 @@ def emit_rank_keys(
     with txl.unroll(items_per_thread) as i:
         txl.assign(
             ranks[i],
-            txl.cast(prefixes[i] + txl.cast(ld_shared_u16(counters16, slots[i]), "uint32"), "int32"),
+            txl.cast(
+                prefixes[i] + txl.cast(ld_shared_u16(counters16, slots[i]), "uint32"), "int32"
+            ),
         )
 
 

@@ -548,7 +548,9 @@ def get_kernel(**kwargs: Any):
             (num_q_stages, next_n_atom * num_heads, head_dim // 2), txl.u8, align=smem_alignment
         )
         smem_kv = smem.alloc(
-            (num_math_warpgroups, num_kv_stages, umma_m, head_dim // 2), txl.u8, align=smem_alignment
+            (num_math_warpgroups, num_kv_stages, umma_m, head_dim // 2),
+            txl.u8,
+            align=smem_alignment,
         )
         smem_sf_q = smem.alloc((num_math_warpgroups, num_q_stages, num_sfq_atom), txl.u32, align=16)
         smem_sf_kv = smem.alloc((num_math_warpgroups, num_kv_stages, num_sfkv), txl.u32, align=16)
@@ -648,7 +650,9 @@ def get_kernel(**kwargs: Any):
                     txl.uint32(0x3FFF),
                 ),
             )
-            return txl.bitwise_or(txl.bitwise_and(desc, txl.bitwise_not(txl.uint64(0x3FFF))), start_addr)
+            return txl.bitwise_or(
+                txl.bitwise_and(desc, txl.bitwise_not(txl.uint64(0x3FFF))), start_addr
+            )
 
         def make_runtime_instr_desc_with_sf_id(desc, sfa_id, sfb_id):
             runtime_desc = txl.bitwise_and(desc, txl.uint32(0x9FFFFFCF))
@@ -682,7 +686,8 @@ def get_kernel(**kwargs: Any):
                 i_u32 = local("uint32", txl.uint32(i))
                 col = local(
                     "uint32",
-                    txl.bitwise_xor(i_u32[0], txl.shift_right(lane_idx_u32, txl.uint32(3))) * txl.uint32(32)
+                    txl.bitwise_xor(i_u32[0], txl.shift_right(lane_idx_u32, txl.uint32(3)))
+                    * txl.uint32(32)
                     + lane_idx_u32,
                 )
                 txl.ptx.ld.shared.u32(
@@ -711,7 +716,9 @@ def get_kernel(**kwargs: Any):
                 with txl.If(q_atom_idx_arg + txl.uint32(1) < runtime_batch_size_arg), txl.Then():
                     index_0 = txl.local_scalar("int32")
                     index_1 = txl.local_scalar("int32")
-                    txl.ptx.ld.global_.s32(index_0, indices.ptr_to([txl.Cast("int32", q_atom_idx_arg)]))
+                    txl.ptx.ld.global_.s32(
+                        index_0, indices.ptr_to([txl.Cast("int32", q_atom_idx_arg)])
+                    )
                     txl.ptx.ld.global_.s32(
                         index_1, indices.ptr_to([txl.Cast("int32", q_atom_idx_arg + txl.uint32(1))])
                     )
@@ -721,7 +728,9 @@ def get_kernel(**kwargs: Any):
                 txl.ptx.ld.global_.u32(
                     context_len, context_lens_flat.ptr_to([txl.Cast("int32", context_idx[0])])
                 )
-                txl.assign(num_kv_result, (context_len + txl.uint32(umma_m - 1)) // txl.uint32(umma_m))
+                txl.assign(
+                    num_kv_result, (context_len + txl.uint32(umma_m - 1)) // txl.uint32(umma_m)
+                )
             else:
                 if num_next_n_atoms == 1:
                     q_idx = local("uint32", q_atom_idx_arg)
@@ -734,7 +743,9 @@ def get_kernel(**kwargs: Any):
                 txl.ptx.ld.global_.u32(
                     context_len, context_lens_flat.ptr_to([txl.Cast("int32", lens_idx[0])])
                 )
-                txl.assign(num_kv_result, (context_len + txl.uint32(umma_m - 1)) // txl.uint32(umma_m))
+                txl.assign(
+                    num_kv_result, (context_len + txl.uint32(umma_m - 1)) // txl.uint32(umma_m)
+                )
 
         def load_atom_advance(q_atom_idx_arg, bound_arg):
             txl.assign(atom_advance_result, txl.uint32(1))
@@ -742,7 +753,9 @@ def get_kernel(**kwargs: Any):
                 with txl.If(q_atom_idx_arg + txl.uint32(1) < bound_arg), txl.Then():
                     index_0 = txl.local_scalar("int32")
                     index_1 = txl.local_scalar("int32")
-                    txl.ptx.ld.global_.s32(index_0, indices.ptr_to([txl.Cast("int32", q_atom_idx_arg)]))
+                    txl.ptx.ld.global_.s32(
+                        index_0, indices.ptr_to([txl.Cast("int32", q_atom_idx_arg)])
+                    )
                     txl.ptx.ld.global_.s32(
                         index_1, indices.ptr_to([txl.Cast("int32", q_atom_idx_arg + txl.uint32(1))])
                     )
@@ -760,7 +773,9 @@ def get_kernel(**kwargs: Any):
                 with txl.Then():
                     txl.ptx.mov.b32(scheduler_result[3], txl.uint32(0))
                 with txl.Else():
-                    txl.ptx.mov.b32(scheduler_result[5], cur_kv_idx + txl.uint32(num_tiles_per_split))
+                    txl.ptx.mov.b32(
+                        scheduler_result[5], cur_kv_idx + txl.uint32(num_tiles_per_split)
+                    )
                     with txl.If(scheduler_result[5] >= cur_num_kv), txl.Then():
                         txl.ptx.mov.b32(scheduler_result[5], txl.uint32(0))
                         load_atom_advance(cur_q_atom, end_q_atom)
@@ -826,9 +841,9 @@ def get_kernel(**kwargs: Any):
         # Early schedule-metadata load: issue the global loads before the
         # pipeline/barrier prologue so the ~200-cycle L2 latency overlaps setup.
         # The original match_buffers schedule_meta as int32 and reads it through
-        # a uint32 decl_buffer view; its generated CUDA carries the
+        # a uint32 decl_tensor view; its generated CUDA carries the
         # `((uint*)schedule_meta_ptr)` cast. Same view here, over the flat gptr.
-        schedule_meta_u32_flat = txl.decl_buffer(
+        schedule_meta_u32_flat = txl.decl_tensor(
             ((config.num_sms + 1) * 2,),
             "uint32",
             data=schedule_meta_flat.data,
@@ -893,7 +908,9 @@ def get_kernel(**kwargs: Any):
         with txl.If(warp_idx_presync == tma_warp_0), txl.Then():
             with txl.If(txl.cuda.elect_sync()), txl.Then():
                 for init_i in range(num_q_stages):
-                    txl.ptx.mbarrier.init.shared.b64(full_q_barriers.ptr_to([init_i]), txl.uint32(1))
+                    txl.ptx.mbarrier.init.shared.b64(
+                        full_q_barriers.ptr_to([init_i]), txl.uint32(1)
+                    )
                     txl.ptx.mbarrier.init.shared.b64(
                         empty_q_barriers.ptr_to([init_i]), txl.uint32(num_math_threads)
                     )
@@ -901,8 +918,12 @@ def get_kernel(**kwargs: Any):
         with txl.If(warp_idx_presync == tma_warp_1), txl.Then():
             with txl.If(txl.cuda.elect_sync()), txl.Then():
                 for init_i in range(num_kv_stages):
-                    txl.ptx.mbarrier.init.shared.b64(full_kv_barriers.ptr_to([init_i]), txl.uint32(1))
-                    txl.ptx.mbarrier.init.shared.b64(empty_kv_barriers.ptr_to([init_i]), txl.uint32(1))
+                    txl.ptx.mbarrier.init.shared.b64(
+                        full_kv_barriers.ptr_to([init_i]), txl.uint32(1)
+                    )
+                    txl.ptx.mbarrier.init.shared.b64(
+                        empty_kv_barriers.ptr_to([init_i]), txl.uint32(1)
+                    )
                 txl.ptx.fence.mbarrier_init.release.cluster()
         with txl.If(warp_idx_presync == umma_warp_0), txl.Then():
             with txl.If(txl.cuda.elect_sync()), txl.Then():
@@ -917,7 +938,9 @@ def get_kernel(**kwargs: Any):
         with txl.If(warp_idx_presync == umma_warp_0 + 1), txl.Then():
             with txl.If(txl.cuda.elect_sync()), txl.Then():
                 for init_i in range(num_tmem_barriers):
-                    txl.ptx.mbarrier.init.shared.b64(full_tmem_barriers.ptr_to([init_i]), txl.uint32(1))
+                    txl.ptx.mbarrier.init.shared.b64(
+                        full_tmem_barriers.ptr_to([init_i]), txl.uint32(1)
+                    )
                     txl.ptx.mbarrier.init.shared.b64(
                         empty_tmem_barriers.ptr_to([init_i]), txl.uint32(128)
                     )
@@ -1026,7 +1049,8 @@ def get_kernel(**kwargs: Any):
                     with txl.If(
                         txl.And(
                             prefetch_tile_idx[0] < state["num_kv"][0],
-                            prefetch_tile_idx[0] * txl.uint32(num_pages_per_tile) + txl.uint32(block_i)
+                            prefetch_tile_idx[0] * txl.uint32(num_pages_per_tile)
+                            + txl.uint32(block_i)
                             < txl.uint32(config.max_num_pages),
                         )
                     ):
@@ -1161,8 +1185,6 @@ def get_kernel(**kwargs: Any):
                 b_dtype="float4_e2m1fn",
                 sfa_dtype="float8_e8m0fnu",
                 sfb_dtype="float8_e8m0fnu",
-                sfa_tmem_addr=0,
-                sfb_tmem_addr=0,
                 M=umma_m,
                 N=umma_n,
                 K=umma_k,
@@ -1280,7 +1302,8 @@ def get_kernel(**kwargs: Any):
                             txl.uint32(k),
                             runtime_desc_i[0],
                             txl.uint32(sfkv_tmem_col) + umma_group_idx * txl.uint32(num_sfkv // 32),
-                            txl.uint32(sfq_tmem_col) + umma_group_idx * txl.uint32(num_sfq_atom // 32),
+                            txl.uint32(sfq_tmem_col)
+                            + umma_group_idx * txl.uint32(num_sfq_atom // 32),
                         )
                 with txl.If(txl.cuda.elect_sync()), txl.Then():
                     full_tmem_barriers.arrive(

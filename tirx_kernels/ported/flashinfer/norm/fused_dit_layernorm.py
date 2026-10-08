@@ -167,7 +167,9 @@ def _rsqrt_accurate(value, result):
             result_bits = txl.alloc_local((1,), "int32")
             txl.ptx.shr.s32(half_adjust[0], exponent_adjust[0], txl.uint32(1))
             txl.ptx.add.s32(result_bits[0], half_adjust[0], txl.reinterpret("int32", refined))
-            txl.assign(result[0], txl.reinterpret("float32", txl.reinterpret("uint32", result_bits[0])))
+            txl.assign(
+                result[0], txl.reinterpret("float32", txl.reinterpret("uint32", result_bits[0]))
+            )
         with txl.Else():
             txl.ptx.rsqrt.approx.ftz.f32(result[0], value)
 
@@ -201,7 +203,9 @@ def _max_bf16x2(lhs, rhs):
 
 def _shfl_xor_u32(value, lane_xor: int):
     out = txl.alloc_local((1,), "uint32")
-    txl.ptx.shfl_sync.bfly.b32(out[0], value, txl.uint32(lane_xor), txl.uint32(31), txl.uint32(_FULL_MASK))
+    txl.ptx.shfl_sync.bfly.b32(
+        out[0], value, txl.uint32(lane_xor), txl.uint32(31), txl.uint32(_FULL_MASK)
+    )
     return out[0]
 
 
@@ -252,7 +256,8 @@ def _sf_offset(batch, row, col, runtime_num_rows, num_k_tiles: int):
         + txl.truncdiv(txl.cast(row, "int64"), txl.int64(128)) * txl.int64(num_k_tiles * 512)
         + txl.truncdiv(txl.cast(col, "int64"), txl.int64(4)) * txl.int64(512)
         + txl.truncmod(txl.cast(row, "int64"), txl.int64(32)) * txl.int64(16)
-        + txl.truncdiv(txl.truncmod(txl.cast(row, "int64"), txl.int64(128)), txl.int64(32)) * txl.int64(4)
+        + txl.truncdiv(txl.truncmod(txl.cast(row, "int64"), txl.int64(128)), txl.int64(32))
+        * txl.int64(4)
         + txl.truncmod(txl.cast(col, "int64"), txl.int64(4))
     )
 
@@ -284,9 +289,9 @@ def _store_nvfp4(
 
     scaled = _widen_and_scale_bf16x8(output_words, output_scale)
     packed: txl.uint32 = cvt_e2m1x8([scaled[value] for value in range(8)])
-    global_row: txl.int64 = txl.cast(batch, "int64") * txl.cast(runtime_num_rows, "int64") + txl.cast(
-        row, "int64"
-    )
+    global_row: txl.int64 = txl.cast(batch, "int64") * txl.cast(
+        runtime_num_rows, "int64"
+    ) + txl.cast(row, "int64")
     txl.ptx.st.b32(norm_output.ptr_to([global_row * txl.int64(384) + tid]), packed)
 
 
@@ -324,9 +329,9 @@ def _store_mxfp8(output_words, norm_output, sf_output, batch, row, tid, runtime_
     txl.ptx.or_.b64(packed[0], packed[0], shifted[1])
     txl.ptx.shl.b64(shifted[2], wide[3], txl.uint32(48))
     txl.ptx.or_.b64(packed[0], packed[0], shifted[2])
-    global_row: txl.int64 = txl.cast(batch, "int64") * txl.cast(runtime_num_rows, "int64") + txl.cast(
-        row, "int64"
-    )
+    global_row: txl.int64 = txl.cast(batch, "int64") * txl.cast(
+        runtime_num_rows, "int64"
+    ) + txl.cast(row, "int64")
     txl.ptx.st.b64(
         norm_output.ptr_to([global_row * txl.int64(768) + txl.cast(tid * 2, "int64")]), packed[0]
     )
@@ -536,9 +541,9 @@ def get_kernel(
         lane: txl.int32 = tid % 32
         warp: txl.int32 = tid // 32
 
-        reduce_store = txl.alloc_buffer((120,), "uint8", scope="shared", align=8)
-        shared_mean = txl.alloc_buffer((8,), "uint8", scope="shared", align=8)
-        shared_inv_std = txl.alloc_buffer((8,), "uint8", scope="shared", align=8)
+        reduce_store = txl.alloc_tensor((120,), "uint8", scope="shared", align=8)
+        shared_mean = txl.alloc_tensor((8,), "uint8", scope="shared", align=8)
+        shared_inv_std = txl.alloc_tensor((8,), "uint8", scope="shared", align=8)
 
         if use_input_sf_scale:
             input_scale: txl.float32 = _load_global_f32(input_sf_scale_buffer, txl.int64(0))
@@ -558,7 +563,9 @@ def get_kernel(
             global_row: txl.int64 = txl.cast(batch_id, "int64") * txl.cast(
                 runtime_num_rows, "int64"
             ) + txl.cast(row, "int64")
-            dense_index: txl.int64 = global_row * txl.int64(_HIDDEN_SIZE) + txl.cast(tid * 8, "int64")
+            dense_index: txl.int64 = global_row * txl.int64(_HIDDEN_SIZE) + txl.cast(
+                tid * 8, "int64"
+            )
             auxiliary_index: txl.int64 = global_row * txl.int64(_AUXILIARY_STRIDE) + txl.cast(
                 tid * 8, "int64"
             )
