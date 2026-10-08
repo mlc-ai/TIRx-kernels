@@ -15,14 +15,14 @@ import os
 import sys
 import sysconfig
 import threading
-from functools import cache, partial
+from functools import cache
 from pathlib import Path
 from types import MappingProxyType
 
 import tvm
 from tvm.ir import SourceName, Span
 from tvm.script.ir_builder import IRBuilder
-from tvm.tirx.script.builder import ir as I
+from tvm.tirx.script import ir_builder as I
 
 # Registers the hardware hands the entry when ptxas pins the allocation with
 # __launch_bounds__(nthreads, min_blocks_per_sm). setmaxnreg's direction is
@@ -317,7 +317,7 @@ class Session:
 
 
 class Kernel:
-    """The traced kernel: a ``PrimFunc`` plus the launch metadata."""
+    """The traced kernel: a ``Function`` plus the launch metadata."""
 
     def __init__(self, func, session):
         self.func = func
@@ -397,7 +397,7 @@ def _derived_gptr_shape(name, ann, scalar_params):
 
 
 def _declare_param(name, ann, scalar_params):
-    """Turn one annotation into a PrimFunc parameter."""
+    """Turn one annotation into a Function parameter."""
     if isinstance(ann, gptr):
         if ann.shape_factory is not None:
             shape = _derived_gptr_shape(name, ann, scalar_params)
@@ -405,26 +405,16 @@ def _declare_param(name, ann, scalar_params):
             # Symbolic dimensions stay parameter-local unless the annotation
             # explicitly owns a scalar-derived shape contract.
             shape = ann.shape or [tvm.tirx.Var(f"{name}_dim{i}", "int64") for i in range(ann.ndim)]
-        return I.arg(name, I.buffer(shape, ann.dtype))
+        return I.arg_(name, I.Tensor(shape, ann.dtype))
     if ann is TensorMap or isinstance(ann, TensorMap):
-        return I.arg(name, I.TensorMap())
+        return I.arg_(name, I.TensorMap())
     if isinstance(ann, str):
-        return I.arg(name, scalar_params[name])
+        return I.arg_(name, scalar_params[name])
     raise TypeError(
         f"parameter {name!r} has annotation {ann!r}; expected txl.gptr[dtype], "
         "txl.gptr[dtype, ndim], txl.gptr[dtype, shape], "
         "txl.TensorMap, or a dtype token such as txl.i32"
     )
-
-
-def _flat_frame(frame):
-    """Open *frame* so it wraps the rest of the body without a ``with`` block.
-
-    ``T.attr`` returns a frame the parser would have entered from an
-    expression statement; a traced body has to do it by hand.
-    """
-    frame.add_callback(partial(frame.__exit__, None, None, None))
-    frame.__enter__()
 
 
 def _resolve_grid(grid, params):
@@ -527,7 +517,7 @@ def kernel(
         original kernel's dimensions directly with ``txl.cta_id(extents)``.
         This is an ownership opt-out, not a second grid representation in txl.
     host_prelude : callable, optional
-        Emit host-only setup in the same traced PrimFunc before its device
+        Emit host-only setup in the same traced Function before its device
         entry.  The callable receives the ABI parameter mapping and returns
         the trace-time value passed to the decorated function's required
         keyword-only ``host`` parameter.  This is for real host/device
@@ -547,9 +537,9 @@ def kernel(
         prev = getattr(_TLS, "session", None)
         function_span = _callable_span(fn)
         with IRBuilder() as ib:
-            with I.prim_func():
-                I.func_name(fn.__name__)
-                # Keep the authored/default target on the PrimFunc itself.
+            with I.function_():
+                I.func_name_(fn.__name__)
+                # Keep the authored/default target on the Function itself.
                 # Consumers such as NumSim receive ``Kernel.func`` rather than
                 # the wrapper, so ``Kernel.arch`` alone loses an ISA fact that
                 # affects SM100 versus SM107 descriptor decoding.
@@ -569,40 +559,40 @@ def kernel(
                     session.params[pname] = value
                     args.append(value)
                 host = host_prelude(session.params) if host_prelude is not None else None
-                I.device_entry()
-                # Omitted entirely when None: the codegen writes the second
-                # __launch_bounds__ operand iff this attribute is present.
-                if min_blocks_per_sm is not None:
-                    _flat_frame(I.attr({"tirx.launch_bounds_min_blocks_per_sm": min_blocks_per_sm}))
-                # txl binds the CTA scope only when requested. Otherwise the body
-                # declares the original kernel's scope directly; the warp/thread
-                # siblings below remain available to infer deferred ids used by
-                # user closures.
-                if grid is not False:
-                    session.cta_id = I.cta_id(_resolve_grid_dimensions(grid, session.params))
-                # tirx-lite owns one flat CTA-local thread axis. A per-entry layout
-                # switch would let kernels silently change the launch ABI (or
-                # leave thread scope to a second builder owner), so it is not
-                # part of the kernel DSL contract.
-                session.warp_scope_id = I.warp_id([warps])
-                session.lane_id = I.lane_id([32])
-                session.thread_id = I.thread_id([session.nthreads])
-                _TLS.session = session
-                try:
-                    with _SourceSpanTracer(ib):
-                        if host_prelude is None:
-                            fn(*args)
-                        else:
-                            fn(*args, host=host)
-                    if session.specialize is not None:
-                        session.specialize.finalize()
-                    if session.pool is not None:
-                        session.pool.commit()
-                finally:
-                    _TLS.session = prev
+                with I.device_entry():
+                    # Omitted entirely when None: the codegen writes the second
+                    # __launch_bounds__ operand iff this attribute is present.
+                    if min_blocks_per_sm is not None:
+                        I.evaluate(I.cuda.launch_bounds_min_blocks_per_sm(min_blocks_per_sm))
+                    # txl binds the CTA scope only when requested. Otherwise the body
+                    # declares the original kernel's scope directly; the warp/thread
+                    # siblings below remain available to infer deferred ids used by
+                    # user closures.
+                    if grid is not False:
+                        session.cta_id = I.cta_id(_resolve_grid_dimensions(grid, session.params))
+                    # tirx-lite owns one flat CTA-local thread axis. A per-entry layout
+                    # switch would let kernels silently change the launch ABI (or
+                    # leave thread scope to a second builder owner), so it is not
+                    # part of the kernel DSL contract.
+                    session.warp_scope_id = I.warp_id([warps])
+                    session.lane_id = I.lane_id([32])
+                    session.thread_id = I.thread_id([session.nthreads])
+                    _TLS.session = session
+                    try:
+                        with _SourceSpanTracer(ib):
+                            if host_prelude is None:
+                                fn(*args)
+                            else:
+                                fn(*args, host=host)
+                        if session.specialize is not None:
+                            session.specialize.finalize()
+                        if session.pool is not None:
+                            session.pool.commit()
+                    finally:
+                        _TLS.session = prev
         func = ib.get()
         if function_span is not None:
-            # PrimFuncFrame intentionally constructs the function with an
+            # FunctionFrame intentionally constructs the function with an
             # undefined span.  Preserve its generated body and attributes while
             # giving the function itself the kernel declaration's location.
             func = func.with_body(func.body, span=function_span)

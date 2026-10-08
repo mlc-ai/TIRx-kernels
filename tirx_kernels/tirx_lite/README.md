@@ -16,7 +16,7 @@ def zero(out: txl.gptr(txl.f32)):
 
 `@txl.kernel` returns a `txl.Kernel`. Its principal views are:
 
-- `zero.func`: the pre-lowering TIRx `PrimFunc` used by analysis tools and
+- `zero.func`: the pre-lowering TIRx `Function` used by analysis tools and
   package runners;
 - `zero.mod`: an `IRModule` containing that function;
 - `zero.compile()`: a runnable module compiled through the TIRx pipeline.
@@ -26,6 +26,10 @@ def zero(out: txl.gptr(txl.f32)):
 - Kernel entries use `@txl.kernel`; parser entry points and raw TIRx builder
   forwarding are not part of the author-facing API.
 - `txl.gptr`, `txl.TensorMap`, and scalar dtype annotations define the entry ABI.
+- Ordinary tensors use `txl.alloc_tensor(...)` and `txl.decl_tensor(...)` with
+  the default layout. `txl.alloc_local(...)` is the shorthand for
+  `txl.alloc_tensor(..., scope="local")`; writable scalars use `txl.local_scalar`.
+  Tensor memory uses raw columns and PTX operations rather than `scope="tmem"`.
 - `txl.cta_id`, `txl.warp_id`, `txl.lane_id`, and `txl.thread_id` are the entry-owned
   coordinates. `txl.specialize()` defines named warp roles when the schedule is
   warp-specialized.
@@ -37,7 +41,7 @@ def zero(out: txl.gptr(txl.f32)):
   explicitly owns a named runtime-call exception.
 - Statements and instruction calls traced from file-backed Python code carry
   TIRx source spans pointing to the kernel or helper line that emitted them;
-  the resulting `PrimFunc` points to the `@txl.kernel` declaration.
+  the resulting `Function` points to the `@txl.kernel` declaration.
 
 You can learn tirx-lite APIs and complete implementation patterns from the canonical
 modules under `tirx_kernels/`. Do not copy API spellings from historical TIRx

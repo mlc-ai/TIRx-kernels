@@ -279,7 +279,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
         lane_in_warp = _local_scalar("int32", tid % 32)
         warp_raw = _local_scalar("int32", tid // 32)
 
-        state_vector = txl.decl_buffer(
+        state_vector = txl.decl_tensor(
             (state_slot_stride * txl.cast(batch * POOL_FACTOR, "int64") // ELEMS_PER_LANE,),
             "uint32x4",
             data=state.data,
@@ -421,7 +421,9 @@ def _make_gdn_decode_bf16_wide_vec_t1(
             softplus_value = _local_scalar("float32", _mul3)
             use_softplus = _local_scalar(
                 "float32",
-                txl.if_then_else(x_value[0] <= txl.float32(20.0), txl.float32(1.0), txl.float32(0.0)),
+                txl.if_then_else(
+                    x_value[0] <= txl.float32(20.0), txl.float32(1.0), txl.float32(0.0)
+                ),
             )
             _sub = txl.local_scalar("float32")
             txl.ptx["sub.f32"](_sub, txl.float32(1.0), use_softplus[0])

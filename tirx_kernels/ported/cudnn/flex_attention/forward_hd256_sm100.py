@@ -619,7 +619,7 @@ def _make_kernel(**config):
             with txl.If(warp == 4), txl.Then():
                 txl.ptx.prefetch.tensormap(txl.address_of(o_map))
 
-        arena = txl.alloc_buffer((smem_bytes,), txl.u8, scope="shared.dyn", align=1024)
+        arena = txl.alloc_tensor((smem_bytes,), txl.u8, scope="shared.dyn", align=1024)
         smem = txl.smem_pool(base=arena)
         pool = smem.pool
         q_full = txl.TMABar(pool, 2)
@@ -650,7 +650,7 @@ def _make_kernel(**config):
         if pool.offset != smem_bytes:
             raise AssertionError("shared arena size changed")
 
-        q_smem = txl.decl_buffer(
+        q_smem = txl.decl_tensor(
             (2 * q_stage_bytes // 2,),
             elem_dtype_name,
             data=arena.data,
@@ -658,7 +658,7 @@ def _make_kernel(**config):
             scope="shared.dyn",
             align=1024,
         )
-        k_smem = txl.decl_buffer(
+        k_smem = txl.decl_tensor(
             (2 * kv_stage_bytes // 2,),
             elem_dtype_name,
             data=arena.data,
@@ -666,7 +666,7 @@ def _make_kernel(**config):
             scope="shared.dyn",
             align=1024,
         )
-        v_smem = txl.decl_buffer(
+        v_smem = txl.decl_tensor(
             (2 * kv_stage_bytes // 2,),
             elem_dtype_name,
             data=arena.data,
@@ -674,11 +674,11 @@ def _make_kernel(**config):
             scope="shared.dyn",
             align=1024,
         )
-        sum_smem = txl.decl_buffer(
+        sum_smem = txl.decl_tensor(
             (128,), "float32", data=arena.data, byte_offset=sum_offset, scope="shared.dyn", align=16
         )
         if not varlen:
-            o_smem = txl.decl_buffer(
+            o_smem = txl.decl_tensor(
                 (128 * 256,),
                 elem_dtype_name,
                 data=arena.data,
@@ -1163,7 +1163,8 @@ def _make_kernel(**config):
                     if causal_dense_cta1:
                         with txl.unroll(128) as j:
                             txl.assign(
-                                score[j], txl.if_then_else(j <= tid128, score[j], txl.float32(_NEG_INF))
+                                score[j],
+                                txl.if_then_else(j <= tid128, score[j], txl.float32(_NEG_INF)),
                             )
                     elif causal_dense_plan:
                         with txl.If(step == cta_rank), txl.Then():
@@ -1183,11 +1184,14 @@ def _make_kernel(**config):
                         with txl.unroll(128) as j:
                             keep = (
                                 txl.bitwise_and(
-                                    txl.shift_right(words[j // 32], txl.uint32(j & 31)), txl.uint32(1)
+                                    txl.shift_right(words[j // 32], txl.uint32(j & 31)),
+                                    txl.uint32(1),
                                 )
                                 != 0
                             )
-                            txl.assign(score[j], txl.if_then_else(keep, score[j], txl.float32(_NEG_INF)))
+                            txl.assign(
+                                score[j], txl.if_then_else(keep, score[j], txl.float32(_NEG_INF))
+                            )
 
                 old_max = txl.local_scalar("float32", init=row_max)
                 if hkv == 1 and (causal_dense_plan or causal_dense_cta1):
@@ -1196,7 +1200,9 @@ def _make_kernel(**config):
                     txl.assign(row_max, _reduce_max_128(score, row_max))
                 safe_max = txl.local_scalar(
                     "float32",
-                    init=txl.if_then_else(row_max != txl.float32(_NEG_INF), row_max, txl.float32(0.0)),
+                    init=txl.if_then_else(
+                        row_max != txl.float32(_NEG_INF), row_max, txl.float32(0.0)
+                    ),
                 )
                 _wait(stats_empty, stats_stage, stats_phase)
                 stats_values = txl.alloc_local((2,), "float32")
@@ -1208,7 +1214,9 @@ def _make_kernel(**config):
                 advance2(stats_stage, stats_phase)
 
                 _wait(p_empty, p_stage, p_phase)
-                negative_max_scale = txl.local_scalar("float32", init=-safe_max * softmax_scale_log2)
+                negative_max_scale = txl.local_scalar(
+                    "float32", init=-safe_max * softmax_scale_log2
+                )
                 with txl.unroll(64) as pair:
                     base = pair * 2
                     _packed(
@@ -1543,28 +1551,28 @@ def _make_kernel(**config):
         host,
     ):
         if cta_group == 2:
-            with txl.attr({"tirx.required_block_size": 1}):
-                kernel_body(
-                    q,
-                    k,
-                    v,
-                    out,
-                    lse,
-                    cu_q,
-                    cu_k,
-                    sequence_desc,
-                    mask_block_cnt,
-                    mask_block_offset,
-                    mask_block_idx,
-                    full_block_cnt,
-                    full_block_offset,
-                    full_block_idx,
-                    mask_payload,
-                    fwd_work_desc,
-                    softmax_scale_log2,
-                    softmax_scale,
-                    host,
-                )
+            txl.cuda.required_block_size(384, 1, 1, cta_group, 1, 1)
+            kernel_body(
+                q,
+                k,
+                v,
+                out,
+                lse,
+                cu_q,
+                cu_k,
+                sequence_desc,
+                mask_block_cnt,
+                mask_block_offset,
+                mask_block_idx,
+                full_block_cnt,
+                full_block_offset,
+                full_block_idx,
+                mask_payload,
+                fwd_work_desc,
+                softmax_scale_log2,
+                softmax_scale,
+                host,
+            )
         else:
             kernel_body(
                 q,

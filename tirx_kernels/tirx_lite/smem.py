@@ -30,7 +30,7 @@ from tvm.backend.cuda.tile_primitive.layout_utils import strip_swizzle_to_tile
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
 from tvm.script import tirx as T
 from tvm.tirx.analysis import undefined_vars
-from tvm.tirx.script.builder import ir as _I
+from tvm.tirx.script import ir_builder as _I
 
 from . import entry as _entry
 
@@ -87,10 +87,8 @@ class SmemDescriptor:
         desc_lo = T.alloc_local((1,), "uint32")
         desc_hi = T.alloc_local((1,), "uint32")
         T.evaluate(T.ptx.mov.b64(desc_lo[0], desc_hi[0], self._buf[0]))
-        _I.buffer_store(
-            desc_lo,
-            T.cuda._shfl_sync(T.uint32(0xFFFFFFFF), desc_lo[0], T.uint32(0), T.uint32(32)),
-            [0],
+        _I.tensor_store(
+            desc_lo, T.tvm_warp_shuffle(T.uint32(0xFFFFFFFF), desc_lo[0], 0, 32, 32), [0]
         )
         T.evaluate(T.ptx.mov.b64(self._buf[0], desc_lo[0], desc_hi[0]))
 
@@ -165,7 +163,7 @@ def _lint_invariant_encode(stage):
     """
     try:
         from tvm.script.ir_builder import IRBuilder
-        from tvm.tirx.script.builder.frame import ForFrame
+        from tvm.tirx.script.ir_builder.frame import ForFrame
 
         builder = IRBuilder.current()
     except Exception:  # pylint: disable=broad-except

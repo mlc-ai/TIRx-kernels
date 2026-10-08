@@ -156,7 +156,9 @@ def _store_y_norm_16(y_norm, values, actual_row, block_start, H: int, input_dtyp
         txl.ptx.shl.b64(high64[0], high64[0], txl.uint32(32))
         txl.ptx.or_.b64(packed[0], high64[0], low64[0])
         offset: txl.int64 = (
-            txl.cast(actual_row, "int64") * txl.int64(H) + txl.cast(block_start, "int64") + group * 4
+            txl.cast(actual_row, "int64") * txl.int64(H)
+            + txl.cast(block_start, "int64")
+            + group * 4
         )
         _store_global_u64(txl.address_of(y_norm[offset]), packed[0])
 
@@ -1063,9 +1065,9 @@ def get_kernel(**config: Any):
                 absolute_col: txl.int32 = block_y * cols + local_col
                 col_valid: txl.bool = absolute_col < H
                 with txl.If(col_valid), txl.Then():
-                    residual_offset: txl.int64 = txl.cast(actual_row, "int64") * txl.int64(H) + txl.cast(
-                        absolute_col, "int64"
-                    )
+                    residual_offset: txl.int64 = txl.cast(actual_row, "int64") * txl.int64(
+                        H
+                    ) + txl.cast(absolute_col, "int64")
                     txl.ptx.st.global_.v4.b32(
                         residual.ptr_to([residual_offset]),
                         h_words[vb * 4],
@@ -1213,19 +1215,19 @@ def get_kernel(**config: Any):
         runtime_M: txl.i32,
         runtime_eps: txl.f32,
     ):
-        with txl.attr({"tirx.required_block_size": 1}):
-            kernel_body(
-                x,
-                residual,
-                weight,
-                y,
-                scales,
-                scales_unswizzled,
-                y_norm,
-                global_scale,
-                runtime_M,
-                runtime_eps,
-            )
+        txl.cuda.required_block_size(threads, 1, 1, 1, cluster_n, 1)
+        kernel_body(
+            x,
+            residual,
+            weight,
+            y,
+            scales,
+            scales_unswizzled,
+            y_norm,
+            global_scale,
+            runtime_M,
+            runtime_eps,
+        )
 
     launch_params = ["blockIdx.x"]
     if cluster_n > 1:

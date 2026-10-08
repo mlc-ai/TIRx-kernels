@@ -265,7 +265,9 @@ class _PersistentScheduler:
                                     )
                                     _load_grouped_layout(self.psum, self.grouped_layout, self.grp)
                                     txl.assign(self.cum, self.cum + self.nmb)
-                                    txl.assign(self.nmb, _uceil(self.psum - self.last, self.block_m))
+                                    txl.assign(
+                                        self.nmb, _uceil(self.psum - self.last, self.block_m)
+                                    )
             else:
                 if self.is_k_grouped:
                     with txl.While(done == 0):
@@ -691,7 +693,7 @@ def build_kernel(spec: GemmSpec):
         smem_cd_word_data = txl.reinterpret(
             PointerType(PrimType("uint32")), smem_cd.ptr_to([0, 0, 0])
         )
-        smem_cd_u32 = txl.decl_buffer(
+        smem_cd_u32 = txl.decl_tensor(
             (NUM_TMA_STORE_STAGES * cd_stage_bytes // 4,),
             "uint32",
             data=smem_cd_word_data,
@@ -734,9 +736,12 @@ def build_kernel(spec: GemmSpec):
                             with_sf_barriers.ptr_to([s]), txl.uint32(cta_group * 32)
                         )
                     with txl.unroll(0, NUM_EPILOGUE_STAGES) as e:
-                        txl.ptx.mbarrier.init.shared.b64(tmem_full_barriers.ptr_to([e]), txl.uint32(1))
                         txl.ptx.mbarrier.init.shared.b64(
-                            tmem_empty_barriers.ptr_to([e]), txl.uint32(cta_group * num_store_threads)
+                            tmem_full_barriers.ptr_to([e]), txl.uint32(1)
+                        )
+                        txl.ptx.mbarrier.init.shared.b64(
+                            tmem_empty_barriers.ptr_to([e]),
+                            txl.uint32(cta_group * num_store_threads),
                         )
                     txl.ptx.fence.mbarrier_init.release.cluster()
 
@@ -880,7 +885,9 @@ def build_kernel(spec: GemmSpec):
                                             if major_b_is_k:
                                                 txl.assign(n_idx, ld_sched.grp * eff_n + n_idx)
                                             else:
-                                                txl.assign(k_b_idx, (ld_sched.grp * eff_k + k_b_idx))
+                                                txl.assign(
+                                                    k_b_idx, (ld_sched.grp * eff_k + k_b_idx)
+                                                )
                                             sfb_k_offset = ld_sched.grp * shape_sfb_k
                                         else:
                                             if is_k_grouped:
@@ -1719,7 +1726,9 @@ def build_kernel(spec: GemmSpec):
                                                 packed[3],
                                             )
 
-                                    with txl.If(txl.And(w == num_m_waves - 1, st == num_stores - 1)):
+                                    with txl.If(
+                                        txl.And(w == num_m_waves - 1, st == num_stores - 1)
+                                    ):
                                         with txl.Then():
                                             txl.ptx.tcgen05.fence__before_thread_sync()
                                             rem_e = txl.local_scalar("uint64")

@@ -16,13 +16,13 @@ def _build_kernel_with_buffer_access(scope: str, access: str):
     @txl.kernel(warps=1, arch="sm_100a", grid=False, check_ir=True)
     def probe(global_buffer: txl.gptr("float32")):
         buffer = (
-            global_buffer if scope == "global" else txl.alloc_buffer([1], "float32", scope="shared")
+            global_buffer if scope == "global" else txl.alloc_tensor([1], "float32", scope="shared")
         )
         if access == "load":
             local = txl.alloc_local([1], "float32")
-            txl.buffer_store(local, buffer[0], [0])
+            txl.tensor_store(local, buffer[0], [0])
         elif access == "store":
-            txl.buffer_store(buffer, txl.float32(1), [0])
+            txl.tensor_store(buffer, txl.float32(1), [0])
         else:
             txl.keep_alive(txl.address_of(buffer[0]))
 
@@ -56,7 +56,7 @@ def test_forbidden_buffer_store_is_reported(scope):
     assert [
         (finding.kind, finding.node_type, finding.scope)
         for finding in error.value.report.violations
-    ] == [("buffer_store", "BufferStore", scope)]
+    ] == [("buffer_store", "TensorStore", scope)]
 
 
 @pytest.mark.parametrize("scope", ["global", "shared"])
@@ -84,8 +84,8 @@ def test_address_of_still_checks_memory_reads_in_its_index():
 
 
 def test_tile_primitive_is_rejected_before_lowering():
-    @T.prim_func
-    def probe(a: T.Buffer((32,), "float32"), b: T.Buffer((32,), "float32")):
+    @T.function
+    def probe(a: T.Tensor((32,), "float32"), b: T.Tensor((32,), "float32")):
         Tx.copy(b[:], a[:])
 
     with pytest.raises(LowLevelIRContractError) as error:

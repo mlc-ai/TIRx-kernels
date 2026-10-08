@@ -80,7 +80,7 @@ class WarpGroup:
             raise RuntimeError(f"warpgroup {self.name!r} cannot nest inside another role scope")
         warp_id = self.owner.session.warp_id()
         cond = tvm.tirx.all(self.first_warp <= warp_id, warp_id <= self.warps[-1])
-        self._frames = [T.If(cond), T.Then()]
+        self._frames = [T.if_(cond), T.then_()]
         self.owner.dispatch.append((self._frames[0].condition, self))
         for frame in self._frames:
             frame.__enter__()
@@ -144,7 +144,7 @@ class Role:
         )
         if self.when is not None:
             cond = tvm.tirx.all(cond, self.when)
-        self._frames = [T.If(cond), T.Then()]
+        self._frames = [T.if_(cond), T.then_()]
         # Remember the exact condition *node* the frame will build the
         # IfThenElse from, so the finished body can be rewritten into an
         # else-if chain (Specialize.chain_dispatch). Read back off the frame

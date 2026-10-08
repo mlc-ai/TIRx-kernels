@@ -133,7 +133,11 @@ def _fast_divmod(divisor):
 def _shfl_bfly_f32(value, lane_mask):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out, txl.reinterpret("uint32", value), txl.uint32(lane_mask), txl.uint32(31), txl.uint32(0xFFFFFFFF)
+        out,
+        txl.reinterpret("uint32", value),
+        txl.uint32(lane_mask),
+        txl.uint32(31),
+        txl.uint32(0xFFFFFFFF),
     )
     return txl.reinterpret("float32", out)
 
@@ -141,7 +145,11 @@ def _shfl_bfly_f32(value, lane_mask):
 def _shfl_bfly_i32(value, lane_mask):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out, txl.reinterpret("uint32", value), txl.uint32(lane_mask), txl.uint32(31), txl.uint32(0xFFFFFFFF)
+        out,
+        txl.reinterpret("uint32", value),
+        txl.uint32(lane_mask),
+        txl.uint32(31),
+        txl.uint32(0xFFFFFFFF),
     )
     return txl.reinterpret("int32", out)
 
@@ -176,10 +184,10 @@ def _make_kernel(log_max_splits):
         row_tile, dim_tile, batch_idx = txl.cta_id([row_tiles, _HEAD_DIM // _K_BLOCK, batch])
         tid = txl.thread_id()
 
-        arena = txl.alloc_buffer((smem_bytes,), txl.u8, scope="shared.dyn", align=1024)
+        arena = txl.alloc_tensor((smem_bytes,), txl.u8, scope="shared.dyn", align=1024)
 
         def _view(shape, dtype, byte_offset):
-            return txl.decl_buffer(
+            return txl.decl_tensor(
                 shape,
                 dtype,
                 data=arena.data,
@@ -194,7 +202,9 @@ def _make_kernel(log_max_splits):
 
         def _lse_index(split, row):
             linear = split * _TILE_M + row
-            return txl.bitwise_xor(linear, txl.bitwise_and(txl.shift_right(linear, 4), txl.int32(15)))
+            return txl.bitwise_xor(
+                linear, txl.bitwise_and(txl.shift_right(linear, 4), txl.int32(15))
+            )
 
         def _o_index(stage, row, col):
             return stage * (_TILE_M * _K_BLOCK) + row * _K_BLOCK + col
@@ -511,20 +521,20 @@ def _make_kernel(log_max_splits):
         seqlen_div_s1: txl.i32,
         seqlen_div_s2: txl.i32,
     ):
-        with txl.attr({"tirx.required_block_size": 1}):
-            kernel_body(
-                o_partial,
-                lse_partial,
-                out,
-                lse,
-                batch,
-                num_heads,
-                seqlen_q,
-                num_splits,
-                seqlen_div_mul,
-                seqlen_div_s1,
-                seqlen_div_s2,
-            )
+        txl.cuda.required_block_size(128, 1, 1, 1, 1, 1)
+        kernel_body(
+            o_partial,
+            lse_partial,
+            out,
+            lse,
+            batch,
+            num_heads,
+            seqlen_q,
+            num_splits,
+            seqlen_div_mul,
+            seqlen_div_s1,
+            seqlen_div_s2,
+        )
 
     return combine
 

@@ -254,7 +254,7 @@ class SchedulerPipeline:
 
 
 def int_var(scope="local", dtype="int32", align=4):
-    buf = txl.alloc_buffer([1], dtype, scope=scope, align=align)
+    buf = txl.alloc_tensor([1], dtype, scope=scope, align=align)
     return buf
 
 
@@ -262,10 +262,10 @@ class MPMCQueue:
     def __init__(
         self,
         capacity: int,
-        task_types: txl.Buffer,
-        task_idxs: txl.Buffer,
-        head: txl.Buffer,
-        tail: txl.Buffer,
+        task_types: tvm.ir.Var,
+        task_idxs: tvm.ir.Var,
+        head: tvm.ir.Var,
+        tail: tvm.ir.Var,
         num_tot_tasks: int,
     ):
         if capacity & capacity - 1:
@@ -296,9 +296,9 @@ class MPMCQueue:
 class GEMMMPMCQueue(MPMCQueue):
     def dequeue(
         self,
-        fetched_task_type: txl.Buffer,
-        fetched_task_idx0: txl.Buffer,
-        fetched_task_idx1: txl.Buffer,
+        fetched_task_type: tvm.ir.Var,
+        fetched_task_idx0: tvm.ir.Var,
+        fetched_task_idx1: tvm.ir.Var,
     ):
         txl.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), txl.int32(1))
         with txl.If(self.head_r[0] < self.num_tot_tasks):
@@ -316,9 +316,7 @@ class GEMMMPMCQueue(MPMCQueue):
                     ptx_type="b32",
                     backoff_ns=40,
                 )
-                txl.ptx.st.global_.s32(
-                    self.task_types.ptr_to([self.masked_pos[0]]), txl.int32(-1)
-                )
+                txl.ptx.st.global_.s32(self.task_types.ptr_to([self.masked_pos[0]]), txl.int32(-1))
                 txl.ptx.ld.global_.s32(
                     fetched_task_idx0[0], self.task_idxs.ptr_to([self.masked_pos[0], 0])
                 )
@@ -332,10 +330,10 @@ class GEMMMPMCQueue(MPMCQueue):
 class RSMPMCQueue(MPMCQueue):
     def dequeue(
         self,
-        fetched_task_type: txl.Buffer,
-        fetched_task_idx0: txl.Buffer,
-        fetched_task_idx1: txl.Buffer,
-        rs_rem: txl.Buffer,
+        fetched_task_type: tvm.ir.Var,
+        fetched_task_idx0: tvm.ir.Var,
+        fetched_task_idx1: tvm.ir.Var,
+        rs_rem: tvm.ir.Var,
     ):
         with txl.If(rs_rem[0] >= 0):
             with txl.Then():
@@ -371,7 +369,7 @@ class MixedDynamicTileScheduler:
         self,
         gemm_queue: GEMMMPMCQueue,
         rs_queue: RSMPMCQueue,
-        packed_value: txl.Buffer,
+        packed_value: tvm.ir.Var,
         sch_pipe: SchedulerPipeline,
     ):
         self.gemm_queue = gemm_queue
@@ -437,7 +435,7 @@ class Semaphore:
     def __init__(self, cnt, buffer):
         self.cnt = cnt
         self.sem = buffer
-        self.state = txl.alloc_buffer([1], "uint64", scope="local", align=8)
+        self.state = txl.alloc_tensor([1], "uint64", scope="local", align=8)
 
     def semaphore_notify(self, signal_rank, tid, m_idx, n_idx, rs_queue):
         with txl.If(tid % 128 == 0):
@@ -645,7 +643,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         packed_ptr = txl.reinterpret(
             PointerType(PrimType("uint32")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)
         )
-        packed_value = txl.decl_buffer((4,), "uint32", data=packed_ptr, scope="shared")
+        packed_value = txl.decl_tensor((4,), "uint32", data=packed_ptr, scope="shared")
         tile_scheduler = MixedDynamicTileScheduler(gemm_queue, rs_queue, packed_value, sch_pipe)
         smem_full_cta0 = smem_pipe.full.remote_view(0)
         smem_cycle = txl.PipelineState(1, phase=0)
@@ -995,11 +993,7 @@ def build_kernel(config: GemmRSConfig | None = None) -> tvm.IRModule:
     return tvm.IRModule({FUSED_DEVICE_ENTRYPOINT: device.func})
 
 
-KERNEL_META = {
-    "name": "gemm_reduce_scatter",
-    "category": "gemm",
-    "runtime_cuda_archs": ["sm_100a"],
-}
+KERNEL_META = {"name": "gemm_reduce_scatter", "category": "gemm", "runtime_cuda_archs": ["sm_100a"]}
 _RELAUNCH_COUNT = 20
 
 CONFIGS = make_configs(GEMM_RS_MODEL_SHAPES)

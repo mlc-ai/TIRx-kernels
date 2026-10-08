@@ -18,7 +18,7 @@ _FORBIDDEN_SCOPE_ROOTS = ("global", "shared")
 _ADDRESS_OF_OP = "tirx.address_of"
 _FUNC_CALL_OP = "tirx.cuda.func_call"
 _SETMAXNREG_OP = "tirx.ptx.setmaxnreg"
-_MIN_BLOCKS_PER_SM_ATTR = "tirx.launch_bounds_min_blocks_per_sm"
+_MIN_BLOCKS_PER_SM_OP = "tirx.cuda.launch_bounds_min_blocks_per_sm"
 
 
 def _is_forbidden_scope(scope: str) -> bool:
@@ -110,7 +110,7 @@ class LowLevelIRContractError(ValueError):
 
 
 class _LowLevelIRInspector:
-    """Collect forbidden operations from one pre-lowering ``PrimFunc`` body."""
+    """Collect forbidden operations from one pre-lowering ``Function`` body."""
 
     def __init__(self, function: str, allowed_func_calls: frozenset[str]):
         self.function = function
@@ -126,9 +126,8 @@ class _LowLevelIRInspector:
             body,
             [
                 (tirx.TilePrimitiveCall, self._visit_tile_call),
-                (tirx.AttrStmt, self._visit_attribute),
                 (tvm.ir.TensorLoad, self._visit_load),
-                (tirx.BufferStore, self._visit_store),
+                (tirx.TensorStore, self._visit_store),
                 (tvm.ir.Call, self._visit_call),
             ],
         )
@@ -149,11 +148,6 @@ class _LowLevelIRInspector:
         self.violations.append(self._finding(op, "tile_primitive"))
         visitor.default_visit(op)
 
-    def _visit_attribute(self, op: tirx.AttrStmt, visitor: Any) -> None:
-        if str(op.attr_key) == _MIN_BLOCKS_PER_SM_ATTR:
-            self.has_min_blocks_per_sm = True
-        visitor.default_visit(op)
-
     def _visit_load(self, op: tvm.ir.TensorLoad, visitor: Any) -> None:
         scope = str(op.source.scope())
         if _is_forbidden_scope(scope):
@@ -161,7 +155,7 @@ class _LowLevelIRInspector:
         for index in op.indices:
             visitor.visit(index)
 
-    def _visit_store(self, op: tirx.BufferStore, visitor: Any) -> None:
+    def _visit_store(self, op: tirx.TensorStore, visitor: Any) -> None:
         scope = str(op.buffer.scope())
         if _is_forbidden_scope(scope):
             self.violations.append(self._finding(op, "buffer_store", scope))
@@ -171,6 +165,8 @@ class _LowLevelIRInspector:
 
     def _visit_call(self, op: tvm.ir.Call, visitor: Any) -> None:
         op_name = getattr(op.op, "name", None)
+        if op_name == _MIN_BLOCKS_PER_SM_OP:
+            self.has_min_blocks_per_sm = True
         if op_name == _SETMAXNREG_OP:
             self.setmaxnreg_calls.append(self._finding(op, "setmaxnreg_without_min_blocks_per_sm"))
         if op_name == _FUNC_CALL_OP:
@@ -200,33 +196,33 @@ def _global_name(global_var: Any) -> str:
     return str(getattr(global_var, "name_hint", global_var))
 
 
-def _iter_prim_funcs(value: Any, path: str = "root") -> Iterator[tuple[str, tirx.PrimFunc]]:
-    if isinstance(value, tirx.PrimFunc):
+def _iter_functions(value: Any, path: str = "root") -> Iterator[tuple[str, tirx.Function]]:
+    if isinstance(value, tirx.Function):
         yield path, value
         return
 
     if isinstance(value, tvm.IRModule):
         for global_var, base_func in value.functions.items():
             function_path = f"{path}.{_global_name(global_var)}"
-            if not isinstance(base_func, tirx.PrimFunc):
+            if not isinstance(base_func, tirx.Function):
                 raise TypeError(
-                    f"{function_path} is {_node_name(base_func)}, expected tvm.tirx.PrimFunc"
+                    f"{function_path} is {_node_name(base_func)}, expected tvm.tirx.Function"
                 )
             yield function_path, base_func
         return
 
     if isinstance(value, Mapping):
         for key, item in value.items():
-            yield from _iter_prim_funcs(item, f"{path}[{key!r}]")
+            yield from _iter_functions(item, f"{path}[{key!r}]")
         return
 
     if isinstance(value, list | tuple):
         for index, item in enumerate(value):
-            yield from _iter_prim_funcs(item, f"{path}[{index}]")
+            yield from _iter_functions(item, f"{path}[{index}]")
         return
 
     raise TypeError(
-        f"{path} is {_node_name(value)}, expected a TIRx PrimFunc, IRModule, "
+        f"{path} is {_node_name(value)}, expected a TIRx Function, IRModule, "
         "or a list/tuple/dict containing them"
     )
 
@@ -236,7 +232,7 @@ def inspect_low_level_ir(
 ) -> LowLevelIRReport:
     """Inspect a public ``get_kernel`` return value without lowering it.
 
-    ``value`` may be a TIRx ``PrimFunc``, ``IRModule``, or nested list, tuple,
+    ``value`` may be a TIRx ``Function``, ``IRModule``, or nested list, tuple,
     or mapping containing those objects.  Direct ``tirx.address_of`` operands
     are reported separately and do not count as memory reads.
     """
@@ -246,7 +242,7 @@ def inspect_low_level_ir(
     address_only_loads: list[LowLevelIRFinding] = []
     allowed_func_calls = frozenset(allowed_func_calls)
 
-    for path, prim_func in _iter_prim_funcs(value):
+    for path, prim_func in _iter_functions(value):
         checked_functions.append(path)
         visitor = _LowLevelIRInspector(path, allowed_func_calls)
         visitor(prim_func.body)
@@ -257,7 +253,7 @@ def inspect_low_level_ir(
         address_only_loads.extend(visitor.address_only_loads)
 
     if not checked_functions:
-        raise TypeError("root must contain at least one TIRx PrimFunc")
+        raise TypeError("root must contain at least one TIRx Function")
 
     return LowLevelIRReport(
         checked_functions=tuple(checked_functions),
