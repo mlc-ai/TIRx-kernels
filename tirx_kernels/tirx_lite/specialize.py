@@ -333,7 +333,7 @@ class Specialize:
             read this arm as evidence that the case is handled; it is only
             evidence that it is refused.
             """
-            if not isinstance(stmt, tvm.tirx.IfThenElse) or stmt.else_case is not None:
+            if not isinstance(stmt, tvm.ir.If) or stmt.else_case is not None:
                 return None
             for cond, role in self.dispatch:
                 if stmt.condition.same_as(cond):
@@ -354,7 +354,7 @@ class Specialize:
             """
             chained = None
             for stmt in reversed(run):
-                chained = tvm.tirx.IfThenElse(stmt.condition, stmt.then_case, chained, stmt.span)
+                chained = tvm.ir.If(stmt.condition, stmt.then_case, chained, stmt.span)
             return chained
 
         def rewrite(seq):
@@ -382,12 +382,12 @@ class Specialize:
             new = rewrite(list(stmt.seq))
             if new is None:
                 return stmt
-            return new[0] if len(new) == 1 else tvm.tirx.SeqStmt(new, stmt.span)
+            return new[0] if len(new) == 1 else tvm.ir.SeqStmt(new, stmt.span)
 
         if structural_map is not None:
-            body = structural_map(func.body, (tvm.tirx.SeqStmt, postorder))
+            body = structural_map(func.body, (tvm.ir.SeqStmt, postorder))
         else:
-            body = tvm.tirx.stmt_functor.ir_transform(func.body, None, postorder, ["tirx.SeqStmt"])
+            body = tvm.tirx.stmt_functor.ir_transform(func.body, None, postorder, ["ir.SeqStmt"])
         return func.with_body(body)
 
     def finalize(self):

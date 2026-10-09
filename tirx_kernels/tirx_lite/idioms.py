@@ -871,21 +871,21 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
         prior = T.alloc_local([n], dtype)
         for i in range(n):
             _I.tensor_store(
-                prior, T.tvm_warp_shuffle_up(T.uint32(FULL_MASK), vals[i], delta, width, width), [i]
+                prior, [i], T.gpu_warp_shuffle_up(T.uint32(FULL_MASK), vals[i], delta, width, width)
             )
         with _I.if_(lane >= delta), _I.then_():
             for i in range(n):
-                _I.tensor_store(vals, vals[i] + prior[i], [i])
+                _I.tensor_store(vals, [i], vals[i] + prior[i])
 
     if chain:
         for i in range(1, n):
             carry = T.alloc_local([1], dtype)
             _I.tensor_store(
                 carry,
-                T.tvm_warp_shuffle(T.uint32(FULL_MASK), vals[i - 1], width - 1, width, 32),
                 [0],
+                T.gpu_warp_shuffle(T.uint32(FULL_MASK), vals[i - 1], width - 1, width, 32),
             )
-            _I.tensor_store(vals, vals[i] + carry[0], [i])
+            _I.tensor_store(vals, [i], vals[i] + carry[0])
 
 
 __all__ = [

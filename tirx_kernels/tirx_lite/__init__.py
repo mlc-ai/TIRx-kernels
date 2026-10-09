@@ -121,7 +121,7 @@ def reinterpret(dtype, value):
 def call_packed(*args):
     """Emit a packed-function call as a statement.
 
-    ``tvm_call_packed`` returns int32, so it is not covered by the void
+    ``call_packed`` returns int32, so it is not covered by the void
     auto-emit; every kernel-side use discards the result, so ``txl`` gives it
     statement semantics directly.
     """
@@ -146,7 +146,7 @@ def cu_tensor_map_encode_tiled(descriptor, dtype, rank, data, *operands):
         )
     interleave, swizzle, l2_promotion, oob_fill, *force_cu_dtype = modes
     _I.evaluate(
-        _T.tensormap_encode_tiled(
+        _T.cuda.tensormap_encode_tiled(
             descriptor,
             data,
             *shape,
@@ -295,6 +295,11 @@ class _CUDAProxy(_StmtProxy):
     ``clock64`` -- no sreg mov exists in the table) stay.
     """
 
+    def func_call(self, func_name, *args, source_code, return_type="void"):
+        """Preserve the kernel API while passing source as TVM's final operand."""
+        ty = None if return_type == "void" else return_type
+        return _StmtProxy(_T.cuda.func_call)(func_name, *args, source_code, ty=ty)
+
     def __getattr__(self, name):
         hint = _RETIRED_CUDA_VALUE_MEMBERS.get(name)
         if hint is not None:
@@ -307,6 +312,14 @@ class _CUDAProxy(_StmtProxy):
 
 
 cuda = _CUDAProxy(_T.cuda)
+
+# Keep existing kernel spellings while using TVM's canonical operator names.
+tvm_warp_shuffle = _StmtProxy(_T.gpu_warp_shuffle)
+tvm_warp_shuffle_up = _StmtProxy(_T.gpu_warp_shuffle_up)
+tvm_warp_shuffle_down = _StmtProxy(_T.gpu_warp_shuffle_down)
+tvm_warp_shuffle_xor = _StmtProxy(_T.gpu_warp_shuffle_xor)
+tvm_warp_activemask = _StmtProxy(_T.gpu_warp_activemask)
+tvm_storage_sync = _StmtProxy(_T.gpu_storage_sync)
 
 
 # ---------------------------------------------------------------------------
@@ -393,11 +406,15 @@ def local_scalar(dtype="float32", init=None, *, name=None):
 def stack_alloca(kind, size=1):
     """Allocate host-stack storage and return its handle, bound exactly once.
 
-    The sanctioned spelling for ``tvm_stack_alloca``: the handle names an
-    allocation, so it must be materialized as a single binding rather than
-    re-evaluated per use.
+    The handle names an allocation, so it must be materialized as a single
+    binding rather than re-evaluated per use.
     """
-    return _I.bind(_T.tvm_stack_alloca(kind, size))
+    return _I.bind(_T.stack_alloca(kind, size))
+
+
+def tensor_store(dest, value, indices):
+    """Emit a tensor store using tirx-lite's existing operand order."""
+    return _I.tensor_store(dest, indices, value)
 
 
 def assign(dst, value):
@@ -408,7 +425,7 @@ def assign(dst, value):
         )
     if not tvm.tirx.is_tensor_var(dst.source) or dst.source.scope() != "local":
         raise TypeError("txl.assign destination must be a local scalar element")
-    return _I.tensor_store(dst.source, value, list(dst.indices))
+    return _I.tensor_store(dst.source, list(dst.indices), value)
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +463,7 @@ def uniform(x, *, width=32, lane=0):
     CTA hangs.
     """
     out = alloc_local([1], str(x.ty.dtype))
-    _I.tensor_store(out, _T.tvm_warp_shuffle(_T.uint32(0xFFFFFFFF), x, lane, width, 32), [0])
+    _I.tensor_store(out, [0], _T.gpu_warp_shuffle(_T.uint32(0xFFFFFFFF), x, lane, width, 32))
     return out[0]
 
 
