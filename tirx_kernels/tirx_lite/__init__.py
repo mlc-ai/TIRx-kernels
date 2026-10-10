@@ -118,6 +118,16 @@ def reinterpret(dtype, value):
     return _T.reinterpret(value, ty=dtype)
 
 
+def ptr_byte_offset(data, byte_offset, dtype, *, ty=None, span=None):
+    """Apply a byte offset and select the result dtype, preserving pointer scope."""
+    if ty is None:
+        element_type = tvm.ir.PrimType(dtype) if isinstance(dtype, str) else dtype
+        data_type = getattr(data, "ty", None)
+        scope = data_type.storage_scope if isinstance(data_type, tvm.ir.PointerType) else "global"
+        ty = tvm.ir.PointerType(element_type, scope)
+    return _T.ptr_byte_offset(data, byte_offset, ty=ty, span=span)
+
+
 def call_packed(*args):
     """Emit a packed-function call as a statement.
 
@@ -260,7 +270,7 @@ class _StmtProxy:
 class _PTXProxy(_StmtProxy):
     def addr(self, ptr, byte_offset):
         """Preserve the pointer's element type while applying a byte offset."""
-        return _T.ptr_byte_offset(ptr, byte_offset, str(ptr.ty.element_type.dtype))
+        return _T.ptr_byte_offset(ptr, byte_offset, ty=ptr.ty)
 
 
 ptx = _PTXProxy(_T.ptx)
