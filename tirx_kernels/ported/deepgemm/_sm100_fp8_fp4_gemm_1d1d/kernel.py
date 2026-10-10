@@ -631,7 +631,7 @@ def build_kernel(spec: GemmSpec):
             block=total_warps * 32,
             cluster=(cta_group,) if cta_group > 1 else None,
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def sm100_fp8_fp4_gemm_1d1d(

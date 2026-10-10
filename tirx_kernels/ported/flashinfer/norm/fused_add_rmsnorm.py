@@ -831,7 +831,7 @@ def get_kernel(
                 preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
                 programmatic_stream_serialization=enable_pdl,
             ),
-            options=txl.cuda.KernelOptions(max_registers_per_thread=max_registers),
+            kernel_attrs=txl.cuda.KernelAttributes(max_registers_per_thread=max_registers),
             arch="sm_100a",
         )
         def flashinfer_fused_add_rmsnorm_compact(
@@ -861,7 +861,7 @@ def get_kernel(
                 preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
                 programmatic_stream_serialization=enable_pdl,
             ),
-            options=txl.cuda.KernelOptions(max_registers_per_thread=max_registers),
+            kernel_attrs=txl.cuda.KernelAttributes(max_registers_per_thread=max_registers),
             arch="sm_100a",
         )
         def flashinfer_fused_add_rmsnorm_strided(

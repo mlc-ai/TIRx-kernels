@@ -188,7 +188,7 @@ def make_kernel_kv(cfg):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=MIN_BLOCKS),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=MIN_BLOCKS),
         arch="sm_100a",
     )
     def msa_decode_kvmajor(
@@ -1494,7 +1494,7 @@ def make_kernel_qm(cfg):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def msa_decode_qmajor(
@@ -3004,7 +3004,7 @@ def make_kernel_qm64(cfg):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=2),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
         arch="sm_100a",
     )
     def msa_decode_qmajor(
@@ -4414,7 +4414,7 @@ def _build_q16_twotile_factory():
 
         @txl.kernel(
             launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_CTAS, block=12 * 32),
-            options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
             arch="sm_100a",
         )
         def msa_decode_qmajor_union(
@@ -5772,7 +5772,7 @@ def make_kernel_q1d(cfg):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=MIN_BLOCKS),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=MIN_BLOCKS),
         arch="sm_100a",
     )
     def msa_decode_q1d(
@@ -7240,7 +7240,7 @@ def make_kernel_q4d(cfg):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def msa_decode_q4d(
@@ -8519,7 +8519,7 @@ def make_kernel_q4r(cfg):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_ITEMS, block=NWARPS * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=Q4R_MIN_BLOCKS),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=Q4R_MIN_BLOCKS),
         arch="sm_100a",
     )
     def msa_decode_q4r(

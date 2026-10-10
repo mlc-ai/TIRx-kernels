@@ -1154,7 +1154,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
         launch=lambda _params: txl.cuda.LaunchConfig(
             block=20 * 32, grid=(1, 1, num_clusters), cluster=[1, 1], preferred_cluster=[1, 1]
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
     )(kernel)
 
 

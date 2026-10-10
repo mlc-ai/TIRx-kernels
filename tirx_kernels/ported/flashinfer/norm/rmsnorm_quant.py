@@ -1364,7 +1364,7 @@ def get_kernel(
                 preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
                 programmatic_stream_serialization=enable_pdl,
             ),
-            options=txl.cuda.KernelOptions(
+            kernel_attrs=txl.cuda.KernelAttributes(
                 min_blocks_per_sm=None if threads == 128 else 1,
                 max_registers_per_thread=max_registers,
             ),
@@ -1395,7 +1395,7 @@ def get_kernel(
                 preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
                 programmatic_stream_serialization=enable_pdl,
             ),
-            options=txl.cuda.KernelOptions(
+            kernel_attrs=txl.cuda.KernelAttributes(
                 min_blocks_per_sm=None if threads == 128 else 1,
                 max_registers_per_thread=max_registers,
             ),

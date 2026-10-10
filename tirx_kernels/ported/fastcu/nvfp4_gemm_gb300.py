@@ -220,7 +220,7 @@ def make_kernel():
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=(2, 1, _NUM_CLUSTERS), block=7 * 32, cluster=(2,), preferred_cluster=[2]
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_103a",
     )
     def fastcu_nvfp4_gemm_gb300_kernel(

@@ -394,7 +394,7 @@ def make_kernel(
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=s_q, block=12 * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
         host_prelude=host_prelude,
     )

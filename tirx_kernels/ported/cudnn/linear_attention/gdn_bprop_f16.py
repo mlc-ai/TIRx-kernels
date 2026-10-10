@@ -1252,7 +1252,7 @@ def _make_main(
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=num_sms, block=12 * 32, cluster=(1, 1, 1)
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
         arch="sm_100a",
     )
     def main(

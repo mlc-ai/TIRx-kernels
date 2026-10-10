@@ -226,7 +226,7 @@ def get_kernel(
 
         @txl.kernel(
             launch=lambda _params: txl.cuda.LaunchConfig(grid=grid_x, block=block_x // 32 * 32),
-            options=txl.cuda.KernelOptions(min_blocks_per_sm=2),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
             arch="sm_100a",
         )
         def nvfp4_quantize_linear(
@@ -275,7 +275,7 @@ def get_kernel(
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=2),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
         arch="sm_100a",
     )
     def nvfp4_quantize_swizzled(

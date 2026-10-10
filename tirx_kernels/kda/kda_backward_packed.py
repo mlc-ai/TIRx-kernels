@@ -450,7 +450,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=_params["num_ctas"] if static_grid is None else static_grid, block=12 * 32
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def kda_bwd_native_mega(
@@ -3356,7 +3356,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=_params["num_ctas"] if static_grid is None else static_grid, block=12 * 32
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def kda_bwd_mega(
@@ -7179,7 +7179,7 @@ def make_native_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=_params["num_ctas"] if static_grid is None else static_grid, block=12 * 32
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def kda_bwd_native_fused(
@@ -9216,7 +9216,7 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=_params["num_ctas"] if static_grid is None else static_grid, block=12 * 32
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def kda_bwd_fused(

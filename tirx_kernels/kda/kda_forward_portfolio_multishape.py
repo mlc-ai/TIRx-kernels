@@ -1879,7 +1879,7 @@ def build_kernel(
     return txl.kernel(
         arch="sm_100a",
         launch=lambda _params: txl.cuda.LaunchConfig(block=NWARPS * 32, grid=_params["num_ctas"]),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
     )(kda_fwd)
 
 
@@ -2274,7 +2274,7 @@ def make_front(H: int):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=_params["num_ctas"], block=20 * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def kda_front(
@@ -3213,7 +3213,7 @@ def make_chain(H: int, hpc: int = 2):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=H // hpc, block=24 * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def kda_chain(

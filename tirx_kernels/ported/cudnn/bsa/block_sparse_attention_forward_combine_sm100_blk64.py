@@ -514,7 +514,7 @@ def _make_kernel(log_max_splits):
             )(_params),
             block=4 * 32,
         ),
-        options=txl.cuda.KernelOptions(required_block_size=True),
+        kernel_attrs=txl.cuda.KernelAttributes(required_block_size=True),
         arch="sm_100a",
     )
     def combine(

@@ -1558,7 +1558,7 @@ def _make_t_precompute(spec):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=(grid_x, num_sequences), block=4 * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=8),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=8),
         arch="sm_100a",
     )
     def t_precompute(
@@ -1818,7 +1818,7 @@ def _make_fixup_simt(spec):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=num_sequences * state_heads * row_ctas, block=4 * 32
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=2),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
         arch="sm_100a",
     )
     def fixup_simt(
@@ -2022,7 +2022,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=num_sequences * state_heads * row_ctas, block=8 * 32
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def fixup_utcmma(
@@ -2287,7 +2287,7 @@ def _make_mn_precompute(spec):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=(grid_x, num_sequences), block=12 * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def mn_precompute(
@@ -2863,7 +2863,7 @@ def _make_prefill(spec):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=(grid_x, num_sequences), block=12 * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def prefill(

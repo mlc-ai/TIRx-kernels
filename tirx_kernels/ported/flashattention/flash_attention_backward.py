@@ -478,7 +478,7 @@ def build_kernel(
     XN = NUM_N_TILES * CLUSTER_SIZE
 
     # fmt: off
-    @txl.kernel(launch=lambda _params: txl.cuda.LaunchConfig(grid=(XN, NUM_HEADS), block=16 * 32, cluster=(CLUSTER_SIZE,), preferred_cluster=[CLUSTER_SIZE]), options=txl.cuda.KernelOptions(min_blocks_per_sm=1), arch='sm_100a')
+    @txl.kernel(launch=lambda _params: txl.cuda.LaunchConfig(grid=(XN, NUM_HEADS), block=16 * 32, cluster=(CLUSTER_SIZE,), preferred_cluster=[CLUSTER_SIZE]), kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1), arch='sm_100a')
     def kernel(
         Q_g: txl.gptr[txl.f16],
         K_g: txl.gptr[txl.f16],

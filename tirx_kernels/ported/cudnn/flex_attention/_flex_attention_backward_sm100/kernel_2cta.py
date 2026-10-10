@@ -340,7 +340,7 @@ def get_kernel_2cta(**config):
             cluster=(2,),
             preferred_cluster=[2],
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def bwd(

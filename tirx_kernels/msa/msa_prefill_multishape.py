@@ -193,7 +193,7 @@ def make_union_kernel(
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=num_ctas, block=16 * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def msa_prefill_union(
@@ -1741,7 +1741,7 @@ def make_main_kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=num_ctas, block=16 * 32, programmatic_stream_serialization=USE_PDL
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def msa_reverse_main(

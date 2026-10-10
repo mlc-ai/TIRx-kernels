@@ -330,7 +330,7 @@ def make_kernel(
             preferred_cluster=[2],
             programmatic_stream_serialization=True,
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
         host_prelude=host_prelude,
     )

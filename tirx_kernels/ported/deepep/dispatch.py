@@ -220,7 +220,7 @@ def _build_dispatch_kernel(
             cluster=(cluster,) if cluster > 1 else None,
             cooperative=True,
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def deepep_dispatch(
@@ -692,7 +692,7 @@ def _build_epilogue_kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=num_sms, block=num_warps * 32, programmatic_stream_serialization=True
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def deepep_dispatch_copy_epilogue(

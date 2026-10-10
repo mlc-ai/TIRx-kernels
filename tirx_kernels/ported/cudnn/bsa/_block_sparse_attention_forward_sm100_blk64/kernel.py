@@ -111,7 +111,7 @@ def make_forward_kernel(**config):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=grid, block=16 * 32, cluster=(q_blocks, num_heads, batch) if use_clc else None
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def forward(
@@ -255,7 +255,7 @@ def make_combine_kernel(**config):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=(row_tiles, 2, batch), block=4 * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def combine(

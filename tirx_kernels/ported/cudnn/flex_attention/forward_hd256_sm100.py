@@ -1624,7 +1624,9 @@ def _make_kernel(**config):
             cluster=2 if cta_group == 2 else None,
             preferred_cluster=2 if cta_group == 2 else None,
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=cta_group == 2),
+        kernel_attrs=txl.cuda.KernelAttributes(
+            min_blocks_per_sm=1, required_block_size=cta_group == 2
+        ),
     )(kernel)
 
 

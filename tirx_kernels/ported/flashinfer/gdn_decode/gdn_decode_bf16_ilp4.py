@@ -349,7 +349,7 @@ def _make_gdn_decode_bf16_ilp4(
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=(_params["batch"] * NUM_V_HEADS * NUM_V_TILES,), block=NUM_WARPS * 32
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=8),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=8),
         arch="sm_100a",
     )
     def gdn_decode_bf16_ilp4(

@@ -1348,7 +1348,7 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
     return txl.kernel(
         arch="sm_103a",
         launch=lambda _params: txl.cuda.LaunchConfig(block=NUM_WARPS * 32, grid=grid),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
     )(entry)
 
 

@@ -48,7 +48,7 @@ def test_launch_factory_keeps_runtime_values_as_region_operands():
         bound.update(params)
         return txl.cuda.LaunchConfig(grid=(params["rows"], 2), block=128, cluster=(1, 2))
 
-    @txl.kernel(launch=launch, options=txl.cuda.KernelOptions(min_blocks_per_sm=1))
+    @txl.kernel(launch=launch, kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1))
     def probe(out: txl.gptr(txl.i32), rows: txl.i32):
         bx, by = txl.cta_id()
         txl.ptx.st.global_.b32(out.ptr_to([bx * 2 + by]), txl.thread_id())
@@ -61,7 +61,7 @@ def test_launch_factory_keeps_runtime_values_as_region_operands():
     assert int(values["grid.y"]) == 2
     assert int(values["block.x"]) == 128
     assert int(values["cluster.y"]) == 2
-    assert entry.attrs["cuda.kernel_options"]["min_blocks_per_sm"] == 1
+    assert entry.attrs["cuda.kernel_attrs"]["min_blocks_per_sm"] == 1
     bindings = []
     structural_walk(probe.func.body, (ir.Bind, lambda node: bindings.append(node)))
     coordinates = [node for node in bindings if node.var.name in ("bx", "by")]
@@ -527,7 +527,7 @@ def test_entry_usage_cap_does_not_shrink_cta_register_pool():
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=4 * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=2),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
         arch="sm_100a",
     )
     def probe(out: txl.gptr(txl.f32)):
@@ -546,7 +546,7 @@ def test_specialize_uses_rounded_cta_register_pool_as_ceiling():
     def build(aux_regs):
         @txl.kernel(
             launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=20 * 32),
-            options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
             arch="sm_100a",
         )
         def probe(out: txl.gptr(txl.f32)):

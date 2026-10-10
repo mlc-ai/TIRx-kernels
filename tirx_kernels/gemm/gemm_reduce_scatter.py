@@ -539,7 +539,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=SM_NUMBER, block=NUM_THREADS // 32 * 32, cluster=(M_CLUSTER, N_CLUSTER)
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
         host_prelude=host_prelude,
         allowed_func_calls=_NVSHMEM_RUNTIME_FUNC_CALLS,

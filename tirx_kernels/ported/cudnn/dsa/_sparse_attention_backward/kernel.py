@@ -581,7 +581,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
             grid=(lambda p: [p["seqlen_q"], (num_head + block - 1) // block, 1])(_params),
             block=BWD_WARPS * 32,
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def bwd(
@@ -1557,7 +1557,7 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk):
             grid=(lambda p: [(p["seqlen_q"] + block_q - 1) // block_q, num_head, 1])(_params),
             block=SUM_ODO_THREADS_D * SUM_ODO_THREADS_Q // 32 * 32,
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def sum_odo(
@@ -1751,7 +1751,7 @@ def make_sum_dsink_kernel(*, num_head):
             ),
             block=DSINK_THREADS // 32 * 32,
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def sum_dsink(

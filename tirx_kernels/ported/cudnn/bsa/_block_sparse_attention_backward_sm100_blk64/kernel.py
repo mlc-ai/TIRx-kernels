@@ -228,7 +228,7 @@ def get_kernel(**config):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=((seqlen_q + 15) // 16, heads, batch), block=4 * 32
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
         arch="sm_100a",
     )
     def sum_odo(
@@ -285,7 +285,7 @@ def get_kernel(**config):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=(tasks * groups, heads, batch), block=WARPS * 32
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
         arch="sm_100a",
     )
     def bwd(
@@ -950,7 +950,7 @@ def get_kernel(**config):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=((max(seqlen_q, seqlen_kv) + 7) // 8, heads, batch), block=4 * 32
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
         arch="sm_100a",
     )
     def convert(

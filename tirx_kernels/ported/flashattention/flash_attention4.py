@@ -204,7 +204,7 @@ def make_kernel(
             cluster=(2,) if USE_2CTA else None,
             preferred_cluster=[2] if USE_2CTA else None,
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def flash_attention4(

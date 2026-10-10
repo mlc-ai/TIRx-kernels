@@ -1335,7 +1335,7 @@ def make_attention_kernel_blk128(
         launch=lambda params: txl.cuda.LaunchConfig(
             grid=params["num_ctas"] if static_grid is None else int(static_grid), block=512
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch=arch,
     )(fn)
 
@@ -2382,7 +2382,7 @@ def make_attention_kernel_blk64(
     return txl.kernel(
         arch=arch,
         launch=lambda _params: txl.cuda.LaunchConfig(block=16 * 32, grid=grid),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
     )(vsa_attn_blk64_ws)
 
 

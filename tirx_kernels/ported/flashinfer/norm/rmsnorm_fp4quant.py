@@ -978,7 +978,7 @@ def get_kernel(
             preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
             programmatic_stream_serialization=enable_pdl,
         ),
-        options=txl.cuda.KernelOptions(required_block_size=True),
+        kernel_attrs=txl.cuda.KernelAttributes(required_block_size=True),
         arch="sm_100a",
     )
     def flashinfer_rmsnorm_fp4quant(

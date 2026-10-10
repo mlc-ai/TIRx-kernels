@@ -2144,7 +2144,7 @@ def _make_kernel(
             launch=lambda _params: txl.cuda.LaunchConfig(
                 block=1 * 32, grid=list(derived["helper_grid"])
             ),
-            options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         )(helper_body)
 
     kernel = _entry_point(list(annotations), body)
@@ -2156,7 +2156,7 @@ def _make_kernel(
             cluster=(cluster_m, cluster_n),
             preferred_cluster=(cluster_m, cluster_n),
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
         host_prelude=host_prelude,
     )(kernel)

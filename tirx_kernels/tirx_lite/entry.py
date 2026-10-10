@@ -420,30 +420,30 @@ def _declare_param(name, ann, scalar_params):
 def kernel(
     *,
     launch,
-    options=None,
+    kernel_attrs=None,
     arch: str = "sm_100a",
     host_prelude=None,
     allowed_func_calls: tuple[str, ...] = (),
     check_ir: bool = True,
 ):
-    """Declare a kernel with a CUDA LaunchConfig and optional KernelOptions.
+    """Declare a kernel with a CUDA LaunchConfig and optional KernelAttributes.
 
     ``launch`` accepts a configuration object or a factory over the bound ABI
     parameter mapping. The block must be a static, one-dimensional multiple
     of 32; grid and cluster may be multidimensional. Launch dimensions are
     independent of the index accessors used by the body.
 
-    ``options.min_blocks_per_sm`` pins the occupancy contract used to validate
-    register transitions in specialized warp roles. An omitted option leaves
+    ``kernel_attrs.min_blocks_per_sm`` pins the occupancy contract used to validate
+    register transitions in specialized warp roles. An omitted attribute leaves
     that contract unpinned, preserving CUDA's default launch-bounds behavior.
 
     ``host_prelude`` receives the bound ABI parameters before device entry and
     supplies the decorated function's keyword-only ``host`` argument.
     """
-    from tvm.backend.cuda.launch import KernelOptions, LaunchConfig
+    from tvm.backend.cuda.launch import KernelAttributes, LaunchConfig
 
-    if options is not None and not isinstance(options, KernelOptions):
-        raise TypeError("options must be a CUDA KernelOptions")
+    if kernel_attrs is not None and not isinstance(kernel_attrs, KernelAttributes):
+        raise TypeError("kernel_attrs must be a CUDA KernelAttributes")
 
     def decorator(fn):
         sig = inspect.signature(fn)
@@ -490,13 +490,13 @@ def kernel(
                     raise ValueError(
                         "tirx-lite block must be a static multiple of 32 between 32 and 1024"
                     )
-                min_blocks = options.min_blocks_per_sm if options is not None else None
+                min_blocks = kernel_attrs.min_blocks_per_sm if kernel_attrs is not None else None
                 session = Session(fn.__name__, nthreads // 32, arch, min_blocks)
                 session.params = params
                 session.launch = config
-                session.options = options
+                session.kernel_attrs = kernel_attrs
                 host = host_prelude(params) if host_prelude is not None else None
-                with I.device_entry(launch=config, options=options):
+                with I.device_entry(launch=config, kernel_attrs=kernel_attrs):
 
                     def index(name, value):
                         return I.bind(value, var=tvm.ir.Var(name, value.ty))

@@ -132,8 +132,8 @@ class _LowLevelIRInspector:
         )
 
     def _visit_region(self, op, visitor):
-        options = op.attrs.get("cuda.kernel_options", {})
-        if options.get("min_blocks_per_sm", 0):
+        kernel_attrs = op.attrs.get("cuda.kernel_attrs", {})
+        if kernel_attrs.get("min_blocks_per_sm", 0):
             self.has_min_blocks_per_sm = True
         visitor.default_visit(op)
 

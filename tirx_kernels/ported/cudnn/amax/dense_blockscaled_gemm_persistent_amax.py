@@ -1638,7 +1638,7 @@ def _make_kernel(
             cluster=[cluster_m, cluster_n],
             preferred_cluster=[cluster_m, cluster_n],
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
     )(kernel)
 
 

@@ -319,7 +319,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=(_params["s_q"], _params["num_sm_parts"], 1), block=12 * 32
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def sparse_flashmla_decode_head64_main(

@@ -986,7 +986,7 @@ def _make_device_kernel():
         launch=lambda _params: txl.cuda.LaunchConfig(
             block=12 * 32, grid=SM_NUMBER, cluster=[M_CLUSTER, N_CLUSTER]
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
     )(test_mma_ss_tma_2sm_persistent)
 
 

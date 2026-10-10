@@ -1984,7 +1984,7 @@ def _make_kernel(
             cluster=[cluster_m, cluster_n],
             preferred_cluster=[cluster_m, cluster_n],
         ),
-        options=txl.cuda.KernelOptions(
+        kernel_attrs=txl.cuda.KernelAttributes(
             min_blocks_per_sm=1, max_registers_per_thread=entry_max_registers
         ),
     )(kernel)

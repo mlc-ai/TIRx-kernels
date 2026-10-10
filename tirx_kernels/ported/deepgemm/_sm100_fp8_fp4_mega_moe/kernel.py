@@ -878,7 +878,7 @@ def get_kernel(
             block=kernel_config.num_total_warps * 32,
             cluster=(kernel_config.num_ctas_per_cluster,),
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def mega_moe(

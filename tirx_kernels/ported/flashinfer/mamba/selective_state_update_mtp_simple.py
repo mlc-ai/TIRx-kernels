@@ -527,18 +527,18 @@ def get_kernel(**kwargs: Any):
     UPDATE_STATE = spec["UPDATE_STATE"]
     WEIGHT_DTYPE = spec["WEIGHT_DTYPE"]
 
-    kernel_options = {
+    kernel_kwargs = {
         "launch": txl.cuda.LaunchConfig(
             grid=(spec["NHEADS"], spec["BATCH"], spec["CTAS_PER_HEAD"])
             if schedule_heads_first
             else (spec["BATCH"], spec["NHEADS"], spec["CTAS_PER_HEAD"]),
             block=128,
         ),
-        "options": txl.cuda.KernelOptions(min_blocks_per_sm=min_blocks_per_sm or None),
+        "kernel_attrs": txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm or None),
         "arch": "sm_100a",
     }
 
-    @txl.kernel(**kernel_options)
+    @txl.kernel(**kernel_kwargs)
     def selective_state_update_mtp_simple(
         state: txl.gptr[spec["STATE_DTYPE"]],
         state_scale: txl.gptr[txl.f32],

@@ -359,7 +359,7 @@ def get_kernel(**kwargs: Any):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=(spec["BATCH"], spec["NHEADS"]), block=spec["NUM_WARPS"] * 32
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=spec["MIN_BLOCKS_PER_SM"]),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=spec["MIN_BLOCKS_PER_SM"]),
         arch="sm_100a",
     )
     def selective_state_update_stp_horizontal(

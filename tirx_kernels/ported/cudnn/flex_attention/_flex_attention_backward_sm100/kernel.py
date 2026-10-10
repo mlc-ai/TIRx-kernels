@@ -606,7 +606,7 @@ def get_kernel(**config):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=((seqlen_q + 127) // 128, heads, batch), block=8 * 32
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
         arch="sm_100a",
     )
     def preprocess(
@@ -721,7 +721,7 @@ def get_kernel(**config):
             else (total_tasks if varlen else tasks * groups, heads, 1 if varlen else batch),
             block=WARPS * 32,
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def bwd(
@@ -1875,7 +1875,7 @@ def get_kernel(**config):
             launch=lambda _params: txl.cuda.LaunchConfig(
                 grid=((seq_len + 127) // 128, heads, batch), block=4 * 32
             ),
-            options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
             arch="sm_100a",
         )
         def postprocess(

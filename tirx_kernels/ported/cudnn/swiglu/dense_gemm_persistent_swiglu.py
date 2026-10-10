@@ -1528,7 +1528,7 @@ def _make_kernel(
             cluster=[cluster_m, cluster_n],
             preferred_cluster=[cluster_m, cluster_n],
         ),
-        options=txl.cuda.KernelOptions(max_registers_per_thread=entry_max_registers),
+        kernel_attrs=txl.cuda.KernelAttributes(max_registers_per_thread=entry_max_registers),
     )(kernel)
 
 

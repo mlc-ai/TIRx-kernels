@@ -200,7 +200,7 @@ def make_kernel(
             block=WARPS * 32,
             programmatic_stream_serialization=True,
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=min_blocks_per_sm),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm),
         arch="sm_100a",
     )
     def msa_sparse_atten_fwd_combine(

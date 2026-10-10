@@ -798,7 +798,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
             cluster=[2, 1],
             preferred_cluster=[2, 1],
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
     )(gemm)
 
 

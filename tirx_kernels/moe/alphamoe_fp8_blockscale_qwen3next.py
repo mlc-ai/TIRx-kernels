@@ -230,7 +230,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=G, block=NWARPS * 32, cluster=(CS,)),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def alphamoe_cluster(
@@ -1938,7 +1938,7 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER):
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=G, block=NWARPS * 32, cluster=(CS8,)),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def alphamoe_wide_m1(

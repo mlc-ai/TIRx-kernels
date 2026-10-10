@@ -362,7 +362,7 @@ def make_forward_kernel(**config):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=grid, block=WARPS * 32, cluster=(1, 1, 1) if use_clc else None
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def forward(

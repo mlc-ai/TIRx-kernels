@@ -3159,7 +3159,7 @@ def _make_kernel(**config):
         launch=lambda _params: txl.cuda.LaunchConfig(
             block=TOTAL_WARPS * 32, grid=_params["work_capacity"]
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
     )(entry)
     return kernel.func
 

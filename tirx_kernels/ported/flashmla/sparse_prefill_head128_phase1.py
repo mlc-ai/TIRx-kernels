@@ -1532,7 +1532,7 @@ def make_kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(
             block=16 * 32, grid=2 * s_q, cluster=[2], preferred_cluster=[2]
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
     )(sparse_flashmla_prefill_head128_phase1_kernel)
 
 

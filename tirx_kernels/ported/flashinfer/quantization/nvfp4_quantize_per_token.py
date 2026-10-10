@@ -154,7 +154,7 @@ def get_kernel(
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=m, block=_PER_TOKEN_WARPS * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=2),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
         arch="sm_100a",
     )
     def nvfp4_quantize_per_token(

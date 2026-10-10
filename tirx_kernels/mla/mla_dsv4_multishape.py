@@ -324,7 +324,7 @@ def make_kernel(
             cluster=(C,) if C > 1 else None,
             preferred_cluster=[C] if C > 1 else None,
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
         host_prelude=host_prelude,
     )
@@ -1879,7 +1879,7 @@ def _make_h128_bf16_prefill():
             launch=lambda _params: txl.cuda.LaunchConfig(
                 grid=grid_ctas, block=20 * 32, cluster=(2,), preferred_cluster=[2]
             ),
-            options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
             arch="sm_100a",
             host_prelude=host_prelude,
         )

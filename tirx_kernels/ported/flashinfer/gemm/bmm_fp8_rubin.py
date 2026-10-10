@@ -867,7 +867,7 @@ def _make_bmm_kernel(B: int, M: int, N: int, K_dim: int, ab_dtype: str, c_dtype:
             cluster=[cluster_m, cluster_n],
             preferred_cluster=[cluster_m, cluster_n],
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
     )(kernel)
 
 

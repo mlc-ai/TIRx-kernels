@@ -1532,7 +1532,7 @@ def _make_kernel(**config):
         launch=lambda _params: txl.cuda.LaunchConfig(
             block=_WARPS * 32, grid=(q_blocks, scheduled_heads, batch), cluster=1
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
     )(kernel)
 
 

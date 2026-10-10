@@ -303,7 +303,7 @@ class _CUDAProxy(_StmtProxy):
     def __getattr__(self, name):
         if name in {
             "LaunchConfig",
-            "KernelOptions",
+            "KernelAttributes",
             "MemSyncDomainMap",
             "AccessPolicyWindow",
             "ProgrammaticEvent",

@@ -239,7 +239,7 @@ def get_kernel(
 
         @txl.kernel(
             launch=lambda _params: txl.cuda.LaunchConfig(grid=grid_x, block=block_x // 32 * 32),
-            options=txl.cuda.KernelOptions(min_blocks_per_sm=_BLOCKS_PER_SM),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=_BLOCKS_PER_SM),
             arch="sm_100a",
         )
         def mxfp8_quantize_linear(
@@ -291,7 +291,7 @@ def get_kernel(
 
     @txl.kernel(
         launch=lambda _params: txl.cuda.LaunchConfig(grid=grid_x, block=block_x // 32 * 32),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=_BLOCKS_PER_SM),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=_BLOCKS_PER_SM),
         arch="sm_100a",
     )
     def mxfp8_quantize_swizzled(

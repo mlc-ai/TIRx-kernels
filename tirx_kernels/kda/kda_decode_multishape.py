@@ -184,7 +184,7 @@ def _make_base():
 
         @txl.kernel(
             launch=lambda _params: txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
-            options=txl.cuda.KernelOptions(min_blocks_per_sm=per_sm),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
             arch="sm_100a",
         )
         def kda_decode_persist(
@@ -1352,7 +1352,7 @@ def _make_defer():
 
         @txl.kernel(
             launch=lambda _params: txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
-            options=txl.cuda.KernelOptions(min_blocks_per_sm=per_sm),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
             arch="sm_100a",
         )
         def kda_decode_persist(
@@ -2502,7 +2502,7 @@ def _make_dyn():
 
         @txl.kernel(
             launch=lambda _params: txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
-            options=txl.cuda.KernelOptions(min_blocks_per_sm=per_sm),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
             arch="sm_100a",
         )
         def kda_decode_persist(
@@ -3689,7 +3689,7 @@ def _make_split():
 
         @txl.kernel(
             launch=lambda _params: txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
-            options=txl.cuda.KernelOptions(min_blocks_per_sm=per_sm),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
             arch="sm_100a",
         )
         def kda_decode_persist(
@@ -4994,7 +4994,7 @@ def _make_clc():
 
         @txl.kernel(
             launch=lambda _params: txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
-            options=txl.cuda.KernelOptions(min_blocks_per_sm=per_sm),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
             arch="sm_100a",
         )
         def kda_decode_persist(

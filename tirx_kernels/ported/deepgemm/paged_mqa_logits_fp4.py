@@ -507,7 +507,7 @@ def get_kernel(**kwargs: Any):
         launch=lambda _params: txl.cuda.LaunchConfig(
             grid=config.num_sms, block=num_warps * 32, programmatic_stream_serialization=True
         ),
-        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
         arch="sm_100a",
     )
     def sm100_fp4_paged_mqa_logits(

@@ -50,8 +50,9 @@ parser kernels.
 ## Launch configuration
 
 Use `launch=txl.cuda.LaunchConfig(grid=..., block=..., cluster=...)` and optional
-`options=txl.cuda.KernelOptions(...)`. `grid` counts CTAs and `cluster` counts CTAs
-per cluster; `block` is a static one-dimensional multiple of 32 in tirx-lite.
+`kernel_attrs=txl.cuda.KernelAttributes(...)` for compile-time CUDA kernel attributes.
+`grid` counts CTAs and `cluster` counts CTAs per cluster; `block` is a static
+one-dimensional multiple of 32 in tirx-lite.
 The raw TIRx API also supports three-dimensional blocks.
 
 A factory can compute launch operands from the kernel's bound ABI parameters:
@@ -59,7 +60,7 @@ A factory can compute launch operands from the kernel's bound ABI parameters:
 ```python
 @txl.kernel(
     launch=lambda p: txl.cuda.LaunchConfig(grid=(p["n"] + 127) // 128, block=128),
-    options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+    kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
 )
 def zero(out: txl.gptr(txl.f32), n: txl.i32):
     i = txl.cta_id() * 128 + txl.thread_id()

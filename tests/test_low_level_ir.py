@@ -139,7 +139,7 @@ def test_setmaxnreg_requires_pinned_entry_allocation():
     def build(min_blocks_per_sm):
         @txl.kernel(
             launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=4 * 32),
-            options=txl.cuda.KernelOptions(min_blocks_per_sm=min_blocks_per_sm),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm),
             arch="sm_100a",
             check_ir=False,
         )
