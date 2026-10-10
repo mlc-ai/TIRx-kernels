@@ -130,13 +130,7 @@ def make_kernel(HQ: int, HV: int):
     )
     TMA_S2G_O = f"cp.async.bulk.tensor.{RANK}d.global.shared::cta.tile.bulk_group.L2::cache_hint"
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(lambda p: txl.min(p["num_sequences"] * HV, p["num_sms"]))(_params), block=12 * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def gdn_prefill(
         q: txl.gptr[txl.f16],
         k: txl.gptr[txl.f16],
@@ -157,6 +151,11 @@ def make_kernel(HQ: int, HV: int):
         num_sms: txl.i32,
         scale: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=txl.min(num_sequences * HV, num_sms), block=12 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         total_work = num_sequences * HV
         grid_x = txl.min(total_work, num_sms)
 

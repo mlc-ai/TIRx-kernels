@@ -529,12 +529,7 @@ def _make_gdn_decode_fp32_mtp_warp(
     ITERS_PER_GROUP,
     PREFETCH_ROWS,
 ):
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(lambda p: p["batch"] * NUM_V_HEADS * NUM_V_TILES)(_params), block=NUM_WARPS * 32
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def gdn_decode_fp32_mtp_warp(
         state: txl.gptr[txl.f32],
         intermediate: txl.gptr[txl.f32],
@@ -556,6 +551,12 @@ def _make_gdn_decode_fp32_mtp_warp(
         v_batch_stride: txl.i64,
         batch: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=batch * NUM_V_HEADS * NUM_V_TILES, block=NUM_WARPS * 32
+            )
+        )
+
         smem = txl.smem_pool()
         s_q = smem.alloc((S_K_BYTE_OFFSET // 4,), txl.f32, align=16)
         s_k = smem.alloc(((S_G_BYTE_OFFSET - S_K_BYTE_OFFSET) // 4,), txl.f32, align=16)

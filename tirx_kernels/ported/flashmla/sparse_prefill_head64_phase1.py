@@ -310,7 +310,7 @@ def make_kernel(
         """orig:290-302. Same."""
         return _ring_phase_parity(value, max_k_blocks)
 
-    def host_prelude(params):
+    def prepare_host(params):
         q = params["q"]
         kv = params["kv"]
         out = params["out"]
@@ -392,12 +392,7 @@ def make_kernel(
             )
         return kv_part1, kv_part0, out_part1, out_part0, q_nope, q_rope
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=s_q, block=12 * 32),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-        host_prelude=host_prelude,
-    )
+    @txl.kernel(arch="sm_100a")
     def sparse_flashmla_prefill_head64_phase1_kernel(
         q: txl.gptr[txl.bf16, (s_q, h_q, d_qk)],
         kv: txl.gptr[txl.bf16, (s_kv * stride_kv_s_kv,)],
@@ -407,9 +402,24 @@ def make_kernel(
         out: txl.gptr[txl.bf16, (s_q, h_q, D_V)],
         max_logits: txl.gptr[txl.f32, (s_q, h_q)],
         lse: txl.gptr[txl.f32, (s_q, h_q)],
-        *,
-        host,
     ):
+        host = prepare_host(
+            {
+                "q": q,
+                "kv": kv,
+                "indices": indices,
+                "attn_sink": attn_sink,
+                "topk_length": topk_length,
+                "out": out,
+                "max_logits": max_logits,
+                "lse": lse,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=s_q, block=12 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         (
             kv_part1_tensormap,
             kv_part0_tensormap,

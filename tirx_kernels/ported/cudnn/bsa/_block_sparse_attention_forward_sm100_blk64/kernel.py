@@ -107,13 +107,7 @@ def make_forward_kernel(**config):
     q_blocks = (seqlen_q + QUERY_TILE - 1) // QUERY_TILE
     grid = (q_blocks, num_heads if use_clc else num_heads * num_splits, batch)
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=grid, block=16 * 32, cluster=(q_blocks, num_heads, batch) if use_clc else None
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def forward(
         q: txl.gptr[txl.bf16],
         k: txl.gptr[txl.bf16],
@@ -131,6 +125,13 @@ def make_forward_kernel(**config):
         # The warp-specialized TMA/TMEM producer in ``source_kernel.py`` is the
         # path this module actually launches; this loop is kept only as a
         # readable statement of the same contract.
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=grid, block=16 * 32, cluster=(q_blocks, num_heads, batch) if use_clc else None
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         if use_clc:
             q_block, head, batch_idx = (
                 txl.cuda.cluster_cta_id("x"),
@@ -253,17 +254,18 @@ def make_combine_kernel(**config):
     smem_bytes = o_ring_offset + 4 * 16 * 64 * 4
     row_tiles = (seqlen_q * num_heads + 15) // 16
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=(row_tiles, 2, batch), block=4 * 32),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def combine(
         out_partial: txl.gptr[txl.f32],
         lse_partial: txl.gptr[txl.f32],
         out: txl.gptr[txl.bf16],
         lse: txl.gptr[txl.f32],
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=(row_tiles, 2, batch), block=4 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         row_tile, dim_tile, batch_idx = (
             txl.cuda.block_idx("x"),
             txl.cuda.block_idx("y"),

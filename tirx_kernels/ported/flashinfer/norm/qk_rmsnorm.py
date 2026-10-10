@@ -455,19 +455,7 @@ def get_kernel(
             return False
         return vb != vec_blocks - 1
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(
-                txl.cast(
-                    txl.ceildiv(_params["runtime_B"] * _params["runtime_N"], txl.int64(rows)),
-                    "int32",
-                ),
-            ),
-            block=threads // 32 * 32,
-            programmatic_stream_serialization=enable_pdl,
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def flashinfer_qk_rmsnorm(
         x: txl.gptr[dtype],
         weight: txl.gptr[dtype, (H,)],
@@ -481,6 +469,14 @@ def get_kernel(
         y_head_stride: txl.i64,
     ):
         # QK_RMSNORM_KERNEL_START
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(txl.cast(txl.ceildiv(runtime_B * runtime_N, txl.int64(rows)), "int32"),),
+                block=threads // 32 * 32,
+                programmatic_stream_serialization=enable_pdl,
+            )
+        )
+
         block_raw = txl.cuda.block_idx("x")
         tid = txl.thread_id()
 

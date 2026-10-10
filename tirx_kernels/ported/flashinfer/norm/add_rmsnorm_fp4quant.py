@@ -1200,19 +1200,7 @@ def get_kernel(**config: Any):
         if enable_pdl:
             txl.ptx.griddepcontrol.launch_dependents()
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(txl.cast(txl.ceildiv(_params["runtime_M"], txl.int32(rows)), "int32"), cluster_n)
-            if cluster_n > 1
-            else (txl.cast(txl.ceildiv(_params["runtime_M"], txl.int32(rows)), "int32"),),
-            block=threads // 32 * 32,
-            cluster=(1, cluster_n) if cluster_n > 1 else None,
-            preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
-            programmatic_stream_serialization=enable_pdl,
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(required_block_size=True),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def flashinfer_add_rmsnorm_fp4quant(
         x: txl.gptr[input_dtype],
         residual: txl.gptr[input_dtype],
@@ -1225,6 +1213,19 @@ def get_kernel(**config: Any):
         runtime_M: txl.i32,
         runtime_eps: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(txl.cast(txl.ceildiv(runtime_M, txl.int32(rows)), "int32"), cluster_n)
+                if cluster_n > 1
+                else (txl.cast(txl.ceildiv(runtime_M, txl.int32(rows)), "int32"),),
+                block=threads // 32 * 32,
+                cluster=(1, cluster_n) if cluster_n > 1 else None,
+                preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
+                programmatic_stream_serialization=enable_pdl,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(required_block_size=True),
+        )
+
         kernel_body(
             x,
             residual,

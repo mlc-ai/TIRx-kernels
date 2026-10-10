@@ -120,6 +120,11 @@ def build_kernel(
         num_ctas,
         scale,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(block=NWARPS * 32, grid=num_ctas),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         cta = txl.cta_id()
         warp = txl.warp_id()
         lane = txl.lane_id()
@@ -1876,11 +1881,7 @@ def build_kernel(
         "num_ctas": txl.i32,
         "scale": txl.f32,
     }
-    return txl.kernel(
-        arch="sm_100a",
-        launch=lambda _params: txl.cuda.LaunchConfig(block=NWARPS * 32, grid=_params["num_ctas"]),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-    )(kda_fwd)
+    return txl.kernel(arch="sm_100a")(kda_fwd)
 
 
 class _TensorMap:
@@ -2272,11 +2273,7 @@ def make_front(H: int):
     so that every L row / Aqk row lands in ONE TMEM lane (Layout F); the norms are folded into
     T1' = diag(kn) T diag(b) and T2' = T1' diag(kn); one warp per item inverts (four solvers)."""
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=_params["num_ctas"], block=20 * 32),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def kda_front(
         q: txl.gptr[txl.bf16],
         k: txl.gptr[txl.bf16],
@@ -2300,6 +2297,11 @@ def make_front(H: int):
         items_per_cta: txl.i32,
         do_signal: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=num_ctas, block=20 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         for buf in (q, k, g):
             txl.keep_alive(buf.ptr_to([0]))
 
@@ -3211,11 +3213,7 @@ def make_chain(H: int, hpc: int = 2):
     front end; hpc = 1: one head per CTA, for head counts that leave the front end enough SMs anyway)."""
     assert H % hpc == 0 and hpc in (1, 2)
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=H // hpc, block=24 * 32),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def kda_chain(
         v: txl.gptr[txl.bf16],
         state_in: txl.gptr[txl.f32],
@@ -3240,6 +3238,11 @@ def make_chain(H: int, hpc: int = 2):
         flag_from: txl.i32,
         flag_target: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=H // hpc, block=24 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         for buf in (v, out, kbar_g, qt_g, t1_g, aqk_g, w1_g):
             txl.keep_alive(buf.ptr_to([0]))
 

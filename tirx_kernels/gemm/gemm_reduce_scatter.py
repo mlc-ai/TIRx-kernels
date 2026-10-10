@@ -475,7 +475,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
     RS_M_CLUSTERS = config.rs_m_clusters
     RS_N_CLUSTERS = config.rs_n_clusters
 
-    def host_prelude(params):
+    def prepare_host(params):
         A_tensor_map = txl.stack_alloca("tensormap", 1)
         B_tensor_map = txl.stack_alloca("tensormap", 1)
         D_tensor_map = txl.stack_alloca("tensormap", 1)
@@ -535,15 +535,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         )
         return A_tensor_map, B_tensor_map, D_tensor_map
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=SM_NUMBER, block=NUM_THREADS // 32 * 32, cluster=(M_CLUSTER, N_CLUSTER)
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-        host_prelude=host_prelude,
-        allowed_func_calls=_NVSHMEM_RUNTIME_FUNC_CALLS,
-    )
+    @txl.kernel(arch="sm_100a", allowed_func_calls=_NVSHMEM_RUNTIME_FUNC_CALLS)
     def test_mma_ss_tma_2sm_persistent(
         A: txl.gptr[txl.f16, (M, K_LOCAL)],
         B: txl.gptr[txl.f16, (N, K_LOCAL)],
@@ -559,9 +551,32 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         rs_head: txl.gptr[txl.i32, (1,)],
         rs_tail: txl.gptr[txl.i32, (1,)],
         exit_barrier: txl.gptr[txl.u32, (2,)],
-        *,
-        host,
     ):
+        host = prepare_host(
+            {
+                "A": A,
+                "B": B,
+                "gemm_out": gemm_out,
+                "semaphore": semaphore,
+                "out": out,
+                "gemm_task_types": gemm_task_types,
+                "gemm_task_idxs": gemm_task_idxs,
+                "gemm_head": gemm_head,
+                "gemm_tail": gemm_tail,
+                "rs_task_types": rs_task_types,
+                "rs_task_idxs": rs_task_idxs,
+                "rs_head": rs_head,
+                "rs_tail": rs_tail,
+                "exit_barrier": exit_barrier,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=SM_NUMBER, block=NUM_THREADS // 32 * 32, cluster=(M_CLUSTER, N_CLUSTER)
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         A_tensor_map, B_tensor_map, D_tensor_map = host
         gemm_out = gemm_out.view(M, N)
         semaphore = semaphore.view(LOCAL_M // TILE_M, N // TILE_N)

@@ -88,12 +88,7 @@ Q_IDX_MASK = (1 << SLOT_SHIFT) - 1
 # ---------------------------------------------------------------------------
 # Target entry.
 # ---------------------------------------------------------------------------
-@txl.kernel(
-    launch=lambda _params: txl.cuda.LaunchConfig(
-        grid=(lambda p: p["work_capacity"])(_params), block=NUM_THREADS // 32 * 32
-    ),
-    arch="sm_100a",
-)
+@txl.kernel(arch="sm_100a")
 def _kernel(
     k2q_row_ptr: txl.gptr[txl.i32],
     k2q_q_indices: txl.gptr[txl.i32],
@@ -113,6 +108,8 @@ def _kernel(
 ):
     # CUDA TRANSCRIPTION START
     # sketch: static ABI/launch, one CTA per work item -> :445-446.
+    txl.device_entry(launch=txl.cuda.LaunchConfig(grid=work_capacity, block=NUM_THREADS // 32 * 32))
+
     block = txl.cta_id()
     tidx = txl.thread_id()
 

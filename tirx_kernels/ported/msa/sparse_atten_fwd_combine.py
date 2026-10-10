@@ -190,19 +190,7 @@ def make_kernel(
     NUM_ROWS, OUT_ROWS, SPLITS_PT = o_rows, out_rows, splits_pt
     NUM_VALS = o_elems
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(
-                (_params["total_q"] * _params["head_q"] + (TILE_M - 1)) // TILE_M,
-                HEAD_DIM // K_BLOCK_SIZE,
-                _params["num_batches"],
-            ),
-            block=WARPS * 32,
-            programmatic_stream_serialization=True,
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def msa_sparse_atten_fwd_combine(
         o_partial: txl.gptr[partial_ty],
         lse_partial: txl.gptr[txl.f32],
@@ -235,6 +223,19 @@ def make_kernel(
         # Grid: (ceil(seqlen*num_head / tile_m), ceil(head_dim / k_block), batch)
         # with the head axis innermost inside the flattened row index
         # (combine.py:401-418).
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(
+                    (total_q * head_q + (TILE_M - 1)) // TILE_M,
+                    HEAD_DIM // K_BLOCK_SIZE,
+                    num_batches,
+                ),
+                block=WARPS * 32,
+                programmatic_stream_serialization=True,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm),
+        )
+
         m_block, k_block, batch = (
             txl.cuda.block_idx("x"),
             txl.cuda.block_idx("y"),

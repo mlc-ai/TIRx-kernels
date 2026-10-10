@@ -191,11 +191,7 @@ def make_union_kernel(
     SOFTMAX_REGS = 200 if kv_fp8 else 216
     XFORM_REGS = 64 if kv_fp8 else 32
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=num_ctas, block=16 * 32),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def msa_prefill_union(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -211,6 +207,11 @@ def make_union_kernel(
         scale_log2: txl.f32,
         num_seqs: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=num_ctas, block=16 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         warp_cta = txl.warp_id()
         wg_id = warp_cta >> 2
         warp_id = warp_cta & 3
@@ -1461,12 +1462,7 @@ def make_prep_kernel(
     ITEM_BATCH = item_batch
     assert NBLK <= PREP_THREADS
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(num_chunks, hkv), block=PREP_THREADS // 32 * 32
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def msa_reverse_prep(
         q2k: txl.gptr[txl.i32],
         cu_q: txl.gptr[txl.i32],
@@ -1480,6 +1476,10 @@ def make_prep_kernel(
         plan: txl.gptr[txl.i32],
         batch_tab: txl.gptr[txl.i32],
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=(num_chunks, hkv), block=PREP_THREADS // 32 * 32)
+        )
+
         cid = txl.cta_id()
         chunk, h = cid[0], cid[1]
         tid = txl.thread_id()
@@ -1737,13 +1737,7 @@ def make_main_kernel(
     CHUNK = 32
     ITEM_BATCH = 10 if kv_fp8 else BATCH
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=num_ctas, block=16 * 32, programmatic_stream_serialization=USE_PDL
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def msa_reverse_main(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -1767,6 +1761,13 @@ def make_main_kernel(
         plan: txl.gptr[txl.i32],
         scale_log2: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_ctas, block=16 * 32, programmatic_stream_serialization=USE_PDL
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         warp_cta = txl.warp_id()
         wg_id = warp_cta >> 2
         warp_id = warp_cta & 3
@@ -3040,12 +3041,7 @@ def make_combine_kernel_legacy(*, total_q, hq, hkv, topk, num_ctas):
     ROWS = total_q * hq
     ROWS_PER_CTA = 32
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=num_ctas, block=8 * 32, programmatic_stream_serialization=USE_PDL
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def msa_reverse_combine_legacy(
         out: txl.gptr[txl.i32],
         deg: txl.gptr[txl.i32],
@@ -3053,6 +3049,12 @@ def make_combine_kernel_legacy(*, total_q, hq, hkv, topk, num_ctas):
         m_part: txl.gptr[txl.f32],
         l_part: txl.gptr[txl.f32],
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_ctas, block=8 * 32, programmatic_stream_serialization=USE_PDL
+            )
+        )
+
         if USE_PDL:
             txl.ptx.griddepcontrol.wait()
         tid = txl.thread_id()
@@ -3135,12 +3137,7 @@ def make_combine_kernel(*, total_q, hq, hkv, topk, num_ctas):
     ROWS = total_q * hq
     ROWS_PER_CTA = 32
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=num_ctas, block=8 * 32, programmatic_stream_serialization=USE_PDL
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def msa_reverse_combine(
         out: txl.gptr[txl.i32],
         deg: txl.gptr[txl.i32],
@@ -3148,6 +3145,12 @@ def make_combine_kernel(*, total_q, hq, hkv, topk, num_ctas):
         m_part: txl.gptr[txl.f32],
         l_part: txl.gptr[txl.f32],
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_ctas, block=8 * 32, programmatic_stream_serialization=USE_PDL
+            )
+        )
+
         if USE_PDL:
             txl.ptx.griddepcontrol.wait()
         tid = txl.thread_id()
@@ -3249,12 +3252,7 @@ def make_combine_kernel_tma(*, total_q, hq, hkv, topk, num_ctas, compact_s2f6=Fa
     WARPS = ROWS_PER_CTA // 4
     TILE_BYTES = ROWS_PER_CTA * TOPK * HEAD_DIM * (1 if compact_s2f6 else F16_BYTES)
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=num_ctas, block=WARPS * 32, programmatic_stream_serialization=USE_PDL
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def msa_reverse_combine_tma(
         part_map: txl.TensorMap,
         out: txl.gptr[txl.i32],
@@ -3263,6 +3261,12 @@ def make_combine_kernel_tma(*, total_q, hq, hkv, topk, num_ctas, compact_s2f6=Fa
         m_part: txl.gptr[txl.f32],
         l_part: txl.gptr[txl.f32],
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_ctas, block=WARPS * 32, programmatic_stream_serialization=USE_PDL
+            )
+        )
+
         if USE_PDL:
             txl.ptx.griddepcontrol.wait()
         tid = txl.thread_id()

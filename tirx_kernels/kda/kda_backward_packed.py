@@ -316,10 +316,7 @@ def _state_needs_stable(g_last):
 
 
 def make_range_guard(HV, PARTS):
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=_params["num_entries"], block=4 * 32),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def guard(
         v: txl.gptr[txl.bf16],
         do: txl.gptr[txl.bf16],
@@ -330,6 +327,8 @@ def make_range_guard(HV, PARTS):
         flags: txl.gptr[txl.i32],
         num_entries: txl.i32,
     ):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=num_entries, block=4 * 32))
+
         guard_tid = txl.thread_id()
         guard_entry = txl.Cast("int32", txl.cta_id())
         guard_chain = guard_entry // PARTS
@@ -446,13 +445,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None):
     S1, S2, S3, S4, S6, S5 = 128, 192, 256, 320, 384, 448
     TMEM_COLS = 512
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=_params["num_ctas"] if static_grid is None else static_grid, block=12 * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def kda_bwd_native_mega(
         q: txl.gptr[txl.bf16],
         k: txl.gptr[txl.bf16],
@@ -497,6 +490,13 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None):
         range_flags: txl.gptr[txl.i32],
         range_entries: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_ctas if static_grid is None else static_grid, block=12 * 32
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         native_modes = txl.local_scalar("uint32", init=txl.uint32(0))
         native_idx = txl.local_scalar("int32", init=txl.thread_id())
         with txl.While(native_idx < range_entries):
@@ -3352,13 +3352,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False):
     S1, S2, S3, S4, S6, S5 = 128, 192, 256, 320, 384, 448
     TMEM_COLS = 512
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=_params["num_ctas"] if static_grid is None else static_grid, block=12 * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def kda_bwd_mega(
         q: txl.gptr[txl.bf16],
         k: txl.gptr[txl.bf16],
@@ -3404,6 +3398,13 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False):
         range_allowed: txl.i32,
         range_entries: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_ctas if static_grid is None else static_grid, block=12 * 32
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         range_bad = txl.local_scalar("uint32", init=txl.uint32(0))
         range_idx = txl.local_scalar("int32", init=txl.thread_id())
         with txl.While(range_idx < range_entries):
@@ -7175,13 +7176,7 @@ def make_native_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_
     IN_BYTES = 3 * CHUNK * D * 2 + CHUNK * 8 * 2
     EG_BYTES = CHUNK * D * 2
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=_params["num_ctas"] if static_grid is None else static_grid, block=12 * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def kda_bwd_native_fused(
         q: txl.gptr[txl.bf16],
         k: txl.gptr[txl.bf16],
@@ -7221,6 +7216,13 @@ def make_native_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_
         range_flags: txl.gptr[txl.i32],
         range_entries: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_ctas if static_grid is None else static_grid, block=12 * 32
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         native_modes = txl.local_scalar("uint32", init=txl.uint32(0))
         native_idx = txl.local_scalar("int32", init=txl.thread_id())
         with txl.While(native_idx < range_entries):
@@ -9212,13 +9214,7 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
     IN_BYTES = 3 * CHUNK * D * 2 + CHUNK * 8 * 2
     EG_BYTES = CHUNK * D * 2
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=_params["num_ctas"] if static_grid is None else static_grid, block=12 * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def kda_bwd_fused(
         q: txl.gptr[txl.bf16],
         k: txl.gptr[txl.bf16],
@@ -9259,6 +9255,13 @@ def make_fused_kernel(H: int, sched_maxp2: int, sched_maxp1: int, static_grid=No
         range_allowed: txl.i32,
         range_entries: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_ctas if static_grid is None else static_grid, block=12 * 32
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         range_bad = txl.local_scalar("uint32", init=txl.uint32(0))
         range_idx = txl.local_scalar("int32", init=txl.thread_id())
         with txl.While(range_idx < range_entries):

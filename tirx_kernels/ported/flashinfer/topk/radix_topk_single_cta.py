@@ -389,10 +389,7 @@ def get_kernel(
         else:
             st_global_u16(dst, dst_i, bits)
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=grid, block=BLOCK_THREADS // 32 * 32),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def radix_topk_single_cta(
         inp: txl.gptr[dtype, (num_rows * length,)],
         out_idx: txl.gptr[txl.i32, (num_rows * k,)],
@@ -404,6 +401,8 @@ def get_kernel(
         row_to_batch_g: txl.gptr[txl.i32, (num_rows,)],
         aux_stride: txl.i64,
     ):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=grid, block=BLOCK_THREADS // 32 * 32))
+
         group_id = txl.cta_id()
         tx = txl.thread_id()
 

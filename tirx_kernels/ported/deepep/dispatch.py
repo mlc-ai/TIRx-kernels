@@ -213,16 +213,7 @@ def _build_dispatch_kernel(
     cluster = 2 - num_sms % 2
     recv_region_bytes_per_rank = num_max_tokens_per_rank * TOKEN_BYTES_GMEM
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=num_sms,
-            block=num_threads // 32 * 32,
-            cluster=(cluster,) if cluster > 1 else None,
-            cooperative=True,
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def deepep_dispatch(
         x: txl.gptr[txl.u8],
         topk_idx: txl.gptr[txl.i64],
@@ -239,6 +230,16 @@ def _build_dispatch_kernel(
         num_tokens: txl.i32,
         rank_idx: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_sms,
+                block=num_threads // 32 * 32,
+                cluster=(cluster,) if cluster > 1 else None,
+                cooperative=True,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         smem = txl.smem_pool().alloc([SMEM_TOTAL], "uint8")
 
         sm_idx = txl.cta_id()
@@ -688,13 +689,7 @@ def _build_epilogue_kernel(
     num_threads = num_warps * 32
     recv_region_bytes_per_rank = num_max_tokens_per_rank * TOKEN_BYTES_GMEM
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=num_sms, block=num_warps * 32, programmatic_stream_serialization=True
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def deepep_dispatch_copy_epilogue(
         buffer_addr: txl.i64,
         psum_rank: txl.gptr[txl.i32, (NUM_RANKS,)],
@@ -707,6 +702,13 @@ def _build_epilogue_kernel(
         num_recv_tokens: txl.i32,
         rank_idx: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_sms, block=num_warps * 32, programmatic_stream_serialization=True
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         smem = txl.smem_pool().alloc([SMEM_TOTAL], "uint8")
 
         sm_idx = txl.cta_id()

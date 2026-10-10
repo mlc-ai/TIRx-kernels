@@ -866,28 +866,24 @@ def get_kernel(
 
     if plain:
 
-        @txl.kernel(
-            launch=lambda p: txl.cuda.LaunchConfig(
-                grid=grid, block=BLOCK_THREADS, cluster=nc if nc > 1 else None
-            ),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def fast_topk_clusters_kernel(
             logits: txl.gptr[val_t, (batch * seq_len,)],
             indices: txl.gptr[idx_t, (batch * k,)],
             values: txl.gptr[val_t, (batch * k,)],
             overflow: txl.gptr[txl.i32, (batch * 4 * ovf_stride * nc,)],
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=grid, block=BLOCK_THREADS, cluster=nc if nc > 1 else None
+                )
+            )
+
             _emit(logits, indices, values, None, None, overflow)
 
     else:
 
-        @txl.kernel(
-            launch=lambda _params: txl.cuda.LaunchConfig(
-                grid=grid, block=BLOCK_THREADS, cluster=nc if nc > 1 else None
-            ),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def fast_topk_clusters_kernel(
             logits: txl.gptr[val_t, (batch * seq_len,)],
             indices: txl.gptr[idx_t, (batch * k,)],
@@ -895,6 +891,12 @@ def get_kernel(
             aux: txl.gptr[txl.i32, (batch * seq_len if pt else batch,)],
             overflow: txl.gptr[txl.i32, (batch * 4 * ovf_stride * nc,)],
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=grid, block=BLOCK_THREADS, cluster=nc if nc > 1 else None
+                )
+            )
+
             _emit(logits, indices, None, seq_lens, aux, overflow)
 
     return fast_topk_clusters_kernel.func

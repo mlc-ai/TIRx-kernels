@@ -511,16 +511,15 @@ def get_kernel(
         )
         unroll_all_batches = threads_per_sf == _4T_THREADS_PER_SF and m == 1024 and k == 2048
 
-        @txl.kernel(
-            launch=lambda _params: txl.cuda.LaunchConfig(
-                grid=grid_x, block=(block_x + 31) // 32 * 32
-            ),
-            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def mxfp4_quantize_linear(
             in_global: txl.gptr[dtype], out_global: txl.gptr[txl.u8], sf_out: txl.gptr[txl.u8]
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm),
+            )
+
             bx = txl.cta_id()
             tx = txl.thread_id()
 
@@ -650,14 +649,15 @@ def get_kernel(
         and nsb == pad_cols
     )
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def mxfp4_quantize_swizzled(
         in_global: txl.gptr[dtype], out_global: txl.gptr[txl.u8], sf_out: txl.gptr[txl.u8]
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm),
+        )
+
         bx = txl.cta_id()
         tx = txl.thread_id()
 

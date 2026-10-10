@@ -1011,7 +1011,7 @@ def _make_kernel(**config):
     physical_blocks = (seqlen_kv + 127) // 128
     overlap_pv_with_k_wait = config["variant"] == "qstage1_1cta" and physical_blocks >= 7
 
-    def host_prelude(params):
+    def prepare_host(params):
         def encode(tensor, dims, strides, box, swizzle):
             descriptor = txl.stack_alloca("tensormap", 1)
             txl.call_packed(
@@ -2827,9 +2827,36 @@ def _make_kernel(**config):
         sequence_desc,
         fwd_work_desc,
         softmax_scale_log2,
-        *,
-        host,
     ):
+        host = prepare_host(
+            {
+                "q": q,
+                "k": k,
+                "v": v,
+                "out": out,
+                "lse": lse,
+                "partial_count": partial_count,
+                "partial_offset": partial_offset,
+                "partial_index": partial_index,
+                "full_count": full_count,
+                "full_offset": full_offset,
+                "full_index": full_index,
+                "mask_payload": mask_payload,
+                "sequence_desc": sequence_desc,
+                "fwd_work_desc": fwd_work_desc,
+                "softmax_scale_log2": softmax_scale_log2,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=_WARPS * 32,
+                grid=(num_work_records * cta_group, 1, 1),
+                cluster=cta_group,
+                preferred_cluster=cta_group if cta_group == 2 else None,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+        )
+
         kernel_body(
             q,
             k,
@@ -2867,17 +2894,7 @@ def _make_kernel(**config):
         "fwd_work_desc": txl.gptr[txl.i32, (num_work_records * 4,)],
         "softmax_scale_log2": txl.f32,
     }
-    return txl.kernel(
-        arch="sm_103a",
-        host_prelude=host_prelude,
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            block=_WARPS * 32,
-            grid=(num_work_records * cta_group, 1, 1),
-            cluster=cta_group,
-            preferred_cluster=cta_group if cta_group == 2 else None,
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-    )(kernel)
+    return txl.kernel(arch="sm_103a")(kernel)
 
 
 def get_kernel(**config):

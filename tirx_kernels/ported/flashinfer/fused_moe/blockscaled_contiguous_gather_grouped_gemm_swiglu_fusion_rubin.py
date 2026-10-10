@@ -260,7 +260,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
     sf_desc_base = _descriptor_base(1, 8, 0)
     instr_desc = _instruction_descriptor()
 
-    def host_prelude(params):
+    def prepare_host(params):
         b = params["b"]
         sfb = params["sfb"]
         c = params["c"]
@@ -357,9 +357,30 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
         token_id_mapping,
         num_non_exiting_tiles,
         global_scale,
-        *,
-        host,
     ):
+        host = prepare_host(
+            {
+                "a": a,
+                "b": b,
+                "sfa": sfa,
+                "sfb": sfb,
+                "c": c,
+                "sfc": sfc,
+                "alpha": alpha,
+                "tile_idx_to_expert_idx": tile_idx_to_expert_idx,
+                "tile_idx_to_mn_limit": tile_idx_to_mn_limit,
+                "token_id_mapping": token_id_mapping,
+                "num_non_exiting_tiles": num_non_exiting_tiles,
+                "global_scale": global_scale,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=20 * 32, grid=(1, 1, num_clusters), cluster=[1, 1], preferred_cluster=[1, 1]
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+        )
+
         del b, sfb, c
         b_map, sfb_map, c_map = host
         _bx, _by, work_id = txl.cta_id()
@@ -1148,14 +1169,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
         "num_non_exiting_tiles": txl.gptr[txl.i32, (1,)],
         "global_scale": txl.gptr[txl.f32, (1,)],
     }
-    return txl.kernel(
-        arch="sm_107a",
-        host_prelude=host_prelude,
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            block=20 * 32, grid=(1, 1, num_clusters), cluster=[1, 1], preferred_cluster=[1, 1]
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-    )(kernel)
+    return txl.kernel(arch="sm_107a")(kernel)
 
 
 def _config_dict(**config):

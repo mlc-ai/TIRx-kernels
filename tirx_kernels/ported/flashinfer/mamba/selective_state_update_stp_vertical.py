@@ -353,12 +353,7 @@ def get_kernel(**kwargs: Any):
     STATE_STAGE_BYTES = spec["STATE_STAGE_BYTES"]
     INPUT_BYTES = spec["INPUT_BYTES"]
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(spec["BATCH"], spec["NHEADS"]), block=5 * 32
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def selective_state_update_stp_vertical(
         tensor_state: txl.TensorMap,
         state: txl.gptr[spec["STATE_DTYPE"]],
@@ -391,6 +386,10 @@ def get_kernel(**kwargs: Any):
         update_state: txl.i32,
         pad_slot_id: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=(spec["BATCH"], spec["NHEADS"]), block=5 * 32)
+        )
+
         batch_i, head = txl.cta_id()
         smem = txl.smem_pool()
         s_state = smem.alloc((3 * spec["STATE_STAGE_VALUES"],), spec["STATE_DTYPE"], align=128)

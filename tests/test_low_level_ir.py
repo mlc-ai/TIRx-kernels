@@ -12,12 +12,10 @@ from tvm.script import tirx as T
 
 
 def _build_kernel_with_buffer_access(scope: str, access: str):
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=1 * 32),
-        arch="sm_100a",
-        check_ir=True,
-    )
+    @txl.kernel(arch="sm_100a", check_ir=True)
     def probe(global_buffer: txl.gptr("float32")):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
+
         buffer = (
             global_buffer if scope == "global" else txl.alloc_tensor([1], "float32", scope="shared")
         )
@@ -33,12 +31,10 @@ def _build_kernel_with_buffer_access(scope: str, access: str):
 
 
 def _kernel_with_func_call(callee: str):
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=1 * 32),
-        arch="sm_100a",
-        check_ir=False,
-    )
+    @txl.kernel(arch="sm_100a", check_ir=False)
     def main():
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
+
         txl.cuda.func_call(callee, source_code="__device__ void ignored() {}")
 
     return main.func
@@ -78,12 +74,10 @@ def test_address_of_tensor_load_is_not_a_memory_read(scope):
 
 
 def test_address_of_still_checks_memory_reads_in_its_index():
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=1 * 32),
-        arch="sm_100a",
-        check_ir=False,
-    )
+    @txl.kernel(arch="sm_100a", check_ir=False)
     def probe(indices: txl.gptr("int32"), values: txl.gptr("float32")):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
+
         txl.keep_alive(txl.address_of(values[indices[0]]))
 
     with pytest.raises(LowLevelIRContractError) as error:
@@ -137,13 +131,13 @@ def test_only_exact_kernel_local_helpers_are_exempt():
 
 def test_setmaxnreg_requires_pinned_entry_allocation():
     def build(min_blocks_per_sm):
-        @txl.kernel(
-            launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=4 * 32),
-            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm),
-            arch="sm_100a",
-            check_ir=False,
-        )
+        @txl.kernel(arch="sm_100a", check_ir=False)
         def probe():
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(grid=1, block=4 * 32),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm),
+            )
+
             txl.ptx.setmaxnreg.dec.sync.aligned.u32(txl.uint32(64))
 
         return probe.func
@@ -230,8 +224,10 @@ def test_correctness_runner_does_not_hide_runtime_reference_errors(monkeypatch):
 
 
 def test_tirx_lite_smem_descriptor_uniformity_stays_in_low_level_contract():
-    @txl.kernel(launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=1 * 32), arch="sm_100a")
+    @txl.kernel(arch="sm_100a")
     def probe():
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
+
         descriptor = txl.SmemDescriptor()
         descriptor.make_lo_uniform()
         descriptor.add_16B_offset(txl.int32(1))

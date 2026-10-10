@@ -602,19 +602,20 @@ def get_kernel(**config):
     compute_regs = 144 if p20_all_partial else (128 if p26_task_major_2d else 136)
     reduce_regs = 136 if p20_all_partial else (168 if p26_task_major_2d else 152)
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=((seqlen_q + 127) // 128, heads, batch), block=8 * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def preprocess(
         o: txl.gptr[txl.bf16],
         do: txl.gptr[txl.bf16],
         lse: txl.gptr[txl.f32],
         workspace: txl.gptr[txl.f32],
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=((seqlen_q + 127) // 128, heads, batch), block=8 * 32
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+        )
+
         txl.ptx.griddepcontrol.wait()
         q_tile, head, batch_idx = txl.cta_id()
         tid = txl.thread_id()
@@ -712,18 +713,7 @@ def get_kernel(**config):
                 workspace.ptr_to([dst]), txl.uint32(0), txl.uint32(0), txl.uint32(0), txl.uint32(0)
             )
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(heads, 32, 1)
-            if p26_task_major_2d
-            else (total_tasks * heads, 1, 1)
-            if use_source_varlen_schedule or use_source_varlen_nondet_schedule or fixed_task_major
-            else (total_tasks if varlen else tasks * groups, heads, 1 if varlen else batch),
-            block=WARPS * 32,
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def bwd(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -753,6 +743,20 @@ def get_kernel(**config):
         workspace: txl.gptr[txl.f32],
         softmax_scale: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(heads, 32, 1)
+                if p26_task_major_2d
+                else (total_tasks * heads, 1, 1)
+                if use_source_varlen_schedule
+                or use_source_varlen_nondet_schedule
+                or fixed_task_major
+                else (total_tasks if varlen else tasks * groups, heads, 1 if varlen else batch),
+                block=WARPS * 32,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         block, head_axis, batch_axis = txl.cta_id()
         head = txl.local_scalar("int32", init=head_axis)
         batch_idx = txl.local_scalar("int32", init=batch_axis)
@@ -1871,16 +1875,19 @@ def get_kernel(**config):
             txl.ptx.bar.arrive(txl.uint32(BAR_TMEM[0]), txl.uint32(BAR_TMEM[1]))
 
     def make_postprocess(seq_len, padded_len, source_base):
-        @txl.kernel(
-            launch=lambda _params: txl.cuda.LaunchConfig(
-                grid=((seq_len + 127) // 128, heads, batch), block=4 * 32
-            ),
-            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def postprocess(
             workspace: txl.gptr[txl.f32], output: txl.gptr[txl.bf16], output_scale: txl.f32
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=((seq_len + 127) // 128, heads, batch), block=4 * 32
+                ),
+                kernel_attrs=txl.cuda.KernelAttributes(
+                    min_blocks_per_sm=1, required_block_size=True
+                ),
+            )
+
             seq_tile, head, batch_idx = txl.cta_id()
             tid = txl.thread_id()
             seq = seq_tile * txl.int32(128) + tid

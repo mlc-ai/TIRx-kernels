@@ -512,7 +512,7 @@ def _make_kernel(
     a_desc_base = _descriptor_base(ldo=a_ldo, sdo=a_sdo, swizzle=a_swizzle)
     b_desc_base = _descriptor_base(ldo=b_ldo, sdo=b_sdo, swizzle=b_swizzle)
 
-    def host_prelude(params):
+    def prepare_host(params):
         a = params["a"]
         b = params["b"]
         ab12 = params["ab12"]
@@ -609,7 +609,18 @@ def _make_kernel(
         encode_output(c_map, c, c_dtype, N // 2, c_bits, epi_n)
         return a_map, b_map, ab12_map, c_map
 
-    def kernel(a, b, ab12, c, alpha, *, host):
+    def kernel(a, b, ab12, c, alpha):
+        host = prepare_host({"a": a, "b": b, "ab12": ab12, "c": c, "alpha": alpha})
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=6 * 32,
+                grid=(cluster_m, cluster_n, num_clusters),
+                cluster=[cluster_m, cluster_n],
+                preferred_cluster=[cluster_m, cluster_n],
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(max_registers_per_thread=entry_max_registers),
+        )
+
         del a, b, ab12, c
         a_map, b_map, ab12_map, c_map = host
         if entry_max_registers is None:
@@ -1519,17 +1530,7 @@ def _make_kernel(
         "c": txl.gptr[txl.u8, (M * (N // 2) * L * c_bits // 8,)],
         "alpha": txl.f32,
     }
-    return txl.kernel(
-        arch="sm_100a",
-        host_prelude=host_prelude,
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            block=6 * 32,
-            grid=(cluster_m, cluster_n, num_clusters),
-            cluster=[cluster_m, cluster_n],
-            preferred_cluster=[cluster_m, cluster_n],
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(max_registers_per_thread=entry_max_registers),
-    )(kernel)
+    return txl.kernel(arch="sm_100a")(kernel)
 
 
 def get_kernel(

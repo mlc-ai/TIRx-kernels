@@ -605,13 +605,7 @@ def get_kernel(**kwargs: Any):
     MMA = "tcgen05.mma.cta_group::1.kind::f8f6f4"
     TC_LD = f"tcgen05.ld.sync.aligned.32x32b.x{num_heads}.b32"
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=config.num_sms, block=num_warps * 32, programmatic_stream_serialization=True
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100f",
-    )
+    @txl.kernel(arch="sm_100f")
     def sm100_fp8_paged_mqa_logits(
         batch_size: txl.u32,
         logits_stride: txl.u32,
@@ -626,6 +620,13 @@ def get_kernel(**kwargs: Any):
         tensor_map_kv_scales: txl.TensorMap,
         tensor_map_weights: txl.TensorMap,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=config.num_sms, block=num_warps * 32, programmatic_stream_serialization=True
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         cache_policy_evict_normal = txl.uint64(1152921504606846976)
         sm_idx_u32 = txl.Cast("uint32", txl.cta_id())
         warp_idx = txl.warp_id()

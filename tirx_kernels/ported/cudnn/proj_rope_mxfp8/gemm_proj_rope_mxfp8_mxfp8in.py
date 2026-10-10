@@ -188,7 +188,7 @@ def _make_kernel(tokens, k_dim, num_heads):
     swizzle = {128: 4, 256: 4, 2048: 16, 4096: 32}[tokens]
     t2r_x8 = tokens >= 2048
 
-    def host_prelude(params):
+    def prepare_host(params):
         x_code = params["x_code"]
         w_code = params["w_code"]
         a_map = txl.stack_alloca("tensormap", 1)
@@ -242,10 +242,24 @@ def _make_kernel(tokens, k_dim, num_heads):
         out_scales_row,
         out_fp8_col,
         out_scales_col,
-        *,
-        host,
     ):
         # TIRX_PORT_START: gemm_proj_rope_mxfp8_mxfp8in_kernel
+        host = prepare_host(
+            {
+                "x_code": x_code,
+                "x_scale": x_scale,
+                "w_code": w_code,
+                "w_scale": w_scale,
+                "cos": cos,
+                "sin": sin,
+                "out_fp8_row": out_fp8_row,
+                "out_scales_row": out_scales_row,
+                "out_fp8_col": out_fp8_col,
+                "out_scales_col": out_scales_col,
+            }
+        )
+        txl.device_entry(launch=txl.cuda.LaunchConfig(block=14 * 32, grid=(1, 1, num_clusters)))
+
         del x_code, w_code
         a_map, b_map = host
         _block_x, _block_y, cluster_work_id = txl.cta_id()
@@ -778,11 +792,7 @@ def _make_kernel(tokens, k_dim, num_heads):
         "out_fp8_col": txl.gptr[txl.u8, (tokens * num_heads * _HEAD_DIM,)],
         "out_scales_col": txl.gptr[txl.u8, ((tokens // _BLOCK) * num_heads * _HEAD_DIM,)],
     }
-    return txl.kernel(
-        arch="sm_100a",
-        host_prelude=host_prelude,
-        launch=lambda _params: txl.cuda.LaunchConfig(block=14 * 32, grid=(1, 1, num_clusters)),
-    )(kernel)
+    return txl.kernel(arch="sm_100a")(kernel)
 
 
 def get_kernel(tokens, k_dim, num_heads):

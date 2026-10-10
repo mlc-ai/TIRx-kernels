@@ -447,12 +447,7 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
     USE_LOWER_BOUND = spec["USE_LOWER_BOUND"]
     STATE_SLOT_STRIDE = spec["STATE_SLOT_STRIDE"]
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=NUM_SEQS * NUM_VALUE_HEADS * NUM_V_TILES, block=1 * 32
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def _recurrent_kda_decode_one_warp(
         q: txl.gptr[txl.bf16],
         k: txl.gptr[txl.bf16],
@@ -471,6 +466,12 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
     ):
         # TIRX_TRANSCRIBE_START recurrent_kda_decode_one_warp
         # --- lane and CTA coordinates (recurrent_kda.py:229-246) ----------------
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=NUM_SEQS * NUM_VALUE_HEADS * NUM_V_TILES, block=1 * 32
+            )
+        )
+
         bidx = txl.cta_id()
         tidx_axis = txl.thread_id()
         tidx = txl.local_scalar("int32")

@@ -259,7 +259,7 @@ def current(required: bool = True) -> Session | None:
     session = getattr(_TLS, "session", None)
     if session is None and required:
         raise RuntimeError(
-            "no tirx-lite kernel is being traced; this call is only valid inside a @txl.kernel body"
+            "this call requires an active txl.device_entry inside a @txl.kernel body"
         )
     return session
 
@@ -417,132 +417,167 @@ def _declare_param(name, ann, scalar_params):
     )
 
 
-def kernel(
-    *,
-    launch,
-    kernel_attrs=None,
-    arch: str = "sm_100a",
-    host_prelude=None,
-    allowed_func_calls: tuple[str, ...] = (),
-    check_ir: bool = True,
-):
-    """Declare a kernel with a CUDA LaunchConfig and optional KernelAttributes.
+class _TraceContext:
+    """Function-wide tracing state; device state exists only inside its entry."""
 
-    ``launch`` accepts a configuration object or a factory over the bound ABI
-    parameter mapping. The block must be a static, one-dimensional multiple
-    of 32; grid and cluster may be multidimensional. Launch dimensions are
-    independent of the index accessors used by the body.
+    def __init__(self, name, arch, params, builder):
+        self.name = name
+        self.arch = arch
+        self.params = params
+        self.builder = builder
+        self.function_frame = builder.frames[-1]
+        self.entry = None
 
-    ``kernel_attrs.min_blocks_per_sm`` pins the occupancy contract used to validate
-    register transitions in specialized warp roles. An omitted attribute leaves
-    that contract unpinned, preserving CUDA's default launch-bounds behavior.
 
-    ``host_prelude`` receives the bound ABI parameters before device entry and
-    supplies the decorated function's keyword-only ``host`` argument.
+class _DeviceEntry:
+    """One native region, closed by a with block or by the kernel decorator."""
+
+    def __init__(self, context, launch, kernel_attrs):
+        from tvm.backend.cuda.launch import KernelAttributes, LaunchConfig
+        from tvm.backend.cuda.launch._impl import _integer
+
+        if not isinstance(launch, LaunchConfig):
+            raise TypeError("device_entry launch must be a CUDA LaunchConfig")
+        if kernel_attrs is not None and not isinstance(kernel_attrs, KernelAttributes):
+            raise TypeError("kernel_attrs must be a CUDA KernelAttributes")
+        if context.entry is not None:
+            raise RuntimeError("a txl.kernel must declare exactly one device_entry")
+        if not context.builder.frames[-1].same_as(context.function_frame):
+            raise RuntimeError(
+                "device_entry must be at function scope, outside TIR branches and loops"
+            )
+        if len(launch.block) != 1:
+            raise ValueError("tirx-lite requires a one-dimensional block")
+        nthreads = _integer(launch.block[0])
+        if nthreads is None or nthreads % 32 or not 32 <= nthreads <= 1024:
+            raise ValueError("tirx-lite block must be a static multiple of 32 between 32 and 1024")
+        min_blocks = kernel_attrs.min_blocks_per_sm if kernel_attrs is not None else None
+        self.session = Session(context.name, nthreads // 32, context.arch, min_blocks)
+        self.session.params = context.params
+        self.session.launch = launch
+        self.session.kernel_attrs = kernel_attrs
+        self.frame = I.device_entry(launch=launch, kernel_attrs=kernel_attrs)
+        self.closed = False
+        self.managed = False
+        self.frame.__enter__()
+        context.entry = self
+        _TLS.session = self.session
+
+        def index(name, value):
+            return I.bind(value, var=tvm.ir.Var(name, value.ty))
+
+        cta_ids = [index("b" + axis, I.cuda.block_idx(axis)) for axis in "xyz"[: len(launch.grid)]]
+        if len(cta_ids) == 1:
+            self.session.cta_id = cta_ids[0]
+        else:
+            from tvm_ffi import convert
+
+            self.session.cta_id = convert(cta_ids)
+        self.session.warp_scope_id = index("warp_id", I.cuda.warp_id())
+        self.session.lane_id = index("lane_id", I.cuda.lane_id())
+        self.session.thread_id = index("thread_id", I.cuda.linear_thread_id())
+
+    def __enter__(self):
+        if self.closed or self.managed:
+            raise RuntimeError("device_entry cannot be entered more than once")
+        self.managed = True
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.closed:
+            return
+        try:
+            if exc_type is None:
+                if self.session.specialize is not None:
+                    self.session.specialize.finalize()
+                if self.session.pool is not None:
+                    self.session.pool.commit()
+            self.frame.__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.closed = True
+            _TLS.session = None
+
+
+def device_entry(*, launch, kernel_attrs=None):
+    """Start the kernel's device region with explicit CUDA launch configuration.
+
+    A flat call covers the remainder of the traced function. A ``with`` block
+    closes the region explicitly and permits subsequent host statements. Host
+    preparation belongs before entry; launch operands can refer directly to
+    function parameters. Exactly one top-level entry is required per kernel.
+
+    The block must be a static, one-dimensional multiple of 32, between 32 and
+    1024. Grid and cluster can be multidimensional. ``kernel_attrs`` supplies
+    compile-time CUDA attributes, including the occupancy contract used by
+    specialized warp roles.
     """
-    from tvm.backend.cuda.launch import KernelAttributes, LaunchConfig
+    context = getattr(_TLS, "trace", None)
+    if context is None:
+        raise RuntimeError("device_entry is only valid inside a @txl.kernel body")
+    return _DeviceEntry(context, launch, kernel_attrs)
 
-    if kernel_attrs is not None and not isinstance(kernel_attrs, KernelAttributes):
-        raise TypeError("kernel_attrs must be a CUDA KernelAttributes")
+
+def kernel(
+    *, arch: str = "sm_100a", allowed_func_calls: tuple[str, ...] = (), check_ir: bool = True
+):
+    """Trace a host function containing one explicit ``txl.device_entry``.
+
+    Annotations bind the host entry's ABI. The function prepares host values
+    and declares its launch configuration in the body, using those parameters
+    directly. Only values used by the device body become device parameters.
+    """
 
     def decorator(fn):
         sig = inspect.signature(fn)
-        host_param = sig.parameters.get("host")
-        if host_prelude is None:
-            if host_param is not None:
-                raise TypeError("keyword-only `host` requires host_prelude=")
-        elif host_param is None or host_param.kind is not inspect.Parameter.KEYWORD_ONLY:
-            raise TypeError("host_prelude= requires a keyword-only `host` parameter")
         params = {}
-        prev = getattr(_TLS, "session", None)
+        previous_trace = getattr(_TLS, "trace", None)
+        previous_session = getattr(_TLS, "session", None)
         function_span = _callable_span(fn)
-        with IRBuilder() as ib:
-            with I.function_():
-                I.func_name_(fn.__name__)
-                # Keep the authored/default target on the Function itself.
-                # Consumers such as NumSim receive ``Kernel.func`` rather than
-                # the wrapper, so ``Kernel.arch`` alone loses an ISA fact that
-                # affects SM100 versus SM107 descriptor decoding.
-                I.func_attr({"global_symbol": fn.__name__, "tirx.cuda_arch": arch})
-                args = []
-                scalar_params = {
-                    pname: _scalar_param(pname, param.annotation)
-                    for pname, param in sig.parameters.items()
-                    if pname != "host" and isinstance(param.annotation, str)
-                }
-                for pname, param in sig.parameters.items():
-                    if pname == "host" and host_prelude is not None:
-                        continue
-                    if param.annotation is inspect.Parameter.empty:
-                        raise TypeError(f"kernel parameter {pname!r} needs an annotation")
-                    value = _declare_param(pname, param.annotation, scalar_params)
-                    params[pname] = value
-                    args.append(value)
-                config = launch(params) if callable(launch) else launch
-                if not isinstance(config, LaunchConfig):
-                    raise TypeError("launch must be a CUDA LaunchConfig or a factory returning one")
-                if len(config.block) != 1:
-                    raise ValueError("tirx-lite requires a one-dimensional block")
-                from tvm.backend.cuda.launch._impl import _integer
-
-                nthreads = _integer(config.block[0])
-                if nthreads is None or nthreads % 32 or not 32 <= nthreads <= 1024:
-                    raise ValueError(
-                        "tirx-lite block must be a static multiple of 32 between 32 and 1024"
-                    )
-                min_blocks = kernel_attrs.min_blocks_per_sm if kernel_attrs is not None else None
-                session = Session(fn.__name__, nthreads // 32, arch, min_blocks)
-                session.params = params
-                session.launch = config
-                session.kernel_attrs = kernel_attrs
-                host = host_prelude(params) if host_prelude is not None else None
-                with I.device_entry(launch=config, kernel_attrs=kernel_attrs):
-
-                    def index(name, value):
-                        return I.bind(value, var=tvm.ir.Var(name, value.ty))
-
-                    cta_ids = [
-                        index("b" + axis, I.cuda.block_idx(axis))
-                        for axis in "xyz"[: len(config.grid)]
-                    ]
-                    if len(cta_ids) == 1:
-                        session.cta_id = cta_ids[0]
-                    else:
-                        from tvm_ffi import convert
-
-                        session.cta_id = convert(cta_ids)
-                    session.warp_scope_id = index("warp_id", I.cuda.warp_id())
-                    session.lane_id = index("lane_id", I.cuda.lane_id())
-                    session.thread_id = index("thread_id", I.cuda.linear_thread_id())
-                    _TLS.session = session
-                    try:
-                        with _SourceSpanTracer(ib):
-                            if host_prelude is None:
-                                fn(*args)
-                            else:
-                                fn(*args, host=host)
-                        if session.specialize is not None:
-                            session.specialize.finalize()
-                        if session.pool is not None:
-                            session.pool.commit()
-                    finally:
-                        _TLS.session = prev
-        func = ib.get()
+        try:
+            _TLS.trace = None
+            _TLS.session = None
+            with IRBuilder() as ib:
+                with I.function_():
+                    I.func_name_(fn.__name__)
+                    I.func_attr({"global_symbol": fn.__name__, "tirx.cuda_arch": arch})
+                    args, kwargs = [], {}
+                    scalar_params = {
+                        pname: _scalar_param(pname, param.annotation)
+                        for pname, param in sig.parameters.items()
+                        if isinstance(param.annotation, str)
+                    }
+                    for pname, param in sig.parameters.items():
+                        if param.annotation is inspect.Parameter.empty:
+                            raise TypeError(f"kernel parameter {pname!r} needs an annotation")
+                        value = _declare_param(pname, param.annotation, scalar_params)
+                        params[pname] = value
+                        if param.kind is inspect.Parameter.KEYWORD_ONLY:
+                            kwargs[pname] = value
+                        else:
+                            args.append(value)
+                    context = _TraceContext(fn.__name__, arch, params, ib)
+                    _TLS.trace = context
+                    with _SourceSpanTracer(ib):
+                        try:
+                            fn(*args, **kwargs)
+                        except BaseException:
+                            if context.entry is not None:
+                                context.entry.__exit__(*sys.exc_info())
+                            raise
+                        if context.entry is None:
+                            raise RuntimeError("a txl.kernel must declare exactly one device_entry")
+                        context.entry.__exit__(None, None, None)
+                    session = context.entry.session
+            func = ib.get()
+        finally:
+            _TLS.trace = previous_trace
+            _TLS.session = previous_session
         if function_span is not None:
-            # FunctionFrame intentionally constructs the function with an
-            # undefined span.  Preserve its generated body and attributes while
-            # giving the function itself the kernel declaration's location.
             func = func.with_body(func.body, span=function_span)
         if session.specialize is not None:
-            # Adjacent role guards become an else-if chain. Done on the built
-            # body rather than with nested frames during the trace: a frame
-            # left open across sibling `with role:` blocks would swallow any
-            # CTA-scope code between them into the previous role's branch.
+            # Keep adjacent role guards mutually exclusive after tracing.
             func = session.specialize.chain_dispatch(func)
         if check_ir:
-            # Every tirx-lite build passes the low-level IR contract by default:
-            # direct global/shared buffer accesses and unlisted func_calls are
-            # trace-time errors, not something a later test run discovers.
             from .low_level_ir import check_low_level_ir
 
             check_low_level_ir(func, allowed_func_calls=allowed_func_calls)

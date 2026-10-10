@@ -475,12 +475,7 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
     SSM_IDX_ELEMENTS = spec["SSM_IDX_ELEMENTS"]
     NAT_ELEMENTS = spec["NAT_ELEMENTS"]
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(NUM_VALUE_HEADS, NUM_SEQS, VSPLIT), block=NUM_WARPS * 32
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def _recurrent_kda_decode_grouped(
         q: txl.gptr[txl.bf16, (QK_ELEMENTS,)],
         k: txl.gptr[txl.bf16, (QK_ELEMENTS,)],
@@ -502,6 +497,12 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
     ):
         # TIRX_TRANSCRIBE_START recurrent_kda_decode_grouped
         # --- CTA and thread coordinates (recurrent_kda.py:512-524) -------------
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(NUM_VALUE_HEADS, NUM_SEQS, VSPLIT), block=NUM_WARPS * 32
+            )
+        )
+
         hv, n, vz = txl.cta_id()
         tid = txl.thread_id()
         lane = txl.lane_id()

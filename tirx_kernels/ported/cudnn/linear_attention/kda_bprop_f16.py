@@ -545,10 +545,7 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out)
         10 if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a" and not run_order else 32
     )
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=prologue_warps * 32),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def prologue(
         base_q: txl.gptr[txl.i64],
         base_k: txl.gptr[txl.i64],
@@ -589,6 +586,8 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out)
         checkpoint_row_stride_bytes: txl.i32,
         checkpoint_every_n: txl.i32,
     ):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=prologue_warps * 32))
+
         thread = txl.thread_id()
         warp = txl.warp_id()
         if run_order:
@@ -856,11 +855,7 @@ def _make_main(
     cg1_regs = 184 if thor_state_path else 168
     support_regs = 40 if thor_state_path else 56
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=num_sms, block=16 * 32),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def main(
         descriptor_workspace: txl.gptr[txl.i64],
         n_desc: txl.i32,
@@ -877,6 +872,11 @@ def _make_main(
         scheduler: txl.gptr[txl.i32],
         scale: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=num_sms, block=16 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         arena = txl.alloc_tensor((_MAIN_SMEM_BYTES,), txl.u8, scope="shared.dyn", align=1024)
         # The pool owns only the fixed pipeline/barrier header over the arena;
         # all data storage below is addressed by integer byte offsets.

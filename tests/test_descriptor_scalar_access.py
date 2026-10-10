@@ -31,8 +31,10 @@ def test_descriptor_selection_is_an_mma_operand(constructor, operand, arguments)
         cta_group=1,
     )
 
-    @txl.kernel(launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=1 * 32), arch="sm_100a")
+    @txl.kernel(arch="sm_100a")
     def probe(choose_first: txl.i32, tmem: txl.u32):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
+
         smem = txl.smem_pool()
         for _ in range(2):
             tile = smem.alloc((64, 64), txl.bf16, align=1024, swizzle=txl.SW128B)

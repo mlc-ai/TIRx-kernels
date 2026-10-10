@@ -983,7 +983,7 @@ def _tcgen_mma_ts(
 def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out, cu_dtype):
     cu_t = txl.i64 if cu_dtype == "int64" else txl.i32
 
-    @txl.kernel(launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=32 * 32), arch="sm_100a")
+    @txl.kernel(arch="sm_100a")
     def prologue(
         base_q: txl.gptr[txl.i64],
         base_k: txl.gptr[txl.i64],
@@ -1018,6 +1018,8 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out,
         dv_row_stride_bytes: txl.i32,
         checkpoint_every_n: txl.i32,
     ):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32 * 32))
+
         thread = txl.thread_id()
         warp = txl.warp_id()
         map_payload = txl.alloc_local((16,), "uint64")
@@ -1248,13 +1250,7 @@ def _make_main(
     idesc_m128_n64_ab = _IDESC_M128_N64_AB_BF16 - idesc_delta
     idesc_m128_n128_b = _IDESC_M128_N128_B_BF16 - idesc_delta
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=num_sms, block=12 * 32, cluster=(1, 1, 1)
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def main(
         descriptor_workspace: txl.gptr[txl.i64],
         n_desc: txl.i32,
@@ -1272,6 +1268,11 @@ def _make_main(
         scheduler: txl.gptr[txl.i32],
         scale: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=num_sms, block=12 * 32, cluster=(1, 1, 1)),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+        )
+
         arena = txl.alloc_tensor((_ARENA_BYTES,), txl.u8, scope="shared.dyn", align=1024)
         txl.smem_pool(base=arena)
         thread = txl.thread_id()

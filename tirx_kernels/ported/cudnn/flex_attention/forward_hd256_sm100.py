@@ -486,7 +486,7 @@ def _make_kernel(**config):
     tmem_dealloc = f"tcgen05.dealloc.cta_group::{cta_group}.sync.aligned.b32"
     tmem_relinquish = f"tcgen05.relinquish_alloc_permit.cta_group::{cta_group}.sync.aligned"
 
-    def host_prelude(params):
+    def prepare_host(params):
         def encode(tensor, dims, strides, box):
             descriptor = txl.stack_alloca("tensormap", 1)
             txl.call_packed(
@@ -1547,9 +1547,41 @@ def _make_kernel(**config):
         fwd_work_desc,
         softmax_scale_log2,
         softmax_scale,
-        *,
-        host,
     ):
+        host = prepare_host(
+            {
+                "q": q,
+                "k": k,
+                "v": v,
+                "out": out,
+                "lse": lse,
+                "cu_q": cu_q,
+                "cu_k": cu_k,
+                "sequence_desc": sequence_desc,
+                "mask_block_cnt": mask_block_cnt,
+                "mask_block_offset": mask_block_offset,
+                "mask_block_idx": mask_block_idx,
+                "full_block_cnt": full_block_cnt,
+                "full_block_offset": full_block_offset,
+                "full_block_idx": full_block_idx,
+                "mask_payload": mask_payload,
+                "fwd_work_desc": fwd_work_desc,
+                "softmax_scale_log2": softmax_scale_log2,
+                "softmax_scale": softmax_scale,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=384,
+                grid=task_count * cta_group,
+                cluster=2 if cta_group == 2 else None,
+                preferred_cluster=2 if cta_group == 2 else None,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(
+                min_blocks_per_sm=1, required_block_size=cta_group == 2
+            ),
+        )
+
         if cta_group == 2:
             kernel_body(
                 q,
@@ -1615,19 +1647,7 @@ def _make_kernel(**config):
         "softmax_scale_log2": txl.f32,
         "softmax_scale": txl.f32,
     }
-    return txl.kernel(
-        arch="sm_100a",
-        host_prelude=host_prelude,
-        launch=txl.cuda.LaunchConfig(
-            block=384,
-            grid=task_count * cta_group,
-            cluster=2 if cta_group == 2 else None,
-            preferred_cluster=2 if cta_group == 2 else None,
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(
-            min_blocks_per_sm=1, required_block_size=cta_group == 2
-        ),
-    )(kernel)
+    return txl.kernel(arch="sm_100a")(kernel)
 
 
 def get_kernel(**config):

@@ -1556,11 +1556,7 @@ def _make_t_precompute(spec):
     max_t_blocks = spec["MAX_T_BLOCKS"]
     grid_x = state_heads * max_t_blocks
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=(grid_x, num_sequences), block=4 * 32),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=8),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def t_precompute(
         k: txl.gptr[io_dtype],
         beta: txl.gptr[txl.f32],
@@ -1568,6 +1564,11 @@ def _make_t_precompute(spec):
         cu_seqlens: txl.gptr[cu_dtype],
         k_map: txl.TensorMap,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=(grid_x, num_sequences), block=4 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=8),
+        )
+
         bx, seq_idx = txl.cta_id()
         roles = txl.specialize()
         compute = roles.role("compute", warps=range(4))
@@ -1814,13 +1815,7 @@ def _make_fixup_simt(spec):
     use_state_indices = spec["USE_STATE_INDICES"]
     row_ctas = D_HEAD // rows_per_cta
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=num_sequences * state_heads * row_ctas, block=4 * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def fixup_simt(
         transfer: txl.gptr[txl.f32],
         local_state: txl.gptr[txl.f32],
@@ -1831,6 +1826,11 @@ def _make_fixup_simt(spec):
         state_indices: txl.gptr[txl.i32],
         cu_seqlens: txl.gptr[cu_dtype],
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=num_sequences * state_heads * row_ctas, block=4 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
+        )
+
         roles = txl.specialize()
         compute = roles.role("compute", warps=range(4), regs=256)
         smem = txl.smem_pool()
@@ -2018,13 +2018,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs):
     use_state_indices = spec["USE_STATE_INDICES"]
     row_ctas = D_HEAD // rows
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=num_sequences * state_heads * row_ctas, block=8 * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def fixup_utcmma(
         transfer: txl.gptr[txl.f32],
         local_state: txl.gptr[txl.f32],
@@ -2037,6 +2031,11 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs):
         transfer_map: txl.TensorMap,
         local_state_map: txl.TensorMap,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=num_sequences * state_heads * row_ctas, block=8 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         roles = txl.specialize()
         compute = roles.role("compute", warps=range(4))
         mma = roles.role("mma", warps=[4], regs=32)
@@ -2285,11 +2284,7 @@ def _make_mn_precompute(spec):
     cp_chunk_len = spec["CP_CHUNK_LEN"]
     grid_x = state_heads * max_cp_chunks
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=(grid_x, num_sequences), block=12 * 32),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def mn_precompute(
         k: txl.gptr[io_dtype],
         v: txl.gptr[io_dtype],
@@ -2302,6 +2297,11 @@ def _make_mn_precompute(spec):
         v_map: txl.TensorMap,
         t_map: txl.TensorMap,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=(grid_x, num_sequences), block=12 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         bx, seq_idx = txl.cta_id()
         roles = txl.specialize()
         cg0 = roles.role("cg0", warps=range(4), regs=216)
@@ -2861,11 +2861,7 @@ def _make_prefill(spec):
         txl.ptx.tensormap_replace.tile.global_dim.global_.b1024.b32(desc, 4, txl.uint32(1))
         txl.ptx.tensormap_replace.tile.global_stride.global_.b1024.b64(desc, 3, txl.uint64(0))
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=(grid_x, num_sequences), block=12 * 32),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def prefill(
         q: txl.gptr[io_dtype],
         k: txl.gptr[io_dtype],
@@ -2884,6 +2880,11 @@ def _make_prefill(spec):
         o_map: txl.TensorMap,
         descriptor_workspace: txl.gptr[txl.i8],
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=(grid_x, num_sequences), block=12 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         bx, seq_idx = txl.cta_id()
         roles = txl.specialize()
         cg0 = roles.role("cg0", warps=range(4), regs=224)

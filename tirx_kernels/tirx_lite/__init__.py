@@ -46,7 +46,17 @@ from tvm.script.ir_builder import IRBuilder
 from tvm.tirx.script import ir_builder as _I
 
 from . import idioms
-from .entry import Kernel, TensorMap, cta_id, gptr, kernel, lane_id, thread_id, warp_id
+from .entry import (
+    Kernel,
+    TensorMap,
+    cta_id,
+    device_entry,
+    gptr,
+    kernel,
+    lane_id,
+    thread_id,
+    warp_id,
+)
 from .entry import current as _current_session
 from .smem import (
     KDesc,
@@ -510,7 +520,6 @@ _FORBIDDEN_TIRX_NAMES = {
     "alloc_cast_frag",
     "alloc_shared",
     "alloc_tcgen05_ldst_frag",
-    "device_entry",
     "function",
     "function_",
     "inline",
@@ -617,6 +626,7 @@ __all__ = [
     "cta_id",
     "cuda",
     "decl_tensor",
+    "device_entry",
     "f16",
     "f32",
     "gptr",

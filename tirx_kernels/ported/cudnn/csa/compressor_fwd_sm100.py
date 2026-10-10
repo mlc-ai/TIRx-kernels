@@ -132,12 +132,7 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
     width = coff * head_dim
     win = 8 if coff == 2 else 4
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(lambda p: [p["nb_total"], txl.ceildiv(ncol, 64), 1])(_params), block=2 * 32
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def compressor_fwd(
         kv: txl.gptr[txl.bf16],
         score: txl.gptr[txl.bf16],
@@ -148,6 +143,10 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
         nb_total: txl.i32,
         n_seq: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=[nb_total, txl.ceildiv(ncol, 64), 1], block=2 * 32)
+        )
+
         bb, block_y, _ = txl.cta_id()
         thread = txl.thread_id()
         col = block_y * txl.int32(64) + thread

@@ -251,7 +251,7 @@ def make_kernel(
     guard_cols = ktot % BN != 0
     nthreads = WARPS * 32
 
-    def host_prelude(params):
+    def prepare_host(params):
         descriptor = txl.stack_alloca("tensormap", 1)
         if q_in_tmem:
             txl.cu_tensor_map_encode_tiled(
@@ -317,17 +317,7 @@ def make_kernel(
         )
         return (descriptor, out_desc)
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=grid,
-            block=WARPS * 32,
-            cluster=(C,) if C > 1 else None,
-            preferred_cluster=[C] if C > 1 else None,
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-        host_prelude=host_prelude,
-    )
+    @txl.kernel(arch="sm_100a")
     def mla_dsv4_splitk(
         q: txl.gptr[gt, (q_rows * D,)],
         swa: txl.gptr[gt, (swa_rows * D,)],
@@ -339,9 +329,31 @@ def make_kernel(
         scale_log2: txl.f32,
         bmm2_scale: txl.f32,
         item_base: txl.i32,
-        *,
-        host,
     ):
+        host = prepare_host(
+            {
+                "q": q,
+                "swa": swa,
+                "comp": comp,
+                "indices": indices,
+                "lens": lens,
+                "sinks": sinks,
+                "out": out,
+                "scale_log2": scale_log2,
+                "bmm2_scale": bmm2_scale,
+                "item_base": item_base,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=grid,
+                block=WARPS * 32,
+                cluster=(C,) if C > 1 else None,
+                preferred_cluster=[C] if C > 1 else None,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         q_tmap, out_tmap = host
         bid = txl.cta_id()
         if C > 1:
@@ -1816,7 +1828,7 @@ def _make_h128_bf16_prefill():
         swa_blocks = SWA_COLS // B_TOPK
         grid_ctas = 152 if s_q == 386 else 2 * s_q
 
-        def host_prelude(params):
+        def prepare_host(params):
             q = params["q"]
             swa = params["swa"]
             comp = params["comp"]
@@ -1875,14 +1887,7 @@ def _make_h128_bf16_prefill():
             )
             return swa_tma, comp_tma, q_tma
 
-        @txl.kernel(
-            launch=lambda _params: txl.cuda.LaunchConfig(
-                grid=grid_ctas, block=20 * 32, cluster=(2,), preferred_cluster=[2]
-            ),
-            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            arch="sm_100a",
-            host_prelude=host_prelude,
-        )
+        @txl.kernel(arch="sm_100a")
         def mla_dsv4_sparse_prefill_pkt_pingpong(
             q: txl.gptr[txl.bf16, (s_q, B_H, D_QK)],
             swa: txl.gptr[txl.bf16, (swa_rows * D_QK,)],
@@ -1893,9 +1898,27 @@ def _make_h128_bf16_prefill():
             out: txl.gptr[txl.bf16, (s_q, B_H, D_V)],
             scale_log2: txl.f32,
             bmm2_scale: txl.f32,
-            *,
-            host,
         ):
+            host = prepare_host(
+                {
+                    "q": q,
+                    "swa": swa,
+                    "comp": comp,
+                    "indices": indices,
+                    "topk_lens": topk_lens,
+                    "sinks": sinks,
+                    "out": out,
+                    "scale_log2": scale_log2,
+                    "bmm2_scale": bmm2_scale,
+                }
+            )
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=grid_ctas, block=20 * 32, cluster=(2,), preferred_cluster=[2]
+                ),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            )
+
             swa_tensormap, comp_tensormap, q_tma_tensormap = host
             block_idx = txl.cta_id()
             thread_idx = txl.thread_id()

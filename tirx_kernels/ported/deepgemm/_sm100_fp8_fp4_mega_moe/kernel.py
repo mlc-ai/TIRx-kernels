@@ -872,15 +872,7 @@ def get_kernel(
         raise ValueError("Top-k must fit in a single warp")
 
     # ---- the kernel body ----
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=kernel_config.num_sms,
-            block=kernel_config.num_total_warps * 32,
-            cluster=(kernel_config.num_ctas_per_cluster,),
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def mega_moe(
         y: txl.gptr[txl.bf16],
         cumulative_local_expert_recv_stats: txl.gptr[txl.i32],
@@ -982,6 +974,15 @@ def get_kernel(
         num_tokens: txl.i32,
         rank_idx: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=kernel_config.num_sms,
+                block=kernel_config.num_total_warps * 32,
+                cluster=(kernel_config.num_ctas_per_cluster,),
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         symm_rank_offsets = (
             symm_rank_offset_0,
             symm_rank_offset_1,

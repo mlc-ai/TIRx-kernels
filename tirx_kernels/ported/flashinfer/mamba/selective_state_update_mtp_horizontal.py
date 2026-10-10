@@ -697,13 +697,7 @@ def get_kernel(**kwargs: Any):
         ) == (64, 64, 128, 4, 64):
             min_blocks = 5
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(spec["BATCH"], spec["NHEADS"]), block=5 * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def selective_state_update_mtp_horizontal(
         tensor_state: txl.TensorMap,
         tensor_b: txl.TensorMap,
@@ -753,6 +747,11 @@ def get_kernel(**kwargs: Any):
         update_state: txl.i32,
         pad_slot_id: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=(spec["BATCH"], spec["NHEADS"]), block=5 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks),
+        )
+
         batch_i, head = txl.cta_id()
         if spec["HAS_STATE_INDICES"]:
             if spec["INDEX_DTYPE"] == "int32":

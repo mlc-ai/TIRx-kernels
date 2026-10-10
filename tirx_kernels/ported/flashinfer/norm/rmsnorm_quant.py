@@ -1354,22 +1354,7 @@ def get_kernel(
 
     if compact:
 
-        @txl.kernel(
-            launch=lambda p: txl.cuda.LaunchConfig(
-                grid=(txl.cast(txl.ceildiv(p["runtime_M"], txl.int64(rows)), "int32"), cluster_n)
-                if cluster_n > 1
-                else (txl.cast(txl.ceildiv(p["runtime_M"], txl.int64(rows)), "int32"),),
-                block=threads,
-                cluster=(1, cluster_n) if cluster_n > 1 else None,
-                preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
-                programmatic_stream_serialization=enable_pdl,
-            ),
-            kernel_attrs=txl.cuda.KernelAttributes(
-                min_blocks_per_sm=None if threads == 128 else 1,
-                max_registers_per_thread=max_registers,
-            ),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def flashinfer_rmsnorm_quant_compact(
             x: txl.gptr[input_dtype],
             weight: txl.gptr[input_dtype, (H,)],
@@ -1378,6 +1363,22 @@ def get_kernel(
             scale_buffer: txl.gptr[txl.f32, (1,)],
             runtime_eps: txl.f32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=(txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"), cluster_n)
+                    if cluster_n > 1
+                    else (txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"),),
+                    block=threads,
+                    cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    programmatic_stream_serialization=enable_pdl,
+                ),
+                kernel_attrs=txl.cuda.KernelAttributes(
+                    min_blocks_per_sm=None if threads == 128 else 1,
+                    max_registers_per_thread=max_registers,
+                ),
+            )
+
             kernel_body(
                 x, weight, out, runtime_M, scale_buffer, runtime_eps, txl.int64(H), txl.int64(H)
             )
@@ -1385,22 +1386,7 @@ def get_kernel(
         kernel = flashinfer_rmsnorm_quant_compact.func
     else:
 
-        @txl.kernel(
-            launch=lambda p: txl.cuda.LaunchConfig(
-                grid=(txl.cast(txl.ceildiv(p["runtime_M"], txl.int64(rows)), "int32"), cluster_n)
-                if cluster_n > 1
-                else (txl.cast(txl.ceildiv(p["runtime_M"], txl.int64(rows)), "int32"),),
-                block=threads,
-                cluster=(1, cluster_n) if cluster_n > 1 else None,
-                preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
-                programmatic_stream_serialization=enable_pdl,
-            ),
-            kernel_attrs=txl.cuda.KernelAttributes(
-                min_blocks_per_sm=None if threads == 128 else 1,
-                max_registers_per_thread=max_registers,
-            ),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def flashinfer_rmsnorm_quant_strided(
             x: txl.gptr[input_dtype],
             weight: txl.gptr[input_dtype, (H,)],
@@ -1411,6 +1397,22 @@ def get_kernel(
             runtime_x_row_stride: txl.i64,
             runtime_y_row_stride: txl.i64,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=(txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"), cluster_n)
+                    if cluster_n > 1
+                    else (txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"),),
+                    block=threads,
+                    cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    programmatic_stream_serialization=enable_pdl,
+                ),
+                kernel_attrs=txl.cuda.KernelAttributes(
+                    min_blocks_per_sm=None if threads == 128 else 1,
+                    max_registers_per_thread=max_registers,
+                ),
+            )
+
             kernel_body(
                 x,
                 weight,

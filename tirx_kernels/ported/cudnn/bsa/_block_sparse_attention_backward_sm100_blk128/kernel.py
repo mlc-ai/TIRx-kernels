@@ -273,19 +273,20 @@ def get_kernel(**config):
     id_dkdv = 0x08110490 if head_dim == 64 else 0x08210490
     id_dq = 0x08118490 if head_dim == 64 else 0x08218490
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=((seqlen_q + 127) // 128, heads, batch), block=8 * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def preprocess(
         o: txl.gptr[txl.bf16],
         do: txl.gptr[txl.bf16],
         lse: txl.gptr[txl.f32],
         workspace: txl.gptr[txl.f32],
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=((seqlen_q + 127) // 128, heads, batch), block=8 * 32
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+        )
+
         txl.ptx.griddepcontrol.wait()
         q_tile, head, batch_idx = txl.cta_id()
         tid = txl.thread_id()
@@ -383,13 +384,7 @@ def get_kernel(**config):
                 workspace.ptr_to([dst]), txl.uint32(0), txl.uint32(0), txl.uint32(0), txl.uint32(0)
             )
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(tasks * groups, heads, batch), block=WARPS * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def bwd(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -405,6 +400,11 @@ def get_kernel(**config):
         edge_stride: txl.i64,
         softmax_scale: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=(tasks * groups, heads, batch), block=WARPS * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+        )
+
         block, head, batch_idx = txl.cta_id()
         warp = txl.warp_id()
         with txl.If(warp == txl.int32(13)), txl.Then():
@@ -1121,16 +1121,19 @@ def get_kernel(**config):
             pass
 
     def make_postprocess(seq_len, padded_len, source_base):
-        @txl.kernel(
-            launch=lambda _params: txl.cuda.LaunchConfig(
-                grid=((seq_len + 127) // 128, heads, batch), block=4 * 32
-            ),
-            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def postprocess(
             workspace: txl.gptr[txl.f32], output: txl.gptr[txl.bf16], output_scale: txl.f32
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=((seq_len + 127) // 128, heads, batch), block=4 * 32
+                ),
+                kernel_attrs=txl.cuda.KernelAttributes(
+                    min_blocks_per_sm=1, required_block_size=True
+                ),
+            )
+
             seq_tile, head, batch_idx = txl.cta_id()
             tid = txl.thread_id()
             seq = seq_tile * txl.int32(128) + tid

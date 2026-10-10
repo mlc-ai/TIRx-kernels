@@ -347,15 +347,7 @@ def get_kernel(
             f"row strides must be divisible by vec={vec}: x={x_stride_hint}, y={y_stride_hint}"
         )
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(lambda p: txl.cast(p["runtime_M"], txl.i32))(_params),
-            block=warps * 32,
-            dynamic_smem_bytes=smem_bytes,
-            programmatic_stream_serialization=enable_pdl,
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def flashinfer_layernorm(
         out: txl.gptr[txl.bf16],
         x: txl.gptr[txl.bf16],
@@ -366,6 +358,15 @@ def get_kernel(
         y_row_stride: txl.i64,
         x_row_stride: txl.i64,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=txl.cast(runtime_M, txl.i32),
+                block=warps * 32,
+                dynamic_smem_bytes=smem_bytes,
+                programmatic_stream_serialization=enable_pdl,
+            )
+        )
+
         row_raw = txl.cta_id()
         tid = txl.thread_id()
         row = txl.cast(row_raw, txl.i64)

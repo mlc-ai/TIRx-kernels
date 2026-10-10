@@ -92,9 +92,7 @@ def make_kernel(hidden_size: int):
     # and 8 was the smallest value that clawed the allocation back. `None` is
     # strictly better — it also matches at hs=128, where the pin gave 32 vs the
     # original's 34.
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=SM_COUNT, block=bdy * 32), arch="sm_100a"
-    )
+    @txl.kernel(arch="sm_100a")
     def rmsnorm(
         inp: txl.gptr[txl.f16],
         wgt: txl.gptr[txl.f16],
@@ -103,6 +101,8 @@ def make_kernel(hidden_size: int):
         # count the way the original's match_buffer does; it is an argument.
         batch_size: txl.i32,
     ):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=SM_COUNT, block=bdy * 32))
+
         bx = txl.cta_id()
         tid = txl.thread_id()
         lane = tid & 31  # orig tx

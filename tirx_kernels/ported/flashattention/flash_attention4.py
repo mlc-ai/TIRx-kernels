@@ -197,16 +197,7 @@ def make_kernel(
         n_idx = m_idx_min + SEQ_LEN_KV - SEQ_LEN_Q
         return txl.max(0, n_idx // BLK_N)
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=cta_count,
-            block=16 * 32,
-            cluster=(2,) if USE_2CTA else None,
-            preferred_cluster=[2] if USE_2CTA else None,
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def flash_attention4(
         Q_tensor_map: txl.TensorMap,
         Q_tensor_map_1: txl.TensorMap,
@@ -217,6 +208,16 @@ def make_kernel(
         O_tensor_map: txl.TensorMap,
     ):
         # ---- CTA coordinates — orig:L625-628 ---------------------------------
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=cta_count,
+                block=16 * 32,
+                cluster=(2,) if USE_2CTA else None,
+                preferred_cluster=[2] if USE_2CTA else None,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         cta_rank = txl.cuda.cluster_cta_id("x") if USE_2CTA else txl.int32(0)
         cluster_id = txl.cta_id() // cta_group
         # Materialize the warp-uniform ids once; TIRx expressions are trees and

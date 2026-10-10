@@ -132,13 +132,12 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
             txl.ptx.mov.b32(dst[2 * pair], _unpack_lo(word, dtype))
             txl.ptx.mov.b32(dst[2 * pair + 1], _unpack_hi(word, dtype))
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=num_tokens, block=(block_size + 31) // 32 * 32
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def act_and_mul(input_global: txl.gptr[dtype, 2], out_global: txl.gptr[dtype, 2]):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=num_tokens, block=(block_size + 31) // 32 * 32)
+        )
+
         token = txl.cta_id()
         tid = txl.thread_id()
         txl.ptx.griddepcontrol.wait()

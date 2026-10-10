@@ -460,13 +460,7 @@ def get_kernel(**kwargs: Any):
     # setmaxnreg requires the entry allocation fixed by .minnctapersm.
     min_blocks = 1
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=config.num_sms, block=num_warps * 32, programmatic_stream_serialization=True
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def sm100_fp4_mqa_logits(
         seq_len: txl.u32,
         seq_len_kv: txl.u32,
@@ -481,6 +475,13 @@ def get_kernel(**kwargs: Any):
         sf_q_map: txl.TensorMap,
         q_map: txl.TensorMap,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=config.num_sms, block=num_warps * 32, programmatic_stream_serialization=True
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks),
+        )
+
         cache_policy_evict_normal = txl.uint64(0x1000000000000000)
 
         def replace_smem_desc_addr(desc, smem_ptr):

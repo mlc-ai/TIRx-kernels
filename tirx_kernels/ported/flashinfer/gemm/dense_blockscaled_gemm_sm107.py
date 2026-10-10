@@ -302,7 +302,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
     epilogue_subtiles = (cta_m // 128) * (n_tile // epi_n)
     tma_cache_hint = 0
 
-    def host_prelude(params):
+    def prepare_host(params):
         a = params["a"]
         b = params["b"]
         c = params["c"]
@@ -444,7 +444,20 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
             )
         return a_map, b_map, sfa_map, sfb_map, c_map
 
-    def kernel(a, b, sfa, sfb, c, alpha_ptr, *, host):
+    def kernel(a, b, sfa, sfb, c, alpha_ptr):
+        host = prepare_host(
+            {"a": a, "b": b, "sfa": sfa, "sfb": sfb, "c": c, "alpha_ptr": alpha_ptr}
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=6 * 32,
+                grid=(cluster_m, cluster_n, num_clusters),
+                cluster=[cluster_m, cluster_n],
+                preferred_cluster=[cluster_m, cluster_n],
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+        )
+
         del a, b, sfa, sfb, c
         a_map, b_map, sfa_map, sfb_map, c_map = host
 
@@ -1577,17 +1590,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
         "c": txl.gptr[txl.u8, (kernel_m * kernel_n * 2,)],
         "alpha_ptr": txl.gptr[txl.f32, (1,)],
     }
-    return txl.kernel(
-        arch="sm_107a",
-        host_prelude=host_prelude,
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            block=6 * 32,
-            grid=(cluster_m, cluster_n, num_clusters),
-            cluster=[cluster_m, cluster_n],
-            preferred_cluster=[cluster_m, cluster_n],
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-    )(kernel)
+    return txl.kernel(arch="sm_107a")(kernel)
 
 
 def get_kernel(M, N, K, sf_mode, out_dtype, alpha, tactic):

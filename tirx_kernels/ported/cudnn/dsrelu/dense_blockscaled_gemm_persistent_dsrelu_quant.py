@@ -672,7 +672,7 @@ def _make_kernel(
     sfb_n_box = _ceil_div(n_tile, 128)
     sfb_piece_values = 256 * sf_k_box * sfb_n_box // cluster_m_groups
 
-    def host_prelude(params):
+    def prepare_host(params):
         a = params["a"]
         b = params["b"]
         sfa = params["sfa"]
@@ -819,7 +819,33 @@ def _make_kernel(
         encode_output(d_map, d, d_dtype, d_bits)
         return a_map, b_map, sfa_map, sfb_map, c_map, d_map
 
-    def kernel(a, b, sfa, sfb, c, d, prob, dprob, amax, alpha, *, host):
+    def kernel(a, b, sfa, sfb, c, d, prob, dprob, amax, alpha):
+        host = prepare_host(
+            {
+                "a": a,
+                "b": b,
+                "sfa": sfa,
+                "sfb": sfb,
+                "c": c,
+                "d": d,
+                "prob": prob,
+                "dprob": dprob,
+                "amax": amax,
+                "alpha": alpha,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=7 * 32,
+                grid=(cluster_m, cluster_n, num_clusters),
+                cluster=[cluster_m, cluster_n],
+                preferred_cluster=[cluster_m, cluster_n],
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(
+                min_blocks_per_sm=1, max_registers_per_thread=entry_max_registers
+            ),
+        )
+
         del a, b, sfa, sfb, c, d
         a_map, b_map, sfa_map, sfb_map, c_map, d_map = host
         if entry_max_registers is None:
@@ -1975,19 +2001,7 @@ def _make_kernel(
         "amax": txl.gptr[txl.f32, (1,)],
         "alpha": txl.f32,
     }
-    return txl.kernel(
-        arch="sm_100a",
-        host_prelude=host_prelude,
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            block=7 * 32,
-            grid=(cluster_m, cluster_n, num_clusters),
-            cluster=[cluster_m, cluster_n],
-            preferred_cluster=[cluster_m, cluster_n],
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(
-            min_blocks_per_sm=1, max_registers_per_thread=entry_max_registers
-        ),
-    )(kernel)
+    return txl.kernel(arch="sm_100a")(kernel)
 
 
 def get_kernel(

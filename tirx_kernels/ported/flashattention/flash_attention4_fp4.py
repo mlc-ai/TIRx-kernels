@@ -1326,6 +1326,11 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
             tmem_dealloc.arrive(0)
 
     def entry(*args):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(block=NUM_WARPS * 32, grid=grid),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         values = dict(zip(names, args, strict=True))
         body(
             values["tmap_q"],
@@ -1345,11 +1350,7 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
             for n, a in params
         ]
     )
-    return txl.kernel(
-        arch="sm_103a",
-        launch=lambda _params: txl.cuda.LaunchConfig(block=NUM_WARPS * 32, grid=grid),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-    )(entry)
+    return txl.kernel(arch="sm_103a")(entry)
 
 
 # ---------------------------------------------------------------------------------------------

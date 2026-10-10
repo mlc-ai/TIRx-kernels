@@ -610,7 +610,7 @@ def _make_kernel(**config):
     regs_correction = 64 if d == 64 else 88
     physical_blocks = (seqlen_kv + 127) // 128
 
-    def host_prelude(params):
+    def prepare_host(params):
         def encode(name, tensor, dims, strides, box):
             descriptor = txl.stack_alloca("tensormap", 1)
             txl.call_packed(
@@ -1497,9 +1497,28 @@ def _make_kernel(**config):
         block_nums,
         block_sparse_num,
         softmax_scale_log2,
-        *,
-        host,
     ):
+        host = prepare_host(
+            {
+                "q": q,
+                "k": k,
+                "v": v,
+                "out": out,
+                "lse": lse,
+                "block_index": block_index,
+                "block_sizes": block_sizes,
+                "block_nums": block_nums,
+                "block_sparse_num": block_sparse_num,
+                "softmax_scale_log2": softmax_scale_log2,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=_WARPS * 32, grid=(q_blocks, scheduled_heads, batch), cluster=1
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+        )
+
         kernel_body(
             q,
             k,
@@ -1526,14 +1545,7 @@ def _make_kernel(**config):
         "block_sparse_num": txl.i32,
         "softmax_scale_log2": txl.f32,
     }
-    return txl.kernel(
-        arch="sm_100a",
-        host_prelude=host_prelude,
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            block=_WARPS * 32, grid=(q_blocks, scheduled_heads, batch), cluster=1
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-    )(kernel)
+    return txl.kernel(arch="sm_100a")(kernel)
 
 
 def get_kernel(**config):

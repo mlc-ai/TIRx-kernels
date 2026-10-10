@@ -195,13 +195,14 @@ def get_kernel(
     end_bit = plan["end_bit"]
     is32 = dtype == "float32"
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=num_rows, block=block_threads // 32 * 32),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def stable_sort_topk_by_value(
         out_idx: txl.gptr[txl.i32, (num_rows * k,)], out_val: txl.gptr[dtype, (num_rows * k,)]
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=num_rows, block=block_threads // 32 * 32)
+        )
+
         row = txl.cta_id()
         tx = txl.thread_id()
 

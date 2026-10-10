@@ -334,6 +334,12 @@ def make_attention_kernel_blk128(
         num_ctas,
         scale_log2,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_ctas if static_grid is None else int(static_grid), block=512
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
         if static_shape is None:
             task_count = num_tasks
             tile_count = tiles_per_head
@@ -1331,13 +1337,7 @@ def make_attention_kernel_blk128(
             )
 
         fn = vsa_attn_blk128
-    return txl.kernel(
-        launch=lambda params: txl.cuda.LaunchConfig(
-            grid=params["num_ctas"] if static_grid is None else int(static_grid), block=512
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch=arch,
-    )(fn)
+    return txl.kernel(arch=arch)(fn)
 
 
 WS_GROUP = 4
@@ -2364,6 +2364,11 @@ def make_attention_kernel_blk64(
         num_ctas: txl.i32,
         scale_log2: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(block=16 * 32, grid=grid),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         body(
             q_map,
             k_map,
@@ -2379,11 +2384,7 @@ def make_attention_kernel_blk64(
             scale_log2,
         )
 
-    return txl.kernel(
-        arch=arch,
-        launch=lambda _params: txl.cuda.LaunchConfig(block=16 * 32, grid=grid),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-    )(vsa_attn_blk64_ws)
+    return txl.kernel(arch=arch)(vsa_attn_blk64_ws)
 
 
 class _AlignedTensorMap:

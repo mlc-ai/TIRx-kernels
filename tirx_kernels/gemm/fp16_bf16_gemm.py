@@ -303,7 +303,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
     WARPS = (NUM_CONSUMER + 1) * 4
     CONSUMER_WARPS = list(range(NUM_CONSUMER * 4))
 
-    def host_prelude(params):
+    def prepare_host(params):
         a = params["a"]
         b = params["b"]
         d = params["d"]
@@ -338,9 +338,18 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
         a,
         b,
         d,
-        *,
-        host,
     ):
+        host = prepare_host({"a": a, "b": b, "d": d})
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=WARPS * 32,
+                grid=NUM_M_TILES * NUM_N_TILES * 2,
+                cluster=[2, 1],
+                preferred_cluster=[2, 1],
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         a_map, b_map, d_map = host
         cbx, _cby = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
         bx = txl.cta_id()
@@ -789,17 +798,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
         "b": txl.gptr[AB_DTYPE, (N, Kdim)],
         "d": txl.gptr[AB_DTYPE, (M, N)],
     }
-    return txl.kernel(
-        arch="sm_100a",
-        host_prelude=host_prelude,
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            block=WARPS * 32,
-            grid=NUM_M_TILES * NUM_N_TILES * 2,
-            cluster=[2, 1],
-            preferred_cluster=[2, 1],
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-    )(gemm)
+    return txl.kernel(arch="sm_100a")(gemm)
 
 
 def make_kernel(dtype: str, M: int, N: int, Kdim: int):

@@ -576,14 +576,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
     block = spec.BLOCK_TILE
     idesc = _IDESC[dtype]
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(lambda p: [p["seqlen_q"], (num_head + block - 1) // block, 1])(_params),
-            block=BWD_WARPS * 32,
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def bwd(
         desc_q: txl.TensorMap,
         desc_do: txl.TensorMap,
@@ -600,6 +593,13 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
         scale: txl.f32,
     ):
         # ---- kernel body starts here ----
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=[seqlen_q, (num_head + block - 1) // block, 1], block=BWD_WARPS * 32
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         token, head_block, _z = txl.cta_id()
         tid = txl.thread_id()
         txl.keep_alive(dq.data)
@@ -1552,14 +1552,7 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk):
     d_steps = head_dim_v // SUM_ODO_ELEM_PER_LOAD // SUM_ODO_THREADS_D
     q_arms = (block_q + SUM_ODO_THREADS_Q - 1) // SUM_ODO_THREADS_Q
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(lambda p: [(p["seqlen_q"] + block_q - 1) // block_q, num_head, 1])(_params),
-            block=SUM_ODO_THREADS_D * SUM_ODO_THREADS_Q // 32 * 32,
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def sum_odo(
         out: txl.gptr[elem],
         dout: txl.gptr[elem],
@@ -1571,6 +1564,14 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk):
         sum_odo_scale: txl.f32,
         lse_scale: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=[(seqlen_q + block_q - 1) // block_q, num_head, 1],
+                block=SUM_ODO_THREADS_D * SUM_ODO_THREADS_Q // 32 * 32,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         tid = txl.thread_id()
         q_block, head, _b = txl.cta_id()
         # blockDim was (8, 16, 1) upstream; the flat id splits the same way.
@@ -1687,15 +1688,16 @@ def make_convert_kernel(*, head_dim, dtype, max_topk):
     threads_seq = 4 if max_topk == 2048 else block_seq
     threads_d = 32
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(lambda p: [(p["seqlen_kv"] + block_seq - 1) // block_seq, 1, 1])(_params),
-            block=threads_d * threads_seq // 32 * 32,
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def convert(ws_dkv: txl.gptr[txl.f32], dkv: txl.gptr[elem], seqlen_kv: txl.i32):
         # ---- kernel body starts here ----
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=[(seqlen_kv + block_seq - 1) // block_seq, 1, 1],
+                block=threads_d * threads_seq // 32 * 32,
+            )
+        )
+
         seq_block, _y, _z = txl.cta_id()
         tid = txl.thread_id()
         tidx = tid % threads_d
@@ -1744,16 +1746,7 @@ def make_sum_dsink_kernel(*, num_head):
     warp-reduced then accumulated with one scalar atomic per CTA.
     """
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(lambda p: [(p["seqlen_q"] + DSINK_BLOCK_Q - 1) // DSINK_BLOCK_Q, num_head, 1])(
-                _params
-            ),
-            block=DSINK_THREADS // 32 * 32,
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def sum_dsink(
         ws: txl.gptr[txl.f32],
         attn_sink: txl.gptr[txl.f32],
@@ -1762,6 +1755,14 @@ def make_sum_dsink_kernel(*, num_head):
         plane: txl.i32,
     ):
         # ---- kernel body starts here ----
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=[(seqlen_q + DSINK_BLOCK_Q - 1) // DSINK_BLOCK_Q, num_head, 1],
+                block=DSINK_THREADS // 32 * 32,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         q_block, head, _b = txl.cta_id()
         tid = txl.thread_id()
 

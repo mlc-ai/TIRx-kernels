@@ -358,13 +358,7 @@ def make_forward_kernel(**config):
     q_blocks = (seqlen_q + 63) // 64
     grid = (q_blocks, heads if use_clc else heads * splits, batch)
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=grid, block=WARPS * 32, cluster=(1, 1, 1) if use_clc else None
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def forward(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -377,6 +371,13 @@ def make_forward_kernel(**config):
         split_offsets: txl.gptr[txl.i32],
         softmax_scale_log2: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=grid, block=WARPS * 32, cluster=(1, 1, 1) if use_clc else None
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         if use_clc:
             # CLC requires cluster-launch semantics, but its work coordinates
             # are the global CTA ids.  The source launches singleton clusters;

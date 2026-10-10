@@ -663,7 +663,7 @@ def _make_kernel(
     if generate_sfc and (m_tiles % cluster_m or n_tiles % cluster_n):
         raise ValueError("SFC output requires complete M/N cluster tiles")
 
-    def host_prelude(params):
+    def prepare_host(params):
         a = params["a"]
         b = params["b"]
         sfa = params["sfa"]
@@ -835,7 +835,33 @@ def _make_kernel(
         encode_output(c_map, c, c_dtype, N // 2, c_bits, epi_n)
         return a_map, b_map, sfa_map, sfb_map, ab12_map, c_map
 
-    def kernel(a, b, sfa, sfb, c, ab12, amax, sfc, norm_const, alpha, *, host):
+    def kernel(a, b, sfa, sfb, c, ab12, amax, sfc, norm_const, alpha):
+        host = prepare_host(
+            {
+                "a": a,
+                "b": b,
+                "sfa": sfa,
+                "sfb": sfb,
+                "c": c,
+                "ab12": ab12,
+                "amax": amax,
+                "sfc": sfc,
+                "norm_const": norm_const,
+                "alpha": alpha,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=6 * 32,
+                grid=(cluster_m, cluster_n, num_clusters),
+                cluster=[cluster_m, cluster_n],
+                preferred_cluster=[cluster_m, cluster_n],
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(
+                min_blocks_per_sm=3, max_registers_per_thread=entry_max_registers
+            ),
+        )
+
         del a, b, sfa, sfb, c, ab12
         a_map, b_map, sfa_map, sfb_map, ab12_map, c_map = host
         if entry_max_registers is None:
@@ -2365,19 +2391,7 @@ def _make_kernel(
         "norm_const": txl.gptr[txl.f32, (1,)],
         "alpha": txl.f32,
     }
-    return txl.kernel(
-        arch="sm_100a",
-        host_prelude=host_prelude,
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            block=6 * 32,
-            grid=(cluster_m, cluster_n, num_clusters),
-            cluster=[cluster_m, cluster_n],
-            preferred_cluster=[cluster_m, cluster_n],
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(
-            min_blocks_per_sm=3, max_registers_per_thread=entry_max_registers
-        ),
-    )(kernel)
+    return txl.kernel(arch="sm_100a")(kernel)
 
 
 def get_kernel(

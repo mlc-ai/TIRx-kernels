@@ -506,7 +506,7 @@ def _make_kernel(
     sfb_n_box = n_tile // 128
     sfb_piece_values = 256 * sf_k_box * sfb_n_box // cluster_m
 
-    def host_prelude(params):
+    def prepare_host(params):
         a = params["a"]
         b = params["b"]
         sfa = params["sfa"]
@@ -641,7 +641,18 @@ def _make_kernel(
         encode(c_map, c_dtype, 3, c.data, *c_fields, *c_tail)
         return a_map, b_map, sfa_map, sfb_map, c_map
 
-    def kernel(a, b, sfa, sfb, c, amax, *, host):
+    def kernel(a, b, sfa, sfb, c, amax):
+        host = prepare_host({"a": a, "b": b, "sfa": sfa, "sfb": sfb, "c": c, "amax": amax})
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=6 * 32,
+                grid=(cluster_m, cluster_n, num_clusters),
+                cluster=[cluster_m, cluster_n],
+                preferred_cluster=[cluster_m, cluster_n],
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         del a, b, sfa, sfb, c
         a_map, b_map, sfa_map, sfb_map, c_map = host
         block_x, block_y, cluster_work_id = txl.cta_id()
@@ -1629,17 +1640,7 @@ def _make_kernel(
         "c": txl.gptr[txl.u8, (M * N * L * c_bits // 8,)],
         "amax": txl.gptr[txl.f32, (1,)],
     }
-    return txl.kernel(
-        arch="sm_100a",
-        host_prelude=host_prelude,
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            block=6 * 32,
-            grid=(cluster_m, cluster_n, num_clusters),
-            cluster=[cluster_m, cluster_n],
-            preferred_cluster=[cluster_m, cluster_n],
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-    )(kernel)
+    return txl.kernel(arch="sm_100a")(kernel)
 
 
 def get_kernel(

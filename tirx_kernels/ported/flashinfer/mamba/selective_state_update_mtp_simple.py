@@ -527,16 +527,7 @@ def get_kernel(**kwargs: Any):
     UPDATE_STATE = spec["UPDATE_STATE"]
     WEIGHT_DTYPE = spec["WEIGHT_DTYPE"]
 
-    kernel_kwargs = {
-        "launch": txl.cuda.LaunchConfig(
-            grid=(spec["NHEADS"], spec["BATCH"], spec["CTAS_PER_HEAD"])
-            if schedule_heads_first
-            else (spec["BATCH"], spec["NHEADS"], spec["CTAS_PER_HEAD"]),
-            block=128,
-        ),
-        "kernel_attrs": txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm or None),
-        "arch": "sm_100a",
-    }
+    kernel_kwargs = {"arch": "sm_100a"}
 
     @txl.kernel(**kernel_kwargs)
     def selective_state_update_mtp_simple(
@@ -584,6 +575,16 @@ def get_kernel(**kwargs: Any):
         update_state: txl.i32,
         pad_slot_id: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(spec["NHEADS"], spec["BATCH"], spec["CTAS_PER_HEAD"])
+                if schedule_heads_first
+                else (spec["BATCH"], spec["NHEADS"], spec["CTAS_PER_HEAD"]),
+                block=128,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm or None),
+        )
+
         cta_x, cta_y, cta_z = txl.cta_id()
         if schedule_heads_first:
             head, seq_idx = cta_x, cta_y

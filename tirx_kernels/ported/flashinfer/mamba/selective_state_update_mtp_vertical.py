@@ -390,13 +390,7 @@ def get_kernel(**kwargs: Any):
     WEIGHT_DTYPE = spec["WEIGHT_DTYPE"]
     INDEX_DTYPE = spec["INDEX_DTYPE"]
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(spec["BATCH"], spec["NUM_HEAD_CHUNKS"]), block=16 * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def selective_state_update_mtp_vertical(
         tensor_state: txl.TensorMap,
         tensor_b: txl.TensorMap,
@@ -446,6 +440,13 @@ def get_kernel(**kwargs: Any):
         update_state: txl.i32,
         pad_slot_id: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(spec["BATCH"], spec["NUM_HEAD_CHUNKS"]), block=16 * 32
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
+        )
+
         batch_i, head_chunk = txl.cta_id()
         head_base = head_chunk * 3
         if spec["HAS_STATE_INDICES"]:

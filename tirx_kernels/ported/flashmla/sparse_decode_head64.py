@@ -315,13 +315,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
     kv_rope_start = (d_nope + (16 if is_v32 else 0)) // BF16_BYTES
     source_smem_size = 232192 if is_v32 else 218848
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(_params["s_q"], _params["num_sm_parts"], 1), block=12 * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def sparse_flashmla_decode_head64_main(
         q: txl.gptr[txl.bf16],
         kv: txl.gptr[txl.bf16],
@@ -378,6 +372,11 @@ def make_main_kernel(model_type, presence, use_pdl=False):
         extra_page_block_size: txl.i32,
         num_sm_parts: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=(s_q, num_sm_parts, 1), block=12 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         s_q_idx, partition_idx, _ = txl.cta_id()
         warp_idx = txl.warp_id()
         lane_idx = txl.lane_id()
@@ -1997,14 +1996,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
 
 
 def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(_params["b"] * _params["s_q"], 1, (_params["h_q"] + 7) // 8),
-            block=8 * 32,
-            programmatic_stream_serialization=use_pdl,
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def sparse_decode_head64_combine(
         lse: txl.gptr[txl.f32],
         out: txl.gptr[txl.bf16],
@@ -2028,6 +2020,14 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
         d_v: txl.i32,
         num_sm_parts: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(b * s_q, 1, (h_q + 7) // 8),
+                block=8 * 32,
+                programmatic_stream_serialization=use_pdl,
+            )
+        )
+
         smem = txl.smem_pool()
         lse_scales = smem.alloc((8, max_splits), "float32")
 

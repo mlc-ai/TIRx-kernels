@@ -660,10 +660,7 @@ def _make_prologue(
     cu_t = txl.i64 if cu_dtype == "int64" else txl.i32
     prologue_warps = 8 if uniform_generated_order else 32
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=prologue_warps * 32),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def prologue(
         base_q: txl.gptr[txl.i64],
         base_k: txl.gptr[txl.i64],
@@ -698,6 +695,8 @@ def _make_prologue(
         checkpoint_row_stride_bytes: txl.i32,
         checkpoint_every_n: txl.i32,
     ):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=prologue_warps * 32))
+
         thread = txl.thread_id()
         warp = txl.warp_id()
         if run_order:
@@ -951,11 +950,7 @@ def _make_main(
     idesc_ts = 0x08040010 if io_dtype == "float16" else 0x08040490
     idesc_final = 0x08210010 if io_dtype == "float16" else 0x08210490
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=num_sms, block=16 * 32),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def main(
         descriptor_workspace: txl.gptr[txl.i64],
         n_desc: txl.i32,
@@ -977,6 +972,11 @@ def _make_main(
         scale: txl.f32,
         checkpoint_every_n: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=num_sms, block=16 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         arena = txl.alloc_tensor((arena_bytes,), txl.u8, scope="shared.dyn", align=1024)
         txl.smem_pool(base=arena)
         thread = txl.thread_id()

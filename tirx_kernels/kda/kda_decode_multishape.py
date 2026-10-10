@@ -182,11 +182,7 @@ def _make_base():
         if hole_cnt0 == 0 or copy_est > hole_cnt0 * max(MAXH, T + 1):
             hole_base0, hole_cnt0 = 0, num_main
 
-        @txl.kernel(
-            launch=lambda _params: txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
-            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def kda_decode_persist(
             q: txl.gptr[txl.bf16],
             k: txl.gptr[txl.bf16],
@@ -205,6 +201,11 @@ def _make_base():
             num_slots: txl.i32,
             num_seqs: txl.i32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
+            )
+
             cta = txl.cta_id()
             tid = txl.thread_id()
             warp = txl.warp_id()
@@ -1350,11 +1351,7 @@ def _make_defer():
         if hole_cnt0 == 0 or copy_est > hole_cnt0 * max(MAXH, T + 1):
             hole_base0, hole_cnt0 = 0, num_main
 
-        @txl.kernel(
-            launch=lambda _params: txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
-            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def kda_decode_persist(
             q: txl.gptr[txl.bf16],
             k: txl.gptr[txl.bf16],
@@ -1373,6 +1370,11 @@ def _make_defer():
             num_slots: txl.i32,
             num_seqs: txl.i32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
+            )
+
             cta = txl.cta_id()
             tid = txl.thread_id()
             warp = txl.warp_id()
@@ -2500,11 +2502,7 @@ def _make_dyn():
         if hole_cnt0 == 0 or copy_est > hole_cnt0 * max(MAXH, T + 1):
             hole_base0, hole_cnt0 = 0, num_main
 
-        @txl.kernel(
-            launch=lambda _params: txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
-            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def kda_decode_persist(
             q: txl.gptr[txl.bf16],
             k: txl.gptr[txl.bf16],
@@ -2524,6 +2522,11 @@ def _make_dyn():
             num_slots: txl.i32,
             num_seqs: txl.i32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
+            )
+
             cta = txl.cta_id()
             tid = txl.thread_id()
             warp = txl.warp_id()
@@ -3687,11 +3690,7 @@ def _make_split():
         if hole_cnt0 == 0 or copy_est > hole_cnt0 * max(MAXH, T + 1):
             hole_base0, hole_cnt0 = 0, num_main
 
-        @txl.kernel(
-            launch=lambda _params: txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
-            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def kda_decode_persist(
             q: txl.gptr[txl.bf16],
             k: txl.gptr[txl.bf16],
@@ -3710,6 +3709,11 @@ def _make_split():
             num_slots: txl.i32,
             num_seqs: txl.i32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
+            )
+
             cta = txl.cta_id()
             tid = txl.thread_id()
             warp = txl.warp_id()
@@ -4992,11 +4996,7 @@ def _make_clc():
         if hole_cnt0 == 0 or copy_est > hole_cnt0 * max(MAXH, T + 1):
             hole_base0, hole_cnt0 = 0, num_main
 
-        @txl.kernel(
-            launch=lambda _params: txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
-            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def kda_decode_persist(
             q: txl.gptr[txl.bf16],
             k: txl.gptr[txl.bf16],
@@ -5015,6 +5015,11 @@ def _make_clc():
             num_slots: txl.i32,
             num_seqs: txl.i32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
+            )
+
             cta = txl.cta_id()
             tid = txl.thread_id()
             warp = txl.warp_id()

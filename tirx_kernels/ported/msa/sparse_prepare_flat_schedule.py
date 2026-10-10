@@ -136,13 +136,7 @@ _shfl_idx_i32 = shfl_idx_i32
 # ---------------------------------------------------------------------------
 # Target entry.
 # ---------------------------------------------------------------------------
-@txl.kernel(
-    launch=lambda _params: txl.cuda.LaunchConfig(
-        grid=(lambda p: txl.ceildiv(p["total_rows"] * p["num_heads_kv"], WARPS_PER_CTA))(_params),
-        block=WARPS_PER_CTA * 32,
-    ),
-    arch="sm_100a",
-)
+@txl.kernel(arch="sm_100a")
 def _kernel(
     k2q_row_ptr: txl.gptr(txl.i32, shape=lambda p: (p["num_heads_kv"] * (p["total_rows"] + 1),)),
     cu_seqlens_k: txl.gptr(txl.i32, shape=lambda p: (p["num_batches"] + 1,)),
@@ -157,6 +151,12 @@ def _kernel(
 ):
     # CUDA TRANSCRIPTION START
     # sketch: static ABI/launch, one warp per (row, head) -> :290-295.
+    txl.device_entry(
+        launch=txl.cuda.LaunchConfig(
+            grid=txl.ceildiv(total_rows * num_heads_kv, WARPS_PER_CTA), block=WARPS_PER_CTA * 32
+        )
+    )
+
     block = txl.cta_id()
     tidx = txl.thread_id()
     lane = txl.local_scalar(txl.i32, init=tidx % 32, name="lane")

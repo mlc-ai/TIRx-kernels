@@ -449,7 +449,7 @@ def skip():
     pass
 
 
-def _host_prelude(params):
+def _prepare_host(params):
     """Encode the six TensorMaps promised by the public PrimFunc ABI."""
 
     A_tensor_map = txl.stack_alloca("tensormap", 1)
@@ -511,9 +511,28 @@ def _make_device_kernel():
         gemm_task_idxs: txl.gptr[txl.i32, (CAPACITY, 2)],
         gemm_head: txl.gptr[txl.i32, (1,)],
         gemm_tail: txl.gptr[txl.i32, (1,)],
-        *,
-        host,
     ):
+        host = _prepare_host(
+            {
+                "A": A,
+                "B": B,
+                "ag_out": ag_out,
+                "semaphore": semaphore,
+                "out": out,
+                "profiler_buffer": profiler_buffer,
+                "gemm_task_types": gemm_task_types,
+                "gemm_task_idxs": gemm_task_idxs,
+                "gemm_head": gemm_head,
+                "gemm_tail": gemm_tail,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=12 * 32, grid=SM_NUMBER, cluster=[M_CLUSTER, N_CLUSTER]
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         (
             A_tensor_map,
             A_tensor_map_1,
@@ -980,14 +999,7 @@ def _make_device_kernel():
                     tmem_addr_local[0], txl.uint32(N_COLS)
                 )
 
-    return txl.kernel(
-        arch="sm_100a",
-        host_prelude=_host_prelude,
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            block=12 * 32, grid=SM_NUMBER, cluster=[M_CLUSTER, N_CLUSTER]
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-    )(test_mma_ss_tma_2sm_persistent)
+    return txl.kernel(arch="sm_100a")(test_mma_ss_tma_2sm_persistent)
 
 
 KERNEL_META = {"name": "allgather_gemm", "category": "gemm", "runtime_cuda_archs": ["sm_100a"]}

@@ -9,8 +9,9 @@ traced, PTX-level DSL over TIRx:
 import tirx_kernels.tirx_lite as txl
 
 
-@txl.kernel(launch=txl.cuda.LaunchConfig(grid=1, block=32), arch="sm_100a")
+@txl.kernel(arch="sm_100a")
 def zero(out: txl.gptr(txl.f32)):
+    txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32))
     txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 ```
 
@@ -49,24 +50,54 @@ parser kernels.
 
 ## Launch configuration
 
-Use `launch=txl.cuda.LaunchConfig(grid=..., block=..., cluster=...)` and optional
+Declare `txl.device_entry` inside the function with
+`launch=txl.cuda.LaunchConfig(grid=..., block=..., cluster=...)` and optional
 `kernel_attrs=txl.cuda.KernelAttributes(...)` for compile-time CUDA kernel attributes.
 `grid` counts CTAs and `cluster` counts CTAs per cluster; `block` is a static
 one-dimensional multiple of 32 in tirx-lite.
 The raw TIRx API also supports three-dimensional blocks.
 
-A factory can compute launch operands from the kernel's bound ABI parameters:
+Launch expressions refer directly to the function's bound ABI parameters:
 
 ```python
-@txl.kernel(
-    launch=lambda p: txl.cuda.LaunchConfig(grid=(p["n"] + 127) // 128, block=128),
-    kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-)
+@txl.kernel()
 def zero(out: txl.gptr(txl.f32), n: txl.i32):
+    txl.device_entry(
+        launch=txl.cuda.LaunchConfig(grid=(n + 127) // 128, block=128),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+    )
     i = txl.cta_id() * 128 + txl.thread_id()
     with txl.If(i < n), txl.Then():
         txl.ptx.st.global_.f32(out.ptr_to([i]), txl.float32(0))
 ```
+
+A flat `txl.device_entry(...)` opens the device region for the remainder of the
+traced function. Use `with txl.device_entry(...):` for an explicit boundary;
+statements after the block run on the host. Each kernel requires exactly one
+entry at function scope, outside TIR branches and loops. Device coordinate,
+specialization, and shared-memory-pool helpers require an active device region.
+
+Host preparation belongs before entry. For example, a normal helper can allocate
+and encode TensorMap descriptors and return them to the function:
+
+```python
+@txl.kernel()
+def kernel(a: txl.gptr(txl.bf16), num_ctas: txl.i32):
+    descriptors = prepare_descriptors(a)
+    with txl.device_entry(launch=txl.cuda.LaunchConfig(grid=num_ctas, block=384)):
+        kernel_body(a, descriptors)
+```
+
+The function is traced once at decoration time. Its emitted host code computes
+launch values and prepares descriptors on each runtime invocation. Parameters
+used only by launch configuration remain host arguments; only device-body
+dependencies become GPU kernel parameters. The external call signature stays
+the same when the grid changes between invocations.
+
+The decorator accepts `arch`, `allowed_func_calls`, and `check_ir`. It no longer
+accepts launch configuration or host preparation callbacks, and `host` is not a
+special injected parameter. Move former launch factories into `device_entry`
+and call preparation helpers directly from the function body.
 
 The no-argument coordinate helpers remain entry-owned. `cta_id()` returns a
 scalar for a one-dimensional authored grid and an array for a two- or

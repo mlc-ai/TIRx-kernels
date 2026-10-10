@@ -343,10 +343,7 @@ def get_kernel(
     def st_key(buf, i, v):
         st_shared_u32(buf, i, v) if is32 else st_shared_u16(buf, i, v)
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=grid, block=BLOCK_THREADS // 32 * 32),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def radix_topk_multi_cta(
         inp: txl.gptr[dtype, (num_rows * length,)],
         out_idx: txl.gptr[txl.i32, (num_rows * k,)],
@@ -359,6 +356,8 @@ def get_kernel(
         state: txl.gptr[txl.u32, (WORKSPACE_WORDS,)],
         aux_stride: txl.i64,
     ):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=grid, block=BLOCK_THREADS // 32 * 32))
+
         cta = txl.cta_id()
         tx = txl.thread_id()
 

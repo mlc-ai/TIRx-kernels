@@ -373,12 +373,7 @@ def get_kernel(
         radix=RADIX,
     )
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=grid, block=FILTERED_TOPK_BLOCK_THREADS // 32 * 32
-        ),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def filtered_topk(
         inp: txl.gptr[dtype, (num_rows * length,)],
         out_idx: txl.gptr[txl.i32, (num_rows * k,)],
@@ -390,6 +385,10 @@ def get_kernel(
         row_to_batch_g: txl.gptr[txl.i32, (num_rows,)],
         aux_stride: txl.i64,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=grid, block=FILTERED_TOPK_BLOCK_THREADS // 32 * 32)
+        )
+
         row = txl.cta_id()
         tx = txl.thread_id()
 
@@ -579,10 +578,7 @@ def get_finalize_kernel(
     val_bytes = dtype_bytes(dtype)
     aux_elems = aux_elements(mode, num_rows, length, row_to_batch)
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=num_rows, block=block_threads // 32 * 32),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def filtered_topk_finalize(
         out_idx: txl.gptr[txl.i32, (num_rows * k,)],
         out_val: txl.gptr[dtype, (num_rows * k,)],
@@ -591,6 +587,10 @@ def get_finalize_kernel(
         row_to_batch_g: txl.gptr[txl.i32, (num_rows,)],
         aux_stride: txl.i64,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=num_rows, block=block_threads // 32 * 32)
+        )
+
         row = txl.cta_id()
         tx = txl.thread_id()
 

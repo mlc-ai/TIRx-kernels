@@ -355,13 +355,7 @@ def get_kernel(**kwargs: Any):
     STATE_STAGE_VALUES = spec["STATE_STAGE_VALUES"]
     STATE_STAGE_BYTES = spec["STATE_STAGE_BYTES"]
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(spec["BATCH"], spec["NHEADS"]), block=spec["NUM_WARPS"] * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=spec["MIN_BLOCKS_PER_SM"]),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def selective_state_update_stp_horizontal(
         tensor_state: txl.TensorMap,
         state: txl.gptr[spec["STATE_DTYPE"]],
@@ -390,6 +384,13 @@ def get_kernel(**kwargs: Any):
         update_state: txl.i32,
         pad_slot_id: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(spec["BATCH"], spec["NHEADS"]), block=spec["NUM_WARPS"] * 32
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=spec["MIN_BLOCKS_PER_SM"]),
+        )
+
         batch_i, head = txl.cta_id()
         smem = txl.smem_pool()
         s_state = smem.alloc(

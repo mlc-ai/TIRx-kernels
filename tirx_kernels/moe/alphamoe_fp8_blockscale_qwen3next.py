@@ -228,11 +228,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS):
         cta_group=1,
     )
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=G, block=NWARPS * 32, cluster=(CS,)),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def alphamoe_cluster(
         topk_ids: txl.gptr[txl.i32],
         topk_w: txl.gptr[txl.f32],
@@ -250,6 +246,11 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS):
         rsf: txl.f32,
         epoch: txl.u32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=G, block=NWARPS * 32, cluster=(CS,)),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         cta = txl.cta_id()
         rank = txl.cuda.cluster_cta_id("x")
         peer = txl.int32(CS - 1) - rank
@@ -1936,11 +1937,7 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER):
         cta_group=1,
     )
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=G, block=NWARPS * 32, cluster=(CS8,)),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def alphamoe_wide_m1(
         topk_ids: txl.gptr[txl.i32],
         topk_w: txl.gptr[txl.f32],
@@ -1953,6 +1950,11 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER):
         tm_w2: txl.TensorMap,
         rsf: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=G, block=NWARPS * 32, cluster=(CS8,)),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         cta = txl.cta_id()
         rank = txl.cuda.cluster_cta_id("x")
         warp = txl.warp_id()
@@ -2979,13 +2981,15 @@ def _check_route_rounding(packed_f32: bool) -> None:
     expected = torch.stack((expected, -expected), dim=1)
     actual = torch.empty_like(expected)
 
-    @txl.kernel(launch=lambda _params: txl.cuda.LaunchConfig(grid=4, block=1 * 32), arch="sm_100a")
+    @txl.kernel(arch="sm_100a")
     def check(
         expert: txl.gptr[txl.u32],
         weight: txl.gptr[txl.f32],
         scale: txl.gptr[txl.f32],
         output: txl.gptr[txl.u32],
     ):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=4, block=1 * 32))
+
         row = txl.cta_id()
         values = txl.alloc_local((TOPK,), txl.u32)
         for route in range(TOPK):

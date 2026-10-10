@@ -398,13 +398,7 @@ def get_kernel(**kwargs: Any):
     desc_sdo = head_dim // 2
     desc_swizzle = {32: 1, 64: 2, 128: 3}[head_dim]
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=config.num_sms, block=num_warps * 32, programmatic_stream_serialization=True
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100f",
-    )
+    @txl.kernel(arch="sm_100f")
     def sm100_fp8_mqa_logits(
         seq_len: txl.u32,
         seq_len_kv: txl.u32,
@@ -419,6 +413,13 @@ def get_kernel(**kwargs: Any):
         weights_map: txl.TensorMap,
         q_map: txl.TensorMap,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=config.num_sms, block=num_warps * 32, programmatic_stream_serialization=True
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         cache_policy_evict_normal = txl.uint64(0x1000000000000000)
         sm_idx_u32 = txl.Cast("uint32", txl.cta_id())
         warp_idx = txl.warp_id()

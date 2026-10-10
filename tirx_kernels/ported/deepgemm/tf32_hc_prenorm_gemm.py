@@ -403,13 +403,7 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
     def cuda_grid_dependency_synchronize():
         txl.ptx.griddepcontrol.wait()
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=config.grid_blocks, block=num_warps * 32, programmatic_stream_serialization=True
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def sm100_tf32_hc_prenorm_gemm(
         shape_m: txl.u32,
         # A/B/D are never dereferenced by the device code -- every access goes
@@ -423,6 +417,15 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
         b_map: txl.TensorMap,
         d_map: txl.TensorMap,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=config.grid_blocks,
+                block=num_warps * 32,
+                programmatic_stream_serialization=True,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         warp_idx = txl.warp_id()
         lane_idx = txl.lane_id()
 

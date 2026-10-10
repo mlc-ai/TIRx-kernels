@@ -345,13 +345,7 @@ def _make_gdn_decode_bf16_ilp4(
     PER_TOKEN_POOL_SCATTER,
     PER_TOKEN_POOL_SCATTER_FLAT,
 ):
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(_params["batch"] * NUM_V_HEADS * NUM_V_TILES,), block=NUM_WARPS * 32
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=8),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def gdn_decode_bf16_ilp4(
         state: txl.gptr[txl.bf16],
         intermediate: txl.gptr[txl.bf16],
@@ -373,6 +367,13 @@ def _make_gdn_decode_bf16_ilp4(
         v_batch_stride: txl.i64,
         batch: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(batch * NUM_V_HEADS * NUM_V_TILES,), block=NUM_WARPS * 32
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=8),
+        )
+
         smem = txl.smem_pool()
         if SEQ_LEN > 1:
             s_q = smem.alloc((S_K_BYTE_OFFSET // 4,), txl.f32, align=16)

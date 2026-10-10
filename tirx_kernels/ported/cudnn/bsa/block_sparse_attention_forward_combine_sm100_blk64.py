@@ -503,20 +503,7 @@ def _make_kernel(log_max_splits):
                     txl.ptx.st.global_.v2.b32(out.ptr_to([out_index]), word0, word1)
         # CUDA TRANSCRIPTION END
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=(
-                lambda p: [
-                    txl.ceildiv(p["seqlen_q"] * p["num_heads"], _TILE_M),
-                    _HEAD_DIM // _K_BLOCK,
-                    p["batch"],
-                ]
-            )(_params),
-            block=4 * 32,
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(required_block_size=True),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def combine(
         o_partial: txl.gptr[txl.f32],
         lse_partial: txl.gptr[txl.f32],
@@ -530,6 +517,14 @@ def _make_kernel(log_max_splits):
         seqlen_div_s1: txl.i32,
         seqlen_div_s2: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=[txl.ceildiv(seqlen_q * num_heads, _TILE_M), _HEAD_DIM // _K_BLOCK, batch],
+                block=4 * 32,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(required_block_size=True),
+        )
+
         kernel_body(
             o_partial,
             lse_partial,

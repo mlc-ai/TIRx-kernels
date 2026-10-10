@@ -110,9 +110,7 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
         else:
             txl.ptx.cvt.rn.bf16x2.f32(dst, hi, lo)
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=seq_len, block=warps * 32), arch="sm_100a"
-    )
+    @txl.kernel(arch="sm_100a")
     def merge_state(
         v_a: txl.gptr[dtype],
         s_a: txl.gptr[txl.f32],
@@ -121,6 +119,8 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
         v_merged: txl.gptr[dtype],
         s_merged: txl.gptr[txl.f32],
     ):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=seq_len, block=warps * 32))
+
         pos = txl.cta_id()  # blockIdx.x
         index_pos = txl.Cast("int64", pos) if index_dtype == "int64" else pos
         tid = txl.thread_id()

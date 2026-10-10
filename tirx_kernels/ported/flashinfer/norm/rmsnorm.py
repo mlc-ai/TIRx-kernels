@@ -920,31 +920,7 @@ def get_kernel(
 
     if compact:
 
-        @txl.kernel(
-            launch=lambda p: txl.cuda.LaunchConfig(
-                grid=(
-                    txl.int32(M // rows)
-                    if thor_full_rows
-                    else txl.cast(txl.ceildiv(p["runtime_M"], txl.int64(rows)), "int32"),
-                    cluster_n,
-                )
-                if cluster_n > 1
-                else (
-                    txl.int32(M // rows)
-                    if thor_full_rows
-                    else txl.cast(txl.ceildiv(p["runtime_M"], txl.int64(rows)), "int32"),
-                ),
-                block=threads,
-                cluster=(1, cluster_n) if cluster_n > 1 else None,
-                preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
-                programmatic_stream_serialization=enable_pdl,
-            ),
-            kernel_attrs=txl.cuda.KernelAttributes(
-                min_blocks_per_sm=None if threads == 128 else 1,
-                max_registers_per_thread=max_registers,
-            ),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def flashinfer_rmsnorm_compact(
             x: txl.gptr[dtype],
             weight: txl.gptr[dtype, (H,)],
@@ -952,36 +928,37 @@ def get_kernel(
             runtime_M: txl.i64,
             runtime_eps: txl.f32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=(
+                        txl.int32(M // rows)
+                        if thor_full_rows
+                        else txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"),
+                        cluster_n,
+                    )
+                    if cluster_n > 1
+                    else (
+                        txl.int32(M // rows)
+                        if thor_full_rows
+                        else txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"),
+                    ),
+                    block=threads,
+                    cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    programmatic_stream_serialization=enable_pdl,
+                ),
+                kernel_attrs=txl.cuda.KernelAttributes(
+                    min_blocks_per_sm=None if threads == 128 else 1,
+                    max_registers_per_thread=max_registers,
+                ),
+            )
+
             kernel_body(x, weight, y, runtime_M, runtime_eps, txl.int64(H), txl.int64(H))
 
         kernel = flashinfer_rmsnorm_compact.func
     else:
 
-        @txl.kernel(
-            launch=lambda p: txl.cuda.LaunchConfig(
-                grid=(
-                    txl.int32(M // rows)
-                    if thor_full_rows
-                    else txl.cast(txl.ceildiv(p["runtime_M"], txl.int64(rows)), "int32"),
-                    cluster_n,
-                )
-                if cluster_n > 1
-                else (
-                    txl.int32(M // rows)
-                    if thor_full_rows
-                    else txl.cast(txl.ceildiv(p["runtime_M"], txl.int64(rows)), "int32"),
-                ),
-                block=threads,
-                cluster=(1, cluster_n) if cluster_n > 1 else None,
-                preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
-                programmatic_stream_serialization=enable_pdl,
-            ),
-            kernel_attrs=txl.cuda.KernelAttributes(
-                min_blocks_per_sm=None if threads == 128 else 1,
-                max_registers_per_thread=max_registers,
-            ),
-            arch="sm_100a",
-        )
+        @txl.kernel(arch="sm_100a")
         def flashinfer_rmsnorm_strided(
             x: txl.gptr[dtype],
             weight: txl.gptr[dtype, (H,)],
@@ -991,6 +968,31 @@ def get_kernel(
             x_row_stride: txl.i64,
             y_row_stride: txl.i64,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=(
+                        txl.int32(M // rows)
+                        if thor_full_rows
+                        else txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"),
+                        cluster_n,
+                    )
+                    if cluster_n > 1
+                    else (
+                        txl.int32(M // rows)
+                        if thor_full_rows
+                        else txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"),
+                    ),
+                    block=threads,
+                    cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    programmatic_stream_serialization=enable_pdl,
+                ),
+                kernel_attrs=txl.cuda.KernelAttributes(
+                    min_blocks_per_sm=None if threads == 128 else 1,
+                    max_registers_per_thread=max_registers,
+                ),
+            )
+
             kernel_body(x, weight, y, runtime_M, runtime_eps, x_row_stride, y_row_stride)
 
         kernel = flashinfer_rmsnorm_strided.func

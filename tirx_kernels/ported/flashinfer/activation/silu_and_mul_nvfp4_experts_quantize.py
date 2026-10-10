@@ -188,11 +188,7 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
     hmax2 = _hmax2(dtype)
     hmax = _hmax(dtype)
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=4),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def silu_and_mul_nvfp4_experts_quantize(
         input_global: txl.gptr[dtype],
         sf_scale: txl.gptr[txl.f32],
@@ -204,6 +200,11 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
         num_experts: txl.i32,
         use_silu_and_mul: txl.i32,  # source ABI is bool; i32 keeps the same branch shape
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=4),
+        )
+
         bx = txl.cta_id()
         tx = txl.thread_id()
 

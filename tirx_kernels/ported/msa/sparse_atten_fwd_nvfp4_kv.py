@@ -1261,7 +1261,7 @@ def _make_kernel(**config):
     q_load_tile = HEAD_DIM if q_bytes == 1 else K_TILE
     q_tokens_per_group = M_BLOCK // qheadperkv
 
-    def host_prelude(params):
+    def prepare_host(params):
         k = params["k"]
         v = params["v"]
         q_flat = params["q_flat"]
@@ -3138,8 +3138,14 @@ def _make_kernel(**config):
     )
     names = tuple(name for name, _ in parameters)
 
-    def entry(*args, host):
-        trace(dict(zip(names, args, strict=True)), host)
+    def entry(*args):
+        values = dict(zip(names, args, strict=True))
+        host = prepare_host(values)
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(block=TOTAL_WARPS * 32, grid=values["work_capacity"]),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+        trace(values, host)
 
     entry.__name__ = KERNEL_META["name"]
     entry.__signature__ = inspect.Signature(
@@ -3149,18 +3155,10 @@ def _make_kernel(**config):
                     name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=annotation
                 )
                 for name, annotation in parameters
-            ],
-            inspect.Parameter("host", inspect.Parameter.KEYWORD_ONLY),
+            ]
         ]
     )
-    kernel = txl.kernel(
-        arch="sm_100a",
-        host_prelude=host_prelude,
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            block=TOTAL_WARPS * 32, grid=_params["work_capacity"]
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-    )(entry)
+    kernel = txl.kernel(arch="sm_100a")(entry)
     return kernel.func
 
 

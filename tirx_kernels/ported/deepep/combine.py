@@ -161,13 +161,7 @@ def _build_combine_kernel(num_sms: int, num_max_tokens_per_rank: int, num_ranks:
     NUM_RANKS_ = num_ranks
     cluster = 2 - num_sms % 2
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=num_sms, block=NUM_WARPS * 32, cluster=(cluster,) if cluster > 1 else None
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def deepep_combine(
         x: txl.gptr[txl.u8],
         topk_weights: txl.gptr[txl.f32],
@@ -180,6 +174,13 @@ def _build_combine_kernel(num_sms: int, num_max_tokens_per_rank: int, num_ranks:
         num_reduced_tokens: txl.i32,
         rank_idx: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_sms, block=NUM_WARPS * 32, cluster=(cluster,) if cluster > 1 else None
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         smem = txl.smem_pool().alloc([SMEM_TOTAL], "uint8")
 
         sm_idx = txl.cta_id()
@@ -362,13 +363,7 @@ def _build_reduce_epilogue_kernel(
     NUM_RANKS_ = num_ranks
     EXPERTS_PER_RANK = NUM_EXPERTS // num_ranks
 
-    @txl.kernel(
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            grid=num_sms, block=NUM_WARPS * 32, programmatic_stream_serialization=True
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-        arch="sm_100a",
-    )
+    @txl.kernel(arch="sm_100a")
     def deepep_combine_reduce_epilogue(
         combined_x: txl.gptr[txl.u8],
         combined_topk_weights: txl.gptr[txl.f32],
@@ -378,6 +373,13 @@ def _build_reduce_epilogue_kernel(
     ):
         # The i64 top-k indices are passed as an int32 view; the source reads
         # only the little-endian low word of each entry (reviewer r2 finding 3)
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_sms, block=NUM_WARPS * 32, programmatic_stream_serialization=True
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+        )
+
         smem = txl.smem_pool().alloc([SMEM_TOTAL], "uint8")
 
         sm_idx = txl.cta_id()

@@ -317,7 +317,7 @@ def _make_bmm_kernel(B: int, M: int, N: int, K_dim: int, ab_dtype: str, c_dtype:
     epilogue_subtiles = n_tile // 32
     tma_cache_hint = 0
 
-    def host_prelude(params):
+    def prepare_host(params):
         a = params["a"]
         b = params["b"]
         c = params["c"]
@@ -343,7 +343,18 @@ def _make_bmm_kernel(B: int, M: int, N: int, K_dim: int, ab_dtype: str, c_dtype:
         encode(c_map, c_dtype, 3, c.data, *c_fields, 1, 1, 1, 0, c_swizzle, 2, 0)
         return a_map, b_map, c_map
 
-    def kernel(a, b, c, output_scale, *, host):
+    def kernel(a, b, c, output_scale):
+        host = prepare_host({"a": a, "b": b, "c": c, "output_scale": output_scale})
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=6 * 32,
+                grid=(cluster_m, cluster_n, num_clusters),
+                cluster=[cluster_m, cluster_n],
+                preferred_cluster=[cluster_m, cluster_n],
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+        )
+
         del a, b, c
         a_map, b_map, c_map = host
         scale = txl.local_scalar("float32")
@@ -858,17 +869,7 @@ def _make_bmm_kernel(B: int, M: int, N: int, K_dim: int, ab_dtype: str, c_dtype:
         "c": txl.gptr[txl.u8, (B * M * N * c_bits // 8,)],
         "output_scale": txl.gptr[txl.f32, (1,)],
     }
-    return txl.kernel(
-        arch="sm_107a",
-        host_prelude=host_prelude,
-        launch=lambda _params: txl.cuda.LaunchConfig(
-            block=6 * 32,
-            grid=(cluster_m, cluster_n, num_clusters),
-            cluster=[cluster_m, cluster_n],
-            preferred_cluster=[cluster_m, cluster_n],
-        ),
-        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-    )(kernel)
+    return txl.kernel(arch="sm_107a")(kernel)
 
 
 def get_kernel(B: int, M: int, N: int, K: int, ab_dtype: str, c_dtype: str, tactic: int):

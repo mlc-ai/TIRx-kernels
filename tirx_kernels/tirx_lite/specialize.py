@@ -39,7 +39,7 @@ def _validate_register_target(session, kind, name, regs):
     if session.min_blocks_per_sm is None:
         raise ValueError(
             f"{kind} {name!r} asks for regs={regs}, but setmaxnreg requires "
-            "txl.kernel(..., min_blocks_per_sm=...) to pin the entry allocation"
+            "txl.device_entry(..., kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=...)) to pin the entry allocation"
         )
 
 
