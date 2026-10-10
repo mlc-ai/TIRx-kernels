@@ -79,7 +79,6 @@ KERNEL_META = {
 
 # The kernel declares no dynamic shared memory and the port declares none either:
 # the cub TempStorage is a static `__shared__` allocation, matching the source.
-LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x")
 
 # --- source constants ------------------------------------------------------
 # Block-local sort variants cover at most 256 * 8 = 2048 elements (:3138-3141).
@@ -196,7 +195,10 @@ def get_kernel(
     end_bit = plan["end_bit"]
     is32 = dtype == "float32"
 
-    @txl.kernel(warps=block_threads // 32, arch="sm_100a", grid=num_rows)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=num_rows, block=block_threads // 32 * 32),
+        arch="sm_100a",
+    )
     def stable_sort_topk_by_value(
         out_idx: txl.gptr[txl.i32, (num_rows * k,)], out_val: txl.gptr[dtype, (num_rows * k,)]
     ):
@@ -258,7 +260,9 @@ def get_kernel(
                         txl.assign(
                             keys[i],
                             txl.cast(
-                                sort_key_u16(txl.cast(ld_global_bits(out_val, slot, is32), "uint16")),
+                                sort_key_u16(
+                                    txl.cast(ld_global_bits(out_val, slot, is32), "uint16")
+                                ),
                                 "uint32",
                             ),
                         )
@@ -302,7 +306,7 @@ def get_kernel(
                 else:
                     st_global_u16(out_val, slot3, sort_key_u16(txl.cast(keys[i3], "uint16")))
 
-    return stable_sort_topk_by_value.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+    return stable_sort_topk_by_value.func
 
 
 _ = (bench, dtype_bytes, PATTERNS)  # wired up with the config matrix and harness

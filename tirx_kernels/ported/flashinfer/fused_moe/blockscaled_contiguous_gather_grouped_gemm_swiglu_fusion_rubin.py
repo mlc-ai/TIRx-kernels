@@ -361,10 +361,9 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
         host,
     ):
         del b, sfb, c
-        txl.cuda.required_block_size(640, 1, 1, 1, 1, 1)
         b_map, sfb_map, c_map = host
         _bx, _by, work_id = txl.cta_id()
-        cluster_x, cluster_y = txl.cta_id_in_cluster([1, 1], preferred=[1, 1])
+        cluster_x, cluster_y = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
         del _bx, _by, cluster_x, cluster_y
         warp = txl.warp_id()
         lane = txl.lane_id()
@@ -1150,11 +1149,12 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
         "global_scale": txl.gptr[txl.f32, (1,)],
     }
     return txl.kernel(
-        warps=20,
         arch="sm_107a",
-        min_blocks_per_sm=1,
-        grid=[1, 1, num_clusters],
         host_prelude=host_prelude,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            block=20 * 32, grid=(1, 1, num_clusters), cluster=[1, 1], preferred_cluster=[1, 1]
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
     )(kernel)
 
 

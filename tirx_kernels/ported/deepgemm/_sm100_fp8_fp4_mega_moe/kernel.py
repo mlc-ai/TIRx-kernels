@@ -31,7 +31,6 @@ from .spec import (
     get_deepgemm_launch_config,
     get_deepgemm_symm_buffer_layout,
     get_deepgemm_workspace_layout,
-    get_tirx_launch_param_tags,
 )
 
 __all__ = ["get_kernel"]
@@ -874,10 +873,13 @@ def get_kernel(
 
     # ---- the kernel body ----
     @txl.kernel(
-        warps=kernel_config.num_total_warps,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=kernel_config.num_sms,
+            block=kernel_config.num_total_warps * 32,
+            cluster=(kernel_config.num_ctas_per_cluster,),
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
         arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=kernel_config.num_sms,
     )
     def mega_moe(
         y: txl.gptr[txl.bf16],
@@ -1453,7 +1455,7 @@ def get_kernel(
         # recombining it folds straight back to that id.  Re-emitting either
         # per use costs nothing.
         sym_buffer_base = ptr_to_u64(symm_buffer.ptr_to([0]))
-        cta_idx_in_cluster = txl.cta_id_in_cluster([kernel_config.num_ctas_per_cluster])
+        cta_idx_in_cluster = txl.cuda.cluster_cta_id("x")
         sm_idx = txl.cta_id()
         wg_id = txl.warp_id() // 4
         warp_id = txl.warp_id() % 4
@@ -4422,4 +4424,4 @@ def get_kernel(
         with epilogue_role:
             epilogue(txl.warp_id_in_role(), txl.tid_in_role())
 
-    return mega_moe.func.with_attr("tirx.kernel_launch_params", get_tirx_launch_param_tags())
+    return mega_moe.func

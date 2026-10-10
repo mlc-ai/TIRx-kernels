@@ -398,7 +398,13 @@ def get_kernel(**kwargs: Any):
     desc_sdo = head_dim // 2
     desc_swizzle = {32: 1, 64: 2, 128: 3}[head_dim]
 
-    @txl.kernel(warps=num_warps, arch="sm_100f", min_blocks_per_sm=1, grid=config.num_sms)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=config.num_sms, block=num_warps * 32, programmatic_stream_serialization=True
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100f",
+    )
     def sm100_fp8_mqa_logits(
         seq_len: txl.u32,
         seq_len_kv: txl.u32,
@@ -416,7 +422,7 @@ def get_kernel(**kwargs: Any):
         cache_policy_evict_normal = txl.uint64(0x1000000000000000)
         sm_idx_u32 = txl.Cast("uint32", txl.cta_id())
         warp_idx = txl.warp_id()
-        warpgroup_idx = txl.warpgroup_id([num_warps // 4])
+        warpgroup_idx = txl.cuda.warpgroup_id()
         lane_idx_u32 = txl.Cast("uint32", txl.lane_id())
 
         # One elected lane of warp 0 prefetches every descriptor before any
@@ -479,10 +485,18 @@ def get_kernel(**kwargs: Any):
                     q_idx * txl.uint32(block_q) + txl.uint32(schedule_i), seq_len - txl.uint32(1)
                 )
                 row = txl.alloc_local([2], "int32")
-                txl.ptx.ld.global_.s32(row[0], cu_seq_len_k_start.ptr_to([txl.Cast("int32", row_idx)]))
-                txl.ptx.mov.b32(seq_k_start[schedule_i], txl.min(txl.Cast("uint32", row[0]), seq_len_kv))
-                txl.ptx.ld.global_.s32(row[1], cu_seq_len_k_end.ptr_to([txl.Cast("int32", row_idx)]))
-                txl.ptx.mov.b32(seq_k_end[schedule_i], txl.min(txl.Cast("uint32", row[1]), seq_len_kv))
+                txl.ptx.ld.global_.s32(
+                    row[0], cu_seq_len_k_start.ptr_to([txl.Cast("int32", row_idx)])
+                )
+                txl.ptx.mov.b32(
+                    seq_k_start[schedule_i], txl.min(txl.Cast("uint32", row[0]), seq_len_kv)
+                )
+                txl.ptx.ld.global_.s32(
+                    row[1], cu_seq_len_k_end.ptr_to([txl.Cast("int32", row_idx)])
+                )
+                txl.ptx.mov.b32(
+                    seq_k_end[schedule_i], txl.min(txl.Cast("uint32", row[1]), seq_len_kv)
+                )
                 txl.assign(schedule_start, txl.min(schedule_start, seq_k_start[schedule_i]))
                 txl.assign(schedule_end, txl.max(schedule_end, seq_k_end[schedule_i]))
             txl.assign(schedule_start, schedule_start // txl.uint32(4) * txl.uint32(4))
@@ -767,7 +781,8 @@ def get_kernel(**kwargs: Any):
                                 # into the row's stride padding; a range guard
                                 # would become a BSSY/BRA region.
                                 col = txl.min(
-                                    kv_offset - seq_k_start[q_inner_i], logits_stride - txl.uint32(1)
+                                    kv_offset - seq_k_start[q_inner_i],
+                                    logits_stride - txl.uint32(1),
                                 )
                                 store_logits(q_offset + txl.Cast("uint64", col), result)
                             else:
@@ -792,17 +807,7 @@ def get_kernel(**kwargs: Any):
     # `@txl.kernel` has no `attrs=`, so the launch metadata the original sets on
     # its PrimFunc is applied to the traced one here. `Kernel.func` is a plain
     # attribute (entry.py), and `Kernel.mod` reads it, so this reaches compile.
-    sm100_fp8_mqa_logits.func = sm100_fp8_mqa_logits.func.with_attr(
-        "tirx.persistent_kernel", True
-    ).with_attr(
-        "tirx.kernel_launch_params",
-        [
-            "blockIdx.x",
-            "threadIdx.x",
-            "tirx.use_programtic_dependent_launch",
-            "tirx.use_dyn_shared_memory",
-        ],
-    )
+    sm100_fp8_mqa_logits.func = sm100_fp8_mqa_logits.func.with_attr("tirx.persistent_kernel", True)
     return sm100_fp8_mqa_logits.func
 
 

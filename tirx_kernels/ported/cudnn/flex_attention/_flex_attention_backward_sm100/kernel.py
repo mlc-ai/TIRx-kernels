@@ -603,7 +603,11 @@ def get_kernel(**config):
     reduce_regs = 136 if p20_all_partial else (168 if p26_task_major_2d else 152)
 
     @txl.kernel(
-        warps=8, arch="sm_100a", min_blocks_per_sm=1, grid=((seqlen_q + 127) // 128, heads, batch)
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=((seqlen_q + 127) // 128, heads, batch), block=8 * 32
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
+        arch="sm_100a",
     )
     def preprocess(
         o: txl.gptr[txl.bf16],
@@ -611,7 +615,6 @@ def get_kernel(**config):
         lse: txl.gptr[txl.f32],
         workspace: txl.gptr[txl.f32],
     ):
-        txl.cuda.required_block_size(256, 1, 1, 1, 1, 1)
         txl.ptx.griddepcontrol.wait()
         q_tile, head, batch_idx = txl.cta_id()
         tid = txl.thread_id()
@@ -710,20 +713,16 @@ def get_kernel(**config):
             )
 
     @txl.kernel(
-        warps=WARPS,
-        arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=(
-            (heads, 32, 1)
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(heads, 32, 1)
             if p26_task_major_2d
-            else (
-                (total_tasks * heads, 1, 1)
-                if use_source_varlen_schedule
-                or use_source_varlen_nondet_schedule
-                or fixed_task_major
-                else (total_tasks if varlen else tasks * groups, heads, 1 if varlen else batch)
-            )
+            else (total_tasks * heads, 1, 1)
+            if use_source_varlen_schedule or use_source_varlen_nondet_schedule or fixed_task_major
+            else (total_tasks if varlen else tasks * groups, heads, 1 if varlen else batch),
+            block=WARPS * 32,
         ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
     )
     def bwd(
         q_map: txl.TensorMap,
@@ -1873,15 +1872,15 @@ def get_kernel(**config):
 
     def make_postprocess(seq_len, padded_len, source_base):
         @txl.kernel(
-            warps=4,
+            launch=lambda _params: txl.cuda.LaunchConfig(
+                grid=((seq_len + 127) // 128, heads, batch), block=4 * 32
+            ),
+            options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
             arch="sm_100a",
-            min_blocks_per_sm=1,
-            grid=((seq_len + 127) // 128, heads, batch),
         )
         def postprocess(
             workspace: txl.gptr[txl.f32], output: txl.gptr[txl.bf16], output_scale: txl.f32
         ):
-            txl.cuda.required_block_size(128, 1, 1, 1, 1, 1)
             seq_tile, head, batch_idx = txl.cta_id()
             tid = txl.thread_id()
             seq = seq_tile * txl.int32(128) + tid

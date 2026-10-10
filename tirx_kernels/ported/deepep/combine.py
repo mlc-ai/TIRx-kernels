@@ -150,17 +150,6 @@ def _shfl_idx(dst, src, src_lane):
     )
 
 
-def _launch_tags(cluster: int, pdl: bool) -> list[str]:
-    tags = ["blockIdx.x"]
-    if cluster > 1:
-        tags.append("clusterCtaIdx.x")
-    tags.append("threadIdx.x")
-    if pdl:
-        tags.append("tirx.use_programtic_dependent_launch")
-    tags.append("tirx.use_dyn_shared_memory")
-    return tags
-
-
 # ---------------------------------------------------------------------------
 # Kernel 1: combine_impl
 # ---------------------------------------------------------------------------
@@ -172,7 +161,13 @@ def _build_combine_kernel(num_sms: int, num_max_tokens_per_rank: int, num_ranks:
     NUM_RANKS_ = num_ranks
     cluster = 2 - num_sms % 2
 
-    @txl.kernel(warps=NUM_WARPS, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=num_sms, block=NUM_WARPS * 32, cluster=(cluster,) if cluster > 1 else None
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+    )
     def deepep_combine(
         x: txl.gptr[txl.u8],
         topk_weights: txl.gptr[txl.f32],
@@ -189,7 +184,7 @@ def _build_combine_kernel(num_sms: int, num_max_tokens_per_rank: int, num_ranks:
 
         sm_idx = txl.cta_id()
         if cluster > 1:
-            txl.cta_id_in_cluster([cluster])
+            pass
         thread_idx = txl.thread_id()
         lane = txl.lane_id()
 
@@ -259,11 +254,7 @@ def _build_combine_kernel(num_sms: int, num_max_tokens_per_rank: int, num_ranks:
                 txl.ptx.red.release.gpu.global_.add.u64(counter_ptr, txl.uint64(1))
                 now = txl.alloc_local([1], "uint64")
                 txl.cuda.wait_until(
-                    now[0],
-                    counter_ptr,
-                    now[0] >= target,
-                    scope="gpu",
-                    ptx_type="u64",
+                    now[0], counter_ptr, now[0] >= target, scope="gpu", ptx_type="u64"
                 )
             txl.ptx.bar.sync(txl.uint32(0), txl.uint32(NUM_THREADS))
 
@@ -355,7 +346,7 @@ def _build_combine_kernel(num_sms: int, num_max_tokens_per_rank: int, num_ranks:
         # No PDL trigger in kernel 1 (combine.cuh has none): kernel 2's
         # griddepcontrol.wait releases at kernel-1 completion.
 
-    return deepep_combine.func.with_attr("tirx.kernel_launch_params", _launch_tags(cluster, False))
+    return deepep_combine.func
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +362,13 @@ def _build_reduce_epilogue_kernel(
     NUM_RANKS_ = num_ranks
     EXPERTS_PER_RANK = NUM_EXPERTS // num_ranks
 
-    @txl.kernel(warps=NUM_WARPS, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=num_sms, block=NUM_WARPS * 32, programmatic_stream_serialization=True
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+    )
     def deepep_combine_reduce_epilogue(
         combined_x: txl.gptr[txl.u8],
         combined_topk_weights: txl.gptr[txl.f32],
@@ -538,7 +535,9 @@ def _build_reduce_epilogue_kernel(
                             with txl.unroll(4) as j:
                                 with txl.unroll(4) as w:
                                     word_u32 = txl.cast(values[j * 4 + w], "uint32")
-                                    lo = txl.cast(txl.bitwise_and(word_u32, txl.uint32(0xFFFF)), "uint16")
+                                    lo = txl.cast(
+                                        txl.bitwise_and(word_u32, txl.uint32(0xFFFF)), "uint16"
+                                    )
                                     hi = txl.cast(word_u32 >> txl.uint32(16), "uint16")
                                     e = j * 8 + w * 2
                                     txl.ptx.add.rn.f32.bf16(reduced[e], lo, reduced[e])
@@ -599,9 +598,7 @@ def _build_reduce_epilogue_kernel(
                 )
             txl.cuda.warp_sync()
 
-    return deepep_combine_reduce_epilogue.func.with_attr(
-        "tirx.kernel_launch_params", _launch_tags(1, True)
-    )
+    return deepep_combine_reduce_epilogue.func
 
 
 # ---------------------------------------------------------------------------

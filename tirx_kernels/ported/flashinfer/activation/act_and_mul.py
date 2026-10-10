@@ -89,7 +89,8 @@ def _fmaf_rn(a, b, c):
 
 def _unpack_lo(word, dtype):
     return txl.cast(
-        txl.reinterpret(dtype, txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")), "float32"
+        txl.reinterpret(dtype, txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")),
+        "float32",
     )
 
 
@@ -120,7 +121,9 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     def unpack_pair(dst, pair, word):
         if thor_bf16:
             # BF16 widening places its bits in the high half of an FP32 word.
-            txl.ptx.mov.b32(dst[2 * pair], txl.reinterpret("float32", txl.shift_left(word, txl.uint32(16))))
+            txl.ptx.mov.b32(
+                dst[2 * pair], txl.reinterpret("float32", txl.shift_left(word, txl.uint32(16)))
+            )
             txl.ptx.mov.b32(
                 dst[2 * pair + 1],
                 txl.reinterpret("float32", txl.bitwise_and(word, txl.uint32(0xFFFF0000))),
@@ -129,7 +132,12 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
             txl.ptx.mov.b32(dst[2 * pair], _unpack_lo(word, dtype))
             txl.ptx.mov.b32(dst[2 * pair + 1], _unpack_hi(word, dtype))
 
-    @txl.kernel(warps=(block_size + 31) // 32, arch="sm_100a", grid=num_tokens)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=num_tokens, block=(block_size + 31) // 32 * 32
+        ),
+        arch="sm_100a",
+    )
     def act_and_mul(input_global: txl.gptr[dtype, 2], out_global: txl.gptr[dtype, 2]):
         token = txl.cta_id()
         tid = txl.thread_id()
@@ -212,7 +220,8 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                     xr16,
                     txl.address_of(
                         input_global[
-                            0, txl.cast(token, "int64") * (2 * d) + txl.cast(ridx, "int64") + rem_off
+                            0,
+                            txl.cast(token, "int64") * (2 * d) + txl.cast(ridx, "int64") + rem_off,
                         ]
                     ),
                 )
@@ -221,7 +230,10 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                     txl.address_of(
                         input_global[
                             0,
-                            txl.cast(token, "int64") * (2 * d) + txl.cast(ridx, "int64") + rem_off + d,
+                            txl.cast(token, "int64") * (2 * d)
+                            + txl.cast(ridx, "int64")
+                            + rem_off
+                            + d,
                         ]
                     ),
                 )
@@ -232,7 +244,8 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                     out_r = (xr / (txl.float32(1.0) + er)) * yr
                 elif act == "gelu":
                     out_r = (
-                        (xr * txl.float32(0.5)) * (txl.float32(1.0) + txl.erf(xr * txl.float32(_SQRT1_2)))
+                        (xr * txl.float32(0.5))
+                        * (txl.float32(1.0) + txl.erf(xr * txl.float32(_SQRT1_2)))
                     ) * yr
                 else:  # gelu_tanh
                     t1 = xr * txl.float32(_GELU_TANH_C0)
@@ -249,7 +262,9 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                     txl.ptx.cvt.rn.bf16.f32(ob16, out_r)
                 txl.ptx.st.global_.b16(
                     txl.address_of(
-                        out_global[0, txl.cast(token, "int64") * d + txl.cast(ridx, "int64") + rem_off]
+                        out_global[
+                            0, txl.cast(token, "int64") * d + txl.cast(ridx, "int64") + rem_off
+                        ]
                     ),
                     ob16,
                 )

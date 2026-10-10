@@ -225,7 +225,11 @@ def get_kernel(**config):
     dv_base = dk_base + bh_count * k8 * 128
 
     @txl.kernel(
-        warps=4, arch="sm_100a", min_blocks_per_sm=1, grid=((seqlen_q + 15) // 16, heads, batch)
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=((seqlen_q + 15) // 16, heads, batch), block=4 * 32
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
+        arch="sm_100a",
     )
     def sum_odo(
         o: txl.gptr[txl.bf16],
@@ -233,7 +237,6 @@ def get_kernel(**config):
         lse: txl.gptr[txl.f32],
         workspace: txl.gptr[txl.f32],
     ):
-        txl.cuda.required_block_size(128, 1, 1, 1, 1, 1)
         q_tile, head, batch_idx = txl.cta_id()
         tid = txl.thread_id()
         tidx = tid % txl.int32(8)
@@ -279,7 +282,11 @@ def get_kernel(**config):
                 txl.ptx.st.global_.b32(workspace.ptr_to([txl.int64(sum_plane) + bhq]), scaled)
 
     @txl.kernel(
-        warps=WARPS, arch="sm_100a", min_blocks_per_sm=1, grid=(tasks * groups, heads, batch)
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(tasks * groups, heads, batch), block=WARPS * 32
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
+        arch="sm_100a",
     )
     def bwd(
         q_map: txl.TensorMap,
@@ -294,7 +301,6 @@ def get_kernel(**config):
         edge_stride: txl.i64,
         softmax_scale: txl.f32,
     ):
-        txl.cuda.required_block_size(THREADS, 1, 1, 1, 1, 1)
         block, head, batch_idx = txl.cta_id()
         warp = txl.warp_id()
         with txl.If(warp == txl.int32(13)), txl.Then():
@@ -941,10 +947,11 @@ def get_kernel(**config):
                 pass
 
     @txl.kernel(
-        warps=4,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=((max(seqlen_q, seqlen_kv) + 7) // 8, heads, batch), block=4 * 32
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
         arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=((max(seqlen_q, seqlen_kv) + 7) // 8, heads, batch),
     )
     def convert(
         workspace: txl.gptr[txl.f32],
@@ -953,7 +960,6 @@ def get_kernel(**config):
         dv: txl.gptr[txl.bf16],
         softmax_scale: txl.f32,
     ):
-        txl.cuda.required_block_size(128, 1, 1, 1, 1, 1)
         seq_tile, head, batch_idx = txl.cta_id()
         tid = txl.thread_id()
         tidx = tid % txl.int32(16)

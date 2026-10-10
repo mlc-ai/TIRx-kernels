@@ -79,30 +79,6 @@ KERNEL_META = {
 }
 
 
-# `clusterCtaIdx.x` is requested only when the cluster is real; a one-CTA cluster
-# takes the plain form, as the sibling cluster kernels do.  The tag alone does not
-# produce a cluster launch -- the body must bind the scope.
-# The source writes `__cluster_dims__(NClusters, 1, 1)` unconditionally, so its
-# `NClusters == 1` entries still declare a one-CTA cluster: all 12 carry
-# `.reqnctapercluster 1, 1, 1` and still read `%cluster_ctarank`.
-#
-# TIRx cannot reproduce that. An extent-1 `cta_id_in_cluster` binding folds away
-# and the `clusterCtaIdx.x` tag then fails to resolve ("Cannot find thread var"),
-# so the tag must be gated on `nc > 1` -- which is what every cluster kernel in
-# this repo already does (`deepep/dispatch.py:192-196`,
-# `flashinfer/norm/rmsnorm.py:845-848`). The port therefore diverges from the
-# reference on exactly one launch attribute at `nc == 1`: no cluster dimension is
-# declared where the reference declares a trivial one. Nothing in the algorithm
-# depends on it -- at one CTA per cluster the peer sum and the epilogue range
-# claim are both compiled out, and rank is statically 0.
-def launch_tags(nc: int) -> list[str]:
-    tags = ["blockIdx.x"]
-    if nc > 1:
-        tags.append("clusterCtaIdx.x")
-    tags += ["threadIdx.x", "tirx.use_dyn_shared_memory"]
-    return tags
-
-
 # `__launch_bounds__(1024)` gives `.maxntid 1024` and nothing else: the export
 # carries no `.minnctapersm` and no `.maxnreg`. Occupancy is already pinned at
 # 2 blocks/SM by the 115188 B carve against a 232448 B optin, so a min-blocks
@@ -391,7 +367,9 @@ def get_kernel(
         txl.tvm_storage_sync("shared")
         bin_ = txl.local_scalar("int32", init=txl.cast(R.ld_shared_u32(scal, THR), "int32"))
         with txl.If(bin_ < RADIX - 1), txl.Then():
-            txl.assign(k_rem, k_rem - txl.cast(R.ld_shared_u32(hist, 2 * RADIX + bin_ + 1), "int32"))
+            txl.assign(
+                k_rem, k_rem - txl.cast(R.ld_shared_u32(hist, 2 * RADIX + bin_ + 1), "int32")
+            )
 
     def _classify(
         hist,
@@ -417,9 +395,13 @@ def get_kernel(
         and the source keeps it in a register too.
         """
         if is32:
-            digit = txl.bitwise_and(txl.cast(txl.shift_right(bits, txl.uint32(shift)), "int32"), 0xFF)
+            digit = txl.bitwise_and(
+                txl.cast(txl.shift_right(bits, txl.uint32(shift)), "int32"), 0xFF
+            )
         else:
-            digit = txl.bitwise_and(txl.cast(txl.shift_right(bits, txl.uint16(shift)), "int32"), 0xFF)
+            digit = txl.bitwise_and(
+                txl.cast(txl.shift_right(bits, txl.uint16(shift)), "int32"), 0xFF
+            )
         d = txl.local_scalar("int32", init=digit)
         with txl.If(d > bin_):
             with txl.Then():
@@ -427,7 +409,9 @@ def get_kernel(
                 # commented out at :195-197; the writeback's `offs < TopK` is what
                 # bounds the global store. Reproduce, do not repair.
                 slot = R.atom_shared_add_u32(scal, FINAL, txl.uint32(1))
-                R.st_shared_u32(topk_inds, txl.cast(slot, "int32"), txl.reinterpret("uint32", index))
+                R.st_shared_u32(
+                    topk_inds, txl.cast(slot, "int32"), txl.reinterpret("uint32", index)
+                )
             with txl.Else():
                 with txl.If(d == bin_), txl.Then():
                     if not last:
@@ -444,7 +428,9 @@ def get_kernel(
                         with txl.If(slot < num_cached):
                             with txl.Then():
                                 R.st_shared_u32(
-                                    cidx, phase * num_cached + slot, txl.reinterpret("uint32", index)
+                                    cidx,
+                                    phase * num_cached + slot,
+                                    txl.reinterpret("uint32", index),
                                 )
                                 R.st_shared_u32(
                                     cbits, phase * num_cached + slot, txl.cast(bits, "uint32")
@@ -467,11 +453,13 @@ def get_kernel(
                         with txl.If(keep == 1), txl.Then():
                             if is32:
                                 nb = txl.bitwise_and(
-                                    txl.cast(txl.shift_right(bits, txl.uint32(shift - 8)), "int32"), 0xFF
+                                    txl.cast(txl.shift_right(bits, txl.uint32(shift - 8)), "int32"),
+                                    0xFF,
                                 )
                             else:
                                 nb = txl.bitwise_and(
-                                    txl.cast(txl.shift_right(bits, txl.uint16(shift - 8)), "int32"), 0xFF
+                                    txl.cast(txl.shift_right(bits, txl.uint16(shift - 8)), "int32"),
+                                    0xFF,
                                 )
                             R.atom_shared_add_u32(hist, (phase ^ 1) * RADIX + nb, txl.uint32(1))
                     else:
@@ -563,7 +551,9 @@ def get_kernel(
                 R.ld_shared_u32(cached_bits, (phase ^ 1) * num_cached + i),
                 txl.local_scalar(
                     "int32",
-                    init=txl.cast(R.ld_shared_u32(cached_idx, (phase ^ 1) * num_cached + i), "int32"),
+                    init=txl.cast(
+                        R.ld_shared_u32(cached_idx, (phase ^ 1) * num_cached + i), "int32"
+                    ),
                 ),
                 bin_t,
                 phase,
@@ -604,7 +594,7 @@ def get_kernel(
 
     def _emit(logits, out_idx, out_val, seq_lens_g, aux, ovf):
         cta = txl.cta_id()
-        rank = txl.cta_id_in_cluster([nc]) if nc > 1 else txl.int32(0)
+        rank = txl.cuda.cluster_cta_id("x") if nc > 1 else txl.int32(0)
         tid = txl.thread_id()
         row = cta // nc
         warp = tid >> 5
@@ -745,7 +735,9 @@ def get_kernel(
                 vbase = (rank * BLOCK_THREADS + tid) * 4
                 # Snapshotted: as a loop bound it is re-evaluated every trip.
                 vec_end = txl.local_scalar("int32", init=(row_len // 4) * 4)
-                with txl.serial(vbase, vec_end, step=BLOCK_THREADS * nc * 4, unroll=vec_unroll) as i:
+                with txl.serial(
+                    vbase, vec_end, step=BLOCK_THREADS * nc * 4, unroll=vec_unroll
+                ) as i:
                     w = _ld_vec4(logits, logit_base + i, is32)
                     with txl.unroll(4) as j:
                         if is32:
@@ -874,7 +866,12 @@ def get_kernel(
 
     if plain:
 
-        @txl.kernel(warps=BLOCK_THREADS // 32, arch="sm_100a", grid=grid)
+        @txl.kernel(
+            launch=lambda p: txl.cuda.LaunchConfig(
+                grid=grid, block=BLOCK_THREADS, cluster=nc if nc > 1 else None
+            ),
+            arch="sm_100a",
+        )
         def fast_topk_clusters_kernel(
             logits: txl.gptr[val_t, (batch * seq_len,)],
             indices: txl.gptr[idx_t, (batch * k,)],
@@ -885,7 +882,12 @@ def get_kernel(
 
     else:
 
-        @txl.kernel(warps=BLOCK_THREADS // 32, arch="sm_100a", grid=grid)
+        @txl.kernel(
+            launch=lambda _params: txl.cuda.LaunchConfig(
+                grid=grid, block=BLOCK_THREADS, cluster=nc if nc > 1 else None
+            ),
+            arch="sm_100a",
+        )
         def fast_topk_clusters_kernel(
             logits: txl.gptr[val_t, (batch * seq_len,)],
             indices: txl.gptr[idx_t, (batch * k,)],
@@ -895,7 +897,7 @@ def get_kernel(
         ):
             _emit(logits, indices, None, seq_lens, aux, overflow)
 
-    return fast_topk_clusters_kernel.func.with_attr("tirx.launch_tags", launch_tags(nc))
+    return fast_topk_clusters_kernel.func
 
 
 # ---------------------------------------------------------------------------

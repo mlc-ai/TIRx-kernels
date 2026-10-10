@@ -674,9 +674,15 @@ def _make_kernel(**config):
     ):
         del q, k, v, out
         q_map, k_map, v_map, o_map = host
-        _cluster_x, _cluster_y, _cluster_z = txl.cta_id_in_cluster([1, 1, 1])
-        initial_q_block, initial_head, initial_batch = txl.cta_id(
-            [q_blocks, scheduled_heads, batch]
+        _cluster_x, _cluster_y, _cluster_z = (
+            txl.cuda.cluster_cta_id("x"),
+            txl.cuda.cluster_cta_id("y"),
+            txl.cuda.cluster_cta_id("z"),
+        )
+        initial_q_block, initial_head, initial_batch = (
+            txl.cuda.block_idx("x"),
+            txl.cuda.block_idx("y"),
+            txl.cuda.block_idx("z"),
         )
         q_block = txl.local_scalar("int32", init=initial_q_block)
         head = txl.local_scalar("int32", init=initial_head)
@@ -1494,7 +1500,6 @@ def _make_kernel(**config):
         *,
         host,
     ):
-        txl.cuda.required_block_size(_WARPS * 32, 1, 1, 1, 1, 1)
         kernel_body(
             q,
             k,
@@ -1522,11 +1527,12 @@ def _make_kernel(**config):
         "softmax_scale_log2": txl.f32,
     }
     return txl.kernel(
-        warps=_WARPS,
         arch="sm_100a",
-        grid=[q_blocks, scheduled_heads, batch],
-        min_blocks_per_sm=1,
         host_prelude=host_prelude,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            block=_WARPS * 32, grid=(q_blocks, scheduled_heads, batch), cluster=1
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
     )(kernel)
 
 

@@ -685,7 +685,7 @@ def _tmem_cell(base, row, row_delta, column):
 
 
 def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out):
-    @txl.kernel(warps=32, arch="sm_100a", grid=1)
+    @txl.kernel(launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=32 * 32), arch="sm_100a")
     def prologue(
         base_q: txl.gptr[txl.i64],
         base_k: txl.gptr[txl.i64],
@@ -1018,7 +1018,11 @@ def _make_main(
     k_ratio,
     v_ratio,
 ):
-    @txl.kernel(warps=16, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=num_sms, block=16 * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+    )
     def main(
         descriptor_workspace: txl.gptr[txl.i64],
         n_desc: txl.i32,

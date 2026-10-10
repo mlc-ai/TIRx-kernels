@@ -345,14 +345,14 @@ def _make_bmm_kernel(B: int, M: int, N: int, K_dim: int, ab_dtype: str, c_dtype:
 
     def kernel(a, b, c, output_scale, *, host):
         del a, b, c
-        txl.cuda.required_block_size(192, 1, 1, cluster_m, cluster_n, 1)
         a_map, b_map, c_map = host
         scale = txl.local_scalar("float32")
         txl.ptx.ld.global_.f32(scale, output_scale.ptr_to([0]))
 
         _block_x, _block_y, cluster_work_id = txl.cta_id()
-        cluster_x_scope, cluster_y_scope = txl.cta_id_in_cluster(
-            [cluster_m, cluster_n], preferred=[cluster_m, cluster_n]
+        cluster_x_scope, cluster_y_scope = (
+            txl.cuda.cluster_cta_id("x"),
+            txl.cuda.cluster_cta_id("y"),
         )
         del _block_x, _block_y, cluster_x_scope, cluster_y_scope
         cluster_rank = txl.local_scalar("int32", init=txl.cuda.mov_sreg(32, "cluster_ctarank"))
@@ -859,11 +859,15 @@ def _make_bmm_kernel(B: int, M: int, N: int, K_dim: int, ab_dtype: str, c_dtype:
         "output_scale": txl.gptr[txl.f32, (1,)],
     }
     return txl.kernel(
-        warps=6,
         arch="sm_107a",
-        min_blocks_per_sm=1,
-        grid=[cluster_m, cluster_n, num_clusters],
         host_prelude=host_prelude,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            block=6 * 32,
+            grid=(cluster_m, cluster_n, num_clusters),
+            cluster=[cluster_m, cluster_n],
+            preferred_cluster=[cluster_m, cluster_n],
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
     )(kernel)
 
 

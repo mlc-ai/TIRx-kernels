@@ -66,14 +66,7 @@ LN_2 = math.log(2.0)
 # kernel always waits on the forward's launch-dependents signal and the launch
 # always carries the programmatic-dependent-launch attribute. The partial
 # staging buffer alone is 64 KB for fp32 partials, so shared memory is dynamic.
-LAUNCH_TAGS = (
-    "blockIdx.x",
-    "blockIdx.y",
-    "blockIdx.z",
-    "threadIdx.x",
-    "tirx.use_programtic_dependent_launch",
-    "tirx.use_dyn_shared_memory",
-)
+
 
 _TORCH_DTYPES = {
     "bfloat16": "bfloat16",
@@ -197,7 +190,19 @@ def make_kernel(
     NUM_ROWS, OUT_ROWS, SPLITS_PT = o_rows, out_rows, splits_pt
     NUM_VALS = o_elems
 
-    @txl.kernel(warps=WARPS, arch="sm_100a", min_blocks_per_sm=min_blocks_per_sm, grid=False)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(
+                (_params["total_q"] * _params["head_q"] + (TILE_M - 1)) // TILE_M,
+                HEAD_DIM // K_BLOCK_SIZE,
+                _params["num_batches"],
+            ),
+            block=WARPS * 32,
+            programmatic_stream_serialization=True,
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=min_blocks_per_sm),
+        arch="sm_100a",
+    )
     def msa_sparse_atten_fwd_combine(
         o_partial: txl.gptr[partial_ty],
         lse_partial: txl.gptr[txl.f32],
@@ -230,8 +235,10 @@ def make_kernel(
         # Grid: (ceil(seqlen*num_head / tile_m), ceil(head_dim / k_block), batch)
         # with the head axis innermost inside the flattened row index
         # (combine.py:401-418).
-        m_block, k_block, batch = txl.cta_id(
-            [(total_q * head_q + (TILE_M - 1)) // TILE_M, HEAD_DIM // K_BLOCK_SIZE, num_batches]
+        m_block, k_block, batch = (
+            txl.cuda.block_idx("x"),
+            txl.cuda.block_idx("y"),
+            txl.cuda.block_idx("z"),
         )
         tidx = txl.thread_id()
 
@@ -1035,9 +1042,7 @@ def get_kernel(**config):
         output_scale=bool(config.get("output_scale", False)),
         seqused=bool(config.get("seqused", False)),
     )
-    return kernel.func.with_attr("global_symbol", KERNEL_META["name"]).with_attr(
-        "tirx.kernel_launch_params", list(LAUNCH_TAGS)
-    )
+    return kernel.func.with_attr("global_symbol", KERNEL_META["name"])
 
 
 # ---------------------------------------------------------------------------

@@ -132,7 +132,12 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
     width = coff * head_dim
     win = 8 if coff == 2 else 4
 
-    @txl.kernel(warps=2, arch="sm_100a", grid=lambda p: [p["nb_total"], txl.ceildiv(ncol, 64), 1])
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(lambda p: [p["nb_total"], txl.ceildiv(ncol, 64), 1])(_params), block=2 * 32
+        ),
+        arch="sm_100a",
+    )
     def compressor_fwd(
         kv: txl.gptr[txl.bf16],
         score: txl.gptr[txl.bf16],
@@ -251,7 +256,9 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
                     value_bits = txl.alloc_local([vec], "uint16")
                     if coff == 2 and k < 4:
                         with txl.If(block_in_sequence > 0), txl.Then():
-                            offset = (token - txl.int32(4) + txl.int32(k)) * txl.int32(width) + column
+                            offset = (token - txl.int32(4) + txl.int32(k)) * txl.int32(
+                                width
+                            ) + column
                             if vec == 1:
                                 txl.ptx.ld.global_.b16(score_bits[0], score.ptr_to([offset]))
                                 txl.ptx.ld.global_.b16(value_bits[0], kv.ptr_to([offset]))
@@ -326,7 +333,9 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
                     for k in range(win):
                         difference = txl.local_scalar("float32")
                         txl.ptx["sub.f32"](difference, scores[k * vec + lane], maximum)
-                        txl.assign(exponentials[k], _source_exp(difference, magic_bias, magic_scale))
+                        txl.assign(
+                            exponentials[k], _source_exp(difference, magic_bias, magic_scale)
+                        )
                         txl.ptx["add.f32"](denominator, denominator, exponentials[k])
 
                     accumulator = txl.local_scalar("float32")

@@ -166,7 +166,9 @@ def _gate_pair(a, b_gate, A_value, dt_value, index):
     _mul2 = txl.local_scalar("float32")
     txl.ptx["mul.f32"](_mul2, _log2, txl.float32(LN_2))
     softplus_value = _mul2
-    use_softplus = txl.if_then_else(x_value <= txl.float32(20.0), txl.float32(1.0), txl.float32(0.0))
+    use_softplus = txl.if_then_else(
+        x_value <= txl.float32(20.0), txl.float32(1.0), txl.float32(0.0)
+    )
     _sub = txl.local_scalar("float32")
     txl.ptx["sub.f32"](_sub, txl.float32(1.0), use_softplus)
     _mul3 = txl.local_scalar("float32")
@@ -343,7 +345,13 @@ def _make_gdn_decode_bf16_ilp4(
     PER_TOKEN_POOL_SCATTER,
     PER_TOKEN_POOL_SCATTER_FLAT,
 ):
-    @txl.kernel(warps=NUM_WARPS, arch="sm_100a", min_blocks_per_sm=8, grid=False)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(_params["batch"] * NUM_V_HEADS * NUM_V_TILES,), block=NUM_WARPS * 32
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=8),
+        arch="sm_100a",
+    )
     def gdn_decode_bf16_ilp4(
         state: txl.gptr[txl.bf16],
         intermediate: txl.gptr[txl.bf16],
@@ -374,7 +382,7 @@ def _make_gdn_decode_bf16_ilp4(
             scratch = smem.alloc((SHARED_BYTES,), txl.u8, align=16)
             s_q = s_k = s_gb = scratch
         smem.commit(SHARED_BYTES)
-        linear_cta = txl.cta_id([batch * NUM_V_HEADS * NUM_V_TILES])
+        linear_cta = txl.cuda.block_idx("x")
         tid = txl.thread_id()
         warp = _local_scalar("int32", tid // LANES_PER_GROUP)
         lane = _local_scalar("int32", tid % LANES_PER_GROUP)
@@ -669,7 +677,9 @@ def _make_gdn_decode_bf16_ilp4(
                 for delta_index in range(5):
                     delta = _local_scalar("int32", txl.shift_right(txl.int32(16), delta_index))
                     for row in range(ILP_ROWS):
-                        txl.ptx["add.f32"](sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0]))
+                        txl.ptx["add.f32"](
+                            sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0])
+                        )
                 v_input_base = _local_scalar(
                     "int64",
                     txl.cast(n[0], "int64") * v_batch_stride

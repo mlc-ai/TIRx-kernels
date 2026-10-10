@@ -37,21 +37,7 @@ BAR_EVERYONE_SYNC = CUTLASS_USER_BARRIER_BASE + 4
 BAR_WG0_SYNC = CUTLASS_USER_BARRIER_BASE + 1
 BAR_WG0_WARP02 = CUTLASS_USER_BARRIER_BASE + 2
 
-LAUNCH_TAGS = (
-    "blockIdx.x",
-    "blockIdx.y",
-    "blockIdx.z",
-    "threadIdx.x",
-    "tirx.use_dyn_shared_memory",
-)
-COMBINE_LAUNCH_TAGS = ("blockIdx.x", "blockIdx.y", "blockIdx.z", "threadIdx.x")
-COMBINE_PDL_LAUNCH_TAGS = (
-    "blockIdx.x",
-    "blockIdx.y",
-    "blockIdx.z",
-    "threadIdx.x",
-    "tirx.use_programtic_dependent_launch",
-)
+
 MAIN_OPTIONAL_BUFFER_PARAMS = (
     "topk_length_h",
     "attn_sink_h",
@@ -329,7 +315,13 @@ def make_main_kernel(model_type, presence, use_pdl=False):
     kv_rope_start = (d_nope + (16 if is_v32 else 0)) // BF16_BYTES
     source_smem_size = 232192 if is_v32 else 218848
 
-    @txl.kernel(warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=("s_q", "num_sm_parts", 1))
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(_params["s_q"], _params["num_sm_parts"], 1), block=12 * 32
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+    )
     def sparse_flashmla_decode_head64_main(
         q: txl.gptr[txl.bf16],
         kv: txl.gptr[txl.bf16],
@@ -389,7 +381,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
         s_q_idx, partition_idx, _ = txl.cta_id()
         warp_idx = txl.warp_id()
         lane_idx = txl.lane_id()
-        idx_in_warpgroup = txl.thread_id_in_wg([128])
+        idx_in_warpgroup = txl.cuda.thread_in_warpgroup()
         with txl.If(warp_idx == 0), txl.Then():
             with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
                 for _prefetch_i in range(8):
@@ -2005,7 +1997,14 @@ def make_main_kernel(model_type, presence, use_pdl=False):
 
 
 def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
-    @txl.kernel(warps=8, arch="sm_100a", grid=False)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(_params["b"] * _params["s_q"], 1, (_params["h_q"] + 7) // 8),
+            block=8 * 32,
+            programmatic_stream_serialization=use_pdl,
+        ),
+        arch="sm_100a",
+    )
     def sparse_decode_head64_combine(
         lse: txl.gptr[txl.f32],
         out: txl.gptr[txl.bf16],
@@ -2033,7 +2032,11 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
         lse_scales = smem.alloc((8, max_splits), "float32")
 
         # combine.cu:18-43. One warp per head, eight heads per CTA.
-        batch_s_q_idx, _, h_block_idx = txl.cta_id([b * s_q, 1, (h_q + 7) // 8])
+        batch_s_q_idx, _, h_block_idx = (
+            txl.cuda.block_idx("x"),
+            txl.cuda.block_idx("y"),
+            txl.cuda.block_idx("z"),
+        )
         thread_idx = txl.thread_id()
         warp_idx = txl.local_scalar("int32", init=thread_idx // 32)
         lane_idx = txl.local_scalar("int32", init=thread_idx % 32)
@@ -2334,22 +2337,15 @@ def _absent_specialization_kwargs(
 def _specialized_main_kernel(
     model_type: ModelType, presence: MainPresenceMask, use_pdl: bool = False
 ):
-    return (
-        make_main_kernel(model_type, presence, use_pdl)
-        .func.with_attr("global_symbol", KERNEL_META["name"])
-        .with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+    return make_main_kernel(model_type, presence, use_pdl).func.with_attr(
+        "global_symbol", KERNEL_META["name"]
     )
 
 
 @lru_cache(maxsize=20)
 def _specialized_combine_kernel(max_splits: int, have_attn_sink: bool, use_pdl: bool = False):
-    return (
-        make_combine_kernel(max_splits, have_attn_sink, use_pdl)
-        .func.with_attr("global_symbol", "sparse_flashmla_decode_head64_combine")
-        .with_attr(
-            "tirx.kernel_launch_params",
-            list(COMBINE_PDL_LAUNCH_TAGS if use_pdl else COMBINE_LAUNCH_TAGS),
-        )
+    return make_combine_kernel(max_splits, have_attn_sink, use_pdl).func.with_attr(
+        "global_symbol", "sparse_flashmla_decode_head64_combine"
     )
 
 

@@ -125,8 +125,6 @@ KERNEL_META = {
 }
 # The unified kernel takes the 128 KiB candidate arena as dynamic shared memory;
 # the finalize kernel's BlockRadixSort scratch is static-sized per (BT, IPT).
-LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
-FINALIZE_LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
 
 # --- source constants (topk.cuh:2339-2347) ---------------------------------
 FILTERED_TOPK_MAX_K = 2048
@@ -375,7 +373,12 @@ def get_kernel(
         radix=RADIX,
     )
 
-    @txl.kernel(warps=FILTERED_TOPK_BLOCK_THREADS // 32, arch="sm_100a", grid=grid)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=grid, block=FILTERED_TOPK_BLOCK_THREADS // 32 * 32
+        ),
+        arch="sm_100a",
+    )
     def filtered_topk(
         inp: txl.gptr[dtype, (num_rows * length,)],
         out_idx: txl.gptr[txl.i32, (num_rows * k,)],
@@ -535,7 +538,7 @@ def get_kernel(
                     cfg,
                 )
 
-    return filtered_topk.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+    return filtered_topk.func
 
 
 def get_finalize_kernel(
@@ -576,7 +579,10 @@ def get_finalize_kernel(
     val_bytes = dtype_bytes(dtype)
     aux_elems = aux_elements(mode, num_rows, length, row_to_batch)
 
-    @txl.kernel(warps=block_threads // 32, arch="sm_100a", grid=num_rows)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=num_rows, block=block_threads // 32 * 32),
+        arch="sm_100a",
+    )
     def filtered_topk_finalize(
         out_idx: txl.gptr[txl.i32, (num_rows * k,)],
         out_val: txl.gptr[dtype, (num_rows * k,)],
@@ -671,14 +677,17 @@ def get_finalize_kernel(
                 elif page_table:
                     page_id = txl.local_scalar("int32", init=txl.int32(-1))
                     with txl.If(key != txl.uint32(0xFFFFFFFF)), txl.Then():
-                        src = txl.local_scalar("int64", init=txl.cast(batch_idx, "int64") * aux_stride)
+                        src = txl.local_scalar(
+                            "int64", init=txl.cast(batch_idx, "int64") * aux_stride
+                        )
                         txl.assign(
                             page_id,
                             txl.reinterpret(
                                 "int32",
                                 ld_global_u32(
                                     aux,
-                                    src + txl.cast(page_start + txl.reinterpret("int32", key), "int64"),
+                                    src
+                                    + txl.cast(page_start + txl.reinterpret("int32", key), "int64"),
                                 ),
                             ),
                         )
@@ -689,9 +698,7 @@ def get_finalize_kernel(
                         txl.assign(val2, txl.reinterpret("int32", key) + offset)
                     st_global_u32(out_idx, slot2, txl.reinterpret("uint32", val2))
 
-    return filtered_topk_finalize.func.with_attr(
-        "tirx.kernel_launch_params", list(FINALIZE_LAUNCH_TAGS)
-    )
+    return filtered_topk_finalize.func
 
 
 _ = (

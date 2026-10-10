@@ -825,10 +825,10 @@ def _make_kernel(
         if entry_max_registers is None:
             _block_x, _block_y, cluster_work_id = txl.cta_id()
         else:
-            txl.cuda.max_registers_per_thread(entry_max_registers)
             _block_x, _block_y, cluster_work_id = txl.cta_id()
-        cluster_x_scope, cluster_y_scope = txl.cta_id_in_cluster(
-            [cluster_m, cluster_n], preferred=[cluster_m, cluster_n]
+        cluster_x_scope, cluster_y_scope = (
+            txl.cuda.cluster_cta_id("x"),
+            txl.cuda.cluster_cta_id("y"),
         )
         del _block_x, _block_y, cluster_x_scope, cluster_y_scope
         cluster_rank = txl.local_scalar("int32", init=txl.cuda.mov_sreg(32, "cluster_ctarank"))
@@ -1976,11 +1976,17 @@ def _make_kernel(
         "alpha": txl.f32,
     }
     return txl.kernel(
-        warps=7,
         arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=[cluster_m, cluster_n, num_clusters],
         host_prelude=host_prelude,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            block=7 * 32,
+            grid=(cluster_m, cluster_n, num_clusters),
+            cluster=[cluster_m, cluster_n],
+            preferred_cluster=[cluster_m, cluster_n],
+        ),
+        options=txl.cuda.KernelOptions(
+            min_blocks_per_sm=1, max_registers_per_thread=entry_max_registers
+        ),
     )(kernel)
 
 

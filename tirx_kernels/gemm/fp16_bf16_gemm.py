@@ -342,7 +342,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
         host,
     ):
         a_map, b_map, d_map = host
-        cbx, _cby = txl.cta_id_in_cluster([2, 1], preferred=[2, 1])
+        cbx, _cby = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
         bx = txl.cta_id()
         warp_in_cta = txl.warp_id()  # the entry's warp-uniform cta->warp scope id
 
@@ -565,7 +565,9 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                         # the first accumulates unconditionally, and only phase 0
                         # asks the runtime flag (0 on the first k-tile of a
                         # tile => overwrite, 1 after).
-                        acc_pred = txl.ptx.pred(1) if ki else txl.ptx.pred(txl.Cast("bool", accum[0]))
+                        acc_pred = (
+                            txl.ptx.pred(1) if ki else txl.ptx.pred(txl.Cast("bool", accum[0]))
+                        )
                         txl.ptx[_MMA_F16_2SM](
                             txl.Cast("uint32", tmem_n),
                             desc_a_ki,
@@ -788,11 +790,15 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
         "d": txl.gptr[AB_DTYPE, (M, N)],
     }
     return txl.kernel(
-        warps=WARPS,
         arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=NUM_M_TILES * NUM_N_TILES * 2,
         host_prelude=host_prelude,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            block=WARPS * 32,
+            grid=NUM_M_TILES * NUM_N_TILES * 2,
+            cluster=[2, 1],
+            preferred_cluster=[2, 1],
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
     )(gemm)
 
 

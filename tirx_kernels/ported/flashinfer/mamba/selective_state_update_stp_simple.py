@@ -381,7 +381,12 @@ def get_kernel(**kwargs: Any):
     STATE_VECTOR = spec["STATE_VECTOR"]
     WEIGHT_DTYPE = spec["WEIGHT_DTYPE"]
 
-    @txl.kernel(warps=4, arch="sm_100a", grid=(spec["BATCH"], spec["NHEADS"], "dim_tiles_runtime"))
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(spec["BATCH"], spec["NHEADS"], _params["dim_tiles_runtime"]), block=4 * 32
+        ),
+        arch="sm_100a",
+    )
     def selective_state_update_stp_simple(
         state: txl.gptr[spec["STATE_DTYPE"]],
         state_scale: txl.gptr[txl.f32],

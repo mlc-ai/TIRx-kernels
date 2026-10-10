@@ -455,7 +455,19 @@ def get_kernel(
             return False
         return vb != vec_blocks - 1
 
-    @txl.kernel(warps=threads // 32, arch="sm_100a", grid=False)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(
+                txl.cast(
+                    txl.ceildiv(_params["runtime_B"] * _params["runtime_N"], txl.int64(rows)),
+                    "int32",
+                ),
+            ),
+            block=threads // 32 * 32,
+            programmatic_stream_serialization=enable_pdl,
+        ),
+        arch="sm_100a",
+    )
     def flashinfer_qk_rmsnorm(
         x: txl.gptr[dtype],
         weight: txl.gptr[dtype, (H,)],
@@ -469,7 +481,7 @@ def get_kernel(
         y_head_stride: txl.i64,
     ):
         # QK_RMSNORM_KERNEL_START
-        block_raw = txl.cta_id([txl.cast(txl.ceildiv(runtime_B * runtime_N, txl.int64(rows)), "int32")])
+        block_raw = txl.cuda.block_idx("x")
         tid = txl.thread_id()
 
         if enable_pdl:
@@ -685,7 +697,9 @@ def get_kernel(
                 txl.ptx.mov.b64(x_f32[pair * 2], x_f32[pair * 2 + 1], packed)
 
             for pair in range(packed_pairs):
-                high_bias = txl.float32(weight_bias) if pair * 2 + 1 < total_values else undefined_f32
+                high_bias = (
+                    txl.float32(weight_bias) if pair * 2 + 1 < total_values else undefined_f32
+                )
                 txl.ptx.add.f32x2(
                     packed,
                     txl.cuda.make_float2(w_f32[pair * 2], w_f32[pair * 2 + 1]),
@@ -728,13 +742,7 @@ def get_kernel(
         if enable_pdl:
             txl.ptx.griddepcontrol.launch_dependents()
 
-    launch_params = ["blockIdx.x", "threadIdx.x"]
-    if enable_pdl:
-        launch_params.append("tirx.use_programtic_dependent_launch")
-    launch_params.append("tirx.use_dyn_shared_memory")
-    return flashinfer_qk_rmsnorm.func.with_attr("tir.is_entry_func", True).with_attr(
-        "tirx.kernel_launch_params", launch_params
-    )
+    return flashinfer_qk_rmsnorm.func.with_attr("tir.is_entry_func", True)
 
 
 def _torch_dtype(dtype: str):

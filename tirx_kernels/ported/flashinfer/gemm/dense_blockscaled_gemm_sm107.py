@@ -446,7 +446,6 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
 
     def kernel(a, b, sfa, sfb, c, alpha_ptr, *, host):
         del a, b, sfa, sfb, c
-        txl.cuda.required_block_size(192, 1, 1, cluster_m, cluster_n, 1)
         a_map, b_map, sfa_map, sfb_map, c_map = host
 
         if alpha_is_one:
@@ -464,8 +463,9 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
                 txl.ptx.cvt.f32.bf16(alpha_value, alpha_bits)
 
         _block_x, _block_y, cluster_work_id = txl.cta_id()
-        cluster_x_scope, cluster_y_scope = txl.cta_id_in_cluster(
-            [cluster_m, cluster_n], preferred=[cluster_m, cluster_n]
+        cluster_x_scope, cluster_y_scope = (
+            txl.cuda.cluster_cta_id("x"),
+            txl.cuda.cluster_cta_id("y"),
         )
         del _block_x, _block_y, cluster_x_scope, cluster_y_scope
         cluster_rank = txl.local_scalar("int32", init=txl.cuda.mov_sreg(32, "cluster_ctarank"))
@@ -1578,11 +1578,15 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
         "alpha_ptr": txl.gptr[txl.f32, (1,)],
     }
     return txl.kernel(
-        warps=6,
         arch="sm_107a",
-        min_blocks_per_sm=1,
-        grid=[cluster_m, cluster_n, num_clusters],
         host_prelude=host_prelude,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            block=6 * 32,
+            grid=(cluster_m, cluster_n, num_clusters),
+            cluster=[cluster_m, cluster_n],
+            preferred_cluster=[cluster_m, cluster_n],
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
     )(kernel)
 
 

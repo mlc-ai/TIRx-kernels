@@ -530,7 +530,10 @@ def _make_gdn_decode_fp32_mtp_warp(
     PREFETCH_ROWS,
 ):
     @txl.kernel(
-        warps=NUM_WARPS, arch="sm_100a", grid=lambda p: p["batch"] * NUM_V_HEADS * NUM_V_TILES
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(lambda p: p["batch"] * NUM_V_HEADS * NUM_V_TILES)(_params), block=NUM_WARPS * 32
+        ),
+        arch="sm_100a",
     )
     def gdn_decode_fp32_mtp_warp(
         state: txl.gptr[txl.f32],
@@ -721,7 +724,8 @@ def _make_gdn_decode_fp32_mtp_warp(
                     )
                     shared_g_ptr = s_g.ptr_to([t])
                     txl.ptx.st.shared.b32(
-                        shared_g_ptr, txl.reinterpret("uint32", txl.cuda.float2_x(gate_pair_value[0]))
+                        shared_g_ptr,
+                        txl.reinterpret("uint32", txl.cuda.float2_x(gate_pair_value[0])),
                     )
                     _shared_store_f32_ptr_offset(
                         shared_g_ptr,
@@ -731,7 +735,9 @@ def _make_gdn_decode_fp32_mtp_warp(
                     )
                     if USE_SMEM_V:
                         with txl.If(tid < TILE_V), txl.Then():
-                            v_input_base = txl.cast(n, "int64") * effective_v_batch_stride + txl.cast(
+                            v_input_base = txl.cast(
+                                n, "int64"
+                            ) * effective_v_batch_stride + txl.cast(
                                 (t * NUM_V_HEADS + hv) * V + v_tile * TILE_V + tid, "int64"
                             )
                             v_input_ptr = v.ptr_to([v_input_base])
@@ -754,7 +760,9 @@ def _make_gdn_decode_fp32_mtp_warp(
                 if USE_SMEM_V:
                     for t in range(SEQ_LEN):
                         with txl.If(tid < TILE_V), txl.Then():
-                            v_input_base = txl.cast(n, "int64") * effective_v_batch_stride + txl.cast(
+                            v_input_base = txl.cast(
+                                n, "int64"
+                            ) * effective_v_batch_stride + txl.cast(
                                 (t * NUM_V_HEADS + hv) * V + v_tile * TILE_V + tid, "int64"
                             )
                             v_input_ptr = v.ptr_to([v_input_base])
@@ -849,7 +857,9 @@ def _make_gdn_decode_fp32_mtp_warp(
                             for row in range(ILP_ROWS):
                                 index = _local_scalar("int32", row * VEC_SIZE + elem)
                                 txl.ptx["mul.f32"](r_h[index[0]], r_h[index[0]], g_value[0])
-                                txl.ptx["fma.rn.f32"](sums[row], r_h[index[0]], r_k[elem], sums[row])
+                                txl.ptx["fma.rn.f32"](
+                                    sums[row], r_h[index[0]], r_k[elem], sums[row]
+                                )
                     for delta_index in range(5):
                         delta = _local_scalar("int32", txl.shift_right(txl.int32(16), delta_index))
                         for row in range(ILP_ROWS):
@@ -932,7 +942,9 @@ def _make_gdn_decode_fp32_mtp_warp(
                                         r_h[base[0] + 1],
                                     )
                                 txl.ptx.mov.b32(r_h[base[0]], txl.cuda.float2_x(packed_value[0]))
-                                txl.ptx.mov.b32(r_h[base[0] + 1], txl.cuda.float2_y(packed_value[0]))
+                                txl.ptx.mov.b32(
+                                    r_h[base[0] + 1], txl.cuda.float2_y(packed_value[0])
+                                )
                                 _packed_fma_store(
                                     packed_value,
                                     r_h[base[0]],
@@ -1099,7 +1111,8 @@ def _make_gdn_decode_fp32_mtp_warp(
                 if not DISABLE_STATE_UPDATE and (not PER_TOKEN_POOL_SCATTER):
                     with txl.If(write_slot_raw[0] >= 0), txl.Then():
                         write_offset = _local_scalar(
-                            "int64", write_state_base[0] + txl.cast(v_base * K + k_start[0], "int64")
+                            "int64",
+                            write_state_base[0] + txl.cast(v_base * K + k_start[0], "int64"),
                         )
                         write_ptr = state.ptr_to([write_offset[0]])
                         for row in range(ILP_ROWS):

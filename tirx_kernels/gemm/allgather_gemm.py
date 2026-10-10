@@ -526,7 +526,7 @@ def _make_device_kernel():
         gemm_task_types = gemm_task_types.view(CAPACITY)
         gemm_task_idxs = gemm_task_idxs.view(CAPACITY, 2)
         gemm_head = gemm_head.view(1)
-        cbx_expr, cby_expr = txl.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
+        cbx_expr, cby_expr = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
         cbx = cbx_expr
         cby = cby_expr
         bx = txl.cta_id()
@@ -981,7 +981,12 @@ def _make_device_kernel():
                 )
 
     return txl.kernel(
-        warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=SM_NUMBER, host_prelude=_host_prelude
+        arch="sm_100a",
+        host_prelude=_host_prelude,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            block=12 * 32, grid=SM_NUMBER, cluster=[M_CLUSTER, N_CLUSTER]
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
     )(test_mma_ss_tma_2sm_persistent)
 
 

@@ -404,10 +404,11 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
         txl.ptx.griddepcontrol.wait()
 
     @txl.kernel(
-        warps=num_warps,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=config.grid_blocks, block=num_warps * 32, programmatic_stream_serialization=True
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
         arch="sm_100a",
-        min_blocks_per_sm=1,  # orig:L511 -- pinned by the original, not a default
-        grid=config.grid_blocks,  # orig:L601
     )
     def sm100_tf32_hc_prenorm_gemm(
         shape_m: txl.u32,
@@ -553,7 +554,9 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                                 txl.ptr_byte_offset(
                                     smem_b_mma[0].ptr_to(0, 0),
                                     stage_idx[0] * txl.uint32(block_n * block_k * 4)
-                                    + txl.cast(b_atom * (block_n * block_swizzled_bk * 4), "uint32"),
+                                    + txl.cast(
+                                        b_atom * (block_n * block_swizzled_bk * 4), "uint32"
+                                    ),
                                     "float32",
                                 ),
                                 txl.address_of(b_map),
@@ -581,10 +584,16 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                     cast_pipe.full.wait(cast_stage_idx[0], txl.cast(mma_cast_state.phase, "uint32"))
                     # TMEM A columns and the swizzled B matrix descriptor match
                     # the former tcgen05 tile dispatch exactly.
-                    a_col = local("int32", txl.cast(cast_stage_idx[0] * txl.uint32(block_k), "int32"))
+                    a_col = local(
+                        "int32", txl.cast(cast_stage_idx[0] * txl.uint32(block_k), "int32")
+                    )
                     desc_b = txl.local_scalar("uint64")
                     txl.cuda.tcgen05.encode_matrix_descriptor(
-                        txl.address_of(desc_b), smem_b_mma[0].ptr_to(0, 0), ldo=256, sdo=64, swizzle=3
+                        txl.address_of(desc_b),
+                        smem_b_mma[0].ptr_to(0, 0),
+                        ldo=256,
+                        sdo=64,
+                        swizzle=3,
                     )
                     with txl.unroll(block_k // umma_k) as ki:
                         with txl.If(txl.cuda.elect_sync()), txl.Then():
@@ -610,7 +619,9 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                                 # unconditionally. The original's Python
                                 # conditional expression is what the TVMScript
                                 # parser rewrites into exactly this select.
-                                txl.ptx.pred(txl.if_then_else(ki == 0, s != txl.uint32(0), txl.bool(True))),
+                                txl.ptx.pred(
+                                    txl.if_then_else(ki == 0, s != txl.uint32(0), txl.bool(True))
+                                ),
                             )
                     with txl.If(txl.cuda.elect_sync()), txl.Then():
                         cast_pipe.empty.arrive(cast_stage_idx[0])
@@ -750,7 +761,9 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                                         "uint32",
                                     )
                                     + stage_idx[0] * txl.uint32(block_k)
-                                    + txl.cast(lane_idx % txl.int32(8) * txl.int32(block_k), "uint32")
+                                    + txl.cast(
+                                        lane_idx % txl.int32(8) * txl.int32(block_k), "uint32"
+                                    )
                                     // txl.uint32(block_k)
                                 )
                                 & txl.uint32(7)
@@ -767,7 +780,9 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                         a_bf16_words[reg_base[0] + 2],
                         a_bf16_words[reg_base[0] + 4],
                         a_bf16_words[reg_base[0] + 6],
-                        txl.ptr_byte_offset(smem_a_mma[0].ptr_to(0, 0), smem_off[0] * 2, "bfloat16"),
+                        txl.ptr_byte_offset(
+                            smem_a_mma[0].ptr_to(0, 0), smem_off[0] * 2, "bfloat16"
+                        ),
                     )
                 cast_pipe.empty.wait(cast_stage_idx[0], txl.cast(cast_tmem_state.phase, "uint32"))
 
@@ -859,15 +874,6 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
     # orig:L981-989 -- @txl.kernel has no attrs= parameter, so the launch-param
     # attribute is attached to the PrimFunc afterwards (entry.py documents
     # ``func`` as a plain attribute and ``Kernel.mod`` reads it).
-    sm100_tf32_hc_prenorm_gemm.func = sm100_tf32_hc_prenorm_gemm.func.with_attr(
-        "tirx.kernel_launch_params",
-        [
-            "blockIdx.x",
-            "threadIdx.x",
-            "tirx.use_programtic_dependent_launch",
-            "tirx.use_dyn_shared_memory",
-        ],
-    )
     return sm100_tf32_hc_prenorm_gemm
 
 

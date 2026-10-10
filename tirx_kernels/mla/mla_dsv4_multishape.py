@@ -318,7 +318,15 @@ def make_kernel(
         return (descriptor, out_desc)
 
     @txl.kernel(
-        warps=WARPS, arch="sm_100a", min_blocks_per_sm=1, grid=grid, host_prelude=host_prelude
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=grid,
+            block=WARPS * 32,
+            cluster=(C,) if C > 1 else None,
+            preferred_cluster=[C] if C > 1 else None,
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+        host_prelude=host_prelude,
     )
     def mla_dsv4_splitk(
         q: txl.gptr[gt, (q_rows * D,)],
@@ -337,7 +345,7 @@ def make_kernel(
         q_tmap, out_tmap = host
         bid = txl.cta_id()
         if C > 1:
-            txl.cta_id_in_cluster([C], preferred=[C])
+            pass
         rank = bid % C
         cluster_idx = bid // C + item_base
         tok = cluster_idx // groups
@@ -1767,8 +1775,6 @@ def _make_h128_bf16_prefill():
 
     KERNEL_NAME = "mla_dsv4_sparse_prefill_pkt_quad_static_dual_issuer_maskfirst"
 
-    LAUNCH_TAGS = ("blockIdx.x", "clusterCtaIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
-
     _Q_CACHE_HINT = 0x12F0000000000000
     _KV_CACHE_HINT = 0x14F0000000000000
 
@@ -1870,7 +1876,12 @@ def _make_h128_bf16_prefill():
             return swa_tma, comp_tma, q_tma
 
         @txl.kernel(
-            warps=20, arch="sm_100a", min_blocks_per_sm=1, grid=grid_ctas, host_prelude=host_prelude
+            launch=lambda _params: txl.cuda.LaunchConfig(
+                grid=grid_ctas, block=20 * 32, cluster=(2,), preferred_cluster=[2]
+            ),
+            options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+            arch="sm_100a",
+            host_prelude=host_prelude,
         )
         def mla_dsv4_sparse_prefill_pkt_pingpong(
             q: txl.gptr[txl.bf16, (s_q, B_H, D_QK)],
@@ -1887,11 +1898,10 @@ def _make_h128_bf16_prefill():
         ):
             swa_tensormap, comp_tensormap, q_tma_tensormap = host
             block_idx = txl.cta_id()
-            txl.cta_id_in_cluster([2], preferred=[2])
             thread_idx = txl.thread_id()
             warp_idx = txl.warp_id()
             lane_idx = txl.lane_id()
-            idx_in_warpgroup = txl.thread_id_in_wg([128])
+            idx_in_warpgroup = txl.cuda.thread_in_warpgroup()
             cta_idx = block_idx % 2
 
             def prefetch(tensor_map):
@@ -3180,9 +3190,7 @@ def _make_h128_bf16_prefill():
 
             txl.cuda.cluster_sync()
 
-        return mla_dsv4_sparse_prefill_pkt_pingpong.func.with_attr(
-            "global_symbol", KERNEL_NAME
-        ).with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+        return mla_dsv4_sparse_prefill_pkt_pingpong.func.with_attr("global_symbol", KERNEL_NAME)
 
     def _pool_rows(pool, name):
         if pool is None or pool.dim() != 4 or pool.shape[-1] != D_QK:

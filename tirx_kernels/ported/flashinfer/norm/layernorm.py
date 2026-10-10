@@ -348,12 +348,13 @@ def get_kernel(
         )
 
     @txl.kernel(
-        warps=warps,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(lambda p: txl.cast(p["runtime_M"], txl.i32))(_params),
+            block=warps * 32,
+            dynamic_smem_bytes=smem_bytes,
+            programmatic_stream_serialization=enable_pdl,
+        ),
         arch="sm_100a",
-        # ``I.cta_id`` owns an int32 block axis; preserve the parser version's
-        # explicit runtime-M cast instead of passing the int64 ABI scalar as
-        # the extent directly.
-        grid=lambda p: txl.cast(p["runtime_M"], txl.i32),
     )
     def flashinfer_layernorm(
         out: txl.gptr[txl.bf16],
@@ -371,7 +372,6 @@ def get_kernel(
         lane = tid % 32
         warp = tid // 32
 
-        txl.cuda.dyn_smem_bytes(smem_bytes)
         if warps > 1:
             shared_raw = txl.alloc_tensor([smem_bytes], txl.u8, scope="shared.dyn", align=1024)
         if enable_pdl:
@@ -560,11 +560,7 @@ def get_kernel(
         if enable_pdl:
             txl.ptx.griddepcontrol.launch_dependents()
 
-    launch_params = ["blockIdx.x", "threadIdx.x"]
-    if enable_pdl:
-        launch_params.append("tirx.use_programtic_dependent_launch")
-    launch_params.append("tirx.use_dyn_shared_memory")
-    return flashinfer_layernorm.func.with_attr("tirx.kernel_launch_params", launch_params)
+    return flashinfer_layernorm.func
 
 
 def _row_strides(config: dict[str, Any]) -> tuple[int, int]:

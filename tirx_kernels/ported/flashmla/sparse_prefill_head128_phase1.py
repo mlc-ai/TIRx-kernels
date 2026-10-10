@@ -24,7 +24,6 @@ MAX_INIT_VAL = -1.0e30
 LOG_2_E = math.log2(math.e)
 LN_2 = math.log(2.0)
 
-LAUNCH_TAGS = ("blockIdx.x", "clusterCtaIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
 
 BAR_WG0_SYNC = 0
 
@@ -71,7 +70,8 @@ def _tmem_store(src, tmem_col, width=32):
 def _replace_smem_desc_addr(desc, smem_ptr):
     start_addr = txl.cast(
         txl.bitwise_and(
-            txl.shift_right(txl.cuda.cvta_generic_to_shared(smem_ptr), txl.uint32(4)), txl.uint32(0x3FFF)
+            txl.shift_right(txl.cuda.cvta_generic_to_shared(smem_ptr), txl.uint32(4)),
+            txl.uint32(0x3FFF),
         ),
         "uint64",
     )
@@ -80,7 +80,8 @@ def _replace_smem_desc_addr(desc, smem_ptr):
 
 def _recompute_smem_desc(smem_ptr, upper, matrix_start):
     start_addr = txl.bitwise_and(
-        txl.shift_right(txl.cuda.cvta_generic_to_shared(smem_ptr), txl.uint32(4)), txl.uint32(0x3FFF)
+        txl.shift_right(txl.cuda.cvta_generic_to_shared(smem_ptr), txl.uint32(4)),
+        txl.uint32(0x3FFF),
     )
     return txl.bitwise_or(
         txl.shift_left(txl.uint64(upper), txl.uint64(32)),
@@ -450,12 +451,11 @@ def make_kernel(
             q_tensormap,
         ) = host
         block_idx = txl.cta_id()
-        txl.cta_id_in_cluster([2], preferred=[2])
         cta_idx = block_idx % 2
         s_q_idx = block_idx // 2
         warp_idx = txl.warp_id()
         lane_idx = txl.lane_id()
-        idx_in_warpgroup = txl.thread_id_in_wg([128])
+        idx_in_warpgroup = txl.cuda.thread_in_warpgroup()
 
         def iket_range(name):
             token = txl.alloc_local((1,), "uint32")
@@ -714,7 +714,9 @@ def make_kernel(
                 bar_p_free.arrive(softmax_stage, remote=txl.uint32(0))
 
                 bar_k_valid_ready.wait(softmax_stage, softmax_phase)
-                valid_word_offset = txl.if_then_else(idx_in_warpgroup >= 64, B_TOPK // 8 // 2 // 4, 0)
+                valid_word_offset = txl.if_then_else(
+                    idx_in_warpgroup >= 64, B_TOPK // 8 // 2 // 4, 0
+                )
                 is_k_valid_lo = txl.local_scalar("uint32")
                 is_k_valid_hi = txl.local_scalar("uint32")
                 txl.ptx.ld.shared.u32(
@@ -826,7 +828,8 @@ def make_kernel(
                         with txl.unroll(32 // 2) as scale_i:
                             mul_f32x2(o_rescale, scale_i * 2, scale_for_old)
                         _tmem_store(
-                            o_rescale, txl.cuda.get_tmem_addr(txl.uint32(o_tmem_col), 0, chunk_idx * 32)
+                            o_rescale,
+                            txl.cuda.get_tmem_addr(txl.uint32(o_tmem_col), 0, chunk_idx * 32),
                         )
                         txl.ptx.tcgen05.wait__st.sync.aligned()
                     txl.ptx.tcgen05.fence__before_thread_sync()
@@ -904,7 +907,9 @@ def make_kernel(
             with txl.unroll((D_V // 2) // B_EPI) as epi_k:
                 with txl.If(have_valid_indices != txl.uint32(0)), txl.Then():
                     _tmem_load(
-                        o_epi, txl.cuda.get_tmem_addr(txl.uint32(o_tmem_col), 0, epi_k * B_EPI), B_EPI
+                        o_epi,
+                        txl.cuda.get_tmem_addr(txl.uint32(o_tmem_col), 0, epi_k * B_EPI),
+                        B_EPI,
                     )
                     txl.ptx.tcgen05.wait__ld.sync.aligned()
                 with txl.unroll(B_EPI // 2) as scale_i:
@@ -932,7 +937,9 @@ def make_kernel(
                             ),
                         )
                     )
-                    s_ptr = txl.ptr_byte_offset(o_smem.ptr_to([0, 0]), s_off * BF16_BYTES, "bfloat16")
+                    s_ptr = txl.ptr_byte_offset(
+                        o_smem.ptr_to([0, 0]), s_off * BF16_BYTES, "bfloat16"
+                    )
                     o_word = o_store_i * 4
                     txl.ptx.st.shared.v4.u32(
                         s_ptr,
@@ -966,7 +973,9 @@ def make_kernel(
                         )
 
             with txl.If(warp_idx == 0), txl.Then():
-                txl.ptx.tcgen05.dealloc.cta_group__2.sync.aligned.b32(txl.uint32(0), txl.uint32(512))
+                txl.ptx.tcgen05.dealloc.cta_group__2.sync.aligned.b32(
+                    txl.uint32(0), txl.uint32(512)
+                )
             txl.cuda.iket.range_end(epilogue_token[0])
 
         def k_loader():
@@ -1218,7 +1227,9 @@ def make_kernel(
                                                         "bfloat16",
                                                     )
                                                     _mma_f16(
-                                                        txl.cast(tmem_p_col + mma_ni * 64, "uint32"),
+                                                        txl.cast(
+                                                            tmem_p_col + mma_ni * 64, "uint32"
+                                                        ),
                                                         _recompute_smem_desc(
                                                             qk_part0_a_ptr, 0x40004040, 0x02000000
                                                         ),
@@ -1255,7 +1266,9 @@ def make_kernel(
                                                         swizzle=3,
                                                     )
                                                     _mma_f16(
-                                                        txl.cast(tmem_p_col + mma_ni * 64, "uint32"),
+                                                        txl.cast(
+                                                            tmem_p_col + mma_ni * 64, "uint32"
+                                                        ),
                                                         qk_part0_a_encode.desc,
                                                         qk_part0_b_encode.desc,
                                                         txl.uint32(0x08200490),
@@ -1266,7 +1279,9 @@ def make_kernel(
                                                     )
                                                 elif mma_smem_desc == "local_hoist":
                                                     _mma_f16(
-                                                        txl.cast(tmem_p_col + mma_ni * 64, "uint32"),
+                                                        txl.cast(
+                                                            tmem_p_col + mma_ni * 64, "uint32"
+                                                        ),
                                                         qk_part0_a_local.add_16B_offset(
                                                             qk_part0_offset // 8
                                                         ),
@@ -1281,7 +1296,9 @@ def make_kernel(
                                                     )
                                                 else:
                                                     _mma_f16(
-                                                        txl.cast(tmem_p_col + mma_ni * 64, "uint32"),
+                                                        txl.cast(
+                                                            tmem_p_col + mma_ni * 64, "uint32"
+                                                        ),
                                                         qk_part0_a_hoist.add_16B_offset(
                                                             qk_part0_offset // 8
                                                         ),
@@ -1452,7 +1469,9 @@ def make_kernel(
                         with txl.serial(0, num_k_blocks, unroll=False) as k:
                             row_base = g_indices_base + k * B_TOPK + lane_idx * 8
                             lane_index_words = lane_indices.view("uint32")
-                            txl.ptx["ld.global.nc.L1::evict_normal.L2::evict_normal.L2::256B.v8.u32"](
+                            txl.ptx[
+                                "ld.global.nc.L1::evict_normal.L2::evict_normal.L2::256B.v8.u32"
+                            ](
                                 lane_index_words[0],
                                 lane_index_words[1],
                                 lane_index_words[2],
@@ -1508,7 +1527,12 @@ def make_kernel(
         "lse": txl.gptr[txl.f32, (s_q, h_q)],
     }
     return txl.kernel(
-        warps=16, arch="sm_100a", min_blocks_per_sm=1, grid=2 * s_q, host_prelude=host_prelude
+        arch="sm_100a",
+        host_prelude=host_prelude,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            block=16 * 32, grid=2 * s_q, cluster=[2], preferred_cluster=[2]
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
     )(sparse_flashmla_prefill_head128_phase1_kernel)
 
 
@@ -1528,11 +1552,7 @@ def get_kernel(**kwargs: Any):
         "have_topk_length": cfg.have_topk_length,
         "sm_scale_div_log2": (1.0 / math.sqrt(cfg.d_qk)) * LOG_2_E,
     }
-    return (
-        make_kernel(**specialization)
-        .func.with_attr("global_symbol", KERNEL_META["name"])
-        .with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
-    )
+    return make_kernel(**specialization).func.with_attr("global_symbol", KERNEL_META["name"])
 
 
 def prepare_bench(**kwargs: Any):

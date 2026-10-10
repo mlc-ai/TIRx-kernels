@@ -328,22 +328,20 @@ def get_kernel_2cta(**config):
     dq_b_offsets = tuple(phase * (64 if is_d192 else 128) for phase in range(16))
 
     @txl.kernel(
-        warps=WARPS,
-        arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=(
-            (heads * 2, tasks)
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(heads * 2, tasks)
             if long_irregular_task_major_2d
-            else (
-                (tasks * heads * 2, 1)
-                if fixed_gqa_task_major
-                else (
-                    (total_tasks * heads * 2, 1)
-                    if use_source_varlen_nondet_schedule
-                    else ((total_tasks if varlen else tasks * batch) * 2, heads)
-                )
-            )
+            else (tasks * heads * 2, 1)
+            if fixed_gqa_task_major
+            else (total_tasks * heads * 2, 1)
+            if use_source_varlen_nondet_schedule
+            else ((total_tasks if varlen else tasks * batch) * 2, heads),
+            block=WARPS * 32,
+            cluster=(2,),
+            preferred_cluster=[2],
         ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
     )
     def bwd(
         q_map: txl.TensorMap,
@@ -380,7 +378,7 @@ def get_kernel_2cta(**config):
         # The source materializes ``block_idx_in_cluster`` with
         # ``cute.arch.make_warp_uniform``.  Keep the single broadcast here so
         # every rank-derived hot-loop address remains on the uniform datapath.
-        cluster_rank = txl.uniform(txl.cta_id_in_cluster([2], preferred=[2]))
+        cluster_rank = txl.uniform(txl.cuda.cluster_cta_id("x"))
         physical_block, head_axis = txl.cta_id()
         rank = cluster_rank % txl.int32(2)
         cluster_block = physical_block // txl.int32(2)

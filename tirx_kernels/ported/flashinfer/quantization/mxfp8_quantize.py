@@ -238,7 +238,9 @@ def get_kernel(
         sfbpt = _LINEAR_WARPS * sfbpw
 
         @txl.kernel(
-            warps=block_x // 32, arch="sm_100a", min_blocks_per_sm=_BLOCKS_PER_SM, grid=grid_x
+            launch=lambda _params: txl.cuda.LaunchConfig(grid=grid_x, block=block_x // 32 * 32),
+            options=txl.cuda.KernelOptions(min_blocks_per_sm=_BLOCKS_PER_SM),
+            arch="sm_100a",
         )
         def mxfp8_quantize_linear(
             in_global: txl.gptr[dtype],
@@ -287,7 +289,11 @@ def get_kernel(
     needs_col_loop = nsb > col_units_per_block
     rows_per_block = 1 if needs_col_loop else col_units_per_block // nsb
 
-    @txl.kernel(warps=block_x // 32, arch="sm_100a", min_blocks_per_sm=_BLOCKS_PER_SM, grid=grid_x)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=grid_x, block=block_x // 32 * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=_BLOCKS_PER_SM),
+        arch="sm_100a",
+    )
     def mxfp8_quantize_swizzled(
         in_global: txl.gptr[dtype],
         out_global: txl.gptr[txl.u8],
@@ -344,7 +350,8 @@ def get_kernel(
                         with txl.While(sc_tail < pad_cols):
                             with txl.If(thread_in_unit == 0), txl.Then():
                                 st_global_u8(
-                                    txl.address_of(sf_out[sf_offset(row_idx, sc_tail)]), txl.uint8(0)
+                                    txl.address_of(sf_out[sf_offset(row_idx, sc_tail)]),
+                                    txl.uint8(0),
                                 )
                             txl.assign(sc_tail, sc_tail + col_units_per_block)
                 txl.assign(row_idx, row_idx + grid_x)

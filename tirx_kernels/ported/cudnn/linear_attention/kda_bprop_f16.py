@@ -545,7 +545,10 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out)
         10 if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a" and not run_order else 32
     )
 
-    @txl.kernel(warps=prologue_warps, arch="sm_100a", grid=1)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=prologue_warps * 32),
+        arch="sm_100a",
+    )
     def prologue(
         base_q: txl.gptr[txl.i64],
         base_k: txl.gptr[txl.i64],
@@ -853,7 +856,11 @@ def _make_main(
     cg1_regs = 184 if thor_state_path else 168
     support_regs = 40 if thor_state_path else 56
 
-    @txl.kernel(warps=16, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=num_sms, block=16 * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+    )
     def main(
         descriptor_workspace: txl.gptr[txl.i64],
         n_desc: txl.i32,

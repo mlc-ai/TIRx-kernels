@@ -645,9 +645,7 @@ def _make_kernel(
         del a, b, sfa, sfb, c
         a_map, b_map, sfa_map, sfb_map, c_map = host
         block_x, block_y, cluster_work_id = txl.cta_id()
-        cluster_x, cluster_y = txl.cta_id_in_cluster(
-            [cluster_m, cluster_n], preferred=[cluster_m, cluster_n]
-        )
+        cluster_x, cluster_y = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
         cluster_rank = cluster_x + cluster_m * cluster_y
         del block_x, block_y
         warp = txl.warp_id()
@@ -1632,11 +1630,15 @@ def _make_kernel(
         "amax": txl.gptr[txl.f32, (1,)],
     }
     return txl.kernel(
-        warps=6,
         arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=[cluster_m, cluster_n, num_clusters],
         host_prelude=host_prelude,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            block=6 * 32,
+            grid=(cluster_m, cluster_n, num_clusters),
+            cluster=[cluster_m, cluster_n],
+            preferred_cluster=[cluster_m, cluster_n],
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
     )(kernel)
 
 

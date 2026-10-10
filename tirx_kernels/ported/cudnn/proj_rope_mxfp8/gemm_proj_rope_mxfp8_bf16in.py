@@ -701,7 +701,9 @@ def _make_kernel(tokens, k_dim, num_heads, w_out_in):
         "out_scales_col": txl.gptr[txl.u8, ((tokens // _BLOCK) * num_heads * _HEAD_DIM,)],
     }
     return txl.kernel(
-        warps=14, arch="sm_100a", grid=[1, 1, num_clusters], host_prelude=host_prelude
+        arch="sm_100a",
+        host_prelude=host_prelude,
+        launch=lambda _params: txl.cuda.LaunchConfig(block=14 * 32, grid=(1, 1, num_clusters)),
     )(kernel)
 
 

@@ -135,7 +135,10 @@ def build_preprocess(B, S, H, D):
     nblk = S // PRE_ROWS_PER_BLOCK
     thor = os.environ.get("TIRX_PREPARE_CUDA_ARCH") == "sm_110a"
 
-    @txl.kernel(warps=PRE_BLOCK // 32, arch="sm_100a", grid=(nblk, H, B))
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=(nblk, H, B), block=PRE_BLOCK // 32 * 32),
+        arch="sm_100a",
+    )
     def preprocess_kernel(
         dO_g: txl.gptr[txl.f16],
         O_g: txl.gptr[txl.f16],
@@ -249,7 +252,10 @@ def _build_cast_f32_to_f16_default(B, S, H, D, scale):
     num_groups = B * S * H * (D // CAST_GROUP_WIDTH)
     nblk = (num_groups + groups_per_block - 1) // groups_per_block
 
-    @txl.kernel(warps=CAST_BLOCK // 32, arch="sm_100a", grid=nblk)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=nblk, block=CAST_BLOCK // 32 * 32),
+        arch="sm_100a",
+    )
     def cast_kernel(src: txl.gptr[txl.f32], dst: txl.gptr[txl.f16]):
         bx = txl.cta_id()
         tx = txl.thread_id()
@@ -299,7 +305,10 @@ def _build_cast_f32_to_f16_thor(B, S, H, D, scale):
     tile_elements = tile_rows * D
     groups_per_tile = tile_elements // CAST_GROUP_WIDTH
 
-    @txl.kernel(warps=4, arch="sm_100a", grid=(S // tile_rows, H, B))
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=(S // tile_rows, H, B), block=4 * 32),
+        arch="sm_100a",
+    )
     def cast_kernel(src: txl.gptr[txl.f32], dst: txl.gptr[txl.f16]):
         bx, by, bz = txl.cta_id()
         tx = txl.thread_id()
@@ -469,7 +478,7 @@ def build_kernel(
     XN = NUM_N_TILES * CLUSTER_SIZE
 
     # fmt: off
-    @txl.kernel(warps=16, arch="sm_100a", min_blocks_per_sm=1, grid=(XN, NUM_HEADS))
+    @txl.kernel(launch=lambda _params: txl.cuda.LaunchConfig(grid=(XN, NUM_HEADS), block=16 * 32, cluster=(CLUSTER_SIZE,), preferred_cluster=[CLUSTER_SIZE]), options=txl.cuda.KernelOptions(min_blocks_per_sm=1), arch='sm_100a')
     def kernel(
         Q_g: txl.gptr[txl.f16],
         K_g: txl.gptr[txl.f16],
@@ -491,7 +500,7 @@ def build_kernel(
         dv_map: txl.TensorMap,
         dq_map: txl.TensorMap,
     ):
-        cluster_rank_ = txl.cta_id_in_cluster([CLUSTER_SIZE], preferred=[CLUSTER_SIZE])
+        cluster_rank_ = txl.cuda.cluster_cta_id('x')
         bx, by = txl.cta_id()
         lane_id = txl.lane_id()
         id_in_pair = cluster_rank_ % CTA_GROUP

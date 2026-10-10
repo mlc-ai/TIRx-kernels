@@ -503,7 +503,13 @@ def get_kernel(**kwargs: Any):
     TCGEN05_CP = "tcgen05.cp.cta_group::1.32x128b.warpx4"
     TC_LD = f"tcgen05.ld.sync.aligned.32x32b.x{num_heads}.b32"
 
-    @txl.kernel(warps=num_warps, arch="sm_100a", min_blocks_per_sm=1, grid=config.num_sms)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=config.num_sms, block=num_warps * 32, programmatic_stream_serialization=True
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+    )
     def sm100_fp4_paged_mqa_logits(
         batch_size: txl.u32,
         logits_stride: txl.u32,
@@ -528,7 +534,7 @@ def get_kernel(**kwargs: Any):
         warp_idx_presync_u32 = txl.local_scalar("uint32")
         txl.ptx.mov.u32(warp_idx_presync_u32, warp_idx_u32)
         warp_idx_presync = txl.Cast("int32", warp_idx_presync_u32)
-        warpgroup_idx = txl.warpgroup_id([num_warps // 4])
+        warpgroup_idx = txl.cuda.warpgroup_id()
         lane_idx = txl.lane_id()
         lane_idx_u32 = txl.local_scalar("uint32", init=txl.Cast("uint32", lane_idx))
 
@@ -1465,17 +1471,6 @@ def get_kernel(**kwargs: Any):
                     txl.uint32(accum_tmem_col), txl.uint32(num_tmem_cols)
                 )
 
-    # `@txl.kernel` has no `attrs=`. The paged original sets ONLY
-    # kernel_launch_params -- no tirx.persistent_kernel.
-    sm100_fp4_paged_mqa_logits.func = sm100_fp4_paged_mqa_logits.func.with_attr(
-        "tirx.kernel_launch_params",
-        [
-            "blockIdx.x",
-            "threadIdx.x",
-            "tirx.use_programtic_dependent_launch",
-            "tirx.use_dyn_shared_memory",
-        ],
-    )
     return sm100_fp4_paged_mqa_logits.func
 
 

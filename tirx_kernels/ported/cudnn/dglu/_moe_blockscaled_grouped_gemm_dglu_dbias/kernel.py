@@ -801,9 +801,7 @@ def _make_kernel(
 
         # ---- coordinates -------------------------------------------------
         block_x, block_y, cluster_work_id = txl.cta_id()
-        cluster_x, cluster_y = txl.cta_id_in_cluster(
-            [cluster_m, cluster_n], preferred=[cluster_m, cluster_n]
-        )
+        cluster_x, cluster_y = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
         cluster_rank = _warp_uniform(cluster_x + cluster_m * cluster_y)
         del block_y
         warp = _warp_uniform(txl.warp_id())
@@ -2864,20 +2862,25 @@ def _make_kernel(
             "workspace": txl.gptr[txl.u8, (max(1, derived["workspace_bytes"]),)],
         }
         return txl.kernel(
-            warps=1,
             arch="sm_100a",
-            min_blocks_per_sm=1,
-            grid=list(derived["helper_grid"]),
             host_prelude=helper_prelude if weight_mode == "discrete" else None,
+            launch=lambda _params: txl.cuda.LaunchConfig(
+                block=1 * 32, grid=list(derived["helper_grid"])
+            ),
+            options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
         )(helper_body)
 
     kernel = _entry_point(list(annotations), body)
     kernel.__annotations__ = dict(annotations)
     main = txl.kernel(
-        warps=8,
+        launch=txl.cuda.LaunchConfig(
+            grid=tuple(derived["grid"]),
+            block=256,
+            cluster=(cluster_m, cluster_n),
+            preferred_cluster=(cluster_m, cluster_n),
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
         arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=list(derived["grid"]),
         host_prelude=host_prelude,
     )(kernel)
     if derived["needs_helper"]:

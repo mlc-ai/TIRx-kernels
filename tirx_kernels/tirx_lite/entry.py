@@ -309,7 +309,7 @@ class Session:
         avoided the broadcast; that was measurably the wrong call.
 
         This costs nothing: the entry already declares the ``cta->warp`` scope
-        id (``I.warp_id([warps])``, emitted as ``warp_id_in_cta``) and that id
+        id (``I.cuda.warp_id()``, emitted as ``warp_id_in_cta``) and that id
         is *already* the broadcast. Reusing it is one fewer instruction than
         even the plain shift, which computed a second, redundant value.
         """
@@ -417,113 +417,33 @@ def _declare_param(name, ann, scalar_params):
     )
 
 
-def _resolve_grid(grid, params):
-    if grid is None:
-        return params["num_sms"] if "num_sms" in params else 1
-    if isinstance(grid, list | tuple):
-        if not grid:
-            raise ValueError("grid must contain at least one CTA dimension")
-        dimensions = [_resolve_grid(dimension, params) for dimension in grid]
-        if any(isinstance(dimension, list) for dimension in dimensions):
-            raise ValueError("grid dimensions cannot be nested")
-        return dimensions
-    if isinstance(grid, str):
-        if grid not in params:
-            raise ValueError(f"grid={grid!r} does not name a kernel parameter")
-        return params[grid]
-    # TIR expressions implement ``__call__`` for function-call construction;
-    # they are values here, not grid callbacks.
-    if callable(grid) and not isinstance(grid, tvm.ir.Expr):
-        return _resolve_grid(grid(params), params)
-    return grid
-
-
-def _resolve_grid_dimensions(grid, params):
-    """Resolve and validate the one-to-three CTA extents owned by txl."""
-    dimensions = _resolve_grid(grid, params)
-    if not isinstance(dimensions, list):
-        dimensions = [dimensions]
-    if len(dimensions) > 3:
-        raise ValueError(f"grid supports at most three CTA dimensions, got {len(dimensions)}")
-    for index, extent in enumerate(dimensions):
-        if isinstance(extent, bool):
-            raise TypeError(f"grid dimension {index} must be an integer extent, got {extent!r}")
-        if isinstance(extent, int):
-            if extent <= 0:
-                raise ValueError(f"grid dimension {index} must be positive, got {extent}")
-            continue
-        if not isinstance(extent, tvm.ir.Expr) or not isinstance(extent.ty, tvm.ir.PrimType):
-            raise TypeError(f"grid dimension {index} must be an integer extent, got {extent!r}")
-        dtype = tvm.DataType(str(extent.ty.dtype))
-        if not dtype.is_integer:
-            raise TypeError(
-                f"grid dimension {index} must have an integer dtype, got {extent.ty.dtype}"
-            )
-        if isinstance(extent, tvm.tirx.IntImm) and int(extent) <= 0:
-            raise ValueError(f"grid dimension {index} must be positive, got {int(extent)}")
-    return dimensions
-
-
 def kernel(
-    warps: int,
+    *,
+    launch,
+    options=None,
     arch: str = "sm_100a",
-    min_blocks_per_sm: int | None = None,
-    grid=None,
     host_prelude=None,
     allowed_func_calls: tuple[str, ...] = (),
     check_ir: bool = True,
 ):
-    """Declare a kernel entry.
+    """Declare a kernel with a CUDA LaunchConfig and optional KernelOptions.
 
-    Parameters
-    ----------
-    warps : int
-        CTA width in warps. tirx-lite owns one flat ``blockDim.x = warps * 32``
-        thread axis; thread layout is not an entry option.
-    arch : str
-        CUDA arch for the default compile target.
-    min_blocks_per_sm : int, optional
-        Second ``__launch_bounds__`` operand. **Defaults to None, which omits
-        it**, emitting ``__launch_bounds__(nthreads)`` — the spelling in-tree
-        kernels use. The operand is a floor on occupancy, so pinning it also
-        pins the entry's register allocation *down*: on an rmsnorm kernel the
-        forced ``, 1`` cost 32 -> 54 registers (the kernel's measured
-        ``-Xptxas -v`` table; an earlier 53 here was a transcription slip), and
-        the ``None`` default matches the original at every configured size —
-        including one (hs=128, 34 regs) where a pin of ``8`` forced 32 vs the
-        original's 34. Pass an int when the kernel wants that
-        trade, and note that pinning is what makes the entry allocation — and
-        therefore the ``setmaxnreg`` direction a role must use — well defined:
-        a role declared with ``regs=`` requires it (see
-        :meth:`Specialize.role`).
+    ``launch`` accepts a configuration object or a factory over the bound ABI
+    parameter mapping. The block must be a static, one-dimensional multiple
+    of 32; grid and cluster may be multidimensional. Launch dimensions are
+    independent of the index accessors used by the body.
 
-        A high value and warp roles pull against each other, and the pull is
-        sharp. The whole register file is a CTA's only at one block per SM;
-        promising *m* divides the resident warpgroup pool by *m*, then rounds
-        each warpgroup's per-thread share down to a multiple of 8 registers.
-        An 8-warp CTA at ``m=8`` has 8192 registers total — 32 a thread — so
-        its roles can afford, say, 40 and 24 but not 64 and 64, which
-        :meth:`Specialize.finalize` refuses. The per-thread entry usage is
-        separately capped at 255; that cap does not shrink the CTA pool or the
-        legal ``setmaxnreg(256)`` target. The rmsnorm-style
-        ``min_blocks_per_sm=8`` is advice for occupancy-bound kernels without
-        roles; a warp-specialized kernel usually wants 1.
-    grid : int | str | list | tuple | callable, optional
-        CTA extents: one constant or kernel-parameter name for ``blockIdx.x``,
-        or a sequence for ``blockIdx.x/y/z``. A callable over the bound
-        parameters may return either form. Defaults to the parameter named
-        ``num_sms`` when the kernel has one, else 1. Pass ``False`` to leave
-        the kernel-to-CTA scope to the body, which can then declare the
-        original kernel's dimensions directly with ``txl.cta_id(extents)``.
-        This is an ownership opt-out, not a second grid representation in txl.
-    host_prelude : callable, optional
-        Emit host-only setup in the same traced Function before its device
-        entry.  The callable receives the ABI parameter mapping and returns
-        the trace-time value passed to the decorated function's required
-        keyword-only ``host`` parameter.  This is for real host/device
-        contracts such as runtime TensorMap encoding; the returned values are
-        IR objects owned by this one function, not a second body to splice.
+    ``options.min_blocks_per_sm`` pins the occupancy contract used to validate
+    register transitions in specialized warp roles. An omitted option leaves
+    that contract unpinned, preserving CUDA's default launch-bounds behavior.
+
+    ``host_prelude`` receives the bound ABI parameters before device entry and
+    supplies the decorated function's keyword-only ``host`` argument.
     """
+    from tvm.backend.cuda.launch import KernelOptions, LaunchConfig
+
+    if options is not None and not isinstance(options, KernelOptions):
+        raise TypeError("options must be a CUDA KernelOptions")
 
     def decorator(fn):
         sig = inspect.signature(fn)
@@ -533,7 +453,7 @@ def kernel(
                 raise TypeError("keyword-only `host` requires host_prelude=")
         elif host_param is None or host_param.kind is not inspect.Parameter.KEYWORD_ONLY:
             raise TypeError("host_prelude= requires a keyword-only `host` parameter")
-        session = Session(fn.__name__, warps, arch, min_blocks_per_sm)
+        params = {}
         prev = getattr(_TLS, "session", None)
         function_span = _callable_span(fn)
         with IRBuilder() as ib:
@@ -556,27 +476,44 @@ def kernel(
                     if param.annotation is inspect.Parameter.empty:
                         raise TypeError(f"kernel parameter {pname!r} needs an annotation")
                     value = _declare_param(pname, param.annotation, scalar_params)
-                    session.params[pname] = value
+                    params[pname] = value
                     args.append(value)
-                host = host_prelude(session.params) if host_prelude is not None else None
-                with I.device_entry():
-                    # Omitted entirely when None: the codegen writes the second
-                    # __launch_bounds__ operand iff this attribute is present.
-                    if min_blocks_per_sm is not None:
-                        I.evaluate(I.cuda.launch_bounds_min_blocks_per_sm(min_blocks_per_sm))
-                    # txl binds the CTA scope only when requested. Otherwise the body
-                    # declares the original kernel's scope directly; the warp/thread
-                    # siblings below remain available to infer deferred ids used by
-                    # user closures.
-                    if grid is not False:
-                        session.cta_id = I.cta_id(_resolve_grid_dimensions(grid, session.params))
-                    # tirx-lite owns one flat CTA-local thread axis. A per-entry layout
-                    # switch would let kernels silently change the launch ABI (or
-                    # leave thread scope to a second builder owner), so it is not
-                    # part of the kernel DSL contract.
-                    session.warp_scope_id = I.warp_id([warps])
-                    session.lane_id = I.lane_id([32])
-                    session.thread_id = I.thread_id([session.nthreads])
+                config = launch(params) if callable(launch) else launch
+                if not isinstance(config, LaunchConfig):
+                    raise TypeError("launch must be a CUDA LaunchConfig or a factory returning one")
+                if len(config.block) != 1:
+                    raise ValueError("tirx-lite requires a one-dimensional block")
+                from tvm.backend.cuda.launch._impl import _integer
+
+                nthreads = _integer(config.block[0])
+                if nthreads is None or nthreads % 32 or not 32 <= nthreads <= 1024:
+                    raise ValueError(
+                        "tirx-lite block must be a static multiple of 32 between 32 and 1024"
+                    )
+                min_blocks = options.min_blocks_per_sm if options is not None else None
+                session = Session(fn.__name__, nthreads // 32, arch, min_blocks)
+                session.params = params
+                session.launch = config
+                session.options = options
+                host = host_prelude(params) if host_prelude is not None else None
+                with I.device_entry(launch=config, options=options):
+
+                    def index(name, value):
+                        return I.bind(value, var=tvm.ir.Var(name, value.ty))
+
+                    cta_ids = [
+                        index("b" + axis, I.cuda.block_idx(axis))
+                        for axis in "xyz"[: len(config.grid)]
+                    ]
+                    if len(cta_ids) == 1:
+                        session.cta_id = cta_ids[0]
+                    else:
+                        from tvm_ffi import convert
+
+                        session.cta_id = convert(cta_ids)
+                    session.warp_scope_id = index("warp_id", I.cuda.warp_id())
+                    session.lane_id = index("lane_id", I.cuda.lane_id())
+                    session.thread_id = index("thread_id", I.cuda.linear_thread_id())
                     _TLS.session = session
                     try:
                         with _SourceSpanTracer(ib):
@@ -614,22 +551,9 @@ def kernel(
     return decorator
 
 
-def cta_id(extents=None, preferred=None, dtype="int32"):
-    """CTA id owned by ``@txl.kernel``.
-
-    A one-dimensional grid returns its scalar scope id; a multidimensional
-    grid returns the corresponding TVM ``Array`` of scope ids. Passing
-    ``extents`` declares the scope directly for a ``grid=False`` kernel.
-    """
-    if extents is not None:
-        return I.cta_id(extents, preferred=preferred, dtype=dtype)
-    value = current().cta_id
-    if value is None:
-        raise RuntimeError(
-            "txl.cta_id() is unavailable because @txl.kernel set grid=False. "
-            "Declare it with txl.cta_id(extents) inside the kernel body."
-        )
-    return value
+def cta_id():
+    """Return the entry's CTA index, or its Array of indices for a multidimensional grid."""
+    return current().cta_id
 
 
 def thread_id():

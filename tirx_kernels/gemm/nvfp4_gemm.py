@@ -370,7 +370,15 @@ def make_kernel(M, N, KDIM):
     CLUSTER_N_TILES = N // MMA_N // CLUSTER_N
     TMEM_LD = _TMEM_LD_X2 if EPI_TILE == 16 else _TMEM_LD_X4 if EPI_TILE == 32 else _TMEM_LD_X8
 
-    @txl.kernel(warps=NUM_WARPS, arch="sm_100a", grid=SM_COUNT)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=SM_COUNT,
+            block=NUM_WARPS * 32,
+            cluster=(CLUSTER_SIZE,),
+            preferred_cluster=[CLUSTER_SIZE],
+        ),
+        arch="sm_100a",
+    )
     def nvfp4_gemm_kernel(
         A_tensor_map: txl.TensorMap,
         B_tensor_map: txl.TensorMap,
@@ -381,7 +389,7 @@ def make_kernel(M, N, KDIM):
     ):
         # The cluster-local rank remains a low-level scope; K owns the global
         # persistent-CTA grid.
-        cluster_rank = txl.cta_id_in_cluster([CLUSTER_SIZE], preferred=[CLUSTER_SIZE])
+        cluster_rank = txl.cuda.cluster_cta_id("x")
         cta_idx = txl.cta_id()
         tid_in_cta = txl.thread_id()
         lane_id = txl.lane_id()

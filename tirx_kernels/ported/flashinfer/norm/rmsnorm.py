@@ -548,10 +548,6 @@ def get_kernel(
         if not (is_thor and variant == "rmsnorm" and M == 32 and H == 4096 and enable_pdl):
             max_registers = 64 if enable_pdl else (96 if H == 8192 else 93)
 
-    def entry_registers():
-        if max_registers is not None:
-            txl.cuda.max_registers_per_thread(max_registers)
-
     def kernel_body(x, weight, y, runtime_M, runtime_eps, x_row_stride, y_row_stride):
         # TIRX_TRANSCRIBE_START flashinfer_rmsnorm
         grid_rows = (
@@ -560,12 +556,12 @@ def get_kernel(
             else txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32")
         )
         if cluster_n > 1:
-            block_x_raw, block_y_raw = txl.cta_id([grid_rows, cluster_n])
-            _, cta_rank_raw = txl.cta_id_in_cluster([1, cluster_n], preferred=[1, cluster_n])
+            block_x_raw, block_y_raw = (txl.cuda.block_idx("x"), txl.cuda.block_idx("y"))
+            _, cta_rank_raw = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
             block_y = txl.cast(block_y_raw, "int32")
             cta_rank = txl.cast(cta_rank_raw, "int32")
         else:
-            block_x_raw = txl.cta_id([grid_rows])
+            block_x_raw = txl.cuda.block_idx("x")
             block_y = 0
             cta_rank = 0
         tid = txl.thread_id()
@@ -922,16 +918,33 @@ def get_kernel(
         if enable_pdl:
             txl.ptx.griddepcontrol.launch_dependents()
 
-    entry_kwargs = {
-        "warps": threads // 32,
-        "arch": "sm_100a",
-        "grid": False,
-        "min_blocks_per_sm": None if threads == 128 else 1,
-    }
-
     if compact:
 
-        @txl.kernel(**entry_kwargs)
+        @txl.kernel(
+            launch=lambda p: txl.cuda.LaunchConfig(
+                grid=(
+                    txl.int32(M // rows)
+                    if thor_full_rows
+                    else txl.cast(txl.ceildiv(p["runtime_M"], txl.int64(rows)), "int32"),
+                    cluster_n,
+                )
+                if cluster_n > 1
+                else (
+                    txl.int32(M // rows)
+                    if thor_full_rows
+                    else txl.cast(txl.ceildiv(p["runtime_M"], txl.int64(rows)), "int32"),
+                ),
+                block=threads,
+                cluster=(1, cluster_n) if cluster_n > 1 else None,
+                preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
+                programmatic_stream_serialization=enable_pdl,
+            ),
+            options=txl.cuda.KernelOptions(
+                min_blocks_per_sm=None if threads == 128 else 1,
+                max_registers_per_thread=max_registers,
+            ),
+            arch="sm_100a",
+        )
         def flashinfer_rmsnorm_compact(
             x: txl.gptr[dtype],
             weight: txl.gptr[dtype, (H,)],
@@ -939,13 +952,36 @@ def get_kernel(
             runtime_M: txl.i64,
             runtime_eps: txl.f32,
         ):
-            entry_registers()
             kernel_body(x, weight, y, runtime_M, runtime_eps, txl.int64(H), txl.int64(H))
 
         kernel = flashinfer_rmsnorm_compact.func
     else:
 
-        @txl.kernel(**entry_kwargs)
+        @txl.kernel(
+            launch=lambda p: txl.cuda.LaunchConfig(
+                grid=(
+                    txl.int32(M // rows)
+                    if thor_full_rows
+                    else txl.cast(txl.ceildiv(p["runtime_M"], txl.int64(rows)), "int32"),
+                    cluster_n,
+                )
+                if cluster_n > 1
+                else (
+                    txl.int32(M // rows)
+                    if thor_full_rows
+                    else txl.cast(txl.ceildiv(p["runtime_M"], txl.int64(rows)), "int32"),
+                ),
+                block=threads,
+                cluster=(1, cluster_n) if cluster_n > 1 else None,
+                preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
+                programmatic_stream_serialization=enable_pdl,
+            ),
+            options=txl.cuda.KernelOptions(
+                min_blocks_per_sm=None if threads == 128 else 1,
+                max_registers_per_thread=max_registers,
+            ),
+            arch="sm_100a",
+        )
         def flashinfer_rmsnorm_strided(
             x: txl.gptr[dtype],
             weight: txl.gptr[dtype, (H,)],
@@ -955,19 +991,11 @@ def get_kernel(
             x_row_stride: txl.i64,
             y_row_stride: txl.i64,
         ):
-            entry_registers()
             kernel_body(x, weight, y, runtime_M, runtime_eps, x_row_stride, y_row_stride)
 
         kernel = flashinfer_rmsnorm_strided.func
 
-    launch_params = ["blockIdx.x"]
-    if cluster_n > 1:
-        launch_params.extend(["blockIdx.y", "clusterCtaIdx.x", "clusterCtaIdx.y"])
-    launch_params.append("threadIdx.x")
-    if enable_pdl:
-        launch_params.append("tirx.use_programtic_dependent_launch")
-    launch_params.append("tirx.use_dyn_shared_memory")
-    return kernel.with_attr("tirx.kernel_launch_params", launch_params)
+    return kernel
 
 
 def prepare_data(**config: Any):

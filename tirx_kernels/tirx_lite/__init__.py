@@ -301,6 +301,15 @@ class _CUDAProxy(_StmtProxy):
         return _StmtProxy(_T.cuda.func_call)(func_name, *args, source_code, ty=ty)
 
     def __getattr__(self, name):
+        if name in {
+            "LaunchConfig",
+            "KernelOptions",
+            "MemSyncDomainMap",
+            "AccessPolicyWindow",
+            "ProgrammaticEvent",
+            "LaunchCompletionEvent",
+        }:
+            return getattr(_T.cuda, name)
         hint = _RETIRED_CUDA_VALUE_MEMBERS.get(name)
         if hint is not None:
             raise AttributeError(

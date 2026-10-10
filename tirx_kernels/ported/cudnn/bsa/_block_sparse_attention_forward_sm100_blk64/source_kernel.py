@@ -358,7 +358,13 @@ def make_forward_kernel(**config):
     q_blocks = (seqlen_q + 63) // 64
     grid = (q_blocks, heads if use_clc else heads * splits, batch)
 
-    @txl.kernel(warps=WARPS, arch="sm_100a", min_blocks_per_sm=1, grid=grid)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=grid, block=WARPS * 32, cluster=(1, 1, 1) if use_clc else None
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+    )
     def forward(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -375,12 +381,17 @@ def make_forward_kernel(**config):
             # CLC requires cluster-launch semantics, but its work coordinates
             # are the global CTA ids.  The source launches singleton clusters;
             # keep that explicit contract independently from the grid shape.
-            txl.cta_id_in_cluster([1, 1, 1])
-            initial_q_block, initial_head, initial_batch = txl.cta_id([q_blocks, heads, batch])
+            initial_q_block, initial_head, initial_batch = (
+                txl.cuda.block_idx("x"),
+                txl.cuda.block_idx("y"),
+                txl.cuda.block_idx("z"),
+            )
             initial_split = txl.int32(0)
         else:
-            initial_q_block, initial_head_split, initial_batch = txl.cta_id(
-                [q_blocks, heads * splits, batch]
+            initial_q_block, initial_head_split, initial_batch = (
+                txl.cuda.block_idx("x"),
+                txl.cuda.block_idx("y"),
+                txl.cuda.block_idx("z"),
             )
             initial_split = initial_head_split // heads
             initial_head = initial_head_split - initial_split * heads

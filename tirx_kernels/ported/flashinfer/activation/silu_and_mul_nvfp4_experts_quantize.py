@@ -167,7 +167,8 @@ def _hmax(dtype):
 
 def _unpack_lo_f32(word, dtype):
     return txl.cast(
-        txl.reinterpret(dtype, txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")), "float32"
+        txl.reinterpret(dtype, txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")),
+        "float32",
     )
 
 
@@ -187,7 +188,11 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
     hmax2 = _hmax2(dtype)
     hmax = _hmax(dtype)
 
-    @txl.kernel(warps=(block_x + 31) // 32, arch="sm_100a", min_blocks_per_sm=4, grid=grid_x)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=4),
+        arch="sm_100a",
+    )
     def silu_and_mul_nvfp4_experts_quantize(
         input_global: txl.gptr[dtype],
         sf_scale: txl.gptr[txl.f32],
@@ -231,7 +236,9 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
 
         m_rows = txl.truncdiv(num_rows, num_experts)
         padded_m = (m_rows + 127) // 128 * 128
-        cols_per_row = txl.local_scalar("int32", init=txl.truncdiv(num_cols, txl.int32(ELTS_PER_THREAD)))
+        cols_per_row = txl.local_scalar(
+            "int32", init=txl.truncdiv(num_cols, txl.int32(ELTS_PER_THREAD))
+        )
         use_mask = txl.reinterpret("uint64", txl.address_of(mask[0])) != txl.uint64(0)
         actual_cols = txl.local_scalar("int32", init=cols_per_row)
         with txl.If(use_silu_and_mul != 0), txl.Then():

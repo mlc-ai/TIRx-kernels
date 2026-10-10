@@ -30,14 +30,6 @@ IKET_EVENT_NAMES = (
     "h128-small-softmax",
 )
 
-LAUNCH_TAGS = (
-    "blockIdx.x",
-    "clusterCtaIdx.x",
-    "threadIdx.x",
-    "tirx.use_programtic_dependent_launch",
-    "tirx.use_dyn_shared_memory",
-)
-
 
 def _add_smem_desc_offset(dst, desc, offset):
     # Descriptor offsets wrap in the low 32 bits without carrying into the
@@ -331,7 +323,16 @@ def make_kernel(
         return kv_tma, out_tma, out_tma_1, q_tma
 
     @txl.kernel(
-        warps=16, arch="sm_100a", min_blocks_per_sm=1, grid=2 * s_q, host_prelude=host_prelude
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=2 * s_q,
+            block=16 * 32,
+            cluster=(2,),
+            preferred_cluster=[2],
+            programmatic_stream_serialization=True,
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+        host_prelude=host_prelude,
     )
     def sparse_flashmla_prefill_head128_small_topk_phase1_kernel(
         q: txl.gptr[txl.bf16, (s_q, B_H, D_QK)],
@@ -347,11 +348,10 @@ def make_kernel(
     ):
         kv_tma_tensormap, out_tensormap, out_tensormap_1, q_tma_tensormap = host
         block_idx = txl.cta_id()
-        txl.cta_id_in_cluster([2], preferred=[2])
         thread_idx = txl.thread_id()
         warp_idx = txl.warp_id()
         lane_idx = txl.lane_id()
-        idx_in_warpgroup = txl.thread_id_in_wg([128])
+        idx_in_warpgroup = txl.cuda.thread_in_warpgroup()
         cta_idx = block_idx % 2
 
         def prefetch(tensor_map):
@@ -1485,7 +1485,7 @@ def make_kernel(
 
     return sparse_flashmla_prefill_head128_small_topk_phase1_kernel.func.with_attr(
         "global_symbol", KERNEL_META["name"]
-    ).with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+    )
 
 
 def get_kernel(**kwargs: Any):

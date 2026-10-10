@@ -536,10 +536,11 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         return A_tensor_map, B_tensor_map, D_tensor_map
 
     @txl.kernel(
-        warps=NUM_THREADS // 32,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=SM_NUMBER, block=NUM_THREADS // 32 * 32, cluster=(M_CLUSTER, N_CLUSTER)
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
         arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=SM_NUMBER,
         host_prelude=host_prelude,
         allowed_func_calls=_NVSHMEM_RUNTIME_FUNC_CALLS,
     )
@@ -575,7 +576,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         rs_tail = rs_tail.view(1)
         exit_barrier = exit_barrier.view(2)
 
-        cbx_expr, _ = txl.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
+        cbx_expr, _ = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
         cbx = cbx_expr
         bx = txl.cta_id()
         warp_id_in_cta = txl.warp_id()

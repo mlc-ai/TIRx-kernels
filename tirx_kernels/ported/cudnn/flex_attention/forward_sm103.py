@@ -1143,12 +1143,22 @@ def _make_kernel(**config):
         else:
             q_map, k_map, v_map, o_map = host
         if cta_group == 2:
-            cluster_rank, _cluster_y, _cluster_z = txl.cta_id_in_cluster(
-                [2, 1, 1], preferred=[2, 1, 1]
+            cluster_rank, _cluster_y, _cluster_z = (
+                txl.cuda.cluster_cta_id("x"),
+                txl.cuda.cluster_cta_id("y"),
+                txl.cuda.cluster_cta_id("z"),
             )
         else:
-            cluster_rank, _cluster_y, _cluster_z = txl.cta_id_in_cluster([1, 1, 1])
-        initial_cta_x, _initial_y, _initial_z = txl.cta_id([num_work_records * cta_group, 1, 1])
+            cluster_rank, _cluster_y, _cluster_z = (
+                txl.cuda.cluster_cta_id("x"),
+                txl.cuda.cluster_cta_id("y"),
+                txl.cuda.cluster_cta_id("z"),
+            )
+        initial_cta_x, _initial_y, _initial_z = (
+            txl.cuda.block_idx("x"),
+            txl.cuda.block_idx("y"),
+            txl.cuda.block_idx("z"),
+        )
         work_index = txl.local_scalar("int32")
         q_block = txl.local_scalar("int32")
         head = txl.local_scalar("int32")
@@ -2820,7 +2830,6 @@ def _make_kernel(**config):
         *,
         host,
     ):
-        txl.cuda.required_block_size(_WARPS * 32, 1, 1, cta_group, 1, 1)
         kernel_body(
             q,
             k,
@@ -2859,11 +2868,15 @@ def _make_kernel(**config):
         "softmax_scale_log2": txl.f32,
     }
     return txl.kernel(
-        warps=_WARPS,
         arch="sm_103a",
-        grid=[num_work_records * cta_group, 1, 1],
-        min_blocks_per_sm=1,
         host_prelude=host_prelude,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            block=_WARPS * 32,
+            grid=(num_work_records * cta_group, 1, 1),
+            cluster=cta_group,
+            preferred_cluster=cta_group if cta_group == 2 else None,
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
     )(kernel)
 
 

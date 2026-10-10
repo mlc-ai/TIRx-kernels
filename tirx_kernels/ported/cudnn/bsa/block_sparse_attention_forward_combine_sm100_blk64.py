@@ -181,7 +181,11 @@ def _make_kernel(log_max_splits):
     ):
         # CUDA TRANSCRIPTION START
         row_tiles = txl.ceildiv(seqlen_q * num_heads, _TILE_M)
-        row_tile, dim_tile, batch_idx = txl.cta_id([row_tiles, _HEAD_DIM // _K_BLOCK, batch])
+        row_tile, dim_tile, batch_idx = (
+            txl.cuda.block_idx("x"),
+            txl.cuda.block_idx("y"),
+            txl.cuda.block_idx("z"),
+        )
         tid = txl.thread_id()
 
         arena = txl.alloc_tensor((smem_bytes,), txl.u8, scope="shared.dyn", align=1024)
@@ -500,13 +504,18 @@ def _make_kernel(log_max_splits):
         # CUDA TRANSCRIPTION END
 
     @txl.kernel(
-        warps=4,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(
+                lambda p: [
+                    txl.ceildiv(p["seqlen_q"] * p["num_heads"], _TILE_M),
+                    _HEAD_DIM // _K_BLOCK,
+                    p["batch"],
+                ]
+            )(_params),
+            block=4 * 32,
+        ),
+        options=txl.cuda.KernelOptions(required_block_size=True),
         arch="sm_100a",
-        grid=lambda p: [
-            txl.ceildiv(p["seqlen_q"] * p["num_heads"], _TILE_M),
-            _HEAD_DIM // _K_BLOCK,
-            p["batch"],
-        ],
     )
     def combine(
         o_partial: txl.gptr[txl.f32],
@@ -521,7 +530,6 @@ def _make_kernel(log_max_splits):
         seqlen_div_s1: txl.i32,
         seqlen_div_s2: txl.i32,
     ):
-        txl.cuda.required_block_size(128, 1, 1, 1, 1, 1)
         kernel_body(
             o_partial,
             lse_partial,

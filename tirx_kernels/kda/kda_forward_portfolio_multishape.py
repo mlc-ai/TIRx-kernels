@@ -1876,7 +1876,11 @@ def build_kernel(
         "num_ctas": txl.i32,
         "scale": txl.f32,
     }
-    return txl.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=1, grid="num_ctas")(kda_fwd)
+    return txl.kernel(
+        arch="sm_100a",
+        launch=lambda _params: txl.cuda.LaunchConfig(block=NWARPS * 32, grid=_params["num_ctas"]),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+    )(kda_fwd)
 
 
 class _TensorMap:
@@ -2268,7 +2272,11 @@ def make_front(H: int):
     so that every L row / Aqk row lands in ONE TMEM lane (Layout F); the norms are folded into
     T1' = diag(kn) T diag(b) and T2' = T1' diag(kn); one warp per item inverts (four solvers)."""
 
-    @txl.kernel(warps=20, arch="sm_100a", min_blocks_per_sm=1, grid="num_ctas")
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=_params["num_ctas"], block=20 * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+    )
     def kda_front(
         q: txl.gptr[txl.bf16],
         k: txl.gptr[txl.bf16],
@@ -3203,7 +3211,11 @@ def make_chain(H: int, hpc: int = 2):
     front end; hpc = 1: one head per CTA, for head counts that leave the front end enough SMs anyway)."""
     assert H % hpc == 0 and hpc in (1, 2)
 
-    @txl.kernel(warps=24, arch="sm_100a", min_blocks_per_sm=1, grid=H // hpc)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=H // hpc, block=24 * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+    )
     def kda_chain(
         v: txl.gptr[txl.bf16],
         state_in: txl.gptr[txl.f32],

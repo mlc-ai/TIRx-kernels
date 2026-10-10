@@ -152,7 +152,11 @@ def get_kernel(
             return row * pad_cols + col  # compute_sf_index_linear_gpu
         return sf_offset_128x4(row, col, pad_cols)
 
-    @txl.kernel(warps=_PER_TOKEN_WARPS, arch="sm_100a", min_blocks_per_sm=2, grid=m)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=m, block=_PER_TOKEN_WARPS * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=2),
+        arch="sm_100a",
+    )
     def nvfp4_quantize_per_token(
         in_global: txl.gptr[dtype],
         out_global: txl.gptr[txl.u8],

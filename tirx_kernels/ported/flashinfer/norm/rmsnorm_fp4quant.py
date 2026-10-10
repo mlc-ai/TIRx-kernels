@@ -743,14 +743,12 @@ def get_kernel(
     def kernel_body(x, weight, y, scales, global_scale, runtime_M, runtime_eps):
         # TIRX_TRANSCRIBE_START flashinfer_rmsnorm_fp4quant
         if cluster_n > 1:
-            block_x_raw, block_y_raw = txl.cta_id(
-                [txl.cast(txl.ceildiv(runtime_M, txl.int32(rows)), "int32"), cluster_n]
-            )
-            _, cta_rank_raw = txl.cta_id_in_cluster([1, cluster_n], preferred=[1, cluster_n])
+            block_x_raw, block_y_raw = (txl.cuda.block_idx("x"), txl.cuda.block_idx("y"))
+            _, cta_rank_raw = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
             block_y: txl.int32 = txl.cast(block_y_raw, "int32")
             cta_rank: txl.int32 = txl.cast(cta_rank_raw, "int32")
         else:
-            block_x_raw = txl.cta_id([txl.cast(txl.ceildiv(runtime_M, txl.int32(rows)), "int32")])
+            block_x_raw = txl.cuda.block_idx("x")
             block_y = txl.int32(0)
             cta_rank = txl.int32(0)
         tid = txl.thread_id()
@@ -970,7 +968,19 @@ def get_kernel(
         if enable_pdl:
             txl.ptx.griddepcontrol.launch_dependents()
 
-    @txl.kernel(warps=threads // 32, arch="sm_100a", grid=False)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(txl.cast(txl.ceildiv(_params["runtime_M"], txl.int32(rows)), "int32"), cluster_n)
+            if cluster_n > 1
+            else (txl.cast(txl.ceildiv(_params["runtime_M"], txl.int32(rows)), "int32"),),
+            block=threads // 32 * 32,
+            cluster=(1, cluster_n) if cluster_n > 1 else None,
+            preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
+            programmatic_stream_serialization=enable_pdl,
+        ),
+        options=txl.cuda.KernelOptions(required_block_size=True),
+        arch="sm_100a",
+    )
     def flashinfer_rmsnorm_fp4quant(
         x: txl.gptr[input_dtype],
         weight: txl.gptr[input_dtype, (H,)],
@@ -980,17 +990,9 @@ def get_kernel(
         runtime_M: txl.i32,
         runtime_eps: txl.f32,
     ):
-        txl.cuda.required_block_size(threads, 1, 1, 1, cluster_n, 1)
         kernel_body(x, weight, y, scales, global_scale, runtime_M, runtime_eps)
 
-    launch_params = ["blockIdx.x"]
-    if cluster_n > 1:
-        launch_params.extend(["blockIdx.y", "clusterCtaIdx.x", "clusterCtaIdx.y"])
-    launch_params.append("threadIdx.x")
-    if enable_pdl:
-        launch_params.append("tirx.use_programtic_dependent_launch")
-    launch_params.append("tirx.use_dyn_shared_memory")
-    return flashinfer_rmsnorm_fp4quant.func.with_attr("tirx.kernel_launch_params", launch_params)
+    return flashinfer_rmsnorm_fp4quant.func
 
 
 def prepare_data(**config: Any):

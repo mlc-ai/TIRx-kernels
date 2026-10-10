@@ -564,7 +564,7 @@ def _make_kernel(**config):
         if cta_group == 1:
             cta_rank = txl.int32(0)
         else:
-            cta_rank = txl.cta_id_in_cluster([2], preferred=[2])
+            cta_rank = txl.cuda.cluster_cta_id("x")
         block_x = txl.cta_id()
         task = txl.local_scalar("int32", init=block_x // cta_group)
         work_valid = txl.local_scalar("int32", init=1)
@@ -1551,7 +1551,6 @@ def _make_kernel(**config):
         host,
     ):
         if cta_group == 2:
-            txl.cuda.required_block_size(384, 1, 1, cta_group, 1, 1)
             kernel_body(
                 q,
                 k,
@@ -1617,11 +1616,15 @@ def _make_kernel(**config):
         "softmax_scale": txl.f32,
     }
     return txl.kernel(
-        warps=12,
         arch="sm_100a",
-        grid=[task_count * cta_group],
-        min_blocks_per_sm=1,
         host_prelude=host_prelude,
+        launch=txl.cuda.LaunchConfig(
+            block=384,
+            grid=task_count * cta_group,
+            cluster=2 if cta_group == 2 else None,
+            preferred_cluster=2 if cta_group == 2 else None,
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=cta_group == 2),
     )(kernel)
 
 

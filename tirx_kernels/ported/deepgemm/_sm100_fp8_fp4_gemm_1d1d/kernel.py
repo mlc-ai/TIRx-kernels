@@ -625,7 +625,15 @@ def build_kernel(spec: GemmSpec):
 
     total_warps = (spec.num_non_epilogue_threads + spec.num_epilogue_threads) // 32
 
-    @txl.kernel(warps=total_warps, arch="sm_100a", min_blocks_per_sm=1, grid=spec.num_sms)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=spec.num_sms,
+            block=total_warps * 32,
+            cluster=(cta_group,) if cta_group > 1 else None,
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+    )
     def sm100_fp8_fp4_gemm_1d1d(
         grouped_layout: txl.gptr[txl.i32],
         grouped_len: txl.i32,
@@ -641,7 +649,7 @@ def build_kernel(spec: GemmSpec):
         # ---- role ids -------------------------------------------------------
         sm_idx = txl.cta_id()
         if cta_group > 1:
-            cta_in_cluster = txl.cta_id_in_cluster([cta_group])
+            cta_in_cluster = txl.cuda.cluster_cta_id("x")
             is_leader_cta = cta_in_cluster == 0
         else:
             is_leader_cta = True

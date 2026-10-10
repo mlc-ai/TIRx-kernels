@@ -475,7 +475,12 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
     SSM_IDX_ELEMENTS = spec["SSM_IDX_ELEMENTS"]
     NAT_ELEMENTS = spec["NAT_ELEMENTS"]
 
-    @txl.kernel(warps=NUM_WARPS, arch="sm_100a", grid=(NUM_VALUE_HEADS, NUM_SEQS, VSPLIT))
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(NUM_VALUE_HEADS, NUM_SEQS, VSPLIT), block=NUM_WARPS * 32
+        ),
+        arch="sm_100a",
+    )
     def _recurrent_kda_decode_grouped(
         q: txl.gptr[txl.bf16, (QK_ELEMENTS,)],
         k: txl.gptr[txl.bf16, (QK_ELEMENTS,)],

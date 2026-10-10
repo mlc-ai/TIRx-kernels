@@ -56,7 +56,6 @@ KERNEL_META = {
 # `__init__(num_threads=128)` (:127-135); the kernel takes no shared memory.
 NUM_THREADS = 128
 WARPS_PER_CTA = NUM_THREADS // 32
-LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x")
 
 # `_emit_work` writes six int32 fields per work item (:151-156).
 WORK_FIELDS = 6
@@ -138,9 +137,11 @@ _shfl_idx_i32 = shfl_idx_i32
 # Target entry.
 # ---------------------------------------------------------------------------
 @txl.kernel(
-    warps=WARPS_PER_CTA,
+    launch=lambda _params: txl.cuda.LaunchConfig(
+        grid=(lambda p: txl.ceildiv(p["total_rows"] * p["num_heads_kv"], WARPS_PER_CTA))(_params),
+        block=WARPS_PER_CTA * 32,
+    ),
     arch="sm_100a",
-    grid=lambda p: txl.ceildiv(p["total_rows"] * p["num_heads_kv"], WARPS_PER_CTA),
 )
 def _kernel(
     k2q_row_ptr: txl.gptr(txl.i32, shape=lambda p: (p["num_heads_kv"] * (p["total_rows"] + 1),)),
@@ -161,7 +162,9 @@ def _kernel(
     lane = txl.local_scalar(txl.i32, init=tidx % 32, name="lane")
     warp = txl.local_scalar(txl.i32, init=tidx // 32, name="warp")
     row_head_idx = txl.local_scalar(txl.i32, init=block * WARPS_PER_CTA + warp, name="row_head_idx")
-    total_row_heads = txl.local_scalar(txl.i32, init=total_rows * num_heads_kv, name="total_row_heads")
+    total_row_heads = txl.local_scalar(
+        txl.i32, init=total_rows * num_heads_kv, name="total_row_heads"
+    )
 
     # sketch: the six scalars the warp publishes, zeroed BEFORE the grid-tail
     # guard so an empty tail warp still broadcasts defined values -> :297-302.
@@ -235,11 +238,14 @@ def _kernel(
                 txl.assign(batch_cursor, txl.int32(0))
                 with txl.While(batch_cursor < num_batches):
                     probe_seq = txl.local_scalar(
-                        txl.i32, init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1), name="probe_seq"
+                        txl.i32,
+                        init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1),
+                        name="probe_seq",
                     )
                     txl.assign(
                         rows_before_next,
-                        rows_before_next + txl.min(_uceil_div_i32(probe_seq - prev, blk_kv), mid + 1),
+                        rows_before_next
+                        + txl.min(_uceil_div_i32(probe_seq - prev, blk_kv), mid + 1),
                     )
                     txl.assign(prev, probe_seq)
                     txl.assign(batch_cursor, batch_cursor + 1)
@@ -277,13 +283,17 @@ def _kernel(
             with txl.While(batch_cursor < num_batches):
                 with txl.If(found == 0), txl.Then():
                     scan_next = txl.local_scalar(
-                        txl.i32, init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1), name="scan_next"
+                        txl.i32,
+                        init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1),
+                        name="scan_next",
                     )
                     scan_prev = txl.local_scalar(
                         txl.i32, init=_ld_global_i32(cu_seqlens_k, batch_cursor), name="scan_prev"
                     )
                     scan_rows = txl.local_scalar(
-                        txl.i32, init=_uceil_div_i32(scan_next - scan_prev, blk_kv), name="scan_rows"
+                        txl.i32,
+                        init=_uceil_div_i32(scan_next - scan_prev, blk_kv),
+                        name="scan_rows",
                     )
                     with txl.If(scan_rows > level), txl.Then():
                         with txl.If(active_idx == offset), txl.Then():
@@ -311,7 +321,9 @@ def _kernel(
             txl.i32, init=_atom_add_global_i32(work_count, 0, txl.uint32(1)), name="work_idx"
         )
         q_begin = txl.local_scalar(txl.i32, init=chunk_idx * target, name="q_begin")
-        q_count = txl.local_scalar(txl.i32, init=txl.min(target, row_count - q_begin), name="q_count")
+        q_count = txl.local_scalar(
+            txl.i32, init=txl.min(target, row_count - q_begin), name="q_count"
+        )
         with txl.If(work_idx < work_capacity), txl.Then():
             work_base = txl.local_scalar(txl.i32, init=work_idx * WORK_FIELDS, name="work_base")
             _st_global_i32(scheduler_metadata, work_base, head_kv_idx)
@@ -331,7 +343,7 @@ def get_kernel(**config):
     schedule scalars stay runtime arguments here too.
     """
     config.pop("label", None)
-    return _kernel.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+    return _kernel.func
 
 
 # ---------------------------------------------------------------------------

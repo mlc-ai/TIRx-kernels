@@ -901,7 +901,7 @@ def _make_prologue(
 ):
     cu_t = txl.i64 if cu_dtype == "int64" else txl.i32
 
-    @txl.kernel(warps=32, arch="sm_100a", grid=1)
+    @txl.kernel(launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=32 * 32), arch="sm_100a")
     def prologue(
         base_q: txl.gptr[txl.i64],
         base_k: txl.gptr[txl.i64],
@@ -1159,7 +1159,11 @@ def _make_main(
     cg1_regs = 256 if use_initial_state else 232
     other_regs = 24 if use_initial_state else 48
 
-    @txl.kernel(warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=num_sms, block=12 * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+    )
     def main(
         descriptor_workspace: txl.gptr[txl.i64],
         n_desc: txl.i32,

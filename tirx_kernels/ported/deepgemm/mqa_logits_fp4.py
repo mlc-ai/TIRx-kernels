@@ -460,7 +460,13 @@ def get_kernel(**kwargs: Any):
     # setmaxnreg requires the entry allocation fixed by .minnctapersm.
     min_blocks = 1
 
-    @txl.kernel(warps=num_warps, arch="sm_100a", min_blocks_per_sm=min_blocks, grid=config.num_sms)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=config.num_sms, block=num_warps * 32, programmatic_stream_serialization=True
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=min_blocks),
+        arch="sm_100a",
+    )
     def sm100_fp4_mqa_logits(
         seq_len: txl.u32,
         seq_len_kv: txl.u32,
@@ -513,7 +519,7 @@ def get_kernel(**kwargs: Any):
         sm_idx = txl.cta_id()
         thread_idx = txl.thread_id()
         warp_idx = txl.warp_id()
-        warpgroup_idx = txl.warpgroup_id([num_warps // 4])
+        warpgroup_idx = txl.cuda.warpgroup_id()
         lane_idx = txl.lane_id()
         # Keep the former dispatcher placement: one warp-elected prefetch for
         # each map, issued before any pipeline work.
@@ -1048,15 +1054,7 @@ def get_kernel(**kwargs: Any):
     # `@txl.kernel` has no `attrs=`, so the launch metadata the original sets on
     # its PrimFunc is applied to the traced one here. `Kernel.func` is a plain
     # attribute (entry.py), and `Kernel.mod` reads it, so this reaches compile.
-    main = sm100_fp4_mqa_logits.func.with_attr(
-        "tirx.kernel_launch_params",
-        [
-            "blockIdx.x",
-            "threadIdx.x",
-            "tirx.use_programtic_dependent_launch",
-            "tirx.use_dyn_shared_memory",
-        ],
-    )
+    main = sm100_fp4_mqa_logits.func
     return tvm.IRModule({"main": main})
 
 

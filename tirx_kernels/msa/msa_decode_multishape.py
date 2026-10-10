@@ -186,7 +186,11 @@ def make_kernel_kv(cfg):
     VLOAD_WARP = 4 * NSWG + 4
     SOFT_THREADS = 128 * NSWG
 
-    @txl.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=MIN_BLOCKS, grid=NUM_CTAS)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=MIN_BLOCKS),
+        arch="sm_100a",
+    )
     def msa_decode_kvmajor(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -1488,7 +1492,11 @@ def make_kernel_qm(cfg):
     LOG2G = G.bit_length() - 1
     assert (1 << LOG2G) == G
 
-    @txl.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=1, grid=NUM_CTAS)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+    )
     def msa_decode_qmajor(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -2994,7 +3002,11 @@ def make_kernel_qm64(cfg):
     LOG2G = G.bit_length() - 1
     assert (1 << LOG2G) == G
 
-    @txl.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=2, grid=NUM_CTAS)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=2),
+        arch="sm_100a",
+    )
     def msa_decode_qmajor(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -4400,7 +4412,11 @@ def _build_q16_twotile_factory():
         Q_TILE_BYTES = BLK_M * HEAD_DIM * F16_BYTES
         KV_TILE_BYTES = BLK_N * HEAD_DIM * F16_BYTES
 
-        @txl.kernel(warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=NUM_CTAS)
+        @txl.kernel(
+            launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_CTAS, block=12 * 32),
+            options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+            arch="sm_100a",
+        )
         def msa_decode_qmajor_union(
             q_map: txl.TensorMap,
             k_map: txl.TensorMap,
@@ -5754,7 +5770,11 @@ def make_kernel_q1d(cfg):
     PV_WARP = 7
     SOFT_THREADS = 128
 
-    @txl.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=MIN_BLOCKS, grid=NUM_CTAS)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=MIN_BLOCKS),
+        arch="sm_100a",
+    )
     def msa_decode_q1d(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -7218,7 +7238,11 @@ def make_kernel_q4d(cfg):
     BAR_TMEM = 1
     BAR_WG = 2
 
-    @txl.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=1, grid=NUM_CTAS)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
+        arch="sm_100a",
+    )
     def msa_decode_q4d(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -8493,7 +8517,11 @@ def make_kernel_q4r(cfg):
     LOAD_WARP = 9
     NWARPS = 12
 
-    @txl.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=Q4R_MIN_BLOCKS, grid=NUM_ITEMS)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=NUM_ITEMS, block=NWARPS * 32),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=Q4R_MIN_BLOCKS),
+        arch="sm_100a",
+    )
     def msa_decode_q4r(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,

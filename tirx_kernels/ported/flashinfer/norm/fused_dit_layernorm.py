@@ -513,7 +513,12 @@ def get_kernel(
     elif output_format == "mxfp8":
         sf_k_tiles = (_HIDDEN_SIZE + 127) // 128
 
-    @txl.kernel(warps=_BLOCK_SIZE // 32, arch="sm_100a", grid="runtime_num_rows")
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=_params["runtime_num_rows"], block=_BLOCK_SIZE // 32 * 32
+        ),
+        arch="sm_100a",
+    )
     def flashinfer_fused_dit_layernorm(
         input_buffer: txl.gptr[txl.bf16],
         residual_buffer: txl.gptr[txl.bf16],
@@ -861,9 +866,7 @@ def get_kernel(
                     runtime_num_rows,
                 )
 
-    return flashinfer_fused_dit_layernorm.func.with_attr(
-        "tirx.kernel_launch_params", ["blockIdx.x", "threadIdx.x"]
-    )
+    return flashinfer_fused_dit_layernorm.func
 
 
 def prepare_data(**config: Any) -> tuple[Any, ...]:

@@ -983,7 +983,7 @@ def _tcgen_mma_ts(
 def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out, cu_dtype):
     cu_t = txl.i64 if cu_dtype == "int64" else txl.i32
 
-    @txl.kernel(warps=32, arch="sm_100a", grid=1)
+    @txl.kernel(launch=lambda _params: txl.cuda.LaunchConfig(grid=1, block=32 * 32), arch="sm_100a")
     def prologue(
         base_q: txl.gptr[txl.i64],
         base_k: txl.gptr[txl.i64],
@@ -1248,7 +1248,13 @@ def _make_main(
     idesc_m128_n64_ab = _IDESC_M128_N64_AB_BF16 - idesc_delta
     idesc_m128_n128_b = _IDESC_M128_N128_B_BF16 - idesc_delta
 
-    @txl.kernel(warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=num_sms, block=12 * 32, cluster=(1, 1, 1)
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1, required_block_size=True),
+        arch="sm_100a",
+    )
     def main(
         descriptor_workspace: txl.gptr[txl.i64],
         n_desc: txl.i32,
@@ -1271,8 +1277,11 @@ def _make_main(
         thread = txl.thread_id()
         warp = txl.warp_id()
         lane = txl.lane_id()
-        txl.cuda.required_block_size(384, 1, 1, 1, 1, 1)
-        _cluster_x, _cluster_y, _cluster_z = txl.cta_id_in_cluster([1, 1, 1])
+        _cluster_x, _cluster_y, _cluster_z = (
+            txl.cuda.cluster_cta_id("x"),
+            txl.cuda.cluster_cta_id("y"),
+            txl.cuda.cluster_cta_id("z"),
+        )
 
         protocol = (
             (_BAR_Q_READY, 1, 1),

@@ -577,10 +577,12 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
     idesc = _IDESC[dtype]
 
     @txl.kernel(
-        warps=BWD_WARPS,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(lambda p: [p["seqlen_q"], (num_head + block - 1) // block, 1])(_params),
+            block=BWD_WARPS * 32,
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
         arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=lambda p: [p["seqlen_q"], (num_head + block - 1) // block, 1],
     )
     def bwd(
         desc_q: txl.TensorMap,
@@ -1551,10 +1553,12 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk):
     q_arms = (block_q + SUM_ODO_THREADS_Q - 1) // SUM_ODO_THREADS_Q
 
     @txl.kernel(
-        warps=(SUM_ODO_THREADS_D * SUM_ODO_THREADS_Q) // 32,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(lambda p: [(p["seqlen_q"] + block_q - 1) // block_q, num_head, 1])(_params),
+            block=SUM_ODO_THREADS_D * SUM_ODO_THREADS_Q // 32 * 32,
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
         arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=lambda p: [(p["seqlen_q"] + block_q - 1) // block_q, num_head, 1],
     )
     def sum_odo(
         out: txl.gptr[elem],
@@ -1684,9 +1688,11 @@ def make_convert_kernel(*, head_dim, dtype, max_topk):
     threads_d = 32
 
     @txl.kernel(
-        warps=(threads_d * threads_seq) // 32,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(lambda p: [(p["seqlen_kv"] + block_seq - 1) // block_seq, 1, 1])(_params),
+            block=threads_d * threads_seq // 32 * 32,
+        ),
         arch="sm_100a",
-        grid=lambda p: [(p["seqlen_kv"] + block_seq - 1) // block_seq, 1, 1],
     )
     def convert(ws_dkv: txl.gptr[txl.f32], dkv: txl.gptr[elem], seqlen_kv: txl.i32):
         # ---- kernel body starts here ----
@@ -1739,10 +1745,14 @@ def make_sum_dsink_kernel(*, num_head):
     """
 
     @txl.kernel(
-        warps=DSINK_THREADS // 32,
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(lambda p: [(p["seqlen_q"] + DSINK_BLOCK_Q - 1) // DSINK_BLOCK_Q, num_head, 1])(
+                _params
+            ),
+            block=DSINK_THREADS // 32 * 32,
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=1),
         arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=lambda p: [(p["seqlen_q"] + DSINK_BLOCK_Q - 1) // DSINK_BLOCK_Q, num_head, 1],
     )
     def sum_dsink(
         ws: txl.gptr[txl.f32],

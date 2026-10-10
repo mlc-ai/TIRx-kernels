@@ -110,7 +110,9 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
         else:
             txl.ptx.cvt.rn.bf16x2.f32(dst, hi, lo)
 
-    @txl.kernel(warps=warps, arch="sm_100a", grid=seq_len)
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(grid=seq_len, block=warps * 32), arch="sm_100a"
+    )
     def merge_state(
         v_a: txl.gptr[dtype],
         s_a: txl.gptr[txl.f32],

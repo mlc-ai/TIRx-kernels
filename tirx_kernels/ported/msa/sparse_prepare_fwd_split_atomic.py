@@ -83,13 +83,17 @@ Q_IDX_MASK = (1 << SLOT_SHIFT) - 1
 # takes it from the dynamic pool -- the export carries
 # `.extern .shared .align 1024 .b8 __dynamic_shmem__0[]` -- so the matching TIRx
 # form is a pool allocation plus this launch tag, not a parser allocation.
-LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
 
 
 # ---------------------------------------------------------------------------
 # Target entry.
 # ---------------------------------------------------------------------------
-@txl.kernel(warps=NUM_THREADS // 32, arch="sm_100a", grid=lambda p: p["work_capacity"])
+@txl.kernel(
+    launch=lambda _params: txl.cuda.LaunchConfig(
+        grid=(lambda p: p["work_capacity"])(_params), block=NUM_THREADS // 32 * 32
+    ),
+    arch="sm_100a",
+)
 def _kernel(
     k2q_row_ptr: txl.gptr[txl.i32],
     k2q_q_indices: txl.gptr[txl.i32],
@@ -174,7 +178,8 @@ def _kernel(
                         k2q_qsplit_indices,
                         head_kv_idx * nnz_capacity + edge,
                         txl.bitwise_or(
-                            q_idx, txl.shift_left(txl.bitwise_and(split_slot, SLOT_MASK), SLOT_SHIFT)
+                            q_idx,
+                            txl.shift_left(txl.bitwise_and(split_slot, SLOT_MASK), SLOT_SHIFT),
                         ),
                     )
             txl.assign(qi, qi + NUM_THREADS)
@@ -188,7 +193,7 @@ def get_kernel(**config):
     serves every shape and all extents and scalars stay runtime arguments.
     """
     config.pop("label", None)
-    return _kernel.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+    return _kernel.func
 
 
 # ---------------------------------------------------------------------------

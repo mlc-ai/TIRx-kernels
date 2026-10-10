@@ -115,7 +115,9 @@ def _philox4x32_horizontal(random_words, random_seed, random_offset, *, PHILOX_R
     k0 = txl.local_scalar("uint32", init=txl.cast(txl.reinterpret("uint64", random_seed), "uint32"))
     k1 = txl.local_scalar(
         "uint32",
-        init=txl.cast(txl.shift_right(txl.reinterpret("uint64", random_seed), txl.uint64(32)), "uint32"),
+        init=txl.cast(
+            txl.shift_right(txl.reinterpret("uint64", random_seed), txl.uint64(32)), "uint32"
+        ),
     )
     with txl.unroll(PHILOX_ROUNDS) as _round:
         old_c0 = txl.local_scalar("uint32", init=c0)
@@ -354,10 +356,11 @@ def get_kernel(**kwargs: Any):
     STATE_STAGE_BYTES = spec["STATE_STAGE_BYTES"]
 
     @txl.kernel(
-        warps=spec["NUM_WARPS"],
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(spec["BATCH"], spec["NHEADS"]), block=spec["NUM_WARPS"] * 32
+        ),
+        options=txl.cuda.KernelOptions(min_blocks_per_sm=spec["MIN_BLOCKS_PER_SM"]),
         arch="sm_100a",
-        min_blocks_per_sm=spec["MIN_BLOCKS_PER_SM"],
-        grid=(spec["BATCH"], spec["NHEADS"]),
     )
     def selective_state_update_stp_horizontal(
         tensor_state: txl.TensorMap,
@@ -788,7 +791,8 @@ def get_kernel(**kwargs: Any):
                 d: txl.int32 = warp * 16 + row_group
                 gload_3 = txl.local_scalar("uint16")
                 txl.ptx.ld.global_.b16(
-                    gload_3, x.ptr_to([txl.cast(batch_i, "int64") * x_stride_batch + head * DIM + d])
+                    gload_3,
+                    x.ptr_to([txl.cast(batch_i, "int64") * x_stride_batch + head * DIM + d]),
                 )
                 bf16_f32_5 = txl.local_scalar("float32")
                 txl.ptx.cvt.f32.bf16(bf16_f32_5, txl.cast(gload_3, "uint16"))

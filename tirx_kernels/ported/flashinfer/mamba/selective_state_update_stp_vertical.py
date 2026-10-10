@@ -206,7 +206,9 @@ def _philox4x32(random_words, random_seed, random_offset, *, PHILOX_ROUNDS):
     k0 = txl.local_scalar("uint32", init=txl.cast(txl.reinterpret("uint64", random_seed), "uint32"))
     k1 = txl.local_scalar(
         "uint32",
-        init=txl.cast(txl.shift_right(txl.reinterpret("uint64", random_seed), txl.uint64(32)), "uint32"),
+        init=txl.cast(
+            txl.shift_right(txl.reinterpret("uint64", random_seed), txl.uint64(32)), "uint32"
+        ),
     )
     with txl.unroll(PHILOX_ROUNDS) as _round:
         old_c0 = txl.local_scalar("uint32", init=c0)
@@ -351,7 +353,12 @@ def get_kernel(**kwargs: Any):
     STATE_STAGE_BYTES = spec["STATE_STAGE_BYTES"]
     INPUT_BYTES = spec["INPUT_BYTES"]
 
-    @txl.kernel(warps=5, arch="sm_100a", grid=(spec["BATCH"], spec["NHEADS"]))
+    @txl.kernel(
+        launch=lambda _params: txl.cuda.LaunchConfig(
+            grid=(spec["BATCH"], spec["NHEADS"]), block=5 * 32
+        ),
+        arch="sm_100a",
+    )
     def selective_state_update_stp_vertical(
         tensor_state: txl.TensorMap,
         state: txl.gptr[spec["STATE_DTYPE"]],
@@ -410,7 +417,11 @@ def get_kernel(**kwargs: Any):
         consumers_ready_buf = consumers_ready.buf
 
         def producer_pipeline(
-            group, state_batch, dst_state_batch, READ_STATE: txl.constexpr, WRITE_STATE: txl.constexpr
+            group,
+            state_batch,
+            dst_state_batch,
+            READ_STATE: txl.constexpr,
+            WRITE_STATE: txl.constexpr,
         ):
             # Phase 1, stage 0: vector inputs and the first optional state tile share
             # one full barrier transaction, exactly as in producer_func_vertical.
@@ -730,7 +741,9 @@ def get_kernel(**kwargs: Any):
                             )
                         # Unlike the simple kernel, the frozen vertical source has no
                         # standalone __syncwarp between max reduction and broadcast.
-                        txl.assign(new_state_max, _simple._shfl_idx_f32(new_state_max, txl.int32(0)))
+                        txl.assign(
+                            new_state_max, _simple._shfl_idx_f32(new_state_max, txl.int32(0))
+                        )
                         encode_scale = txl.local_scalar("float32", init=1.0)
                         with txl.If(new_state_max != txl.float32(0.0)), txl.Then():
                             txl.ptx["div.approx.ftz.f32"](
@@ -834,8 +847,8 @@ def get_kernel(**kwargs: Any):
             scale_head_offset: txl.int64 = state_batch * state_scale_stride_batch + txl.cast(
                 head * DIM, "int64"
             )
-            dst_scale_head_offset: txl.int64 = dst_state_batch * state_scale_stride_batch + txl.cast(
-                head * DIM, "int64"
+            dst_scale_head_offset: txl.int64 = (
+                dst_state_batch * state_scale_stride_batch + txl.cast(head * DIM, "int64")
             )
 
             txl.keep_alive(state.data)
