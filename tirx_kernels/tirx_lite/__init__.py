@@ -128,14 +128,14 @@ def reinterpret(dtype, value):
     return _T.reinterpret(value, ty=dtype)
 
 
-def ptr_byte_offset(data, byte_offset, dtype, *, ty=None, span=None):
+def ptr_byte_offset(data, byte_offset, dtype, *, ty=None, loc=tvm.ir.UNKNOWN_LOC):
     """Apply a byte offset and select the result dtype, preserving pointer scope."""
     if ty is None:
         element_type = tvm.ir.PrimType(dtype) if isinstance(dtype, str) else dtype
         data_type = getattr(data, "ty", None)
         scope = data_type.storage_scope if isinstance(data_type, tvm.ir.PointerType) else "global"
         ty = tvm.ir.PointerType(element_type, scope)
-    return _T.ptr_byte_offset(data, byte_offset, ty=ty, span=span)
+    return _T.ptr_byte_offset(data, byte_offset, ty=ty, loc=loc)
 
 
 def call_packed(*args):
@@ -267,7 +267,7 @@ class _StmtProxy:
             raise TypeError(f"{obj!r}: missing the trailing src-size operand.\n\n{_CP_ASYNC_HELP}")
         result = obj(*args, **kwargs)
         if isinstance(result, tvm.ir.Expr) and _current_session(required=False) is not None:
-            result = IRBuilder.current()._set_current_source_span(result)
+            result = IRBuilder.current()._set_current_loc(result)
         if _is_void_call(result):
             _T.evaluate(result)
             return None

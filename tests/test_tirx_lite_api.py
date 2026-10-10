@@ -636,7 +636,7 @@ def test_value_constructors_work_outside_kernel_trace():
     assert str(value.ty.dtype) == "uint64"
 
 
-def test_kernel_records_python_source_spans():
+def test_kernel_records_python_source_locations():
     import inspect
     import linecache
 
@@ -650,10 +650,10 @@ def test_kernel_records_python_source_spans():
         txl.ptx.st.global_.f32(out.ptr_to([1]), txl.float32(1))
         emit(out)
 
-    assert probe.func.span is not None
-    assert probe.func.span.source_name.name == inspect.getsourcefile(emit)
+    assert probe.func.loc is not None
+    assert probe.func.loc.source_name.name == inspect.getsourcefile(emit)
     assert "@txl.kernel" in linecache.getline(
-        probe.func.span.source_name.name, probe.func.span.line
+        probe.func.loc.source_name.name, probe.func.loc.start_line
     )
 
     stores = []
@@ -671,15 +671,15 @@ def test_kernel_records_python_source_spans():
     assert len(stores) == 2
     source_lines = []
     for store in stores:
-        assert store.span is not None
-        assert store.span.source_name.name == inspect.getsourcefile(emit)
-        assert store.value.span.same_as(store.span)
-        source_lines.append(linecache.getline(store.span.source_name.name, store.span.line))
+        assert store.loc is not None
+        assert store.loc.source_name.name == inspect.getsourcefile(emit)
+        assert store.value.loc.same_as(store.loc)
+        source_lines.append(linecache.getline(store.loc.source_name.name, store.loc.start_line))
     assert "out.ptr_to([1])" in source_lines[0]
     assert "out.ptr_to([0])" in source_lines[1]
 
 
-def test_kernel_source_span_tracer_is_restored_after_failure():
+def test_kernel_source_location_tracer_is_restored_after_failure():
     import sys
 
     import pytest

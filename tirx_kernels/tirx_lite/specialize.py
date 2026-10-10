@@ -354,7 +354,7 @@ class Specialize:
             """
             chained = None
             for stmt in reversed(run):
-                chained = tvm.ir.If(stmt.condition, stmt.then_case, chained, stmt.span)
+                chained = tvm.ir.If(stmt.condition, stmt.then_case, chained, stmt.loc)
             return chained
 
         def rewrite(seq):
@@ -382,7 +382,7 @@ class Specialize:
             new = rewrite(list(stmt.seq))
             if new is None:
                 return stmt
-            return new[0] if len(new) == 1 else tvm.ir.SeqStmt(new, stmt.span)
+            return new[0] if len(new) == 1 else tvm.ir.SeqStmt(new, stmt.loc)
 
         if structural_map is not None:
             body = structural_map(func.body, (tvm.ir.SeqStmt, postorder))

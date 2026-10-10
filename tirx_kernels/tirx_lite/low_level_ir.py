@@ -29,14 +29,14 @@ def _node_name(node: Any) -> str:
 
 
 def _span_text(node: Any) -> str | None:
-    span = getattr(node, "span", None)
-    if span is None:
+    span = getattr(node, "loc", None)
+    if span is None or isinstance(span, tvm.ir.UnknownLoc):
         return None
 
     source_name = getattr(span, "source_name", None)
     source = getattr(source_name, "name", None)
-    line = getattr(span, "line", None)
-    column = getattr(span, "column", None)
+    line = getattr(span, "start_line", None)
+    column = getattr(span, "start_column", None)
     end_line = getattr(span, "end_line", None)
     end_column = getattr(span, "end_column", None)
     if source is not None and line is not None and column is not None:

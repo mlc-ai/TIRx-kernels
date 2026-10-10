@@ -19,7 +19,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import tvm
-from tvm.ir import SourceName, Span
+from tvm.ir import SourceLoc, SourceName
 from tvm.script.ir_builder import IRBuilder
 from tvm.tirx.script import ir_builder as I
 
@@ -130,7 +130,7 @@ _TLS = threading.local()
 # tirx-lite traces Python directly instead of going through the TVMScript parser.
 # Keep the parser's source-location contract by recording the active user line
 # while the body is being traced.  Frames in tirx-lite itself, TVM, and Python's
-# runtime are implementation details; allowing them to update the active span
+# runtime are implementation details; allowing them to update the active loc
 # would make diagnostics point into the DSL rather than to the kernel source.
 _TXL_SOURCE_ROOT = Path(__file__).resolve().parent
 _TVM_SOURCE_ROOT = Path(tvm.__file__).resolve().parent
@@ -139,7 +139,7 @@ _PYTHON_SITE_ROOTS = tuple(
     {Path(sysconfig.get_paths()[key]).resolve() for key in ("purelib", "platlib")}
 )
 _SOURCE_NAME_CACHE = {}
-_SOURCE_SPAN_CACHE = {}
+_SOURCE_LOC_CACHE = {}
 
 
 @cache
@@ -162,31 +162,31 @@ def _is_user_source(filename: str) -> bool:
     return True
 
 
-def _source_span(filename: str, line: int) -> Span | None:
-    """Return the one-line span for a Python frame, if it is author code."""
+def _source_loc(filename: str, line: int) -> SourceLoc | None:
+    """Return the one-line loc for a Python frame, if it is author code."""
     if not _is_user_source(filename):
         return None
     key = (filename, line)
-    span = _SOURCE_SPAN_CACHE.get(key)
-    if span is not None:
-        return span
+    loc = _SOURCE_LOC_CACHE.get(key)
+    if loc is not None:
+        return loc
     source_name = _SOURCE_NAME_CACHE.setdefault(filename, SourceName(filename))
     source_line = linecache.getline(filename, line)
     end_column = max(2, len(source_line.rstrip("\r\n")) + 1)
-    span = Span(source_name, line, line, 1, end_column)
-    _SOURCE_SPAN_CACHE[key] = span
-    return span
+    loc = SourceLoc(source_name, line, 1, line, end_column)
+    _SOURCE_LOC_CACHE[key] = loc
+    return loc
 
 
-def _callable_span(func) -> Span | None:
-    """Return the definition-line span used for generated entry scaffolding."""
+def _callable_loc(func) -> SourceLoc | None:
+    """Return the definition-line loc used for generated entry scaffolding."""
     code = getattr(func, "__code__", None)
     if code is None:
         return None
-    return _source_span(code.co_filename, code.co_firstlineno)
+    return _source_loc(code.co_filename, code.co_firstlineno)
 
 
-class _SourceSpanTracer:
+class _SourceLocationTracer:
     """Attach the current Python source line to statements emitted by tirx-lite."""
 
     def __init__(self, builder):
@@ -194,8 +194,8 @@ class _SourceSpanTracer:
         self.previous_trace = None
         self.active_context = None
         self.active_frame = None
-        self.active_span = None
-        self.frame_spans = {}
+        self.active_loc = None
+        self.frame_locs = {}
 
     def __enter__(self):
         self.previous_trace = sys.gettrace()
@@ -205,32 +205,32 @@ class _SourceSpanTracer:
     def __exit__(self, ptype, value, trace):  # pylint: disable=unused-argument
         sys.settrace(self.previous_trace)
         self._restore(None)
-        self.frame_spans.clear()
+        self.frame_locs.clear()
 
-    def _set_active(self, frame, span):
-        if self.active_frame is frame and self.active_span is span:
+    def _set_active(self, frame, loc):
+        if self.active_frame is frame and self.active_loc is loc:
             return
         if self.active_context is not None:
             self.active_context.__exit__(None, None, None)
-        self.active_context = self.builder.with_source_span(span)
+        self.active_context = self.builder.with_loc(loc)
         self.active_context.__enter__()
         self.active_frame = frame
-        self.active_span = span
+        self.active_loc = loc
 
     def _restore(self, frame):
-        """Restore the nearest caller's span after a nested user helper returns."""
+        """Restore the nearest caller's loc after a nested user helper returns."""
         if self.active_context is not None:
             self.active_context.__exit__(None, None, None)
             self.active_context = None
         self.active_frame = None
-        self.active_span = None
+        self.active_loc = None
         while frame is not None:
-            span = self.frame_spans.get(frame)
-            if span is not None:
-                self.active_context = self.builder.with_source_span(span)
+            loc = self.frame_locs.get(frame)
+            if loc is not None:
+                self.active_context = self.builder.with_loc(loc)
                 self.active_context.__enter__()
                 self.active_frame = frame
-                self.active_span = span
+                self.active_loc = loc
                 return
             frame = frame.f_back
 
@@ -241,13 +241,13 @@ class _SourceSpanTracer:
                 return self._trace
             return None
         if event == "line":
-            span = _source_span(frame.f_code.co_filename, frame.f_lineno)
-            if span is not None:
-                self.frame_spans[frame] = span
-                self._set_active(frame, span)
+            loc = _source_loc(frame.f_code.co_filename, frame.f_lineno)
+            if loc is not None:
+                self.frame_locs[frame] = loc
+                self._set_active(frame, loc)
             return self._trace
-        if event == "return" and frame in self.frame_spans:
-            self.frame_spans.pop(frame, None)
+        if event == "return" and frame in self.frame_locs:
+            self.frame_locs.pop(frame, None)
             if self.active_frame is frame:
                 self._restore(frame.f_back)
         return self._trace
@@ -537,7 +537,7 @@ def kernel(*, allowed_func_calls: tuple[str, ...] = (), check_ir: bool = True, *
         params = {}
         previous_trace = getattr(_TLS, "trace", None)
         previous_session = getattr(_TLS, "session", None)
-        function_span = _callable_span(fn)
+        function_loc = _callable_loc(fn)
         try:
             _TLS.trace = None
             _TLS.session = None
@@ -562,7 +562,7 @@ def kernel(*, allowed_func_calls: tuple[str, ...] = (), check_ir: bool = True, *
                             args.append(value)
                     context = _TraceContext(fn.__name__, params, ib)
                     _TLS.trace = context
-                    with _SourceSpanTracer(ib):
+                    with _SourceLocationTracer(ib):
                         try:
                             fn(*args, **kwargs)
                         except BaseException:
@@ -577,8 +577,8 @@ def kernel(*, allowed_func_calls: tuple[str, ...] = (), check_ir: bool = True, *
         finally:
             _TLS.trace = previous_trace
             _TLS.session = previous_session
-        if function_span is not None:
-            func = func.with_body(func.body, span=function_span)
+        if function_loc is not None:
+            func = func.with_body(func.body, loc=function_loc)
         if session.specialize is not None:
             # Keep adjacent role guards mutually exclusive after tracing.
             func = session.specialize.chain_dispatch(func)
