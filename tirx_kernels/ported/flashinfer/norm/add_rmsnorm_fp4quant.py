@@ -789,7 +789,7 @@ def _validate(config: dict[str, Any]) -> None:
         raise ValueError("scale_format must be e4m3 or ue8m0")
 
 
-def get_kernel(**config: Any):
+def get_kernel(*, compile_config=None, **config: Any):
     """Return one source-faithful Add/RMSNorm/FP4 specialization."""
     _validate(config)
     input_dtype = str(config["input_dtype"])
@@ -1200,7 +1200,7 @@ def get_kernel(**config: Any):
         if enable_pdl:
             txl.ptx.griddepcontrol.launch_dependents()
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def flashinfer_add_rmsnorm_fp4quant(
         x: txl.gptr[input_dtype],
         residual: txl.gptr[input_dtype],
@@ -1224,6 +1224,7 @@ def get_kernel(**config: Any):
                 programmatic_stream_serialization=enable_pdl,
             ),
             kernel_attrs=txl.cuda.KernelAttributes(required_block_size=True),
+            compile_config=compile_config,
         )
 
         kernel_body(
@@ -1428,6 +1429,8 @@ def _compiled_test_specialization(
     output_both_sf_layouts: bool,
     enable_pdl: bool,
     output_norm: bool,
+    *,
+    compile_config=None,
 ):
     from tirx_kernels.runner import compile_kernel
 
@@ -1449,7 +1452,9 @@ def _compiled_test_specialization(
             global_scale_mode="none",
             allocation="preallocated",
             data_mode="random",
-        )
+            compile_config=compile_config,
+        ),
+        compile_config=compile_config,
     )
 
 
@@ -1710,7 +1715,7 @@ def _check_public_allocation(reference, reference_data, config: dict[str, Any]) 
         raise AssertionError("public residual update differs from direct source kernel")
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, compile_config=None, **config: Any) -> None:
     """Compile, launch, and validate one source-domain specialization."""
     import torch
 
@@ -1731,6 +1736,7 @@ def run_test(**config: Any) -> None:
         bool(config["output_both_sf_layouts"]),
         bool(config["enable_pdl"]),
         bool(config["output_norm"]),
+        compile_config=compile_config,
     )
     if _launch_tirx(executable, tirx_data, tirx_output, config) is not None:
         raise AssertionError("TIRx AddRMSNormFP4Quant ABI must return None")
@@ -1750,16 +1756,29 @@ def run_test(**config: Any) -> None:
     _check_public_allocation(source_output, source_data, config)
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, compile_config=None, **config: Any):
     """Compile the specialization before the bench suite assigns a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(config), "executable": compile_kernel(get_kernel(**config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(config),
+        "executable": compile_kernel(
+            get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
 def run_gpu(
-    prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs: Any
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **kwargs: Any,
 ):
     """Build and prevalidate independent TIRx and CuTeDSL launch closures."""
     import torch
@@ -1803,9 +1822,18 @@ def run_gpu(
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config: Any):
+def run_bench(
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **config: Any,
+):
     """Benchmark one specialization against the CuTeDSL kernel reference."""
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, compile_config=compile_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

@@ -15,11 +15,10 @@ token, ``min(d / 8, 1024)`` threads, 16-byte vectorized access, scalar
 remainder loop, and ``griddepcontrol`` PDL intrinsics.
 """
 
-import os
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
+from tirx_kernels.runner import bench, resolve_compile_config
 
 KERNEL_META = {
     "name": "act_and_mul",
@@ -100,14 +99,14 @@ def _unpack_hi(word, dtype):
     )
 
 
-def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
+def get_kernel(act: str, dtype: str, num_tokens: int, d: int, *, compile_config=None, **kwargs):
     """Return the TIRx specialization for one (act, dtype, num_tokens, d) config."""
     _validate(act, dtype, d)
     block_size = _block_size(d)
     n_vec = d // VEC_SIZE
     rem = d % (block_size * VEC_SIZE)
     rem_off = d - rem
-    thor_bf16 = dtype == "bfloat16" and os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a"
+    thor_bf16 = dtype == "bfloat16" and resolve_compile_config(compile_config).arch == "sm_110a"
     compact_vector_offset = thor_bf16 and num_tokens * (2 * d) < 2**32
 
     def vector_offset(token, idx, stride):
@@ -132,10 +131,11 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
             txl.ptx.mov.b32(dst[2 * pair], _unpack_lo(word, dtype))
             txl.ptx.mov.b32(dst[2 * pair + 1], _unpack_hi(word, dtype))
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def act_and_mul(input_global: txl.gptr[dtype, 2], out_global: txl.gptr[dtype, 2]):
         txl.device_entry(
-            launch=txl.cuda.LaunchConfig(grid=num_tokens, block=(block_size + 31) // 32 * 32)
+            launch=txl.cuda.LaunchConfig(grid=num_tokens, block=(block_size + 31) // 32 * 32),
+            compile_config=resolve_compile_config(compile_config),
         )
 
         token = txl.cta_id()
@@ -284,23 +284,30 @@ def prepare_data(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     return (input_data,)
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_test(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
+def run_test(act: str, dtype: str, num_tokens: int, d: int, *, compile_config=None, **kwargs):
     """Compile, launch, and validate one config against the flashinfer source."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
 
     (input_data,) = prepare_data(act=act, dtype=dtype, num_tokens=num_tokens, d=d)
-    kernel = get_kernel(act=act, dtype=dtype, num_tokens=num_tokens, d=d)
-    ex = compile_kernel(kernel)
+    kernel = get_kernel(
+        act=act, dtype=dtype, num_tokens=num_tokens, d=d, compile_config=compile_config
+    )
+    ex = compile_kernel(kernel, compile_config=compile_config)
     out_tirx = torch.empty((num_tokens, d), dtype=_torch_dtype(dtype), device="cuda")
     ex(input_data, out_tirx)
     torch.cuda.synchronize()
@@ -312,7 +319,17 @@ def run_test(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     torch.testing.assert_close(out_tirx, ref, rtol=1e-3, atol=1e-3)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **kwargs,
+):
     """Benchmark the TIRx port against the flashinfer source kernel."""
     config = dict(prepared["config"])
     act = config.pop("act")
@@ -359,10 +376,13 @@ def run_bench(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
+    compile_config=None,
     **kwargs,
 ):
     config = dict(kwargs)
-    prepared = prepare_bench(act=act, dtype=dtype, num_tokens=num_tokens, d=d, **config)
+    prepared = prepare_bench(
+        act=act, dtype=dtype, num_tokens=num_tokens, d=d, **config, compile_config=compile_config
+    )
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

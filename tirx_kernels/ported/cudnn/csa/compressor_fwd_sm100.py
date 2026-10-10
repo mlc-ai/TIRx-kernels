@@ -124,7 +124,7 @@ def _load4_bf16x2(score_words, value_words, start, score_pointer, value_pointer,
         txl.ptx.ld.global_.b32(value_words[start + index], txl.ptx.addr(value_pointer, byte_offset))
 
 
-def get_kernel(head_dim: int, coff: int, **kwargs):
+def get_kernel(head_dim: int, coff: int, *, compile_config=None, **kwargs):
     """Return the static ``(head_dim, coff)`` specialization."""
     _validate(head_dim, coff)
     vec = 2 if head_dim % 2 == 0 else 1
@@ -132,7 +132,7 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
     width = coff * head_dim
     win = 8 if coff == 2 else 4
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def compressor_fwd(
         kv: txl.gptr[txl.bf16],
         score: txl.gptr[txl.bf16],
@@ -144,7 +144,8 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
         n_seq: txl.i32,
     ):
         txl.device_entry(
-            launch=txl.cuda.LaunchConfig(grid=[nb_total, txl.ceildiv(ncol, 64), 1], block=2 * 32)
+            launch=txl.cuda.LaunchConfig(grid=[nb_total, txl.ceildiv(ncol, 64), 1], block=2 * 32),
+            compile_config=compile_config,
         )
 
         bb, block_y, _ = txl.cta_id()
@@ -522,16 +523,21 @@ def _kernel_config(config):
     return {key: value for key, value in config.items() if key != "label"}
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, compile_config=None, **config: Any):
     """Compile the static TIRx specialization before GPU assignment."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     config = _kernel_config(config)
-    state = {"config": config, "executable": compile_kernel(get_kernel(**config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": config,
+        "executable": compile_kernel(
+            get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_test(**config: Any):
+def run_test(*, compile_config=None, **config: Any):
     """Compare TIRx with the pinned source kernel on identical inputs."""
     import torch
 
@@ -542,7 +548,9 @@ def run_test(**config: Any):
     snapshots = {
         key: data[key].clone() for key in ("kv", "score", "ape", "cu_seqlens", "cu_seqlens_comp")
     }
-    executable = compile_kernel(get_kernel(**config))
+    executable = compile_kernel(
+        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+    )
     _launch(executable, data)
     _launch(executable, data, "repeat_out")
     source_launch = _source_launch(data)
@@ -556,7 +564,15 @@ def run_test(**config: Any):
 
 
 def run_gpu(
-    prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **kwargs: Any
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    compile_config=None,
+    **kwargs: Any,
 ):
     """Validate once, then expose only the two launch closures to bench_suite."""
     import torch
@@ -596,9 +612,18 @@ def run_gpu(
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config: Any):
+def run_bench(
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    compile_config=None,
+    **config: Any,
+):
     """Standalone wrapper over the bench-suite preparation and GPU stages."""
-    return prepare_bench(**config).run_gpu(
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

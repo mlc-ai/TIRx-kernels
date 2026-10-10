@@ -88,7 +88,7 @@ Q_IDX_MASK = (1 << SLOT_SHIFT) - 1
 # ---------------------------------------------------------------------------
 # Target entry.
 # ---------------------------------------------------------------------------
-@txl.kernel(arch="sm_100a")
+@txl.kernel()
 def _kernel(
     k2q_row_ptr: txl.gptr[txl.i32],
     k2q_q_indices: txl.gptr[txl.i32],
@@ -182,7 +182,7 @@ def _kernel(
             txl.assign(qi, qi + NUM_THREADS)
 
 
-def get_kernel(**config):
+def get_kernel(*, compile_config=None, **config):
     """Return the TIRx specialization of `SparseAttentionPrepareFwdSplitAtomicSm100`.
 
     Nothing about a config reaches the kernel as a compile-time constant: the
@@ -654,7 +654,7 @@ def assert_split_metadata(data: dict[str, Any], outputs: dict[str, Any]) -> None
             raise AssertionError(f"head {h}: slots are not a gapless permutation per (q_abs, head)")
 
 
-def run_test(**config):
+def run_test(*, compile_config=None, **config):
     """Compile, launch, and validate one config against MSA's own kernel."""
     import unittest
 
@@ -680,7 +680,9 @@ def run_test(**config):
     torch.cuda.synchronize()
     assert_split_metadata(data, reference_outputs)
 
-    executable = compile_kernel(get_kernel(**config))
+    executable = compile_kernel(
+        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+    )
     outputs = make_outputs(data)
     executable(*tirx_args(data, outputs))
     torch.cuda.synchronize()
@@ -693,13 +695,18 @@ def run_test(**config):
     )
 
 
-def prepare_bench(**config):
+def prepare_bench(*, compile_config=None, **config):
     """Compile the TIRx specialization without initializing CUDA."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     config.pop("label", None)
-    state = {"config": dict(config), "executable": compile_kernel(get_kernel(**config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(config),
+        "executable": compile_kernel(
+            get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +747,17 @@ def _rotating_split_counts(data: dict[str, Any]):
     return block, views, slots
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **config,
+):
     """Kernel-only comparison against MSA's compiled split-atomic launch."""
     from tirx_kernels.runner import bench
 
@@ -768,7 +785,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         reference_outputs = make_outputs(data)
         block, views, ref_slots = _rotating_split_counts(data)
         case = _reference_case(data, reference_outputs)
-        compiled = compiled_fwd_split_atomic(case)
+        compiled = compiled_fwd_split_atomic(case, compile_config=compile_config)
         step = [0]
 
         def reference_launch():
@@ -808,8 +825,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

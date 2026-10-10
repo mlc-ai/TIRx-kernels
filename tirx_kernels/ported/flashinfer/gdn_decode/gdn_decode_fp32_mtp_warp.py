@@ -9,14 +9,13 @@ Upstream source: flashinfer/gdn_kernels/gdn_decode_mtp.py.
 """
 
 import functools
-import os
 from typing import Any
 from unittest import SkipTest
 
 import torch
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import bench, resolve_compile_config
 
 KERNEL_META = {
     "name": "gdn_decode_fp32_mtp_warp",
@@ -528,8 +527,9 @@ def _make_gdn_decode_fp32_mtp_warp(
     ROWS_PER_GROUP,
     ITERS_PER_GROUP,
     PREFETCH_ROWS,
+    compile_config=None,
 ):
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def gdn_decode_fp32_mtp_warp(
         state: txl.gptr[txl.f32],
         intermediate: txl.gptr[txl.f32],
@@ -554,7 +554,8 @@ def _make_gdn_decode_fp32_mtp_warp(
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
                 grid=batch * NUM_V_HEADS * NUM_V_TILES, block=NUM_WARPS * 32
-            )
+            ),
+            compile_config=compile_config,
         )
 
         smem = txl.smem_pool()
@@ -1161,7 +1162,7 @@ def _pool_factor(config: dict[str, Any]) -> int:
     return factor
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, compile_config=None, **kwargs: Any):
     """Return the source-specialized TIRx PrimFunc."""
     config = dict(kwargs)
     _require_supported_config(config)
@@ -1225,6 +1226,7 @@ def get_kernel(**kwargs: Any):
         ROWS_PER_GROUP=tile_v // NUM_GROUPS,
         ITERS_PER_GROUP=(tile_v // NUM_GROUPS) // ilp_rows,
         PREFETCH_ROWS=0 if ilp_rows == 8 else ilp_rows,
+        compile_config=compile_config,
     )
 
 
@@ -1367,6 +1369,8 @@ def _compile_tirx(
     per_token_pool_scatter: bool,
     padded_pool: bool,
     packed_qkv: bool,
+    *,
+    compile_config=None,
 ):
     from tirx_kernels.runner import compile_kernel
 
@@ -1405,14 +1409,14 @@ def _compile_tirx(
         reg_level = 0
     elif seq_len == 8 and num_heads <= 4:
         reg_level = 4
-    if reg_level is None:
-        os.environ.pop("TVM_CUDA_PTXAS_REG_LEVEL", None)
-    else:
-        os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = str(reg_level)
-    return compile_kernel(get_kernel(**config))
+    if reg_level is not None:
+        compile_config = resolve_compile_config(compile_config, ptxas_reg_usage_level=reg_level)
+    return compile_kernel(
+        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+    )
 
 
-def _compile_tirx_for_config(config: dict[str, Any]):
+def _compile_tirx_for_config(config: dict[str, Any], *, compile_config=None):
     return _compile_tirx(
         int(config["batch"]) * int(config["num_v_heads"]),
         int(config["seq_len"]),
@@ -1429,11 +1433,12 @@ def _compile_tirx_for_config(config: dict[str, Any]):
         bool(config.get("per_token_pool_scatter", False)),
         bool(config.get("padded_pool", False)),
         bool(config.get("packed_qkv", False)),
+        compile_config=compile_config,
     )
 
 
-def _tirx_executable(case: dict[str, Any]):
-    return _compile_tirx_for_config(case["config"])
+def _tirx_executable(case: dict[str, Any], *, compile_config=None):
+    return _compile_tirx_for_config(case["config"], compile_config=compile_config)
 
 
 def _storage_span(tensor: torch.Tensor, elements: int) -> torch.Tensor:
@@ -1663,9 +1668,9 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     }
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, compile_config=None, **kwargs: Any) -> None:
     case = prepare_data(**kwargs)
-    executable = _tirx_executable(case)
+    executable = _tirx_executable(case, compile_config=compile_config)
     executable(*_tirx_args(case))
     torch.cuda.synchronize(case["tirx_state"].device)
     _run_reference(case)
@@ -1673,14 +1678,16 @@ def run_test(**kwargs: Any) -> None:
     _assert_case_close(case)
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Compile the selected FP32 MTP warp specialization before CUDA setup."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = dict(kwargs)
     _require_supported_config(config)
-    executable = _compile_tirx_for_config(config)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+    executable = _compile_tirx_for_config(config, compile_config=compile_config)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(kwargs), "executable": executable}, compile_config=compile_config
+    )
 
 
 def run_gpu(
@@ -1691,6 +1698,7 @@ def run_gpu(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
@@ -1730,9 +1738,10 @@ def run_bench(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    return prepare_bench(**kwargs).run_gpu(
+    return prepare_bench(**kwargs, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

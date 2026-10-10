@@ -9,13 +9,13 @@ Upstream source: include/flashinfer/mamba/kernel_selective_state_update_mtp_simp
 """
 
 import functools
-import os
 from typing import Any
 from unittest import SkipTest
 
 import torch
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import resolve_compile_config
 
 KERNEL_META = {
     "name": "selective_state_update_mtp_simple",
@@ -47,11 +47,11 @@ def _next_power_of_two(value: int) -> int:
     return 1 << (value - 1).bit_length()
 
 
-def _cvt_rs_f16x2_f32(dst, a, b, random_bits):
+def _cvt_rs_f16x2_f32(dst, a, b, random_bits, *, compile_config=None):
     """Use FlashInfer's integer stochastic-conversion fallback on Thor."""
-    from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV
+    from tirx_kernels.runner import resolve_compile_config
 
-    if os.environ.get(PREPARE_CUDA_ARCH_ENV, "sm_100a") != "sm_110a":
+    if resolve_compile_config(compile_config).arch != "sm_110a":
         txl.ptx.cvt.rs.f16x2.f32(dst, a, b, random_bits)
         return
 
@@ -486,7 +486,7 @@ def _specialization(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, compile_config=None, **kwargs: Any):
     """Build the K entry for one MTP simple specialization."""
     spec = _specialization(kwargs)
     schedule_heads_first = bool(kwargs.get("_schedule_heads_first", False))
@@ -527,9 +527,7 @@ def get_kernel(**kwargs: Any):
     UPDATE_STATE = spec["UPDATE_STATE"]
     WEIGHT_DTYPE = spec["WEIGHT_DTYPE"]
 
-    kernel_kwargs = {"arch": "sm_100a"}
-
-    @txl.kernel(**kernel_kwargs)
+    @txl.kernel()
     def selective_state_update_mtp_simple(
         state: txl.gptr[spec["STATE_DTYPE"]],
         state_scale: txl.gptr[txl.f32],
@@ -583,6 +581,7 @@ def get_kernel(**kwargs: Any):
                 block=128,
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm or None),
+            compile_config=resolve_compile_config(compile_config),
         )
 
         cta_x, cta_y, cta_z = txl.cta_id()
@@ -1293,6 +1292,7 @@ def get_kernel(**kwargs: Any):
                                                 txl.cuda.float2_y(state_pair),
                                                 txl.cuda.float2_x(state_pair),
                                                 random_words[pair_idx % 2],
+                                                compile_config=compile_config,
                                             )
                                             txl.ptx.mov.b32(store_words[pair_idx], (packed_f16))
                                         elif STATE_DTYPE == "bfloat16":
@@ -2003,19 +2003,26 @@ def _assert_case_close(case: dict[str, Any]) -> None:
             )
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, compile_config=None, **kwargs: Any) -> None:
     from tirx_kernels.runner import compile_kernel
 
     case = prepare_data(**kwargs)
-    executable = compile_kernel(get_kernel(**kwargs))
+    executable = compile_kernel(
+        get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+    )
     executable(*_tirx_args(case))
     torch.cuda.synchronize()
     _run_reference(case)
@@ -2031,6 +2038,7 @@ def run_gpu(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -2074,9 +2082,10 @@ def run_bench(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    return prepare_bench(**kwargs).run_gpu(
+    return prepare_bench(**kwargs, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

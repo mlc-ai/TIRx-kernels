@@ -32,8 +32,12 @@ CONFIGS : list[dict]
 
 Functions
 ---------
-get_kernel(**cfg) -> PrimFunc | IRModule | nested function collection
+get_kernel(*, compile_config=None, **cfg) -> PrimFunc | IRModule | nested function collection
     Return the pre-lowering TIRx function or functions for this kernel.
+    ``compile_config`` is an immutable ``tvm.backend.cuda.CompileConfig``.
+    Factories receive it explicitly; architecture-sensitive factories record
+    their selected architecture on the device entry. ``prepare_bench`` and
+    ``run_test`` accept and forward the same setting to compilation.
     Multi-kernel workloads may return an ``IRModule`` or a nested list,
     tuple, or mapping containing ``tvm.tirx.PrimFunc`` objects.
 
@@ -63,7 +67,7 @@ class KernelModule(Protocol):
     CONFIGS: list[dict[str, Any]]
 
     @staticmethod
-    def get_kernel(**kwargs: Any) -> Any: ...
+    def get_kernel(*, compile_config=None, **kwargs: Any) -> Any: ...
 
     @staticmethod
     def prepare_data(**kwargs: Any) -> dict[str, Any]: ...

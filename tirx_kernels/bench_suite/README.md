@@ -158,7 +158,7 @@ fails the pair; there is no retry. Artifacts are written under
   serializes GPU stages through its lease, so no interference detection or
   retry exists on the client. Per-request `lease_wait_ms` / `lease_held_ms`
   are recorded under each row's `remote` entry.
-- Compilation uses `TVM_CUDA_COMPILE_MODE=nvcc` (the nvrtc path initializes
+- Compilation receives `CompileConfig(arch=server.arch, compiler="nvcc")` explicitly (older NVRTC caching initializes
   the driver, which the `cpu_only` guard rejects).
 - The worker shim points triton's proton at the libcupti copy that kcoral's
   `cpu_only` guard already loaded (`TRITON_CUPTI_LIB_PATH`); two libcupti

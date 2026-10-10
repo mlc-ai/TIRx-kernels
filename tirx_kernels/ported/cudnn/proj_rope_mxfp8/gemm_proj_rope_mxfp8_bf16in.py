@@ -189,7 +189,7 @@ def _validate_config(tokens, k_dim, num_heads, w_out_in):
 
 
 @cache
-def _make_kernel(tokens, k_dim, num_heads, w_out_in):
+def _make_kernel(tokens, k_dim, num_heads, w_out_in, *, compile_config=None):
     _validate_config(tokens, k_dim, num_heads, w_out_in)
     num_clusters = min((tokens // _TILE_M) * num_heads, _MAX_ACTIVE_CLUSTERS)
     total_work = (tokens // _TILE_M) * num_heads
@@ -274,7 +274,10 @@ def _make_kernel(tokens, k_dim, num_heads, w_out_in):
                 "out_scales_col": out_scales_col,
             }
         )
-        txl.device_entry(launch=txl.cuda.LaunchConfig(block=14 * 32, grid=(1, 1, num_clusters)))
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(block=14 * 32, grid=(1, 1, num_clusters)),
+            compile_config=compile_config,
+        )
 
         del x, w
         a_map, b_map = host
@@ -714,11 +717,11 @@ def _make_kernel(tokens, k_dim, num_heads, w_out_in):
         "out_fp8_col": txl.gptr[txl.u8, (tokens * num_heads * _HEAD_DIM,)],
         "out_scales_col": txl.gptr[txl.u8, ((tokens // _BLOCK) * num_heads * _HEAD_DIM,)],
     }
-    return txl.kernel(arch="sm_100a")(kernel)
+    return txl.kernel()(kernel)
 
 
-def get_kernel(tokens, k_dim, num_heads, w_out_in):
-    return _make_kernel(tokens, k_dim, num_heads, w_out_in).func
+def get_kernel(tokens, k_dim, num_heads, w_out_in, *, compile_config=None):
+    return _make_kernel(tokens, k_dim, num_heads, w_out_in, compile_config=compile_config).func
 
 
 def prepare_data(tokens, k_dim, num_heads, w_out_in):
@@ -859,7 +862,7 @@ def _validate_outputs(data):
     return {"row_match": row_match, "col_match": col_match}
 
 
-def run_test(**config):
+def run_test(*, compile_config=None, **config):
     """Compare the pure-K port with the pinned cuDNN Frontend implementation."""
     import torch
 
@@ -867,7 +870,13 @@ def run_test(**config):
 
     kernel_config = _without_label(config)
     data = prepare_data(**kernel_config)
-    tirx_launch = _tirx_launch(compile_kernel(get_kernel(**kernel_config)), data)
+    tirx_launch = _tirx_launch(
+        compile_kernel(
+            get_kernel(**kernel_config, compile_config=compile_config),
+            compile_config=compile_config,
+        ),
+        data,
+    )
     source_launch = _compile_reference(data, kernel_config)
     tirx_launch()
     source_launch()
@@ -875,16 +884,32 @@ def run_test(**config):
     return _validate_outputs(data)
 
 
-def prepare_bench(**config):
+def prepare_bench(*, compile_config=None, **config):
     """Compile TIRx before entering the benchmark's GPU child."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     kernel_config = _without_label(config)
-    state = {"config": kernel_config, "executable": compile_kernel(get_kernel(**kernel_config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": kernel_config,
+        "executable": compile_kernel(
+            get_kernel(**kernel_config, compile_config=compile_config),
+            compile_config=compile_config,
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    compile_config=None,
+    **kwargs,
+):
     """Validate once, then time closures containing exactly one kernel launch."""
     from tirx_kernels.runner import bench, defer_gpu_interrupts, external_references_enabled
 
@@ -936,8 +961,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

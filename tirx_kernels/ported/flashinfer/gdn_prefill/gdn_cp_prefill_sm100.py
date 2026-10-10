@@ -1547,7 +1547,7 @@ _PREFILL_OPT_TMA_S2G_4D = (
 )
 
 
-def _make_t_precompute(spec):
+def _make_t_precompute(spec, *, compile_config=None):
     io_dtype = spec["IO_DTYPE"]
     cu_dtype = spec["CU_DTYPE"]
     num_sequences = spec["NUM_SEQUENCES"]
@@ -1556,7 +1556,7 @@ def _make_t_precompute(spec):
     max_t_blocks = spec["MAX_T_BLOCKS"]
     grid_x = state_heads * max_t_blocks
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def t_precompute(
         k: txl.gptr[io_dtype],
         beta: txl.gptr[txl.f32],
@@ -1567,6 +1567,7 @@ def _make_t_precompute(spec):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(grid_x, num_sequences), block=4 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=8),
+            compile_config=compile_config,
         )
 
         bx, seq_idx = txl.cta_id()
@@ -1802,7 +1803,7 @@ def _make_t_precompute(spec):
     return t_precompute
 
 
-def _make_fixup_simt(spec):
+def _make_fixup_simt(spec, *, compile_config=None):
     cu_dtype = spec["CU_DTYPE"]
     state_dtype = spec["STATE_DTYPE"]
     num_sequences = spec["NUM_SEQUENCES"]
@@ -1815,7 +1816,7 @@ def _make_fixup_simt(spec):
     use_state_indices = spec["USE_STATE_INDICES"]
     row_ctas = D_HEAD // rows_per_cta
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def fixup_simt(
         transfer: txl.gptr[txl.f32],
         local_state: txl.gptr[txl.f32],
@@ -1829,6 +1830,7 @@ def _make_fixup_simt(spec):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_sequences * state_heads * row_ctas, block=4 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
+            compile_config=compile_config,
         )
 
         roles = txl.specialize()
@@ -2007,7 +2009,7 @@ def _make_fixup_simt(spec):
     return fixup_simt
 
 
-def _make_fixup_utcmma(spec, rows, m_stages, compute_regs):
+def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, compile_config=None):
     cu_dtype = spec["CU_DTYPE"]
     state_dtype = spec["STATE_DTYPE"]
     num_sequences = spec["NUM_SEQUENCES"]
@@ -2018,7 +2020,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs):
     use_state_indices = spec["USE_STATE_INDICES"]
     row_ctas = D_HEAD // rows
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def fixup_utcmma(
         transfer: txl.gptr[txl.f32],
         local_state: txl.gptr[txl.f32],
@@ -2034,6 +2036,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_sequences * state_heads * row_ctas, block=8 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         roles = txl.specialize()
@@ -2273,7 +2276,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs):
     return fixup_utcmma
 
 
-def _make_mn_precompute(spec):
+def _make_mn_precompute(spec, *, compile_config=None):
     io_dtype = spec["IO_DTYPE"]
     cu_dtype = spec["CU_DTYPE"]
     num_sequences = spec["NUM_SEQUENCES"]
@@ -2284,7 +2287,7 @@ def _make_mn_precompute(spec):
     cp_chunk_len = spec["CP_CHUNK_LEN"]
     grid_x = state_heads * max_cp_chunks
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def mn_precompute(
         k: txl.gptr[io_dtype],
         v: txl.gptr[io_dtype],
@@ -2300,6 +2303,7 @@ def _make_mn_precompute(spec):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(grid_x, num_sequences), block=12 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         bx, seq_idx = txl.cta_id()
@@ -2798,7 +2802,7 @@ def _make_mn_precompute(spec):
     return mn_precompute
 
 
-def _make_prefill(spec):
+def _make_prefill(spec, *, compile_config=None):
     io_dtype = spec["IO_DTYPE"]
     cu_dtype = spec["CU_DTYPE"]
     num_sequences = spec["NUM_SEQUENCES"]
@@ -2861,7 +2865,7 @@ def _make_prefill(spec):
         txl.ptx.tensormap_replace.tile.global_dim.global_.b1024.b32(desc, 4, txl.uint32(1))
         txl.ptx.tensormap_replace.tile.global_stride.global_.b1024.b64(desc, 3, txl.uint64(0))
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def prefill(
         q: txl.gptr[io_dtype],
         k: txl.gptr[io_dtype],
@@ -2883,6 +2887,7 @@ def _make_prefill(spec):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(grid_x, num_sequences), block=12 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         bx, seq_idx = txl.cta_id()
@@ -4208,17 +4213,21 @@ def _specialization(cfg: GDNCPPrefillSM100Config, device: str = "cuda") -> dict[
     }
 
 
-def get_kernel(**kwargs: Any) -> dict[str, Any]:
+def get_kernel(*, compile_config=None, **kwargs: Any) -> dict[str, Any]:
     """Build the six K-owned device variants used by the four-launch chain."""
     cfg = _cfg(**kwargs)
     spec = _specialization(cfg, kwargs.get("device", "cuda"))
     return {
-        "t_precompute": _make_t_precompute(spec).func,
-        "mn_precompute": _make_mn_precompute(spec).func,
-        "fixup_simt_row4": _make_fixup_simt(spec).func,
-        "fixup_utcmma64": _make_fixup_utcmma(spec, rows=64, m_stages=2, compute_regs=120).func,
-        "fixup_utcmma128": _make_fixup_utcmma(spec, rows=128, m_stages=1, compute_regs=256).func,
-        "prefill": _make_prefill(spec).func,
+        "t_precompute": _make_t_precompute(spec, compile_config=compile_config).func,
+        "mn_precompute": _make_mn_precompute(spec, compile_config=compile_config).func,
+        "fixup_simt_row4": _make_fixup_simt(spec, compile_config=compile_config).func,
+        "fixup_utcmma64": _make_fixup_utcmma(
+            spec, rows=64, m_stages=2, compute_regs=120, compile_config=compile_config
+        ).func,
+        "fixup_utcmma128": _make_fixup_utcmma(
+            spec, rows=128, m_stages=1, compute_regs=256, compile_config=compile_config
+        ).func,
+        "prefill": _make_prefill(spec, compile_config=compile_config).func,
     }
 
 
@@ -4427,31 +4436,33 @@ def _run_oracle(
     )
 
 
-def _compile_selected(case: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+def _compile_selected(
+    case: dict[str, Any], *, compile_config=None, **kwargs: Any
+) -> dict[str, Any]:
     from tirx_kernels.runner import compile_kernel
 
-    kernels = get_kernel(**kwargs)
+    kernels = get_kernel(**kwargs, compile_config=compile_config)
     fixup_name = case["spec"]["FIXUP_KIND"]
     return {
-        "t_precompute": compile_kernel(kernels["t_precompute"]),
-        "mn_precompute": compile_kernel(kernels["mn_precompute"]),
-        fixup_name: compile_kernel(kernels[fixup_name]),
-        "prefill": compile_kernel(kernels["prefill"]),
+        "t_precompute": compile_kernel(kernels["t_precompute"], compile_config=compile_config),
+        "mn_precompute": compile_kernel(kernels["mn_precompute"], compile_config=compile_config),
+        fixup_name: compile_kernel(kernels[fixup_name], compile_config=compile_config),
+        "prefill": compile_kernel(kernels["prefill"], compile_config=compile_config),
     }
 
 
-def _compile_for_config(**kwargs: Any) -> dict[str, Any]:
+def _compile_for_config(*, compile_config=None, **kwargs: Any) -> dict[str, Any]:
     cfg = _cfg(**kwargs)
     spec = _specialization(cfg, kwargs.get("device", "cuda"))
-    kernels = get_kernel(**kwargs)
+    kernels = get_kernel(**kwargs, compile_config=compile_config)
     fixup_name = spec["FIXUP_KIND"]
     from tirx_kernels.runner import compile_kernel
 
     return {
-        "t_precompute": compile_kernel(kernels["t_precompute"]),
-        "mn_precompute": compile_kernel(kernels["mn_precompute"]),
-        fixup_name: compile_kernel(kernels[fixup_name]),
-        "prefill": compile_kernel(kernels["prefill"]),
+        "t_precompute": compile_kernel(kernels["t_precompute"], compile_config=compile_config),
+        "mn_precompute": compile_kernel(kernels["mn_precompute"], compile_config=compile_config),
+        fixup_name: compile_kernel(kernels[fixup_name], compile_config=compile_config),
+        "prefill": compile_kernel(kernels["prefill"], compile_config=compile_config),
     }
 
 
@@ -4464,10 +4475,10 @@ def _launch_chain(case: dict[str, Any], executable: dict[str, Any]) -> None:
     executable["prefill"](*args["prefill"])
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, compile_config=None, **kwargs: Any) -> None:
     """Compile and compare the full four-launch chain with frozen FlashInfer."""
     case = prepare_data(**kwargs)
-    executable = _compile_selected(case, **kwargs)
+    executable = _compile_selected(case, **kwargs, compile_config=compile_config)
     _launch_chain(case, executable)
     torch.cuda.synchronize()
 
@@ -4498,12 +4509,15 @@ def run_test(**kwargs: Any) -> None:
         torch.testing.assert_close(got_state, expected_state, atol=state_atol, rtol=state_rtol)
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Compile the selected four-launch chain before CUDA assignment."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": _compile_for_config(**kwargs)}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": _compile_for_config(**kwargs, compile_config=compile_config),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
 def run_gpu(
@@ -4514,6 +4528,7 @@ def run_gpu(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Benchmark the prepared four-launch chain against the source chain."""
@@ -4553,10 +4568,11 @@ def run_bench(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Prepare and benchmark the complete four-launch chain."""
-    return prepare_bench(**kwargs).run_gpu(
+    return prepare_bench(**kwargs, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

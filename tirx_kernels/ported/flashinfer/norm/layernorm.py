@@ -11,11 +11,10 @@ The source implementation is ``LayerNormKernel`` in
 ``flashinfer/norm/utils.py``.
 """
 
-import os
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
+from tirx_kernels.runner import bench, resolve_compile_config
 
 KERNEL_META = {
     "name": "flashinfer_layernorm",
@@ -39,8 +38,8 @@ _GUARD_ELEMENTS = 64
 _GUARD_VALUE = 123.0
 
 
-def _preparing_for_thor() -> bool:
-    return os.environ.get(PREPARE_CUDA_ARCH_ENV, "sm_100a") == "sm_110a"
+def _preparing_for_thor(*, compile_config=None) -> bool:
+    return resolve_compile_config(compile_config).arch == "sm_110a"
 
 
 def _ceil_div(lhs: int, rhs: int) -> int:
@@ -321,6 +320,8 @@ def get_kernel(
     output_layout: str,
     enable_pdl: bool,
     eps: float = _DEFAULT_EPS,
+    *,
+    compile_config=None,
     **kwargs: Any,
 ):
     """Return the source-faithful dynamic-Int64-stride specialization."""
@@ -335,7 +336,7 @@ def get_kernel(
     mixed_local_sum = bool(source["mixed_local_sum"])
     packed_pairs = _ceil_div(total_values, 2)
     pair_values = packed_pairs * 2
-    thor_vector_affine = _preparing_for_thor() and vec in (4, 8)
+    thor_vector_affine = _preparing_for_thor(compile_config=compile_config) and vec in (4, 8)
     full_affine_tile = int(source["cols"]) == H
 
     x_stride_hint = int(kwargs.get("x_row_stride", H if input_layout == "compact" else 2 * H))
@@ -347,7 +348,7 @@ def get_kernel(
             f"row strides must be divisible by vec={vec}: x={x_stride_hint}, y={y_stride_hint}"
         )
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def flashinfer_layernorm(
         out: txl.gptr[txl.bf16],
         x: txl.gptr[txl.bf16],
@@ -364,7 +365,8 @@ def get_kernel(
                 block=warps * 32,
                 dynamic_smem_bytes=smem_bytes,
                 programmatic_stream_serialization=enable_pdl,
-            )
+            ),
+            compile_config=resolve_compile_config(compile_config),
         )
 
         row_raw = txl.cta_id()
@@ -766,7 +768,7 @@ def _check_public_dispatch(data, eps: float) -> None:
         raise AssertionError("FlashInfer public LayerNorm returned an incompatible output")
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, compile_config=None, **config: Any) -> None:
     """Compile, launch, and validate one LayerNorm specialization."""
     import torch
 
@@ -780,7 +782,9 @@ def run_test(**config: Any) -> None:
     output = _prepare_output(M, H, data["y_row_stride"], initialize_padding=True)
     reference = _prepare_output(M, H, data["y_row_stride"], initialize_padding=True)
 
-    executable = compile_kernel(get_kernel(**config))
+    executable = compile_kernel(
+        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+    )
     _launch_tirx(executable, data, output, config)
     _, layernorm_cute = _flashinfer_cute(data["x"].device)
     returned = layernorm_cute(
@@ -805,16 +809,29 @@ def run_test(**config: Any) -> None:
     _assert_output_padding(reference, M, H, data["y_row_stride"], name="FlashInfer output")
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, compile_config=None, **config: Any):
     """Compile the selected TIRx specialization before GPU assignment."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(config), "executable": compile_kernel(get_kernel(**config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(config),
+        "executable": compile_kernel(
+            get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
 def run_gpu(
-    prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs: Any
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **kwargs: Any,
 ):
     """Construct and validate both timed closures before benchmarking."""
     import torch
@@ -888,9 +905,18 @@ def run_gpu(
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config: Any):
+def run_bench(
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **config: Any,
+):
     """Benchmark a TIRx specialization against FlashInfer CuTe-DSL."""
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, compile_config=compile_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

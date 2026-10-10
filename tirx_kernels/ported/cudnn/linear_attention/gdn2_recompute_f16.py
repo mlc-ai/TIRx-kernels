@@ -11,10 +11,8 @@ Upstream source:
 driven by ``chunk_gdn2_recompute_sm100``).
 """
 
-import os
-
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, hardware_num_sms
+from tirx_kernels.runner import hardware_num_sms, resolve_compile_config
 from tvm.ir.type import PointerType, PrimType
 
 KERNEL_META = {
@@ -646,11 +644,18 @@ def _tcgen_mma_ts(
 
 
 def _make_prologue(
-    *, run_order, order_generate, dynamic_scheduler, n_heads_out, checkpoints, cu_dtype
+    *,
+    run_order,
+    order_generate,
+    dynamic_scheduler,
+    n_heads_out,
+    checkpoints,
+    cu_dtype,
+    compile_config=None,
 ):
     cu_t = txl.i64 if cu_dtype == "int64" else txl.i32
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def prologue(
         base_k: txl.TensorMap,
         base_v: txl.TensorMap,
@@ -679,7 +684,10 @@ def _make_prologue(
         checkpoint_row_stride_bytes: txl.i32,
         checkpoint_every_n: txl.i32,
     ):
-        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32 * 32))
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=1, block=32 * 32),
+            compile_config=resolve_compile_config(compile_config),
+        )
 
         thread = txl.thread_id()
         warp = txl.warp_id()
@@ -899,6 +907,7 @@ def _make_main(
     v_ratio,
     n_heads_out,
     full_tiles,
+    compile_config=None,
 ):
     io_t = txl.f16 if io_dtype == "float16" else txl.bf16
     state_t = txl.bf16 if state_dtype == "bfloat16" else txl.f32
@@ -924,7 +933,7 @@ def _make_main(
     idesc_ts = 0x08040010 if io_dtype == "float16" else 0x08040490
     idesc_final = 0x08210010 if io_dtype == "float16" else 0x08210490
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def main(
         descriptor_workspace: txl.gptr[txl.i64],
         n_desc: txl.i32,
@@ -946,6 +955,7 @@ def _make_main(
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_sms, block=16 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=resolve_compile_config(compile_config),
         )
 
         arena = txl.alloc_tensor((arena_bytes,), txl.u8, scope="shared.dyn", align=1024)
@@ -2326,8 +2336,8 @@ def _make_main(
     return main
 
 
-def _default_num_sms(config) -> int:
-    if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+def _default_num_sms(config, *, compile_config=None) -> int:
+    if resolve_compile_config(compile_config).arch == "sm_110a":
         count = hardware_num_sms()
         if config.get("dynamic_scheduler", False):
             short_nostate = (
@@ -2341,7 +2351,7 @@ def _default_num_sms(config) -> int:
     return 148
 
 
-def _normalized_config(config):
+def _normalized_config(config, *, compile_config=None):
     config = {key: value for key, value in config.items() if key != "label"}
     config.setdefault("seq_lens", (64,))
     config["seq_lens"] = tuple(int(value) for value in config["seq_lens"])
@@ -2351,7 +2361,7 @@ def _normalized_config(config):
     config.setdefault("io_dtype", "bfloat16")
     config.setdefault("state_dtype", "float32")
     config.setdefault("cu_dtype", "int32")
-    config.setdefault("num_sms", _default_num_sms(config))
+    config.setdefault("num_sms", _default_num_sms(config, compile_config=compile_config))
     if "checkpoint_every_n_tokens" not in config:
         config["checkpoint_every_n_tokens"] = config.pop("checkpoint", 0)
     config.setdefault("gate_lower_bound", -5.0)
@@ -2418,9 +2428,9 @@ def _work_rows(seq_lens, heads, *, split):
     return rows
 
 
-def get_kernel(**config):
+def get_kernel(*, compile_config=None, **config):
     """Return the source-ordered prologue and persistent main kernels."""
-    config = _normalized_config(config)
+    config = _normalized_config(config, compile_config=compile_config)
     num_ctas = int(config["num_sms"])
     checkpoints = int(config["checkpoint_every_n_tokens"]) > 0
     prologue = _make_prologue(
@@ -2430,6 +2440,7 @@ def get_kernel(**config):
         n_heads_out=int(config["heads"]),
         checkpoints=checkpoints,
         cu_dtype=config["cu_dtype"],
+        compile_config=compile_config,
     )
     main = _make_main(
         num_sms=num_ctas,
@@ -2449,6 +2460,7 @@ def get_kernel(**config):
         v_ratio=int(config["heads"]) // int(config["v_heads"]),
         n_heads_out=int(config["heads"]),
         full_tiles=all(length % _BT == 0 for length in config["seq_lens"]),
+        compile_config=compile_config,
     )
     return [prologue.func, main.func]
 
@@ -2527,10 +2539,10 @@ def _new_outputs(torch, config):
     return result
 
 
-def _prepare_data(config):
+def _prepare_data(config, *, compile_config=None):
     import torch
 
-    config = _normalized_config(config)
+    config = _normalized_config(config, compile_config=compile_config)
     torch.manual_seed(20260902)
     total_tokens = sum(config["seq_lens"])
     io_t = torch.float16 if config["io_dtype"] == "float16" else torch.bfloat16
@@ -2591,9 +2603,9 @@ def _prepare_data(config):
     }
 
 
-def prepare_data(**config):
+def prepare_data(*, compile_config=None, **config):
     """Allocate one shared input set and independent source/TIRx outputs."""
-    return _prepare_data(config)
+    return _prepare_data(config, compile_config=compile_config)
 
 
 def _encode_tiled_map(tensor, dimensions, strides, box):
@@ -2847,15 +2859,18 @@ def _validate_outputs(data, *, sources):
         )
 
 
-def run_test(**config):
+def run_test(*, compile_config=None, **config):
     """Compare TIRx with the upstream kernel on identical inputs."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
 
-    config = _normalized_config(config)
-    data = _prepare_data(config)
-    executables = [compile_kernel(func) for func in get_kernel(**config)]
+    config = _normalized_config(config, compile_config=compile_config)
+    data = _prepare_data(config, compile_config=compile_config)
+    executables = [
+        compile_kernel(func, compile_config=compile_config)
+        for func in get_kernel(**config, compile_config=compile_config)
+    ]
     tirx_launch = _tirx_launch(executables, data)
     source_launch = _source_launch(data)
     tirx_launch()
@@ -2865,26 +2880,39 @@ def run_test(**config):
     return {"tokens": sum(config["seq_lens"]), "heads": config["heads"]}
 
 
-def prepare_bench(**config):
+def prepare_bench(*, compile_config=None, **config):
     """Compile the two TIRx launches without importing torch or touching CUDA."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    config = _normalized_config(config)
+    config = _normalized_config(config, compile_config=compile_config)
     state = {
         "config": config,
-        "executables": [compile_kernel(func) for func in get_kernel(**config)],
+        "executables": [
+            compile_kernel(func, compile_config=compile_config)
+            for func in get_kernel(**config, compile_config=compile_config)
+        ],
     }
-    return prepared_gpu_benchmark(run_gpu, state)
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    compile_config=None,
+    **kwargs,
+):
     """Validate once, then expose the exact two-launch paths to bench_suite."""
     import torch
 
     from tirx_kernels.runner import bench, external_references_enabled
 
-    config = _normalized_config({**prepared["config"], **kwargs})
-    data = _prepare_data(config)
+    config = _normalized_config({**prepared["config"], **kwargs}, compile_config=compile_config)
+    data = _prepare_data(config, compile_config=compile_config)
     tirx_launch = _tirx_launch(prepared["executables"], data)
     tirx_launch()
     torch.cuda.synchronize()
@@ -2906,8 +2934,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

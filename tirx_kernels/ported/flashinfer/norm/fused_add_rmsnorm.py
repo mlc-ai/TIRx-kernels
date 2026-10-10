@@ -350,6 +350,8 @@ def get_kernel(
     residual_layout: str,
     enable_pdl: bool,
     eps: float = _DEFAULT_EPS,
+    *,
+    compile_config=None,
     **kwargs: Any,
 ):
     """Return the compact or explicit-i64-strided runtime-M specialization."""
@@ -818,7 +820,7 @@ def get_kernel(
 
     if compact:
 
-        @txl.kernel(arch="sm_100a")
+        @txl.kernel()
         def flashinfer_fused_add_rmsnorm_compact(
             input_buffer: txl.gptr[dtype],
             residual: txl.gptr[dtype],
@@ -837,6 +839,7 @@ def get_kernel(
                     programmatic_stream_serialization=enable_pdl,
                 ),
                 kernel_attrs=txl.cuda.KernelAttributes(max_registers_per_thread=max_registers),
+                compile_config=compile_config,
             )
 
             kernel_body(
@@ -846,7 +849,7 @@ def get_kernel(
         kernel = flashinfer_fused_add_rmsnorm_compact.func
     else:
 
-        @txl.kernel(arch="sm_100a")
+        @txl.kernel()
         def flashinfer_fused_add_rmsnorm_strided(
             input_buffer: txl.gptr[dtype],
             residual: txl.gptr[dtype],
@@ -867,6 +870,7 @@ def get_kernel(
                     programmatic_stream_serialization=enable_pdl,
                 ),
                 kernel_attrs=txl.cuda.KernelAttributes(max_registers_per_thread=max_registers),
+                compile_config=compile_config,
             )
 
             kernel_body(
@@ -1081,7 +1085,7 @@ def _launch_tirx(executable, data: dict[str, Any], config: dict[str, Any]) -> No
         )
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, compile_config=None, **config: Any) -> None:
     """Compile, launch, and validate both in-place outputs for one config."""
     import torch
 
@@ -1100,7 +1104,9 @@ def run_test(**config: Any) -> None:
     use_cute_reference = not _uses_rolled_fragment_loops(H)
     reference = _prepare_tensors(config) if use_cute_reference else None
     snapshot = _input_snapshot(data, M, H)
-    executable = compile_kernel(get_kernel(**config))
+    executable = compile_kernel(
+        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+    )
     _launch_tirx(executable, data, config)
 
     if reference is not None:
@@ -1157,16 +1163,29 @@ def run_test(**config: Any) -> None:
         _assert_padding(reference, M, H, prefix="FlashInfer")
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, compile_config=None, **config: Any):
     """Compile the selected specialization before GPU assignment."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(config), "executable": compile_kernel(get_kernel(**config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(config),
+        "executable": compile_kernel(
+            get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
 def run_gpu(
-    prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs: Any
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **kwargs: Any,
 ):
     """Construct and validate independent mutable timed closures."""
     import torch
@@ -1219,9 +1238,18 @@ def run_gpu(
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config: Any):
+def run_bench(
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **config: Any,
+):
     """Benchmark the TIRx specialization against FlashInfer CuTe-DSL."""
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, compile_config=compile_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

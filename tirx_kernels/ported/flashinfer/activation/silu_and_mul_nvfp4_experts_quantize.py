@@ -178,7 +178,16 @@ def _unpack_hi_f32(word, dtype):
     )
 
 
-def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand", **kwargs):
+def get_kernel(
+    dtype: str,
+    n_experts: int,
+    m: int,
+    k: int,
+    mask_mode: str = "rand",
+    *,
+    compile_config=None,
+    **kwargs,
+):
     """Return the TIRx specialization for one (dtype, n_experts, m, k) config."""
     _validate(dtype, n_experts, m, k)
     if mask_mode not in _MASK_MODES:
@@ -188,7 +197,7 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
     hmax2 = _hmax2(dtype)
     hmax = _hmax(dtype)
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def silu_and_mul_nvfp4_experts_quantize(
         input_global: txl.gptr[dtype],
         sf_scale: txl.gptr[txl.f32],
@@ -203,6 +212,7 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=4),
+            compile_config=compile_config,
         )
 
         bx = txl.cta_id()
@@ -484,15 +494,29 @@ def _run_launch(ex, a, global_scale, out, sf, mask, n_experts, m, k):
     )
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_test(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand", **kwargs):
+def run_test(
+    dtype: str,
+    n_experts: int,
+    m: int,
+    k: int,
+    mask_mode: str = "rand",
+    *,
+    compile_config=None,
+    **kwargs,
+):
     """Compile, launch, and validate one config against the flashinfer source."""
     import torch
 
@@ -501,8 +525,15 @@ def run_test(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand"
     a, mask, global_scale = prepare_data(
         dtype=dtype, n_experts=n_experts, m=m, k=k, mask_mode=mask_mode
     )
-    kernel = get_kernel(dtype=dtype, n_experts=n_experts, m=m, k=k, mask_mode=mask_mode)
-    ex = compile_kernel(kernel)
+    kernel = get_kernel(
+        dtype=dtype,
+        n_experts=n_experts,
+        m=m,
+        k=k,
+        mask_mode=mask_mode,
+        compile_config=compile_config,
+    )
+    ex = compile_kernel(kernel, compile_config=compile_config)
     out_tirx, sf_tirx = _alloc_outputs(dtype, n_experts, m, k)
     _run_launch(ex, a, global_scale, out_tirx, sf_tirx, mask, n_experts, m, k)
     torch.cuda.synchronize()
@@ -526,7 +557,17 @@ def run_test(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand"
     torch.testing.assert_close(sf_tirx_u8[valid], ref_sf_u8[valid], rtol=0, atol=0)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **kwargs,
+):
     """Benchmark the TIRx port against the source thop (kernel-only)."""
     config = dict(prepared["config"])
     dtype = config.pop("dtype")
@@ -584,11 +625,18 @@ def run_bench(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
+    compile_config=None,
     **kwargs,
 ):
     config = dict(kwargs)
     prepared = prepare_bench(
-        dtype=dtype, n_experts=n_experts, m=m, k=k, mask_mode=mask_mode, **config
+        dtype=dtype,
+        n_experts=n_experts,
+        m=m,
+        k=k,
+        mask_mode=mask_mode,
+        **config,
+        compile_config=compile_config,
     )
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s

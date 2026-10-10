@@ -389,6 +389,8 @@ def _make_kernel(
     c_major,
     mma_tiler_mn,
     cluster_shape_mn,
+    *,
+    compile_config=None,
 ):
     if ab_dtype == "uint8" or c_dtype == "uint8":
         raise ValueError("the non-running public uint8 packed-FP4 alias is not supported")
@@ -651,6 +653,7 @@ def _make_kernel(
                 preferred_cluster=[cluster_m, cluster_n],
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         del a, b, sfa, sfb, c
@@ -1640,7 +1643,7 @@ def _make_kernel(
         "c": txl.gptr[txl.u8, (M * N * L * c_bits // 8,)],
         "amax": txl.gptr[txl.f32, (1,)],
     }
-    return txl.kernel(arch="sm_100a")(kernel)
+    return txl.kernel()(kernel)
 
 
 def get_kernel(
@@ -1657,6 +1660,8 @@ def get_kernel(
     c_major,
     mma_tiler_mn,
     cluster_shape_mn,
+    *,
+    compile_config=None,
 ):
     return _make_kernel(
         M,
@@ -1672,6 +1677,7 @@ def get_kernel(
         c_major,
         mma_tiler_mn,
         cluster_shape_mn,
+        compile_config=compile_config,
     ).func
 
 
@@ -1931,7 +1937,7 @@ def _validate_outputs(data, config, *, with_source):
     )
 
 
-def run_test(**config):
+def run_test(*, compile_config=None, **config):
     """Compare TIRx with the pinned source kernel on identical inputs."""
     import torch
 
@@ -1939,7 +1945,13 @@ def run_test(**config):
 
     kernel_config = _without_label(config)
     data = prepare_data(**kernel_config)
-    tirx_launch = _tirx_launch(compile_kernel(get_kernel(**kernel_config)), data)
+    tirx_launch = _tirx_launch(
+        compile_kernel(
+            get_kernel(**kernel_config, compile_config=compile_config),
+            compile_config=compile_config,
+        ),
+        data,
+    )
     source_launch = _compile_reference(data, kernel_config)
     tirx_launch()
     source_launch()
@@ -1948,16 +1960,32 @@ def run_test(**config):
     return {"max_abs": float(data["source_amax"].abs().amax().item())}
 
 
-def prepare_bench(**config):
+def prepare_bench(*, compile_config=None, **config):
     """Compile only TIRx; reference imports and CUDA work stay in ``run_gpu``."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     kernel_config = _without_label(config)
-    state = {"config": kernel_config, "executable": compile_kernel(get_kernel(**kernel_config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": kernel_config,
+        "executable": compile_kernel(
+            get_kernel(**kernel_config, compile_config=compile_config),
+            compile_config=compile_config,
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    compile_config=None,
+    **kwargs,
+):
     """Validate once, then time pure launches with the canonical timer."""
     import torch
 
@@ -1988,8 +2016,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

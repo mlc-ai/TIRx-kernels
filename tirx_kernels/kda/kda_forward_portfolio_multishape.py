@@ -25,6 +25,7 @@ import tvm_ffi
 
 import tirx_kernels.tirx_lite as txl
 import tvm
+from tirx_kernels.runner import cuda_target, resolve_compile_config
 from tvm.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
 
 from ._kda_forward_schedule import packed_schedule
@@ -93,6 +94,8 @@ def build_kernel(
     intra_unroll=False,
     bf16_handoff=False,
     max_items=MAX_ITEMS,
+    *,
+    compile_config=None,
 ):
     """Persistent CTAs, each walking its host-built item list (see _host_item_table).
 
@@ -123,6 +126,7 @@ def build_kernel(
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(block=NWARPS * 32, grid=num_ctas),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         cta = txl.cta_id()
@@ -1881,7 +1885,7 @@ def build_kernel(
         "num_ctas": txl.i32,
         "scale": txl.f32,
     }
-    return txl.kernel(arch="sm_100a")(kda_fwd)
+    return txl.kernel()(kda_fwd)
 
 
 class _TensorMap:
@@ -1956,19 +1960,30 @@ def _encode_beta_map(tensor, T, H):
 _KERNELS = {}
 
 
-def _get_kernel(H, intra_unroll, bf16_handoff, force_lpt, max_items=MAX_ITEMS):
+def _get_kernel(
+    H, intra_unroll, bf16_handoff, force_lpt, max_items=MAX_ITEMS, *, compile_config=None
+):
+    cache_config = resolve_compile_config(compile_config)
     key = (H, intra_unroll, bf16_handoff, force_lpt, max_items)
-    if key not in _KERNELS:
+    if (cache_config, key) not in _KERNELS:
         kernel = build_kernel(
-            H, intra_unroll=intra_unroll, bf16_handoff=bf16_handoff, max_items=max_items
+            H,
+            intra_unroll=intra_unroll,
+            bf16_handoff=bf16_handoff,
+            max_items=max_items,
+            compile_config=compile_config,
         )
-        target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+        target = tvm.target.Target(
+            {"kind": "cuda", "arch": resolve_compile_config(compile_config).arch}
+        )
         with target:
-            _KERNELS[key] = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
-    return _KERNELS[key]
+            _KERNELS[(cache_config, key)] = tvm.compile(
+                kernel.mod, target=target, tir_pipeline="tirx", compile_config=compile_config
+            )
+    return _KERNELS[(cache_config, key)]
 
 
-def fused_setup(data, B, T, H):
+def fused_setup(data, B, T, H, *, compile_config=None):
     q, k, v, g, beta = data["q"], data["k"], data["v"], data["g"], data["beta"]
     A_log, dt_bias, scale = data["A_log"], data["dt_bias"], float(data["scale"])
     h0, out, final_state = data["initial_state"], data["output"], data["final_state"]
@@ -2004,7 +2019,9 @@ def fused_setup(data, B, T, H):
     item_counts = torch.tensor(plan.counts, dtype=torch.int32, device=q.device)
 
     intra_unroll = H == 64 and nseq == 1
-    ex = _get_kernel(H, intra_unroll, bf16_handoff, force_lpt, max_items)
+    ex = _get_kernel(
+        H, intra_unroll, bf16_handoff, force_lpt, max_items, compile_config=compile_config
+    )
     maps = (
         [_encode_map(t, T, H, rows=32, slabs=1) for t in (q, k)]
         + [_encode_map(t, T, H) for t in (v, g)]
@@ -2033,7 +2050,7 @@ def fused_setup(data, B, T, H):
         )
 
     run._keep = (maps, cu, hand, flags, items_g, item_counts)
-    run()
+    run(compile_config=compile_config)
     torch.cuda.synchronize()
     return run
 
@@ -2264,7 +2281,7 @@ def _tmem_preamble(s_tmem_addr, count):
     return tm
 
 
-def make_front(H: int):
+def make_front(H: int, *, compile_config=None):
     """Front-end kernel for a fixed head count: item it = c*H + h.  All per-item outputs are written
     straight to global memory with coalesced generic stores (row-major tiles, read back by K2 with TMA).
 
@@ -2273,7 +2290,7 @@ def make_front(H: int):
     so that every L row / Aqk row lands in ONE TMEM lane (Layout F); the norms are folded into
     T1' = diag(kn) T diag(b) and T2' = T1' diag(kn); one warp per item inverts (four solvers)."""
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def kda_front(
         q: txl.gptr[txl.bf16],
         k: txl.gptr[txl.bf16],
@@ -2300,6 +2317,7 @@ def make_front(H: int):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_ctas, block=20 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         for buf in (q, k, g):
@@ -3207,13 +3225,13 @@ BAR_TMEM_N2 = 704
 TX2 = 4 * TILE_BYTES + 2 * SMALL_BYTES + VEC_F32 * 4
 
 
-def make_chain(H: int, hpc: int = 2):
+def make_chain(H: int, hpc: int = 2, *, compile_config=None):
     """Recurrence kernel: grid = H/hpc, one persistent CTA per group of hpc heads (hpc = 2: the two heads' chains
     are interleaved so that one chain's latency hides behind the other's work, freeing SMs for the concurrent
     front end; hpc = 1: one head per CTA, for head counts that leave the front end enough SMs anyway)."""
     assert H % hpc == 0 and hpc in (1, 2)
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def kda_chain(
         v: txl.gptr[txl.bf16],
         state_in: txl.gptr[txl.f32],
@@ -3241,6 +3259,7 @@ def make_chain(H: int, hpc: int = 2):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=H // hpc, block=24 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         for buf in (v, out, kbar_g, qt_g, t1_g, aqk_g, w1_g):
@@ -3781,24 +3800,35 @@ def _encode_tile(tensor, rows, cols, NI):
 _COMPILED = {}
 
 
-def _compile(H, hpc):
-    exes = _COMPILED.get((H, hpc))
+def _compile(H, hpc, *, compile_config=None):
+    cache_config = resolve_compile_config(compile_config)
+    exes = _COMPILED.get((cache_config, (H, hpc)))
     if exes is None:
-        k1 = make_front(H)
-        with k1.target():
-            exe1 = tvm.compile(k1.mod, target=k1.target(), tir_pipeline="tirx")
-        k2 = make_chain(H, hpc)
-        with k2.target():
-            exe2 = tvm.compile(k2.mod, target=k2.target(), tir_pipeline="tirx")
+        k1 = make_front(H, compile_config=compile_config)
+        with cuda_target(compile_config=compile_config):
+            exe1 = tvm.compile(
+                k1.mod,
+                target=cuda_target(compile_config=compile_config),
+                tir_pipeline="tirx",
+                compile_config=compile_config,
+            )
+        k2 = make_chain(H, hpc, compile_config=compile_config)
+        with cuda_target(compile_config=compile_config):
+            exe2 = tvm.compile(
+                k2.mod,
+                target=cuda_target(compile_config=compile_config),
+                tir_pipeline="tirx",
+                compile_config=compile_config,
+            )
         exes = (exe1, exe2)
-        _COMPILED[(H, hpc)] = exes
+        _COMPILED[(cache_config, (H, hpc))] = exes
     return exes
 
 
 CONCURRENT = os.environ.get("KDA_CONCURRENT", "1") == "1"
 
 
-def _split_setup(data, B, T, H):
+def _split_setup(data, B, T, H, *, compile_config=None):
     assert B == 1 and data["cu_seqlens"] is None, "fixed single-sequence case only"
     assert T % C == 0 and H % 2 == 0
     q, k, v, g, beta = data["q"], data["k"], data["v"], data["g"], data["beta"]
@@ -3815,7 +3845,7 @@ def _split_setup(data, B, T, H):
         or os.environ.get("KDA_HPC") == "1"
         else 2
     )
-    exe1, exe2 = _compile(H, hpc)
+    exe1, exe2 = _compile(H, hpc, compile_config=compile_config)
     NC = T // C
     NI = NC * H
     a_log = data["A_log"].contiguous().float()
@@ -3963,11 +3993,11 @@ def _split_setup(data, B, T, H):
     return run
 
 
-def setup(data, B, T, H):
+def setup(data, B, T, H, *, compile_config=None):
     cu = data.get("cu_seqlens")
     if cu is None and T % 32 == 0 and H % 2 == 0 and os.environ.get("KDA_NO_SPLIT") is None:
-        return _split_setup(data, B, T, H)
-    return fused_setup(data, B, T, H)
+        return _split_setup(data, B, T, H, compile_config=compile_config)
+    return fused_setup(data, B, T, H, compile_config=compile_config)
 
 
 # ---------------------------------------------------------------------------
@@ -4078,7 +4108,7 @@ def _cfg(**kwargs: Any) -> KDAForwardPortfolioConfig:
     return cfg
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, compile_config=None, **kwargs: Any):
     """The pre-lowering TIRx functions this configuration dispatches to.
 
     A fixed single-sequence config runs the split front end, which is two
@@ -4094,8 +4124,8 @@ def get_kernel(**kwargs: Any):
         if hpc == "auto":
             hpc = 1 if cfg.num_heads == 64 else 2
         return {
-            "kda_front": make_front(cfg.num_heads).func,
-            "kda_chain": make_chain(cfg.num_heads, int(hpc)).func,
+            "kda_front": make_front(cfg.num_heads, compile_config=compile_config).func,
+            "kda_chain": make_chain(cfg.num_heads, int(hpc), compile_config=compile_config).func,
         }
     from tirx_kernels.runner import hardware_num_sms
 
@@ -4111,6 +4141,7 @@ def get_kernel(**kwargs: Any):
         intra_unroll=cfg.num_heads == 64 and cfg.num_seqs == 1,
         bf16_handoff=cfg.num_heads == 64 and cfg.num_seqs in (6, 8),
         max_items=plan.max_items,
+        compile_config=compile_config,
     ).func
 
 
@@ -4169,7 +4200,9 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     return case
 
 
-def run(q, k, v, g, beta, A_log, dt_bias, scale, initial_state, cu_seqlens=None):
+def run(
+    q, k, v, g, beta, A_log, dt_bias, scale, initial_state, cu_seqlens=None, *, compile_config=None
+):
     """Both scored outputs: the bf16 output and the fp32 V-first final state."""
 
     data = {
@@ -4187,7 +4220,7 @@ def run(q, k, v, g, beta, A_log, dt_bias, scale, initial_state, cu_seqlens=None)
         "final_state": torch.empty_like(initial_state),
     }
     _, total_tokens, num_heads, _ = q.shape
-    setup(data, 1, total_tokens, num_heads)()
+    setup(data, 1, total_tokens, num_heads, compile_config=compile_config)()
     return data["output"], data["final_state"]
 
 
@@ -4232,10 +4265,10 @@ def _args(case, cfg):
     )
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, compile_config=None, **kwargs: Any) -> None:
     cfg = _cfg(**kwargs)
     case = prepare_data(**kwargs)
-    launch = setup(case, 1, cfg.total_tokens, cfg.num_heads)
+    launch = setup(case, 1, cfg.total_tokens, cfg.num_heads, compile_config=compile_config)
     launch()
     first_out, first_state = case["output"].clone(), case["final_state"].clone()
     case["output"].fill_(float("nan"))
@@ -4253,7 +4286,7 @@ def run_test(**kwargs: Any) -> None:
     if cfg.packed and cfg.seq_lens[1] > 1:
         # The same CUDA tensor can hold a new layout; a pointer-keyed cache is stale.
         case["cu_seqlens"][1] += 1
-        changed_out, changed_state = run(*_args(case, cfg))
+        changed_out, changed_state = run(*_args(case, cfg), compile_config=compile_config)
         # FLA caches chunk metadata by tensor identity. Give its oracle a fresh
         # tensor so it observes the changed boundaries too.
         reference_case = dict(case)
@@ -4282,7 +4315,7 @@ def _flashkda_builder(case, cfg):
     return prepare_flashkda_raw_reference(reference_case).launch
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     from itertools import accumulate
 
     from tirx_kernels.runner import hardware_num_sms, prepared_gpu_benchmark
@@ -4296,7 +4329,7 @@ def prepare_bench(**kwargs: Any):
             or os.environ.get("KDA_HPC") == "1"
             else 2
         )
-        _compile(cfg.num_heads, hpc)
+        _compile(cfg.num_heads, hpc, compile_config=compile_config)
     else:
         force_lpt = cfg.num_heads == 96 and cfg.num_seqs == 6
         plan = packed_schedule(
@@ -4311,12 +4344,13 @@ def prepare_bench(**kwargs: Any):
             cfg.num_heads == 64 and cfg.num_seqs in (6, 8),
             force_lpt,
             plan.max_items,
+            compile_config=compile_config,
         )
 
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs)})
+    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs)}, compile_config=compile_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs: Any):
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, compile_config=None, **kwargs: Any):
     """Time on the CUDA-event wall clock: the fixed route launches two kernels.
 
     The Proton timer reports the sum of every leaf kernel's GPU time, which
@@ -4334,7 +4368,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs: Any):
     config.update(kwargs)
     cfg = _cfg(**config)
     case = prepare_data(**config)
-    kernel_fn = setup(case, 1, cfg.total_tokens, cfg.num_heads)
+    kernel_fn = setup(case, 1, cfg.total_tokens, cfg.num_heads, compile_config=compile_config)
     return bench(
         {"tirx": kernel_fn},
         references={"flash_kda": lambda: _flashkda_builder(case, cfg)},
@@ -4346,8 +4380,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs: Any):
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, **kwargs: Any):
-    return run_gpu({"config": kwargs}, warmup=warmup, repeat=repeat, timer=timer)
+def run_bench(*, warmup=None, repeat=None, timer=None, compile_config=None, **kwargs: Any):
+    return run_gpu(
+        {"config": kwargs}, warmup=warmup, repeat=repeat, timer=timer, compile_config=compile_config
+    )
 
 
 __all__ = [

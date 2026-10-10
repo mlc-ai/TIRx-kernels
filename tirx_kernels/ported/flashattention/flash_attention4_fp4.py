@@ -32,6 +32,7 @@ import os
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import resolve_compile_config
 
 # ---------------------------------------------------------------------------------------------
 # Static specialization (orig: FlashAttentionForwardSm100.__init__ / _setup_attributes)
@@ -277,7 +278,17 @@ def _l2_swizzle(seq_len_kv, head_dim, head_dim_v, element_size):
     return 1 << math.floor(math.log2(L2_SIZE // size_one_head))
 
 
-def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, num_sms):
+def make_kernel(
+    spec: Spec,
+    batch_size,
+    seq_len_q,
+    seq_len_kv,
+    num_qo_heads,
+    num_kv_heads,
+    num_sms,
+    *,
+    compile_config=None,
+):
     """Trace the kernel for one specialization."""
     import inspect
 
@@ -1329,6 +1340,7 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(block=NUM_WARPS * 32, grid=grid),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         values = dict(zip(names, args, strict=True))
@@ -1350,7 +1362,7 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
             for n, a in params
         ]
     )
-    return txl.kernel(arch="sm_103a")(entry)
+    return txl.kernel()(entry)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1492,9 +1504,6 @@ _REG_LEVEL_TABLE: dict = {("nvfp4", "nvfp4", False, True): "3"}
 
 
 def _select_reg_level(qk_format, pv_format, is_causal, single_wave):
-    override = os.environ.get("FA4FP4_REG_LEVEL", "")
-    if override:
-        return override
     return _REG_LEVEL_TABLE.get((qk_format, pv_format, is_causal, single_wave), "10")
 
 
@@ -1515,6 +1524,8 @@ def get_kernel(
     num_kv_heads,
     head_dim,
     is_causal=False,
+    *,
+    compile_config=None,
     **kwargs,
 ):
     from tirx_kernels.runner import hardware_num_sms
@@ -1523,11 +1534,21 @@ def get_kernel(
     spec = Spec(qk_format, pv_format, head_dim, is_causal, num_qo_heads, num_kv_heads)
     num_sms = hardware_num_sms()
     num_tiles = batch_size * num_qo_heads * ceildiv(seq_len_q, Q_STAGE * BLK_M)
-    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = _select_reg_level(
-        qk_format, pv_format, is_causal, num_tiles <= num_sms
+    compile_config = resolve_compile_config(
+        compile_config,
+        ptxas_reg_usage_level=int(
+            _select_reg_level(qk_format, pv_format, is_causal, num_tiles <= num_sms)
+        ),
     )
     return make_kernel(
-        spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, num_sms
+        spec,
+        batch_size,
+        seq_len_q,
+        seq_len_kv,
+        num_qo_heads,
+        num_kv_heads,
+        num_sms,
+        compile_config=compile_config,
     ).func
 
 
@@ -2006,6 +2027,8 @@ def run_test(
     num_kv_heads,
     head_dim,
     is_causal=False,
+    *,
+    compile_config=None,
     **kwargs,
 ):
     """Compile, run, and verify against the upstream kernel on identical quantized bytes."""
@@ -2029,7 +2052,9 @@ def run_test(
         is_causal=is_causal,
     )
     data = prepare_data(**{k: v for k, v in config.items() if k != "is_causal"})
-    executable = compile_kernel(get_kernel(**config))
+    executable = compile_kernel(
+        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+    )
     launch = build_tirx_launch(executable, data, config)
     launch()
     torch.cuda.synchronize()
@@ -2086,16 +2111,18 @@ def run_test(
 # ---------------------------------------------------------------------------------------------
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU (CUDA stays uninitialized)."""
     from tirx_kernels.runner import compile_kernel, hardware_num_sms, prepared_gpu_benchmark
 
     state = {
         "config": dict(kwargs),
         "num_sms": hardware_num_sms(),
-        "executable": compile_kernel(get_kernel(**kwargs)),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+        ),
     }
-    return prepared_gpu_benchmark(run_gpu, state)
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
 def run_gpu(
@@ -2104,6 +2131,7 @@ def run_gpu(
     warmup=None,
     repeat=None,
     timer=None,  # None inherits proton: the CuTeDSL reference cannot be CUDA-graph captured.
+    compile_config=None,
     **kwargs,
 ):
     import torch
@@ -2127,7 +2155,9 @@ def run_gpu(
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, **kwargs):
+def run_bench(*, warmup=None, repeat=None, timer=None, compile_config=None, **kwargs):
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    return prepare_bench(**config).run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, **protocol
+    )

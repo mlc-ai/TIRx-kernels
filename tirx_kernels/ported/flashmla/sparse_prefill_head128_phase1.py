@@ -325,6 +325,8 @@ def make_kernel(
     have_attn_sink,
     have_topk_length,
     sm_scale_div_log2,
+    *,
+    compile_config=None,
 ):
     d_sq = d_qk - D_TQ
     num_sq_tiles = (d_qk - D_TQ) // 64
@@ -458,6 +460,7 @@ def make_kernel(
                 block=16 * 32, grid=2 * s_q, cluster=[2], preferred_cluster=[2]
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         (
@@ -1545,10 +1548,10 @@ def make_kernel(
         "max_logits": txl.gptr[txl.f32, (s_q, h_q)],
         "lse": txl.gptr[txl.f32, (s_q, h_q)],
     }
-    return txl.kernel(arch="sm_100a")(sparse_flashmla_prefill_head128_phase1_kernel)
+    return txl.kernel()(sparse_flashmla_prefill_head128_phase1_kernel)
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, compile_config=None, **kwargs: Any):
     cfg = _cfg(**kwargs)
     stride_kv_s_kv = int(kwargs.get("stride_kv_s_kv", cfg.d_qk * cfg.h_kv))
     stride_indices_s_q = int(kwargs.get("stride_indices_s_q", cfg.topk * cfg.h_kv))
@@ -1564,18 +1567,25 @@ def get_kernel(**kwargs: Any):
         "have_topk_length": cfg.have_topk_length,
         "sm_scale_div_log2": (1.0 / math.sqrt(cfg.d_qk)) * LOG_2_E,
     }
-    return make_kernel(**specialization).func.with_attr("global_symbol", KERNEL_META["name"])
+    return make_kernel(**specialization, compile_config=compile_config).func.with_attr(
+        "global_symbol", KERNEL_META["name"]
+    )
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, compile_config=None, **kwargs: Any) -> None:
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for sparse FlashMLA head128 phase1")
 
@@ -1585,8 +1595,8 @@ def run_test(**kwargs: Any) -> None:
     cfg: SparseFlashMLAPrefillHead128Config = case["config"]
     if not case["dispatch_reason"].startswith("regular:"):
         raise SkipTest(case["dispatch_reason"])
-    prim_func = get_kernel(**kwargs)
-    ex = compile_kernel(prim_func)
+    prim_func = get_kernel(**kwargs, compile_config=compile_config)
+    ex = compile_kernel(prim_func, compile_config=compile_config)
     ex(*_tirx_args(case))
     torch.cuda.synchronize()
     # Torch oracle retained by design: no library exposes phase-1's split
@@ -1605,6 +1615,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1650,11 +1661,16 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    compile_config=None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, compile_config=compile_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

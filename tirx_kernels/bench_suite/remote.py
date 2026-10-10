@@ -42,7 +42,6 @@ MAX_IN_FLIGHT_LIMIT = 32
 EXECUTION_MODE = "remote"
 PROCESS_MODEL = "kcoral_worker_per_request"
 PREPARE_MODES = ("cpu", "gpu")
-CUDA_COMPILE_MODE = "nvcc"
 TREE_ARCNAME = "tirx_kernels"
 # Paths relative to the package directory that never ship to the worker.
 TREE_EXCLUDES = (
@@ -390,14 +389,20 @@ def workload_spec(
     for key in ("warmup", "repeat", "timer"):
         if workload.get(key) is not None:
             bench[key] = workload[key]
+    from tvm.backend.cuda import CompileConfig
+
+    config = CompileConfig(
+        arch=cuda_arch, compiler="nvcc" if prepare_mode == "cpu" else None
+    ).overlay(CompileConfig(**workload.get("compile_config", {})))
+    if config.arch != cuda_arch:
+        raise ValueError("Remote CompileConfig.arch must match the assigned server architecture")
     return {
         "kernel": workload["kernel"],
         "config": workload["config"],
         "side": side,
-        "cuda_arch": cuda_arch,
+        "compile_config": config.to_dict(),
         "num_sms": int(num_sms),
         "references": bool(references_enabled),
-        "cuda_compile_mode": CUDA_COMPILE_MODE,
         "cupti_workaround": True,
         "prepare_mode": prepare_mode,
         "reference_deps_dir": reference_deps_dir,
@@ -662,7 +667,10 @@ def outcome_to_record(
         "transport_retries": submission.transport_retries,
         "wall_s": submission.wall_s,
         "prepare_mode": prepare_mode,
-        "cuda_compile_mode": CUDA_COMPILE_MODE,
+        "compile_config": {
+            "arch": profile.arch,
+            **({"compiler": "nvcc"} if prepare_mode == "cpu" else {}),
+        },
         "tree_sha256": tree_sha256,
         "before_tree_sha256": before_tree_sha256,
         "log": str(log_path) if log_path else None,
@@ -1012,7 +1020,10 @@ def pipeline_metadata(
             "is_default": rounds == DEFAULT_BENCH_ROUNDS and cooldown == DEFAULT_BENCH_COOLDOWN_S,
         },
         "prepare_mode": prepare_mode,
-        "cuda_compile_mode": CUDA_COMPILE_MODE,
+        "compile_config": {
+            "arch": profile.arch,
+            **({"compiler": "nvcc"} if prepare_mode == "cpu" else {}),
+        },
         "max_in_flight": max_in_flight,
         "request_timeout_s": request_timeout_s,
         "server": profile.summary(),

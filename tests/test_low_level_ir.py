@@ -12,7 +12,7 @@ from tvm.script import tirx as T
 
 
 def _build_kernel_with_buffer_access(scope: str, access: str):
-    @txl.kernel(arch="sm_100a", check_ir=True)
+    @txl.kernel(check_ir=True)
     def probe(global_buffer: txl.gptr("float32")):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -31,7 +31,7 @@ def _build_kernel_with_buffer_access(scope: str, access: str):
 
 
 def _kernel_with_func_call(callee: str):
-    @txl.kernel(arch="sm_100a", check_ir=False)
+    @txl.kernel(check_ir=False)
     def main():
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -74,7 +74,7 @@ def test_address_of_tensor_load_is_not_a_memory_read(scope):
 
 
 def test_address_of_still_checks_memory_reads_in_its_index():
-    @txl.kernel(arch="sm_100a", check_ir=False)
+    @txl.kernel(check_ir=False)
     def probe(indices: txl.gptr("int32"), values: txl.gptr("float32")):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -131,7 +131,7 @@ def test_only_exact_kernel_local_helpers_are_exempt():
 
 def test_setmaxnreg_requires_pinned_entry_allocation():
     def build(min_blocks_per_sm):
-        @txl.kernel(arch="sm_100a", check_ir=False)
+        @txl.kernel(check_ir=False)
         def probe():
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=1, block=4 * 32),
@@ -176,7 +176,8 @@ def test_correctness_runner_does_not_rebuild_an_already_checked_kernel():
             raise AssertionError("correctness runner rebuilt the kernel")
 
         @staticmethod
-        def run_test(**params):
+        def run_test(*, compile_config, **params):
+            assert compile_config.arch.startswith("sm_")
             assert params == {"value": 3}
 
     run_kernel_test("probe", {"label": "case", "value": 3}, registry={"probe": KernelModule})
@@ -224,7 +225,7 @@ def test_correctness_runner_does_not_hide_runtime_reference_errors(monkeypatch):
 
 
 def test_tirx_lite_smem_descriptor_uniformity_stays_in_low_level_contract():
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def probe():
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 

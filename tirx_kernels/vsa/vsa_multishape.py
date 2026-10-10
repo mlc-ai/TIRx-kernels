@@ -53,6 +53,7 @@ import torch
 
 import tirx_kernels.tirx_lite as txl
 import tvm
+from tirx_kernels.runner import resolve_compile_config
 
 D = 128
 TILE_ROWS = 128
@@ -92,9 +93,8 @@ ENTRY_MASK_SHIFT = 27
 PREP_MAX_TOPK = 2048
 
 
-def _arch():
-    major, minor = torch.cuda.get_device_capability()
-    return f"sm_{major}{minor}a"
+def _arch(*, compile_config=None):
+    return resolve_compile_config(compile_config).arch
 
 
 EMU_MODE = "none"
@@ -314,7 +314,13 @@ def apply_column_mask(score, len0, len1):
 
 
 def make_attention_kernel_blk128(
-    arch, static_grid=None, complete_pairs=False, sid_fifo=False, static_shape=None
+    arch,
+    static_grid=None,
+    complete_pairs=False,
+    sid_fifo=False,
+    static_shape=None,
+    *,
+    compile_config=None,
 ):
     """``static_grid`` pins the blockIdx extent for the pre-GPU checkers; production uses
     the ``num_ctas`` parameter as the grid."""
@@ -339,6 +345,7 @@ def make_attention_kernel_blk128(
                 grid=num_ctas if static_grid is None else int(static_grid), block=512
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=resolve_compile_config(compile_config),
         )
         if static_shape is None:
             task_count = num_tasks
@@ -1337,7 +1344,7 @@ def make_attention_kernel_blk128(
             )
 
         fn = vsa_attn_blk128
-    return txl.kernel(arch=arch)(fn)
+    return txl.kernel()(fn)
 
 
 WS_GROUP = 4
@@ -1363,6 +1370,8 @@ def make_attention_kernel_blk64(
     full_blocks=False,
     complete_groups=False,
     static_shape=None,
+    *,
+    compile_config=None,
 ):
     """One 64-row query block per task; each stage covers four 64-key KV blocks.
 
@@ -2367,6 +2376,7 @@ def make_attention_kernel_blk64(
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(block=16 * 32, grid=grid),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=resolve_compile_config(compile_config),
         )
 
         body(
@@ -2384,7 +2394,7 @@ def make_attention_kernel_blk64(
             scale_log2,
         )
 
-    return txl.kernel(arch=arch)(vsa_attn_blk64_ws)
+    return txl.kernel()(vsa_attn_blk64_ws)
 
 
 class _AlignedTensorMap:
@@ -2430,22 +2440,17 @@ EARLY_TMEM_RELEASE = _os.environ.get("VSA_EARLY_TMEM", "1") != "0"
 EARLY_ISSUE = _os.environ.get("VSA_EARLY_ISSUE", "1") != "0"
 
 
-def _compile(kernel, reg_level=None):
-    import os
-
-    previous = os.environ.get("TVM_CUDA_PTXAS_REG_LEVEL")
+def _compile(kernel, reg_level=None, *, compile_config=None):
+    pass
     if reg_level is not None:
-        os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = str(reg_level)
-    try:
-        target = tvm.target.Target({"kind": "cuda", "arch": kernel.arch})
-        with target:
-            return tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
-    finally:
-        if reg_level is not None:
-            if previous is None:
-                os.environ.pop("TVM_CUDA_PTXAS_REG_LEVEL", None)
-            else:
-                os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = previous
+        compile_config = resolve_compile_config(compile_config, ptxas_reg_usage_level=reg_level)
+    target = tvm.target.Target(
+        {"kind": "cuda", "arch": resolve_compile_config(compile_config).arch}
+    )
+    with target:
+        return tvm.compile(
+            kernel.mod, target=target, tir_pipeline="tirx", compile_config=compile_config
+        )
 
 
 def _get_executable(
@@ -2457,7 +2462,10 @@ def _get_executable(
     blk128_complete_pairs=False,
     blk128_sid_fifo=False,
     blk128_shape=None,
+    *,
+    compile_config=None,
 ):
+    cache_config = resolve_compile_config(compile_config)
     key = (
         (
             128,
@@ -2474,24 +2482,26 @@ def _get_executable(
             None if blk64_shape is None else tuple(blk64_shape),
         )
     )
-    if key not in _COMPILED:
-        arch = _arch()
+    if (cache_config, key) not in _COMPILED:
+        arch = _arch(compile_config=compile_config)
         level = PTXAS_REG_LEVEL.get(block_size)
         set_emu_mode(EMU_BY_BLOCK.get(block_size, "none"))
         try:
             if block_size == 128:
-                _COMPILED[key] = _compile(
+                _COMPILED[(cache_config, key)] = _compile(
                     make_attention_kernel_blk128(
                         arch,
                         static_grid=None if blk128_shape is None else blk128_shape[-1],
                         complete_pairs=blk128_complete_pairs,
                         sid_fifo=blk128_sid_fifo,
                         static_shape=blk128_shape,
+                        compile_config=compile_config,
                     ),
                     level,
+                    compile_config=compile_config,
                 )
             else:
-                _COMPILED[key] = _compile(
+                _COMPILED[(cache_config, key)] = _compile(
                     make_attention_kernel_blk64(
                         arch,
                         cross_alias=blk64_cross,
@@ -2499,12 +2509,14 @@ def _get_executable(
                         complete_groups=blk64_complete_groups,
                         static_grid=None if blk64_shape is None else blk64_shape[-1],
                         static_shape=blk64_shape,
+                        compile_config=compile_config,
                     ),
                     level,
+                    compile_config=compile_config,
                 )
         finally:
             set_emu_mode(EMU_MODE)
-    return _COMPILED[key]
+    return _COMPILED[(cache_config, key)]
 
 
 # ---------------------------------------------------------------------------
@@ -2613,7 +2625,7 @@ def _assert_supported_arch() -> None:
         )
 
 
-def get_kernel(**config: Any):
+def get_kernel(*, compile_config=None, **config: Any):
     """Return the traced tirx-lite PrimFunc this config dispatches to.
 
     The runtime path compiles through `_get_executable`, which pins a
@@ -2622,7 +2634,7 @@ def get_kernel(**config: Any):
     """
     resolved = _config(**config)
     state = _dispatch_shape(resolved, num_sms=hardware_sms())
-    arch = _arch()
+    arch = _arch(compile_config=compile_config)
     if int(resolved["block_size"]) == 128:
         kernel = make_attention_kernel_blk128(
             arch,
@@ -2630,6 +2642,7 @@ def get_kernel(**config: Any):
             complete_pairs=state["blk128_complete_pairs"],
             sid_fifo=state["blk128_sid_fifo"],
             static_shape=state["blk128_shape"],
+            compile_config=compile_config,
         )
     else:
         kernel = make_attention_kernel_blk64(
@@ -2639,6 +2652,7 @@ def get_kernel(**config: Any):
             complete_groups=state["blk64_complete_groups"],
             static_grid=None if state["blk64_shape"] is None else state["blk64_shape"][-1],
             static_shape=state["blk64_shape"],
+            compile_config=compile_config,
         )
     return kernel.func
 
@@ -2779,7 +2793,7 @@ def prepare_data(**config: Any) -> dict[str, Any]:
     }
 
 
-def _launch_state(case: dict[str, Any]):
+def _launch_state(case: dict[str, Any], *, compile_config=None):
     """Encode the tensor maps and bind the launch arguments for this shape."""
     resolved = case["config"]
     q, k, v, out = case["q"], case["k"], case["v"], case["output"]
@@ -2800,6 +2814,7 @@ def _launch_state(case: dict[str, Any]):
         state["blk128_complete_pairs"],
         state["blk128_sid_fifo"],
         state["blk128_shape"],
+        compile_config=compile_config,
     )
     q2k_flat = case["q2k_indices"].contiguous().view(-1)
     if q2k_flat.dtype != torch.int32:
@@ -2915,10 +2930,10 @@ def check_correctness(outputs: dict[str, Any], **config: Any) -> None:
         raise AssertionError(f"normalized RMS error ratio {rms_ratio:.6e} must be below 1e-2")
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, compile_config=None, **config: Any) -> None:
     _assert_supported_arch()
     case = prepare_data(**config)
-    run = _launch_state(case)
+    run = _launch_state(case, compile_config=compile_config)
     case["output"].fill_(float("nan"))
     run()
     torch.cuda.synchronize()
@@ -2997,11 +3012,11 @@ def _flashinfer_reference(case: dict[str, Any]):
     return replay
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, compile_config=None, **config: Any):
     """Resolve the dispatch before bench-suite assigns a GPU."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(config)})
+    return prepared_gpu_benchmark(run_gpu, {"config": dict(config)}, compile_config=compile_config)
 
 
 def run_gpu(
@@ -3010,6 +3025,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     _assert_supported_arch()
@@ -3020,7 +3036,7 @@ def run_gpu(
     rounds = config.pop("rounds", 5)
     cooldown_s = config.pop("cooldown_s", 1.0)
     case = prepare_data(**config)
-    run = _launch_state(case)
+    run = _launch_state(case, compile_config=compile_config)
     run()
     torch.cuda.synchronize()
 
@@ -3036,11 +3052,16 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **config: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    compile_config=None,
+    **config: Any,
 ) -> dict[str, Any]:
     values = dict(config)
     protocol = {name: values.pop(name) for name in ("rounds", "cooldown_s") if name in values}
-    prepared = prepare_bench(**values)
+    prepared = prepare_bench(**values, compile_config=compile_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

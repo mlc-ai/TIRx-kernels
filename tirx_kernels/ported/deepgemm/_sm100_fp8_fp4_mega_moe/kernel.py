@@ -369,6 +369,7 @@ def get_kernel(
     fast_math: int = 1,
     collect_stats: bool = False,
     emit_nvl_barrier_timeout_printf: bool = True,
+    compile_config=None,
 ):
     # ---- compile-time constants (all Python ints; nothing below is emitted) ----
     runtime_config = MegaMoeConfig(
@@ -872,7 +873,7 @@ def get_kernel(
         raise ValueError("Top-k must fit in a single warp")
 
     # ---- the kernel body ----
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def mega_moe(
         y: txl.gptr[txl.bf16],
         cumulative_local_expert_recv_stats: txl.gptr[txl.i32],
@@ -981,6 +982,7 @@ def get_kernel(
                 cluster=(kernel_config.num_ctas_per_cluster,),
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         symm_rank_offsets = (

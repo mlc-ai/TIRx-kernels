@@ -124,14 +124,14 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     return case
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, compile_config=None, **kwargs: Any):
     _name, mod, _reason = _select_impl(**kwargs)
-    return mod.get_kernel(**kwargs)
+    return mod.get_kernel(**kwargs, compile_config=compile_config)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, compile_config=None, **kwargs: Any) -> None:
     _name, mod, _reason = _select_impl(**kwargs)
-    mod.run_test(**kwargs)
+    mod.run_test(**kwargs, compile_config=compile_config)
 
 
 @dataclass(frozen=True)
@@ -144,7 +144,7 @@ class _PreparedDispatch:
     def required_num_gpus(self) -> int:
         return self.prepared.required_num_gpus
 
-    def run_gpu(self, **kwargs: Any) -> dict[str, Any]:
+    def run_gpu(self, *, compile_config=None, **kwargs: Any) -> dict[str, Any]:
         result = self.prepared.run_gpu(**kwargs)
         if isinstance(result, dict):
             result.setdefault("dispatch_kernel", self.name)
@@ -157,12 +157,12 @@ class _PreparedDispatch:
             close()
 
 
-def run_gpu(prepared: _PreparedDispatch, **kwargs: Any) -> dict[str, Any]:
+def run_gpu(prepared: _PreparedDispatch, *, compile_config=None, **kwargs: Any) -> dict[str, Any]:
     """Run only the implementation selected and prepared before assignment."""
     return prepared.run_gpu(**kwargs)
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Prepare only the implementation selected by the canonical dispatcher."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
@@ -170,16 +170,27 @@ def prepare_bench(**kwargs: Any):
     prepare = getattr(mod, "prepare_bench", None)
     if prepare is None:
         raise TypeError(f"dispatch target {mod.__name__!r} has no prepare_bench()")
-    state = _PreparedDispatch(prepare(**kwargs), name, reason)
+    state = _PreparedDispatch(prepare(**kwargs, compile_config=compile_config), name, reason)
     return prepared_gpu_benchmark(
-        run_gpu, state, required_num_gpus=state.required_num_gpus, close=state.close
+        run_gpu,
+        state,
+        required_num_gpus=state.required_num_gpus,
+        close=state.close,
+        compile_config=compile_config,
     )
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    compile_config=None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
-    return prepare_bench(**kwargs).run_gpu(warmup=warmup, repeat=repeat, timer=timer)
+    return prepare_bench(**kwargs, compile_config=compile_config).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer
+    )
 
 
 def _parse_iket_args() -> argparse.Namespace:
@@ -262,7 +273,7 @@ def _iket_launch_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _profile_iket_workload(args: argparse.Namespace) -> None:
+def _profile_iket_workload(args: argparse.Namespace, *, compile_config=None) -> None:
     if args.s_q <= 0:
         raise ValueError("--s-q must be positive")
     if args.s_kv <= 0:
@@ -272,11 +283,14 @@ def _profile_iket_workload(args: argparse.Namespace) -> None:
 
     from tirx_kernels.runner import cuda_target
 
-    target = cuda_target()
+    target = cuda_target(compile_config=compile_config)
     launches = []
     for _name, config in _iket_configs(args):
         executable = iket.IketProfiler().compile(
-            tvm.IRModule({"main": get_kernel(**config)}), target=target, tir_pipeline="tirx"
+            tvm.IRModule({"main": get_kernel(**config, compile_config=compile_config)}),
+            target=target,
+            tir_pipeline="tirx",
+            compile_config=compile_config,
         )
         case = prepare_data(**config)
         launches.append((executable, _iket_launch_args(case)))

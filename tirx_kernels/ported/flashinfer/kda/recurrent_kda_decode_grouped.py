@@ -449,7 +449,7 @@ def _specialization(kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
+def _make_recurrent_kda_decode_grouped(spec: dict[str, Any], *, compile_config=None):
     """Trace the grouped recurrence with K-owned launch and shared storage."""
     NUM_SEQS = spec["NUM_SEQS"]
     NUM_TOKENS = spec["NUM_TOKENS"]
@@ -475,7 +475,7 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
     SSM_IDX_ELEMENTS = spec["SSM_IDX_ELEMENTS"]
     NAT_ELEMENTS = spec["NAT_ELEMENTS"]
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def _recurrent_kda_decode_grouped(
         q: txl.gptr[txl.bf16, (QK_ELEMENTS,)],
         k: txl.gptr[txl.bf16, (QK_ELEMENTS,)],
@@ -500,7 +500,8 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
                 grid=(NUM_VALUE_HEADS, NUM_SEQS, VSPLIT), block=NUM_WARPS * 32
-            )
+            ),
+            compile_config=compile_config,
         )
 
         hv, n, vz = txl.cta_id()
@@ -812,9 +813,11 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
     return _recurrent_kda_decode_grouped
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, compile_config=None, **kwargs: Any):
     """Return the specialized grouped-CTA recurrent-KDA decode PrimFunc."""
-    return _make_recurrent_kda_decode_grouped(_specialization(kwargs)).func
+    return _make_recurrent_kda_decode_grouped(
+        _specialization(kwargs), compile_config=compile_config
+    ).func
 
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
@@ -1053,20 +1056,27 @@ def _assert_close(got, want, rtol, atol, what: str) -> None:
         )
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, compile_config=None, **kwargs: Any) -> None:
     from tirx_kernels.runner import compile_kernel
 
     case = prepare_data(**kwargs)
     spec = case["spec"]
-    executable = compile_kernel(get_kernel(**kwargs))
+    executable = compile_kernel(
+        get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+    )
     executable(*_tirx_args(case))
     torch.cuda.synchronize()
 
@@ -1120,6 +1130,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1167,11 +1178,16 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    compile_config=None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, compile_config=compile_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

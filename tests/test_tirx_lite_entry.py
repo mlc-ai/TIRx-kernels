@@ -137,7 +137,7 @@ def test_invalid_blocks_are_rejected(block):
 
 @pytest.mark.parametrize("kind", ["missing", "nested", "second", "branch", "loop"])
 def test_entry_must_be_unique_and_at_function_scope(kind):
-    with pytest.raises(RuntimeError, match="exactly one|function scope"):
+    with pytest.raises(RuntimeError, match=r"exactly one|function scope"):
 
         @txl.kernel()
         def probe():
@@ -163,7 +163,7 @@ def test_entry_must_be_unique_and_at_function_scope(kind):
 )
 @pytest.mark.parametrize("after", [False, True])
 def test_device_helpers_require_an_active_region(helper, after):
-    with pytest.raises(RuntimeError, match="active txl.device_entry"):
+    with pytest.raises(RuntimeError, match=r"active txl\.device_entry"):
 
         @txl.kernel()
         def probe():
@@ -261,12 +261,10 @@ def _compile(kernel, host, tmp_path):
 @pytest.mark.parametrize("host", ["llvm", "cuda_host"])
 @pytest.mark.parametrize("prepare_map", [False, True])
 def test_dynamic_launch_and_host_descriptors_execute(host, prepare_map, tmp_path):
-    from tvm.testing import env
-
     if prepare_map and int(tvm.cuda().compute_version.split(".")[0]) < 9:
         pytest.skip("tensor map encoding requires SM90 or newer")
 
-    @txl.kernel(arch=env.cuda_arch(0))
+    @txl.kernel()
     def coordinates(out: txl.gptr(txl.i32), n: txl.i32):
         if prepare_map:
             descriptor = txl.stack_alloca("tensormap", 1)

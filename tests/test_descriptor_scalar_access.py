@@ -31,7 +31,7 @@ def test_descriptor_selection_is_an_mma_operand(constructor, operand, arguments)
         cta_group=1,
     )
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def probe(choose_first: txl.i32, tmem: txl.u32):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 

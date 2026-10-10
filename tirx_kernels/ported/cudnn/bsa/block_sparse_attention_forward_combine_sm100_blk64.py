@@ -155,7 +155,7 @@ def _shfl_bfly_i32(value, lane_mask):
 
 
 @lru_cache(maxsize=8)
-def _make_kernel(log_max_splits):
+def _make_kernel(log_max_splits, *, compile_config=None):
     if not 1 <= log_max_splits <= 8:
         raise ValueError(f"log_max_splits must be in [1, 8], got {log_max_splits}")
 
@@ -503,7 +503,7 @@ def _make_kernel(log_max_splits):
                     txl.ptx.st.global_.v2.b32(out.ptr_to([out_index]), word0, word1)
         # CUDA TRANSCRIPTION END
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def combine(
         o_partial: txl.gptr[txl.f32],
         lse_partial: txl.gptr[txl.f32],
@@ -523,6 +523,7 @@ def _make_kernel(log_max_splits):
                 block=4 * 32,
             ),
             kernel_attrs=txl.cuda.KernelAttributes(required_block_size=True),
+            compile_config=compile_config,
         )
 
         kernel_body(
@@ -542,9 +543,13 @@ def _make_kernel(log_max_splits):
     return combine
 
 
-def get_kernel(*, batch, num_heads, seqlen_q, kv_splits, seed=0, data_pattern="mixed"):
+def get_kernel(
+    *, batch, num_heads, seqlen_q, kv_splits, seed=0, data_pattern="mixed", compile_config=None
+):
     del batch, num_heads, seqlen_q, seed, data_pattern
-    return _make_kernel(_ceil_log2(kv_splits)).func.with_attr("global_symbol", KERNEL_META["name"])
+    return _make_kernel(_ceil_log2(kv_splits), compile_config=compile_config).func.with_attr(
+        "global_symbol", KERNEL_META["name"]
+    )
 
 
 def _without_label(config):
@@ -816,14 +821,20 @@ def prepare_data(**config):
     }
 
 
-def run_test(**config):
+def run_test(*, compile_config=None, **config):
     import torch
 
     from tirx_kernels.runner import compile_kernel
 
     kernel_config = _without_label(config)
     data = prepare_data(**kernel_config)
-    tirx_launch = _tirx_launch(compile_kernel(get_kernel(**kernel_config)), data)
+    tirx_launch = _tirx_launch(
+        compile_kernel(
+            get_kernel(**kernel_config, compile_config=compile_config),
+            compile_config=compile_config,
+        ),
+        data,
+    )
     source_launch = _compile_reference(data)
     tirx_launch()
     source_launch()
@@ -831,15 +842,31 @@ def run_test(**config):
     return _validate_outputs(data)
 
 
-def prepare_bench(**config):
+def prepare_bench(*, compile_config=None, **config):
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     kernel_config = _without_label(config)
-    state = {"config": kernel_config, "executable": compile_kernel(get_kernel(**kernel_config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": kernel_config,
+        "executable": compile_kernel(
+            get_kernel(**kernel_config, compile_config=compile_config),
+            compile_config=compile_config,
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    compile_config=None,
+    **config,
+):
     from tirx_kernels.runner import bench, defer_gpu_interrupts, external_references_enabled
 
     with defer_gpu_interrupts():
@@ -885,8 +912,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

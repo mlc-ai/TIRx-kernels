@@ -50,10 +50,10 @@ def _max(a, b):
     return out[0]
 ```
 
-Global fast-math off-switches exist for both TVM CUDA compile paths
-(`TVM_CUDA_NVCC_NO_FAST_MATH=1` for nvcc, `--ftz=false` via
-`TVM_CUDA_NVRTC_EXTRA_OPTS` for NVRTC), but prefer per-op pinning: it holds
-regardless of compile defaults and documents intent at the use site.
+Both CUDA compiler paths accept explicit `CompileConfig(fast_math=False)`
+or the narrower `CompileConfig(ftz=False)` at the build or device entry.
+Use per-op pinning when the contract belongs to an individual instruction:
+it holds regardless of compile defaults and documents intent at the use site.
 
 ## Rationale
 
@@ -84,6 +84,13 @@ reference is plain CUDA operators compiled with fast math, emits 108
 plain-`.f32` arithmetic at all. Inheriting a sibling's arithmetic helpers is a
 silent divergence in either direction; read the reference's own PTX census
 first.
+
+Do not rewrite arithmetic when PTX already has the requested FTZ behavior
+but a cached cubin does not. In a measured NVRTC 13.2 case, compiling the same
+source with opposite FTZ settings produced distinct PTX but identical cubins.
+Disabling NVRTC's implicit cache restored the expected subnormal-versus-zero
+results on B200. The CUDA compilation service disables that cache on versions
+that support `--no-cache`; this does not change the kernel's instruction contract.
 
 Matching the FTZ flag alone does not justify splitting an FMA into a multiply
 and a global FP32 atomic add. An FMA can add a subnormal product to a normal

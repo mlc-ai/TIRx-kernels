@@ -785,6 +785,9 @@ def main() -> None:
         action="store_true",
         help="Import every unique kernel in --workloads and exit (for CI import gates)",
     )
+    from tvm.backend.cuda.compile_config import add_compile_config_argument
+
+    add_compile_config_argument(ap)
     args = ap.parse_args()
     if args.rounds < 1:
         print("[bench-suite] --rounds must be >= 1", file=sys.stderr)
@@ -815,6 +818,8 @@ def main() -> None:
         workloads_path = args.workloads
 
     workloads = load_workloads(workloads_path)
+    if args.compile_config is not None:
+        workloads = [dict(w, compile_config=args.compile_config.to_dict()) for w in workloads]
     if args.filter:
         workloads = [w for w in workloads if args.filter in w["kernel"]]
     if not workloads:

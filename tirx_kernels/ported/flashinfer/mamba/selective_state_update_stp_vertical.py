@@ -330,7 +330,7 @@ def _specialization(kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, compile_config=None, **kwargs: Any):
     """Build the K entry for one vertical specialization."""
     spec = _specialization(kwargs)
     DIM = spec["DIM"]
@@ -353,7 +353,7 @@ def get_kernel(**kwargs: Any):
     STATE_STAGE_BYTES = spec["STATE_STAGE_BYTES"]
     INPUT_BYTES = spec["INPUT_BYTES"]
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def selective_state_update_stp_vertical(
         tensor_state: txl.TensorMap,
         state: txl.gptr[spec["STATE_DTYPE"]],
@@ -387,7 +387,8 @@ def get_kernel(**kwargs: Any):
         pad_slot_id: txl.i32,
     ):
         txl.device_entry(
-            launch=txl.cuda.LaunchConfig(grid=(spec["BATCH"], spec["NHEADS"]), block=5 * 32)
+            launch=txl.cuda.LaunchConfig(grid=(spec["BATCH"], spec["NHEADS"]), block=5 * 32),
+            compile_config=compile_config,
         )
 
         batch_i, head = txl.cta_id()
@@ -1169,19 +1170,26 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
     return result
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, compile_config=None, **kwargs: Any) -> None:
     from tirx_kernels.runner import compile_kernel
 
     case = prepare_data(**kwargs)
-    executable = compile_kernel(get_kernel(**kwargs))
+    executable = compile_kernel(
+        get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+    )
     executable(*_tirx_args(case))
     _run_reference(case)
     torch.cuda.synchronize()
@@ -1194,6 +1202,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1233,11 +1242,16 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    compile_config=None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, compile_config=compile_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

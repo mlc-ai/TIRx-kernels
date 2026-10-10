@@ -52,14 +52,13 @@ and ``num_clusters`` outside ``{1, 2, 4, 8}`` (the launcher degrades it to 1
 before the kernel sees it, ``:607-611``).
 """
 
-import os
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
 from tirx_kernels.ported.flashinfer.utils import topk_radix as R
 from tirx_kernels.ported.flashinfer.utils.filtered_topk_ops import st_global_bits
 from tirx_kernels.ported.flashinfer.utils.topk_harness import source_module, torch_dtype
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench, hardware_num_sms
+from tirx_kernels.runner import bench, hardware_num_sms, resolve_compile_config
 
 KERNEL_META = {
     "name": "fast_topk_clusters",
@@ -139,11 +138,11 @@ def clusters_for(batch_size: int, seq_len: int) -> int:
     return 1
 
 
-def _tirx_clusters_for(batch_size: int, seq_len: int) -> int:
+def _tirx_clusters_for(batch_size: int, seq_len: int, *, compile_config=None) -> int:
     """Use row-level parallelism when it already supplies three Thor waves."""
     source_clusters = clusters_for(batch_size, seq_len)
     if (
-        os.environ.get(PREPARE_CUDA_ARCH_ENV, "sm_100a") == "sm_110a"
+        resolve_compile_config(compile_config).arch == "sm_110a"
         and source_clusters > 1
         and batch_size >= 3 * hardware_num_sms()
     ):
@@ -231,6 +230,8 @@ def get_kernel(
     mode: str = "plain",
     pattern: str = "unique",
     idx_dtype: str = "int32",
+    *,
+    compile_config=None,
     **kwargs: Any,
 ):
     """One PrimFunc per reachable specialization of `fast_topk_cuda_v4`.
@@ -242,7 +243,7 @@ def get_kernel(
     is32 = dtype == "float32"
     rounds = 4 if is32 else 2  # NRemainingRounds + 1 (:90)
     lshift_start = 8 * (4 if is32 else 2) - 8  # (:91)
-    nc = _tirx_clusters_for(batch, seq_len)
+    nc = _tirx_clusters_for(batch, seq_len, compile_config=compile_config)
     num_cached = num_cached_for_device(k)
     ovf_stride = seq_len // nc  # binding:47, from the row stride
     plain = mode == "plain"
@@ -866,7 +867,7 @@ def get_kernel(
 
     if plain:
 
-        @txl.kernel(arch="sm_100a")
+        @txl.kernel()
         def fast_topk_clusters_kernel(
             logits: txl.gptr[val_t, (batch * seq_len,)],
             indices: txl.gptr[idx_t, (batch * k,)],
@@ -876,14 +877,15 @@ def get_kernel(
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(
                     grid=grid, block=BLOCK_THREADS, cluster=nc if nc > 1 else None
-                )
+                ),
+                compile_config=resolve_compile_config(compile_config),
             )
 
             _emit(logits, indices, values, None, None, overflow)
 
     else:
 
-        @txl.kernel(arch="sm_100a")
+        @txl.kernel()
         def fast_topk_clusters_kernel(
             logits: txl.gptr[val_t, (batch * seq_len,)],
             indices: txl.gptr[idx_t, (batch * k,)],
@@ -894,7 +896,8 @@ def get_kernel(
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(
                     grid=grid, block=BLOCK_THREADS, cluster=nc if nc > 1 else None
-                )
+                ),
+                compile_config=resolve_compile_config(compile_config),
             )
 
             _emit(logits, indices, None, seq_lens, aux, overflow)
@@ -1175,7 +1178,7 @@ def compare_outputs(data: dict[str, Any], mine: dict[str, Any], theirs: dict[str
             )
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, compile_config=None, **config: Any) -> None:
     import unittest
 
     try:
@@ -1191,7 +1194,9 @@ def run_test(**config: Any) -> None:
     data = prepare_data(**cfg)
 
     mine = alloc_outputs(data)
-    ex = compile_kernel(get_kernel(**cfg))
+    ex = compile_kernel(
+        get_kernel(**cfg, compile_config=compile_config), compile_config=compile_config
+    )
     ex(*build_tirx_args(data, mine))
     torch.cuda.synchronize()
 
@@ -1202,7 +1207,7 @@ def run_test(**config: Any) -> None:
     compare_outputs(data, mine, theirs)
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU.
 
     The reference is NOT built here. `source_module()` JITs the FlashInfer module,
@@ -1215,11 +1220,28 @@ def prepare_bench(**kwargs: Any):
 
     cfg = _normalize_config(kwargs)
     return prepared_gpu_benchmark(
-        run_gpu, {"config": cfg, "executable": compile_kernel(get_kernel(**cfg))}
+        run_gpu,
+        {
+            "config": cfg,
+            "executable": compile_kernel(
+                get_kernel(**cfg, compile_config=compile_config), compile_config=compile_config
+            ),
+        },
+        compile_config=compile_config,
     )
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **kwargs,
+):
     """Kernel-only comparison against the source launch.
 
     Both implementations ALTERNATE over the same two working sets in opposite
@@ -1323,8 +1345,8 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(**config: Any):
-    prepared = prepare_bench(**config)
+def run_bench(*, compile_config=None, **config: Any):
+    prepared = prepare_bench(**config, compile_config=compile_config)
     return prepared.run_gpu()
 
 

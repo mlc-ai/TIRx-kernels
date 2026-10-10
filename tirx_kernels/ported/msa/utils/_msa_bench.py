@@ -85,11 +85,11 @@ def cutedsl_paths() -> list[str]:
     return [str(prefix), str(packages)]
 
 
-def _configure_msa_thor_target() -> None:
+def _configure_msa_thor_target(*, compile_config=None) -> None:
     """Use the Thor spelling recognized by MSA's pinned CuTe-DSL 4.5.3."""
-    from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV
+    from tirx_kernels.runner import resolve_compile_config
 
-    if os.environ.get(PREPARE_CUDA_ARCH_ENV, "sm_100a") != "sm_110a":
+    if resolve_compile_config(compile_config).arch != "sm_110a":
         return
     if "cutlass" in sys.modules:
         raise RuntimeError(
@@ -212,10 +212,10 @@ def _drop_interrupted_imports() -> None:
             del sys.modules[name]
 
 
-def ensure_msa_importable() -> None:
+def ensure_msa_importable(*, compile_config=None) -> None:
     """Put MSA's two import roots -- and its pinned CuTe-DSL -- on ``sys.path``."""
     _drop_interrupted_imports()
-    _configure_msa_thor_target()
+    _configure_msa_thor_target(compile_config=compile_config)
     if "cutlass" in sys.modules:
         pinned = cutedsl_paths()
         search_path = getattr(sys.modules["cutlass"], "__path__", None)
@@ -235,13 +235,13 @@ def ensure_msa_importable() -> None:
             sys.path.insert(0, entry)
 
 
-def prepare_scheduler_module():
+def prepare_scheduler_module(*, compile_config=None):
     """Import ``src.sm100.prepare_scheduler`` from the MSA checkout, once."""
     global _MSA_MODULE
     if _MSA_MODULE is not None:
         return _MSA_MODULE
 
-    ensure_msa_importable()
+    ensure_msa_importable(compile_config=compile_config)
 
     import src.sm100.prepare_scheduler as prepare_scheduler
 
@@ -249,7 +249,7 @@ def prepare_scheduler_module():
     return _MSA_MODULE
 
 
-def compiled_fwd_split_atomic(case: dict):
+def compiled_fwd_split_atomic(case: dict, *, compile_config=None):
     """Compile (or fetch from MSA's AOT cache) the forward split-slot kernel.
 
     Returns the compiled callable behind ``prepare_sparse_fwd_schedule_and_split``'s
@@ -257,7 +257,7 @@ def compiled_fwd_split_atomic(case: dict):
     host wrapper's shape validation, its ``split_counts.zero_()``, or the
     flat-schedule kernel it runs first.
     """
-    module = prepare_scheduler_module()
+    module = prepare_scheduler_module(compile_config=compile_config)
     return module._get_sparse_prepare_fwd_split_atomic(
         case["k2q_row_ptr"],
         case["k2q_q_indices"],
@@ -275,7 +275,7 @@ def compiled_fwd_split_atomic(case: dict):
 _FWD_CACHE: dict = {}
 
 
-def compiled_sparse_atten_fwd(case: dict):
+def compiled_sparse_atten_fwd(case: dict, *, compile_config=None):
     """Compile (or fetch) ``SparseAttentionForwardSm100`` and return the launchable.
 
     This mirrors the compile step of ``_call_sparse_forward_sm100_csr_varlen``
@@ -289,7 +289,7 @@ def compiled_sparse_atten_fwd(case: dict):
     binds this process to a host ``cuTensorMapEncodeTiled`` path that unrelated
     kernels then fail on, long after the call that caused it.
     """
-    ensure_msa_importable()
+    ensure_msa_importable(compile_config=compile_config)
 
     import cutlass
     import cutlass.cute as cute
@@ -414,7 +414,7 @@ def compiled_sparse_atten_fwd(case: dict):
 _FWD_NVFP4_CACHE: dict = {}
 
 
-def compiled_sparse_atten_nvfp4_kv(case: dict):
+def compiled_sparse_atten_nvfp4_kv(case: dict, *, compile_config=None):
     """Compile (or fetch) ``SparseAttentionForwardNvfp4KvSm100`` and return the launchable.
 
     Mirrors the compile step of ``_call_sparse_forward_sm100_csr_varlen_nvfp4_kv``
@@ -433,7 +433,7 @@ def compiled_sparse_atten_nvfp4_kv(case: dict):
     Every tensor is wrapped **before** ``cute.compile``; wrapping one afterwards
     poisons this process's host ``cuTensorMapEncodeTiled`` path.
     """
-    ensure_msa_importable()
+    ensure_msa_importable(compile_config=compile_config)
 
     import cutlass.cute as cute
     import torch
@@ -556,14 +556,14 @@ def compiled_sparse_atten_nvfp4_kv(case: dict):
     return launch
 
 
-def compiled_flat_schedule(case: dict):
+def compiled_flat_schedule(case: dict, *, compile_config=None):
     """Compile (or fetch from MSA's AOT cache) the flat-schedule kernel.
 
     Returns the compiled callable behind ``prepare_sparse_flat_schedule``'s NVTX
     range, so the timed closure covers the kernel launch alone rather than the
     host wrapper's allocation and schedule sizing.
     """
-    module = prepare_scheduler_module()
+    module = prepare_scheduler_module(compile_config=compile_config)
     return module._get_sparse_prepare_flat_schedule(
         case["k2q_row_ptr"],
         case["cu_seqlens_k"],
@@ -579,7 +579,7 @@ def compiled_flat_schedule(case: dict):
 _COMBINE_CACHE: dict = {}
 
 
-def compiled_sparse_atten_combine(case: dict):
+def compiled_sparse_atten_combine(case: dict, *, compile_config=None):
     """Compile (or fetch) ``SparseAttentionForwardCombine`` and return the launchable.
 
     Mirrors the compile step of ``combine()`` (combine.py:1327-1480, varlen
@@ -593,7 +593,7 @@ def compiled_sparse_atten_combine(case: dict):
     combine.py:518-526 is therefore compiled out of every specialization the
     production path can reach.
     """
-    ensure_msa_importable()
+    ensure_msa_importable(compile_config=compile_config)
 
     import cutlass
     import cutlass.cute as cute

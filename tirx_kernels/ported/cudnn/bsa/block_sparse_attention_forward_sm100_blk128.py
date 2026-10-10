@@ -507,7 +507,7 @@ def _query_cancel_response(response, q_block, head, batch_idx, valid):
     txl.ptx.fence.proxy.async_.shared__cta()
 
 
-def _make_kernel(**config):
+def _make_kernel(*, compile_config=None, **config):
     batch = int(config["batch"])
     hq = int(config["num_q_heads"])
     hkv = int(config["num_kv_heads"])
@@ -1517,6 +1517,7 @@ def _make_kernel(**config):
                 block=_WARPS * 32, grid=(q_blocks, scheduled_heads, batch), cluster=1
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+            compile_config=compile_config,
         )
 
         kernel_body(
@@ -1545,11 +1546,11 @@ def _make_kernel(**config):
         "block_sparse_num": txl.i32,
         "softmax_scale_log2": txl.f32,
     }
-    return txl.kernel(arch="sm_100a")(kernel)
+    return txl.kernel()(kernel)
 
 
-def get_kernel(**config):
-    return _make_kernel(**config).func
+def get_kernel(*, compile_config=None, **config):
+    return _make_kernel(**config, compile_config=compile_config).func
 
 
 def _without_label(config):
@@ -1918,14 +1919,20 @@ def _validate_outputs(data, *, with_oracle):
     return metrics
 
 
-def run_test(**config):
+def run_test(*, compile_config=None, **config):
     import torch
 
     from tirx_kernels.runner import compile_kernel
 
     kernel_config = _without_label(config)
     data = prepare_data(**kernel_config)
-    tirx_launch = _tirx_launch(compile_kernel(get_kernel(**kernel_config)), data)
+    tirx_launch = _tirx_launch(
+        compile_kernel(
+            get_kernel(**kernel_config, compile_config=compile_config),
+            compile_config=compile_config,
+        ),
+        data,
+    )
     source_launch = _compile_reference(data)
     tirx_launch()
     torch.cuda.synchronize()
@@ -1934,15 +1941,31 @@ def run_test(**config):
     return _validate_outputs(data, with_oracle=True)
 
 
-def prepare_bench(**config):
+def prepare_bench(*, compile_config=None, **config):
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     kernel_config = _without_label(config)
-    state = {"config": kernel_config, "executable": compile_kernel(get_kernel(**kernel_config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": kernel_config,
+        "executable": compile_kernel(
+            get_kernel(**kernel_config, compile_config=compile_config),
+            compile_config=compile_config,
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    compile_config=None,
+    **kwargs,
+):
     from tirx_kernels.runner import bench, defer_gpu_interrupts, external_references_enabled
 
     with defer_gpu_interrupts():
@@ -1991,8 +2014,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

@@ -16,11 +16,10 @@ source host launcher ``flashinfer::MergeState`` does.  One CTA per position,
 ``head_dim / vec_size`` threads per head along ``x`` and one head per ``y``.
 """
 
-import os
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
+from tirx_kernels.runner import bench, resolve_compile_config
 
 KERNEL_META = {
     "name": "merge_state",
@@ -77,7 +76,9 @@ def _torch_dtype(dtype: str):
     return {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
 
 
-def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs):
+def get_kernel(
+    dtype: str, seq_len: int, num_heads: int, head_dim: int, *, compile_config=None, **kwargs
+):
     """Return the TIRx specialization for one (dtype, seq_len, num_heads, head_dim) config."""
     _validate(dtype, seq_len, num_heads, head_dim)
     vec = _vec_size(head_dim)  # source template vec_size
@@ -88,7 +89,7 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
     bdx_shift = bdx.bit_length() - 1  # bdx is 8, 16, or 32
     is_f16 = dtype == "float16"
     index_dtype = "int64" if seq_len * num_heads * head_dim > 2**31 else "int32"
-    thor_flat_index = os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a"
+    thor_flat_index = resolve_compile_config(compile_config).arch == "sm_110a"
     fused_index = thor_flat_index and index_dtype == "int32"
 
     def widen_pair(dst, w, word):
@@ -110,7 +111,7 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
         else:
             txl.ptx.cvt.rn.bf16x2.f32(dst, hi, lo)
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def merge_state(
         v_a: txl.gptr[dtype],
         s_a: txl.gptr[txl.f32],
@@ -119,7 +120,10 @@ def get_kernel(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs
         v_merged: txl.gptr[dtype],
         s_merged: txl.gptr[txl.f32],
     ):
-        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=seq_len, block=warps * 32))
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=seq_len, block=warps * 32),
+            compile_config=resolve_compile_config(compile_config),
+        )
 
         pos = txl.cta_id()  # blockIdx.x
         index_pos = txl.Cast("int64", pos) if index_dtype == "int64" else pos
@@ -278,15 +282,22 @@ def _kernel_args(v_a, s_a, v_b, s_b, v_merged, s_merged):
     )
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_test(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs):
+def run_test(
+    dtype: str, seq_len: int, num_heads: int, head_dim: int, *, compile_config=None, **kwargs
+):
     """Compile, launch, and validate one config against the flashinfer source."""
     import torch
 
@@ -295,8 +306,14 @@ def run_test(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs):
     v_a, s_a, v_b, s_b = prepare_data(
         dtype=dtype, seq_len=seq_len, num_heads=num_heads, head_dim=head_dim
     )
-    kernel = get_kernel(dtype=dtype, seq_len=seq_len, num_heads=num_heads, head_dim=head_dim)
-    ex = compile_kernel(kernel)
+    kernel = get_kernel(
+        dtype=dtype,
+        seq_len=seq_len,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        compile_config=compile_config,
+    )
+    ex = compile_kernel(kernel, compile_config=compile_config)
     v_out = torch.empty_like(v_a)
     s_out = torch.empty_like(s_a)
     ex(*_kernel_args(v_a, s_a, v_b, s_b, v_out, s_out))
@@ -311,7 +328,17 @@ def run_test(dtype: str, seq_len: int, num_heads: int, head_dim: int, **kwargs):
     torch.testing.assert_close(s_out, s_ref, rtol=1e-3, atol=1e-3)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **kwargs,
+):
     """Benchmark the TIRx port against the flashinfer source kernel."""
     config = dict(prepared["config"])
     dtype = config.pop("dtype")
@@ -364,11 +391,17 @@ def run_bench(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
+    compile_config=None,
     **kwargs,
 ):
     config = dict(kwargs)
     prepared = prepare_bench(
-        dtype=dtype, seq_len=seq_len, num_heads=num_heads, head_dim=head_dim, **config
+        dtype=dtype,
+        seq_len=seq_len,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        **config,
+        compile_config=compile_config,
     )
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s

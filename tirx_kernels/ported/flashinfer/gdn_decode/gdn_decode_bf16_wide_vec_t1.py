@@ -246,8 +246,9 @@ def _make_gdn_decode_bf16_wide_vec_t1(
     DISABLE_STATE_UPDATE,
     CACHE_INTERMEDIATE_STATES,
     SAME_POOL,
+    compile_config=None,
 ):
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def gdn_decode_bf16_wide_vec_t1(
         state: txl.gptr[txl.bf16],
         intermediate: txl.gptr[txl.bf16],
@@ -270,7 +271,8 @@ def _make_gdn_decode_bf16_wide_vec_t1(
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
                 grid=batch * NUM_V_HEADS * NUM_V_TILES, block=NUM_WARPS * 32
-            )
+            ),
+            compile_config=compile_config,
         )
 
         smem = txl.smem_pool()
@@ -648,7 +650,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
     return gdn_decode_bf16_wide_vec_t1.func
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, compile_config=None, **kwargs: Any):
     """Return the source-specialized TIRx PrimFunc."""
     tile_v = int(kwargs["tile_v"])
     same_pool = bool(kwargs.get("same_pool", True))
@@ -670,6 +672,7 @@ def get_kernel(**kwargs: Any):
         DISABLE_STATE_UPDATE=kwargs.get("disable_state_update", False),
         CACHE_INTERMEDIATE_STATES=kwargs.get("cache_intermediate_states", False),
         SAME_POOL=same_pool,
+        compile_config=compile_config,
     )
 
 
@@ -890,6 +893,8 @@ def _compile_tirx(
     disable_state_update: bool,
     cache_intermediate_states: bool,
     same_pool: bool,
+    *,
+    compile_config=None,
 ):
     from tirx_kernels.runner import compile_kernel
 
@@ -903,7 +908,9 @@ def _compile_tirx(
             disable_state_update=disable_state_update,
             cache_intermediate_states=cache_intermediate_states,
             same_pool=same_pool,
-        )
+            compile_config=compile_config,
+        ),
+        compile_config=compile_config,
     )
 
 
@@ -943,7 +950,7 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _tirx_executable(case: dict[str, Any]):
+def _tirx_executable(case: dict[str, Any], *, compile_config=None):
     config = case["config"]
     return _compile_tirx(
         int(config["num_heads"]),
@@ -953,6 +960,7 @@ def _tirx_executable(case: dict[str, Any]):
         bool(config.get("disable_state_update", False)),
         bool(config.get("cache_intermediate_states", False)),
         bool(config.get("same_pool", True)),
+        compile_config=compile_config,
     )
 
 
@@ -1020,9 +1028,9 @@ def _assert_case_close(case: dict[str, Any]) -> None:
         torch.testing.assert_close(case["qkv_backing"], case["qkv_snapshot"], atol=0.0, rtol=0.0)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, compile_config=None, **kwargs: Any) -> None:
     case = prepare_data(**kwargs)
-    executable = _tirx_executable(case)
+    executable = _tirx_executable(case, compile_config=compile_config)
     executable(*_tirx_args(case))
     torch.cuda.synchronize()
     _run_reference(case)
@@ -1030,7 +1038,7 @@ def run_test(**kwargs: Any) -> None:
     _assert_case_close(case)
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Compile the selected wide-vector specialization before CUDA setup."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
@@ -1044,8 +1052,11 @@ def prepare_bench(**kwargs: Any):
         bool(config.get("disable_state_update", False)),
         bool(config.get("cache_intermediate_states", False)),
         bool(config.get("same_pool", True)),
+        compile_config=compile_config,
     )
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(kwargs), "executable": executable}, compile_config=compile_config
+    )
 
 
 def run_gpu(
@@ -1056,6 +1067,7 @@ def run_gpu(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
@@ -1095,9 +1107,10 @@ def run_bench(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    return prepare_bench(**kwargs).run_gpu(
+    return prepare_bench(**kwargs, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

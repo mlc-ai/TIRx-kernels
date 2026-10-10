@@ -499,7 +499,7 @@ def _prepare_host(params):
     )
 
 
-def _make_device_kernel():
+def _make_device_kernel(*, compile_config=None):
     def test_mma_ss_tma_2sm_persistent(
         A: txl.gptr[txl.f16, (LOCAL_M, K)],
         B: txl.gptr[txl.f16, (LOCAL_N, K)],
@@ -531,6 +531,7 @@ def _make_device_kernel():
                 block=12 * 32, grid=SM_NUMBER, cluster=[M_CLUSTER, N_CLUSTER]
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         (
@@ -999,7 +1000,7 @@ def _make_device_kernel():
                     tmem_addr_local[0], txl.uint32(N_COLS)
                 )
 
-    return txl.kernel(arch="sm_100a")(test_mma_ss_tma_2sm_persistent)
+    return txl.kernel()(test_mma_ss_tma_2sm_persistent)
 
 
 KERNEL_META = {"name": "allgather_gemm", "category": "gemm", "runtime_cuda_archs": ["sm_100a"]}
@@ -1022,6 +1023,8 @@ def get_kernel(
     world_size: int = WORLD_SIZE,
     dtype: str = "float16",
     scheduler: str = "dynamic",
+    *,
+    compile_config=None,
     **_kwargs: Any,
 ):
     config = _check_config(M, N, K, world_size, dtype)
@@ -1041,8 +1044,8 @@ def get_kernel(
                 _SPECIALIZATION_WORLD_SIZE_ENV: config.world_size,
             },
         )
-        return specialized.get_kernel()
-    return _make_device_kernel().func
+        return specialized.get_kernel(compile_config=compile_config)
+    return _make_device_kernel(compile_config=compile_config).func
 
 
 def _get_benchmark_kernel(
@@ -1052,8 +1055,12 @@ def _get_benchmark_kernel(
     world_size: int = WORLD_SIZE,
     dtype: str = "float16",
     scheduler: str = "dynamic",
+    *,
+    compile_config=None,
 ):
-    return get_kernel(M, N, K, world_size, dtype, scheduler=scheduler)
+    return get_kernel(
+        M, N, K, world_size, dtype, scheduler=scheduler, compile_config=compile_config
+    )
 
 
 def prepare_data(
@@ -1293,6 +1300,8 @@ def run_test(
     dtype: str = "float16",
     seed: int = 42,
     scheduler: str = "dynamic",
+    *,
+    compile_config=None,
     **_kwargs: Any,
 ) -> None:
     """Compile, launch on the requested TP ranks, and compare with PyTorch."""
@@ -1300,7 +1309,7 @@ def run_test(
     _check_config(M, N, K, world_size, dtype)
     _check_scheduler(scheduler)
     run_distributed(
-        get_kernel(M, N, K, world_size, dtype, scheduler=scheduler),
+        get_kernel(M, N, K, world_size, dtype, scheduler=scheduler, compile_config=compile_config),
         world_size=world_size,
         worker=_run_worker,
         mode="test",
@@ -1313,6 +1322,7 @@ def run_test(
             "seed": seed,
             "scheduler": scheduler,
         },
+        compile_config=compile_config,
     )
 
 
@@ -1329,6 +1339,7 @@ def run_bench(
     rounds: int = 1,
     cooldown_s: float = 1.0,
     scheduler: str = "dynamic",
+    compile_config=None,
     **_kwargs: Any,
 ) -> dict[str, Any]:
     """Return cold-cache Kineto full-span timings for TIRx and both baselines."""
@@ -1340,11 +1351,17 @@ def run_bench(
     if warmup is not None or repeat is not None:
         raise ValueError("timer='kineto' uses fixed iteration counts and rejects overrides")
     return prepare_bench(
-        M=M, N=N, K=K, world_size=world_size, dtype=dtype, scheduler=scheduler
+        M=M,
+        N=N,
+        K=K,
+        world_size=world_size,
+        dtype=dtype,
+        scheduler=scheduler,
+        compile_config=compile_config,
     ).run_gpu(warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s)
 
 
-def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
+def run_gpu(prepared, *, compile_config=None, **kwargs: Any) -> dict[str, Any]:
     """Start distributed ranks only after the complete GPU claim exists."""
     return prepared.run_gpu(**kwargs)
 
@@ -1357,6 +1374,7 @@ def prepare_bench(
     dtype: str = "float16",
     *,
     scheduler: str = "dynamic",
+    compile_config=None,
     **_kwargs: Any,
 ):
     """Compile/export before assignment; ranks start CUDA in run_gpu."""
@@ -1365,7 +1383,9 @@ def prepare_bench(
     _check_config(M, N, K, world_size, dtype)
     _check_scheduler(scheduler)
     state = prepare_distributed_bench(
-        _get_benchmark_kernel(M, N, K, world_size, dtype, scheduler=scheduler),
+        _get_benchmark_kernel(
+            M, N, K, world_size, dtype, scheduler=scheduler, compile_config=compile_config
+        ),
         world_size=world_size,
         worker=_run_worker,
         worker_kwargs={
@@ -1377,8 +1397,15 @@ def prepare_bench(
             "scheduler": scheduler,
         },
         required_timer="kineto",
+        compile_config=compile_config,
     )
-    return prepared_gpu_benchmark(run_gpu, state, required_num_gpus=world_size, close=state.close)
+    return prepared_gpu_benchmark(
+        run_gpu,
+        state,
+        required_num_gpus=world_size,
+        close=state.close,
+        compile_config=compile_config,
+    )
 
 
 __all__ = [

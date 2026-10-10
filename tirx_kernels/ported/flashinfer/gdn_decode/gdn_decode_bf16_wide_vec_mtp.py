@@ -334,8 +334,9 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
     PER_REQUEST_ACCEPTED_STEPS,
     PER_TOKEN_POOL_SCATTER,
     PER_TOKEN_POOL_SCATTER_FLAT,
+    compile_config=None,
 ):
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def gdn_decode_bf16_wide_vec_mtp(
         state: txl.gptr[txl.bf16],
         intermediate: txl.gptr[txl.bf16],
@@ -360,7 +361,8 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
                 grid=batch * NUM_V_HEADS * NUM_V_TILES, block=NUM_WARPS * 32
-            )
+            ),
+            compile_config=compile_config,
         )
 
         smem = txl.smem_pool()
@@ -953,7 +955,7 @@ def _require_supported_config(config: dict[str, Any]) -> None:
         raise ValueError("per-token scatter requires update, no cache/recovery, and T >= 2")
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, compile_config=None, **kwargs: Any):
     """Return the source-specialized TIRx PrimFunc."""
     config = dict(kwargs)
     _require_supported_config(config)
@@ -999,6 +1001,7 @@ def get_kernel(**kwargs: Any):
         PER_REQUEST_ACCEPTED_STEPS=bool(config.get("per_request_accepted_steps", False)),
         PER_TOKEN_POOL_SCATTER=scatter,
         PER_TOKEN_POOL_SCATTER_FLAT=scatter_flat,
+        compile_config=compile_config,
     )
 
 
@@ -1252,6 +1255,8 @@ def _compile_tirx(
     per_request_accepted_steps: bool,
     per_token_pool_scatter: bool,
     padded_pool: bool,
+    *,
+    compile_config=None,
 ):
     from tirx_kernels.runner import compile_kernel
 
@@ -1272,10 +1277,12 @@ def _compile_tirx(
         "padded_pool": padded_pool,
         "pool_factor_override": pool_factor,
     }
-    return compile_kernel(get_kernel(**config))
+    return compile_kernel(
+        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+    )
 
 
-def _compile_tirx_for_config(config: dict[str, Any]):
+def _compile_tirx_for_config(config: dict[str, Any], *, compile_config=None):
     return _compile_tirx(
         int(config["seq_len"]),
         int(config["num_heads"]),
@@ -1291,11 +1298,12 @@ def _compile_tirx_for_config(config: dict[str, Any]):
         bool(config.get("per_request_accepted_steps", False)),
         bool(config.get("per_token_pool_scatter", False)),
         bool(config.get("padded_pool", False)),
+        compile_config=compile_config,
     )
 
 
-def _tirx_executable(case: dict[str, Any]):
-    return _compile_tirx_for_config(case["config"])
+def _tirx_executable(case: dict[str, Any], *, compile_config=None):
+    return _compile_tirx_for_config(case["config"], compile_config=compile_config)
 
 
 def _storage_span(tensor: torch.Tensor, elements: int) -> torch.Tensor:
@@ -1402,9 +1410,9 @@ def _assert_case_close(case: dict[str, Any]) -> None:
         torch.testing.assert_close(case["qkv_backing"], case["qkv_snapshot"], atol=0, rtol=0)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, compile_config=None, **kwargs: Any) -> None:
     case = prepare_data(**kwargs)
-    executable = _tirx_executable(case)
+    executable = _tirx_executable(case, compile_config=compile_config)
     executable(*_tirx_args(case))
     torch.cuda.synchronize(case["tirx_state"].device)
     _run_reference(case)
@@ -1412,14 +1420,16 @@ def run_test(**kwargs: Any) -> None:
     _assert_case_close(case)
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Compile the selected wide-vector MTP specialization before CUDA setup."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = dict(kwargs)
     _require_supported_config(config)
-    executable = _compile_tirx_for_config(config)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+    executable = _compile_tirx_for_config(config, compile_config=compile_config)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(kwargs), "executable": executable}, compile_config=compile_config
+    )
 
 
 def run_gpu(
@@ -1430,6 +1440,7 @@ def run_gpu(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
@@ -1469,9 +1480,10 @@ def run_bench(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    return prepare_bench(**kwargs).run_gpu(
+    return prepare_bench(**kwargs, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

@@ -136,7 +136,7 @@ _shfl_idx_i32 = shfl_idx_i32
 # ---------------------------------------------------------------------------
 # Target entry.
 # ---------------------------------------------------------------------------
-@txl.kernel(arch="sm_100a")
+@txl.kernel()
 def _kernel(
     k2q_row_ptr: txl.gptr(txl.i32, shape=lambda p: (p["num_heads_kv"] * (p["total_rows"] + 1),)),
     cu_seqlens_k: txl.gptr(txl.i32, shape=lambda p: (p["num_batches"] + 1,)),
@@ -335,7 +335,7 @@ def _kernel(
         txl.assign(chunk_idx, chunk_idx + 32)
 
 
-def get_kernel(**config):
+def get_kernel(*, compile_config=None, **config):
     """Return the TIRx specialization of `SparseAttentionPrepareFlatScheduleSm100`.
 
     Nothing about a config reaches the kernel as a compile-time constant: the
@@ -791,7 +791,7 @@ def assert_schedule_matches(data: dict[str, Any], outputs: dict[str, Any]) -> No
     torch.testing.assert_close(sorted_rows(produced), sorted_rows(expected), rtol=0, atol=0)
 
 
-def run_test(**config):
+def run_test(*, compile_config=None, **config):
     """Compile, launch, and validate one config against MSA's own kernel."""
     import unittest
 
@@ -818,7 +818,9 @@ def run_test(**config):
     torch.cuda.synchronize()
     assert_schedule_matches(data, reference_outputs)
 
-    executable = compile_kernel(get_kernel(**config))
+    executable = compile_kernel(
+        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+    )
     outputs = make_outputs(data)
     executable(*tirx_args(data, outputs))
     torch.cuda.synchronize()
@@ -882,16 +884,31 @@ def _counter_slots(counters):
     return [counters[i * COUNTER_STRIDE : i * COUNTER_STRIDE + 1] for i in range(COUNTER_SLOTS)]
 
 
-def prepare_bench(**config):
+def prepare_bench(*, compile_config=None, **config):
     """Compile the TIRx specialization without initializing CUDA."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     config.pop("label", None)
-    state = {"config": dict(config), "executable": compile_kernel(get_kernel(**config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(config),
+        "executable": compile_kernel(
+            get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **config,
+):
     """Kernel-only comparison against MSA's compiled flat-schedule launch."""
     from tirx_kernels.runner import bench
 
@@ -930,7 +947,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
             "head_kv": data["head_kv"],
             "blk_kv": data["blk_kv"],
         }
-        compiled = compiled_flat_schedule(case)
+        compiled = compiled_flat_schedule(case, compile_config=compile_config)
         metadata = reference_outputs["scheduler_metadata"]
         step = [0]
 
@@ -968,8 +985,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

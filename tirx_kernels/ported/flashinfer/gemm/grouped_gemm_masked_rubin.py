@@ -376,7 +376,19 @@ def _validate_problem(
 
 @cache
 def _make_kernel(
-    num_groups, max_m, N, K_dim, ab_dtype, sf_mode, out_dtype, alpha, signals, tactic, num_sms
+    num_groups,
+    max_m,
+    N,
+    K_dim,
+    ab_dtype,
+    sf_mode,
+    out_dtype,
+    alpha,
+    signals,
+    tactic,
+    num_sms,
+    *,
+    compile_config=None,
 ):
     _validate_problem(
         num_groups, max_m, N, K_dim, ab_dtype, sf_mode, out_dtype, alpha, signals, tactic
@@ -640,6 +652,7 @@ def _make_kernel(
                 preferred_cluster=[cluster_m, cluster_n],
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+            compile_config=compile_config,
         )
 
         del a, b, sfa, sfb, c
@@ -2110,7 +2123,7 @@ def _make_kernel(
         "alpha_ptr": txl.gptr[txl.f32, (num_groups,)],
         "dst_signals": txl.gptr[txl.i32, (num_groups,)],
     }
-    return txl.kernel(arch="sm_107a")(kernel)
+    return txl.kernel()(kernel)
 
 
 def get_kernel(
@@ -2124,6 +2137,8 @@ def get_kernel(
     alpha=False,
     signals=False,
     tactic=0,
+    *,
+    compile_config=None,
 ):
     """Return one concrete masked-grouped SM107 specialization."""
     from tirx_kernels.runner import hardware_num_sms
@@ -2140,6 +2155,7 @@ def get_kernel(
         signals,
         tactic,
         hardware_num_sms(216),
+        compile_config=compile_config,
     ).func
 
 
@@ -2333,12 +2349,36 @@ def prepare_data(
 
 @cache
 def _compile_executable(
-    num_groups, max_m, N, K, ab_dtype, sf_mode, out_dtype, alpha, signals, tactic
+    num_groups,
+    max_m,
+    N,
+    K,
+    ab_dtype,
+    sf_mode,
+    out_dtype,
+    alpha,
+    signals,
+    tactic,
+    *,
+    compile_config=None,
 ):
     from tirx_kernels.runner import compile_kernel
 
     return compile_kernel(
-        get_kernel(num_groups, max_m, N, K, ab_dtype, sf_mode, out_dtype, alpha, signals, tactic)
+        get_kernel(
+            num_groups,
+            max_m,
+            N,
+            K,
+            ab_dtype,
+            sf_mode,
+            out_dtype,
+            alpha,
+            signals,
+            tactic,
+            compile_config=compile_config,
+        ),
+        compile_config=compile_config,
     )
 
 
@@ -2438,7 +2478,7 @@ def _config_dict(**config):
     }
 
 
-def run_test(**raw_config):
+def run_test(*, compile_config=None, **raw_config):
     import torch
 
     config = _config_dict(**raw_config)
@@ -2458,7 +2498,8 @@ def run_test(**raw_config):
                 "signals",
                 "tactic",
             )
-        ]
+        ],
+        compile_config=compile_config,
     )
     tirx = _tirx_launch(executable, data)
     source = _source_launch(data, config)
@@ -2479,7 +2520,7 @@ def run_test(**raw_config):
     return result
 
 
-def prepare_bench(**raw_config):
+def prepare_bench(*, compile_config=None, **raw_config):
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _config_dict(**raw_config)
@@ -2498,12 +2539,25 @@ def prepare_bench(**raw_config):
                 "signals",
                 "tactic",
             )
-        ]
+        ],
+        compile_config=compile_config,
     )
-    return prepared_gpu_benchmark(run_gpu, {"config": config, "executable": executable})
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": config, "executable": executable}, compile_config=compile_config
+    )
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **_):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **_,
+):
     import torch
 
     from tirx_kernels.runner import bench, external_references_enabled
@@ -2533,8 +2587,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

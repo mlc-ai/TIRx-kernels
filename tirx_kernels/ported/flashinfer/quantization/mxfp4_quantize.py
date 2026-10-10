@@ -23,7 +23,6 @@ The implementation structure follows the reviewer-approved sketch
 ``tirx_kernels/ported/flashinfer/utils/fp_quant.py``.
 """
 
-import os
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
@@ -46,7 +45,7 @@ from tirx_kernels.ported.flashinfer.utils.fp_quant_tirx_lite import (
     st_global_u64,
     ue8m0_to_inv_scale,
 )
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
+from tirx_kernels.runner import bench, resolve_compile_config
 
 KERNEL_META = {
     "name": "mxfp4_quantize",
@@ -463,12 +462,19 @@ def _ptxas_level(dtype: str, m: int, k: int, sf_layout: str, arch: str) -> str:
 
 
 def get_kernel(
-    dtype: str, m: int, k: int, sf_layout: str = "128x4", enable_pdl: bool = False, **kwargs
+    dtype: str,
+    m: int,
+    k: int,
+    sf_layout: str = "128x4",
+    enable_pdl: bool = False,
+    *,
+    compile_config=None,
+    **kwargs,
 ):
     """Return the TIRx specialization for one (dtype, m, k, sf_layout) config."""
     _validate(dtype, m, k, sf_layout)
     use_4t = _use_4t()
-    thor = os.environ.get(PREPARE_CUDA_ARCH_ENV, "") == "sm_110a"
+    thor = resolve_compile_config(compile_config).arch == "sm_110a"
     optimized_fp16 = thor and dtype == "float16"
     packed_fp16 = sf_layout == "linear" or (m == 1024 and k == 2048)
     fp16_mode = 2 if optimized_fp16 and packed_fp16 else int(optimized_fp16)
@@ -480,7 +486,7 @@ def get_kernel(
     max_threads = _MAX_THREADS
     grid_blocks_per_sm = _BLOCKS_PER_SM
     min_blocks_per_sm = _BLOCKS_PER_SM
-    if os.environ.get(PREPARE_CUDA_ARCH_ENV, "") == "sm_110a":
+    if resolve_compile_config(compile_config).arch == "sm_110a":
         if (sf_layout == "linear" and m >= 4096) or (sf_layout != "linear" and m >= 1024):
             max_threads = 1024
             grid_blocks_per_sm = 2
@@ -511,13 +517,14 @@ def get_kernel(
         )
         unroll_all_batches = threads_per_sf == _4T_THREADS_PER_SF and m == 1024 and k == 2048
 
-        @txl.kernel(arch="sm_100a")
+        @txl.kernel()
         def mxfp4_quantize_linear(
             in_global: txl.gptr[dtype], out_global: txl.gptr[txl.u8], sf_out: txl.gptr[txl.u8]
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
                 kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm),
+                compile_config=resolve_compile_config(compile_config),
             )
 
             bx = txl.cta_id()
@@ -649,13 +656,14 @@ def get_kernel(
         and nsb == pad_cols
     )
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def mxfp4_quantize_swizzled(
         in_global: txl.gptr[dtype], out_global: txl.gptr[txl.u8], sf_out: txl.gptr[txl.u8]
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm),
+            compile_config=resolve_compile_config(compile_config),
         )
 
         bx = txl.cta_id()
@@ -1004,15 +1012,18 @@ def _run_reference(a, sf_layout: str, enable_pdl: bool):
     )
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": _compile_tirx(dict(kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": _compile_tirx(dict(kwargs), compile_config=compile_config),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def _compile_tirx(config: dict[str, Any]):
+def _compile_tirx(config: dict[str, Any], *, compile_config=None):
     from tirx_kernels.runner import compile_kernel
 
     level = _ptxas_level(
@@ -1020,28 +1031,32 @@ def _compile_tirx(config: dict[str, Any]):
         int(config["m"]),
         int(config["k"]),
         str(config.get("sf_layout", "128x4")),
-        os.environ.get(PREPARE_CUDA_ARCH_ENV, ""),
+        resolve_compile_config(compile_config).arch,
     )
-    previous = os.environ.get("TVM_CUDA_PTXAS_REG_LEVEL")
-    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = level
-    try:
-        return compile_kernel(get_kernel(**config))
-    finally:
-        if previous is None:
-            os.environ.pop("TVM_CUDA_PTXAS_REG_LEVEL", None)
-        else:
-            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = previous
+    pass
+    compile_config = resolve_compile_config(compile_config, ptxas_reg_usage_level=int(level))
+    return compile_kernel(
+        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+    )
 
 
 def run_test(
-    dtype: str, m: int, k: int, sf_layout: str = "128x4", enable_pdl: bool = False, **kwargs
+    dtype: str,
+    m: int,
+    k: int,
+    sf_layout: str = "128x4",
+    enable_pdl: bool = False,
+    *,
+    compile_config=None,
+    **kwargs,
 ):
     """Compile, launch, and validate one config against the flashinfer source."""
     import torch
 
     (a,) = prepare_data(dtype=dtype, m=m, k=k, sf_layout=sf_layout, enable_pdl=enable_pdl)
     ex = _compile_tirx(
-        {"dtype": dtype, "m": m, "k": k, "sf_layout": sf_layout, "enable_pdl": enable_pdl}
+        {"dtype": dtype, "m": m, "k": k, "sf_layout": sf_layout, "enable_pdl": enable_pdl},
+        compile_config=compile_config,
     )
     out_tirx, sf_tirx = _alloc_outputs(m, k, sf_layout)
     ex(a.view(-1), out_tirx.view(-1), sf_tirx)
@@ -1052,7 +1067,17 @@ def run_test(
     torch.testing.assert_close(sf_tirx, ref_sf.view(-1), rtol=0, atol=0)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **kwargs,
+):
     """Benchmark the TIRx port against the CuTe-DSL source (kernel-only)."""
     config = dict(prepared["config"])
     dtype = config.pop("dtype")
@@ -1121,11 +1146,18 @@ def run_bench(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
+    compile_config=None,
     **kwargs,
 ):
     config = dict(kwargs)
     prepared = prepare_bench(
-        dtype=dtype, m=m, k=k, sf_layout=sf_layout, enable_pdl=enable_pdl, **config
+        dtype=dtype,
+        m=m,
+        k=k,
+        sf_layout=sf_layout,
+        enable_pdl=enable_pdl,
+        **config,
+        compile_config=compile_config,
     )
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s

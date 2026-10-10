@@ -10,11 +10,10 @@ The source implementation is ``QKRMSNormKernel`` and
 public dispatch is in ``flashinfer/norm/__init__.py``.
 """
 
-import os
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
+from tirx_kernels.runner import bench, resolve_compile_config
 
 KERNEL_META = {
     "name": "flashinfer_qk_rmsnorm",
@@ -51,8 +50,8 @@ _FMA_HALF_TO_F32 = {"float16": "fma.rn.f32.f16", "bfloat16": "fma.rn.f32.bf16"}
 _CP_ASYNC = "cp.async.ca.shared.global"
 
 
-def _preparing_for_thor() -> bool:
-    return os.environ.get(PREPARE_CUDA_ARCH_ENV, "sm_100a") == "sm_110a"
+def _preparing_for_thor(*, compile_config=None) -> bool:
+    return resolve_compile_config(compile_config).arch == "sm_110a"
 
 
 def _ceil_div(lhs: int, rhs: int) -> int:
@@ -398,6 +397,7 @@ def get_kernel(
     B: int = 1,
     N: int = 1,
     eps: float = _DEFAULT_EPS,
+    compile_config=None,
     **kwargs: Any,
 ):
     """Return the source-shaped dynamic-stride QK RMSNorm specialization."""
@@ -434,7 +434,7 @@ def get_kernel(
     # The packed x staging is only reachable on the synchronous full-tile
     # power-of-two shape; elsewhere the f32 lanes carry x directly.
     packed_x_pairs = not use_async and full_tile and vb_pow2
-    thor_predicated_async = _preparing_for_thor() and H == 128
+    thor_predicated_async = _preparing_for_thor(compile_config=compile_config) and H == 128
     thor_static_n = thor_predicated_async and N & (N - 1) == 0
 
     for name in ("x_batch_stride", "x_head_stride", "y_batch_stride", "y_head_stride"):
@@ -455,7 +455,7 @@ def get_kernel(
             return False
         return vb != vec_blocks - 1
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def flashinfer_qk_rmsnorm(
         x: txl.gptr[dtype],
         weight: txl.gptr[dtype, (H,)],
@@ -474,7 +474,8 @@ def get_kernel(
                 grid=(txl.cast(txl.ceildiv(runtime_B * runtime_N, txl.int64(rows)), "int32"),),
                 block=threads // 32 * 32,
                 programmatic_stream_serialization=enable_pdl,
-            )
+            ),
+            compile_config=resolve_compile_config(compile_config),
         )
 
         block_raw = txl.cuda.block_idx("x")
@@ -971,7 +972,7 @@ def _assert_inputs_unchanged(data, snapshot, B: int, N: int, H: int) -> None:
     _assert_all_guard(data["weight_backing"][H:], name="weight")
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, compile_config=None, **config: Any) -> None:
     """Compile, launch, and validate one QK RMSNorm config."""
     import torch
 
@@ -994,7 +995,9 @@ def run_test(**config: Any) -> None:
         B, N, H, data["y_batch_stride"], data["y_head_stride"], dtype, initialize_padding=True
     )
 
-    executable = compile_kernel(get_kernel(**config))
+    executable = compile_kernel(
+        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+    )
     _launch_tirx(executable, data, output, config)
 
     api, flashinfer_norm = _flashinfer_api(variant, data["x"].device)
@@ -1051,16 +1054,29 @@ def run_test(**config: Any) -> None:
     )
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, compile_config=None, **config: Any):
     """Compile the selected specialization before GPU assignment."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(config), "executable": compile_kernel(get_kernel(**config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(config),
+        "executable": compile_kernel(
+            get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
 def run_gpu(
-    prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs: Any
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **kwargs: Any,
 ):
     """Construct and validate both single-launch timed closures."""
     import torch
@@ -1115,9 +1131,18 @@ def run_gpu(
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config: Any):
+def run_bench(
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **config: Any,
+):
     """Benchmark QK RMSNorm against FlashInfer CuTe-DSL."""
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, compile_config=compile_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

@@ -138,7 +138,7 @@ def make_desc(
     )
 
 
-def get_kernel(**config):
+def get_kernel(*, compile_config=None, **config):
     """Return the TIRx `PrimFunc` for one config."""
     from ._sm100_fp8_fp4_gemm_1d1d import build_kernel
 
@@ -165,7 +165,7 @@ def prepare_data(*, seed: int = 0, **config):
     return prepare_normal(seed=seed, **config)
 
 
-def prepare_bench(**config):
+def prepare_bench(*, compile_config=None, **config):
     """Compile the exact DeepGEMM specialization without initializing CUDA."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
@@ -174,7 +174,7 @@ def prepare_bench(**config):
     from ._sm100_fp8_fp4_gemm_1d1d import compile_spec
 
     state = {"config": dict(config), "executable": compile_spec(spec)}
-    return prepared_gpu_benchmark(run_gpu, state)
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
 def _tirx_launch(data, config, executable=None):
@@ -195,7 +195,7 @@ def _tirx_launch(data, config, executable=None):
     )
 
 
-def run_test(**config):
+def run_test(*, compile_config=None, **config):
     """Compile, launch and compare against DeepGEMM on the same operands."""
     import torch
 
@@ -233,7 +233,17 @@ def run_test(**config):
     )
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **config,
+):
     """Time our launch against `deep_gemm.fp8_fp4_gemm_nt`."""
     config = {**prepared["config"], **config}
     from ._sm100_fp8_fp4_gemm_1d1d.data import bench_against_deepgemm, deepgemm_launch_normal
@@ -255,8 +265,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

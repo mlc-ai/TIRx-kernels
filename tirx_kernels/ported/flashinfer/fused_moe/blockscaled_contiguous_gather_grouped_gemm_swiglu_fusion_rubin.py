@@ -238,7 +238,7 @@ def _validate_config(config):
 
 
 @cache
-def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
+def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, compile_config=None):
     counts, permuted_m, permuted_tiles = _problem(num_experts, seq_len, N, K_dim, routing)
     del counts
     n_tiles = N // _TILE_N
@@ -379,6 +379,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
                 block=20 * 32, grid=(1, 1, num_clusters), cluster=[1, 1], preferred_cluster=[1, 1]
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+            compile_config=compile_config,
         )
 
         del b, sfb, c
@@ -1169,7 +1170,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl):
         "num_non_exiting_tiles": txl.gptr[txl.i32, (1,)],
         "global_scale": txl.gptr[txl.f32, (1,)],
     }
-    return txl.kernel(arch="sm_107a")(kernel)
+    return txl.kernel()(kernel)
 
 
 def _config_dict(**config):
@@ -1202,7 +1203,7 @@ def _config_dict(**config):
     return answer
 
 
-def get_kernel(**raw_config):
+def get_kernel(*, compile_config=None, **raw_config):
     """Return the fixed production Rubin specialization for one concrete shape."""
     from tirx_kernels.runner import hardware_num_sms
 
@@ -1215,6 +1216,7 @@ def get_kernel(**raw_config):
         config["routing"],
         hardware_num_sms(216),
         config["use_pdl"],
+        compile_config=compile_config,
     ).func
 
 
@@ -1314,13 +1316,20 @@ def prepare_data(**raw_config):
 
 
 @cache
-def _compile_executable(num_experts, seq_len, N, K_dim, routing, use_pdl):
+def _compile_executable(num_experts, seq_len, N, K_dim, routing, use_pdl, *, compile_config=None):
     from tirx_kernels.runner import compile_kernel
 
     return compile_kernel(
         get_kernel(
-            num_experts=num_experts, seq_len=seq_len, N=N, K=K_dim, routing=routing, use_pdl=use_pdl
-        )
+            num_experts=num_experts,
+            seq_len=seq_len,
+            N=N,
+            K=K_dim,
+            routing=routing,
+            use_pdl=use_pdl,
+            compile_config=compile_config,
+        ),
+        compile_config=compile_config,
     )
 
 
@@ -1403,7 +1412,7 @@ def _check_outputs(data, with_source):
     return {"bitwise": True, "differing_bytes": 0}
 
 
-def _executable_for(config):
+def _executable_for(config, *, compile_config=None):
     return _compile_executable(
         config["num_experts"],
         config["seq_len"],
@@ -1411,15 +1420,16 @@ def _executable_for(config):
         config["K"],
         config["routing"],
         config["use_pdl"],
+        compile_config=compile_config,
     )
 
 
-def run_test(**raw_config):
+def run_test(*, compile_config=None, **raw_config):
     import torch
 
     config = _config_dict(**raw_config)
     data = prepare_data(**config)
-    tirx = _tirx_launch(_executable_for(config), data)
+    tirx = _tirx_launch(_executable_for(config, compile_config=compile_config), data)
     source = _source_launch(data)
     tirx()
     source()
@@ -1438,16 +1448,28 @@ def run_test(**raw_config):
     return result
 
 
-def prepare_bench(**raw_config):
+def prepare_bench(*, compile_config=None, **raw_config):
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _config_dict(**raw_config)
     return prepared_gpu_benchmark(
-        run_gpu, {"config": config, "executable": _executable_for(config)}
+        run_gpu,
+        {"config": config, "executable": _executable_for(config, compile_config=compile_config)},
+        compile_config=compile_config,
     )
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **_):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **_,
+):
     import torch
 
     from tirx_kernels.runner import bench, external_references_enabled
@@ -1476,8 +1498,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

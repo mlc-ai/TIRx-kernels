@@ -677,7 +677,7 @@ def make_spec(
 # --------------------------------------------------------------------------------------
 
 
-def build_kernel(spec: GemmSpec):
+def build_kernel(spec: GemmSpec, *, compile_config=None):
     """Build the TIRx `PrimFunc` for one `sm100_fp8_fp4_gemm_1d1d_impl` instantiation.
 
     The body lives in the `kernel` submodule; the import is deferred because
@@ -685,7 +685,7 @@ def build_kernel(spec: GemmSpec):
     """
     from .kernel import build_kernel as _build
 
-    return _build(spec)
+    return _build(spec, compile_config=compile_config)
 
 
 __all__ += ["GemmConfig", "GemmDesc", "Layout", "make_spec"]
@@ -1090,7 +1090,7 @@ __all__ += [
 
 
 @cache
-def _compile_spec_cached(spec: GemmSpec):
+def _compile_spec_cached(spec: GemmSpec, *, compile_config=None):
     """Compile one specialization.  `GemmSpec` is frozen, so it keys the cache."""
     import tvm
     from tirx_kernels.runner import cuda_target
@@ -1101,13 +1101,18 @@ def _compile_spec_cached(spec: GemmSpec):
     if spec.num_multicast > 1:
         tags.append("clusterCtaIdx.x")
     tags += ["threadIdx.x", "tirx.use_dyn_shared_memory"]
-    func = build_kernel(spec)
-    return tvm.compile(tvm.IRModule({"main": func}), target=cuda_target(), tir_pipeline="tirx")
+    func = build_kernel(spec, compile_config=compile_config)
+    return tvm.compile(
+        tvm.IRModule({"main": func}),
+        target=cuda_target(compile_config=compile_config),
+        tir_pipeline="tirx",
+        compile_config=compile_config,
+    )
 
 
-def compile_spec(spec: GemmSpec):
+def compile_spec(spec: GemmSpec, *, compile_config=None):
     """Compile or reuse one immutable specialization."""
-    return _compile_spec_cached(spec)
+    return _compile_spec_cached(spec, compile_config=compile_config)
 
 
 def build_launch(
@@ -1126,6 +1131,7 @@ def build_launch(
     num_groups: int = 1,
     sf_num_groups_a: int = 1,
     sf_num_groups_b: int = 1,
+    compile_config=None,
 ):
     """Return a no-argument closure that issues exactly one kernel launch.
 
@@ -1136,7 +1142,7 @@ def build_launch(
     import torch
 
     if executable is None:
-        executable = compile_spec(spec)
+        executable = compile_spec(spec, compile_config=compile_config)
     if spec.gemm_type is GemmType.BATCHED:
         # A, B and C/D are rank-3 here and A/D are permuted views, so the
         # descriptors must read their real strides rather than assume packing.

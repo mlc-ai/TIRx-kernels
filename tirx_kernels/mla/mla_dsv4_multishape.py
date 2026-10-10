@@ -59,6 +59,7 @@ import torch
 
 import tirx_kernels.tirx_lite as txl
 import tvm
+from tirx_kernels.runner import resolve_compile_config
 
 D = 512
 BN = 64
@@ -186,6 +187,7 @@ def make_kernel(
     swa_rows,
     comp_rows,
     n_items=None,
+    compile_config=None,
 ):
     direct_output = fp8 and q_tokens <= 64 and splits > 1
     short_split_decode = fp8 and q_tokens <= 64 and h_total == 64 and splits == 5 and bpc == 2
@@ -317,7 +319,7 @@ def make_kernel(
         )
         return (descriptor, out_desc)
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def mla_dsv4_splitk(
         q: txl.gptr[gt, (q_rows * D,)],
         swa: txl.gptr[gt, (swa_rows * D,)],
@@ -352,6 +354,7 @@ def make_kernel(
                 preferred_cluster=[C] if C > 1 else None,
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         q_tmap, out_tmap = host
@@ -1558,8 +1561,9 @@ def _choose_split(kblk, q_tokens, groups, fp8=False, nstage=2, swa_blocks=2):
 _KERNELS = {}
 
 
-def _compile(cfg):
-    compiled_kernel = _KERNELS.get(cfg)
+def _compile(cfg, *, compile_config=None):
+    cache_config = resolve_compile_config(compile_config)
+    compiled_kernel = _KERNELS.get((cache_config, cfg))
     if compiled_kernel is None:
         keys = (
             "fp8",
@@ -1575,11 +1579,15 @@ def _compile(cfg):
             "comp_rows",
             "n_items",
         )
-        kernel = make_kernel(**dict(zip(keys, cfg)))
-        target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+        kernel = make_kernel(**dict(zip(keys, cfg)), compile_config=compile_config)
+        target = tvm.target.Target(
+            {"kind": "cuda", "arch": resolve_compile_config(compile_config).arch}
+        )
         with target:
-            compiled_kernel = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
-        _KERNELS[cfg] = compiled_kernel
+            compiled_kernel = tvm.compile(
+                kernel.mod, target=target, tir_pipeline="tirx", compile_config=compile_config
+            )
+        _KERNELS[(cache_config, cfg)] = compiled_kernel
     return compiled_kernel
 
 
@@ -1645,7 +1653,7 @@ def plan(h_total, q_tokens, ktot, fp8, prefill=False):
     )
 
 
-def _multishape_setup(data, Q, Kt):
+def _multishape_setup(data, Q, Kt, *, compile_config=None):
     """The multishape candidate's own planner and dispatch (its harness ``setup``)."""
     q = data["query"]
     swa = data["swa_kv_cache"]
@@ -1681,7 +1689,7 @@ def _multishape_setup(data, Q, Kt):
             comp_rows,
             items,
         )
-        launches.append((_compile(cfg), 0))
+        launches.append((_compile(cfg, compile_config=compile_config), 0))
     else:
         items_main, c_tail, bpc_tail = p["tail"]
         cfg_main = (
@@ -1712,8 +1720,8 @@ def _multishape_setup(data, Q, Kt):
             comp_rows,
             items - items_main,
         )
-        launches.append((_compile(cfg_main), 0))
-        launches.append((_compile(cfg_tail), items_main))
+        launches.append((_compile(cfg_main, compile_config=compile_config), 0))
+        launches.append((_compile(cfg_tail, compile_config=compile_config), items_main))
 
     def flat(t):
         if fp8:
@@ -1758,7 +1766,7 @@ def _multishape_setup(data, Q, Kt):
     return run
 
 
-def _make_h128_bf16_prefill():
+def _make_h128_bf16_prefill(*, compile_config=None):
     """The shipped single-shape "dual-issuer" kernel, kept for H=128 bf16 prefill.
 
     This retains the original single-shape prefill device program and argument
@@ -1822,7 +1830,7 @@ def _make_h128_bf16_prefill():
         txl.ptx.add.u32(desc_lo[0], desc_lo[0], txl.cast(offset, "uint32"))
         txl.ptx.mov.b64(dst, desc_lo[0], desc_hi[0])
 
-    def make_kernel(s_q, topk, swa_rows, comp_rows):
+    def make_kernel(s_q, topk, swa_rows, comp_rows, *, compile_config=None):
         if topk % B_TOPK != 0 or topk < SWA_COLS:
             raise ValueError("topk must be a positive multiple of 64 including the 128 SWA slots")
         swa_blocks = SWA_COLS // B_TOPK
@@ -1887,7 +1895,7 @@ def _make_h128_bf16_prefill():
             )
             return swa_tma, comp_tma, q_tma
 
-        @txl.kernel(arch="sm_100a")
+        @txl.kernel()
         def mla_dsv4_sparse_prefill_pkt_pingpong(
             q: txl.gptr[txl.bf16, (s_q, B_H, D_QK)],
             swa: txl.gptr[txl.bf16, (swa_rows * D_QK,)],
@@ -1917,6 +1925,7 @@ def _make_h128_bf16_prefill():
                     grid=grid_ctas, block=20 * 32, cluster=(2,), preferred_cluster=[2]
                 ),
                 kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+                compile_config=compile_config,
             )
 
             swa_tensormap, comp_tensormap, q_tma_tensormap = host
@@ -3262,7 +3271,7 @@ def _make_h128_bf16_prefill():
         keep = (query, swa, comp, swa_flat, comp_flat, indices, lens_c, sinks_f, out)
         return args, keep
 
-    def setup(data, Q, Kt):
+    def setup(data, Q, Kt, *, compile_config=None):
         """Compile and bind this row, returning the launch callable."""
         from tirx_kernels.runner import compile_kernel
 
@@ -3270,7 +3279,10 @@ def _make_h128_bf16_prefill():
         sum_q, topk = int(indices.shape[0]), int(indices.shape[1])
         swa_rows = _pool_rows(data["swa_kv_cache"], "swa_kv_cache")
         comp_rows = _pool_rows(data["compressed_kv_cache"], "compressed_kv_cache")
-        executable = compile_kernel(make_kernel(sum_q, topk, swa_rows, comp_rows))
+        executable = compile_kernel(
+            make_kernel(sum_q, topk, swa_rows, comp_rows, compile_config=compile_config),
+            compile_config=compile_config,
+        )
         args, keep = _tirx_args(data)
 
         def run():
@@ -3307,11 +3319,11 @@ def _use_h128_bf16_prefill(data) -> bool:
     return int(data["sparse_indices"].shape[0]) > 64
 
 
-def _candidate_setup(data, Q, Kt):
+def _candidate_setup(data, Q, Kt, *, compile_config=None):
     """Shape dispatch over the two device programs."""
     if _use_h128_bf16_prefill(data):
-        return _H128_BF16_PREFILL_SETUP(data, Q, Kt)
-    return _multishape_setup(data, Q, Kt)
+        return _H128_BF16_PREFILL_SETUP(data, Q, Kt, compile_config=compile_config)
+    return _multishape_setup(data, Q, Kt, compile_config=compile_config)
 
 
 # ---------------------------------------------------------------------------
@@ -5473,7 +5485,7 @@ def _assert_supported_arch() -> None:
         )
 
 
-def get_kernel(**config: Any):
+def get_kernel(*, compile_config=None, **config: Any):
     """Return the traced tirx-lite PrimFunc this config's planner selects."""
     resolved = _config(**config)
     fp8 = str(resolved["kv_dtype"]) == "float8_e4m3fn"
@@ -5498,7 +5510,21 @@ def get_kernel(**config: Any):
         comp_rows,
         items,
     )
-    return make_kernel(*cfg)
+    keys = (
+        "fp8",
+        "h_total",
+        "h_valid",
+        "groups",
+        "q_tokens",
+        "ktot",
+        "splits",
+        "bpc",
+        "nstage",
+        "swa_rows",
+        "comp_rows",
+        "n_items",
+    )
+    return make_kernel(**dict(zip(keys, cfg)), compile_config=compile_config)
 
 
 # ---------------------------------------------------------------------------
@@ -5659,10 +5685,12 @@ def prepare_data(**config: Any) -> dict[str, Any]:
     }
 
 
-def _launch_state(case: dict[str, Any]):
+def _launch_state(case: dict[str, Any], *, compile_config=None):
     """Bind the launch through the candidate's own planner and dispatch."""
     indices = case["sparse_indices"]
-    return _candidate_setup(case, int(indices.shape[0]), int(indices.shape[1]))
+    return _candidate_setup(
+        case, int(indices.shape[0]), int(indices.shape[1]), compile_config=compile_config
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -5718,11 +5746,11 @@ def check_correctness(outputs: dict[str, Any], **config: Any) -> None:
     )
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, compile_config=None, **config: Any) -> None:
     """Run one config through the dispatch and gate it against the oracle."""
     _assert_supported_arch()
     case = prepare_data(**config)
-    run = _launch_state(case)
+    run = _launch_state(case, compile_config=compile_config)
     run()
     torch.cuda.synchronize()
     check_correctness({"case": case, "output": case["output"]}, **config)
@@ -5788,13 +5816,15 @@ def _trtllm_builder(case: dict[str, Any]):
 # ---------------------------------------------------------------------------
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, compile_config=None, **config: Any):
     """Build the row and bind its launch, so nothing compiles in the GPU stage."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     case = prepare_data(**config)
-    run = _launch_state(case)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(config), "case": case, "run": run})
+    run = _launch_state(case, compile_config=compile_config)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(config), "case": case, "run": run}, compile_config=compile_config
+    )
 
 
 def run_gpu(
@@ -5803,6 +5833,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     _assert_supported_arch()
@@ -5829,11 +5860,16 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **config: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    compile_config=None,
+    **config: Any,
 ) -> dict[str, Any]:
     values = dict(config)
     protocol = {name: values.pop(name) for name in ("rounds", "cooldown_s") if name in values}
-    prepared = prepare_bench(**values)
+    prepared = prepare_bench(**values, compile_config=compile_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

@@ -204,7 +204,7 @@ def _tmem_load32(dst, base, address):
     txl.ptx[TMEM_LD32](*(dst[base + i] for i in range(32)), txl.cast(address, "uint32"))
 
 
-def get_kernel(**config):
+def get_kernel(*, compile_config=None, **config):
     batch = int(config["batch"])
     heads = int(config["num_heads"])
     seqlen_q = int(config["seqlen_q"])
@@ -224,7 +224,7 @@ def get_kernel(**config):
     dk_base = dq_base + bh_count * q8 * 128
     dv_base = dk_base + bh_count * k8 * 128
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def sum_odo(
         o: txl.gptr[txl.bf16],
         do: txl.gptr[txl.bf16],
@@ -234,6 +234,7 @@ def get_kernel(**config):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=((seqlen_q + 15) // 16, heads, batch), block=4 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+            compile_config=compile_config,
         )
 
         q_tile, head, batch_idx = txl.cta_id()
@@ -280,7 +281,7 @@ def get_kernel(**config):
                 txl.ptx.mul.f32(scaled, lse_value, txl.float32(-1.4426950408889634))
                 txl.ptx.st.global_.b32(workspace.ptr_to([txl.int64(sum_plane) + bhq]), scaled)
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def bwd(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -297,6 +298,7 @@ def get_kernel(**config):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(tasks * groups, heads, batch), block=WARPS * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+            compile_config=compile_config,
         )
 
         block, head, batch_idx = txl.cta_id()
@@ -944,7 +946,7 @@ def get_kernel(**config):
             with r_empty:
                 pass
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def convert(
         workspace: txl.gptr[txl.f32],
         dq: txl.gptr[txl.bf16],
@@ -957,6 +959,7 @@ def get_kernel(**config):
                 grid=((max(seqlen_q, seqlen_kv) + 7) // 8, heads, batch), block=4 * 32
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+            compile_config=compile_config,
         )
 
         seq_tile, head, batch_idx = txl.cta_id()

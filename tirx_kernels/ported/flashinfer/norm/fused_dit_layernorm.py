@@ -487,6 +487,8 @@ def get_kernel(
     auxiliary_ndim: int,
     bias_ndim: int,
     epsilon: float = _DEFAULT_EPSILON,
+    *,
+    compile_config=None,
 ):
     """Return one of the eighteen compile-time source specializations."""
     _validate(
@@ -513,7 +515,7 @@ def get_kernel(
     elif output_format == "mxfp8":
         sf_k_tiles = (_HIDDEN_SIZE + 127) // 128
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def flashinfer_fused_dit_layernorm(
         input_buffer: txl.gptr[txl.bf16],
         residual_buffer: txl.gptr[txl.bf16],
@@ -537,7 +539,8 @@ def get_kernel(
     ):
         # TIRX_TRANSCRIBE_START flashinfer_fused_dit_layernorm
         txl.device_entry(
-            launch=txl.cuda.LaunchConfig(grid=runtime_num_rows, block=_BLOCK_SIZE // 32 * 32)
+            launch=txl.cuda.LaunchConfig(grid=runtime_num_rows, block=_BLOCK_SIZE // 32 * 32),
+            compile_config=compile_config,
         )
 
         row = txl.cta_id()
@@ -877,7 +880,7 @@ def prepare_data(**config: Any) -> tuple[Any, ...]:
     return tuple(_tirx_args(data, output, config))
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, compile_config=None, **config: Any) -> None:
     """Compile, launch, and validate one source-domain specialization."""
     import torch
 
@@ -888,7 +891,10 @@ def run_test(**config: Any) -> None:
     tirx_output = _prepare_output(config)
     source_output = _prepare_output(config)
     executable = _compiled_specialization(
-        str(config["mode"]), str(config["output_format"]), bool(config["use_input_sf_scale"])
+        str(config["mode"]),
+        str(config["output_format"]),
+        bool(config["use_input_sf_scale"]),
+        compile_config=compile_config,
     )
 
     if _launch_tirx(executable, data, tirx_output, config) is not None:
@@ -905,7 +911,7 @@ def run_test(**config: Any) -> None:
     _assert_inputs_unchanged(data, snapshot)
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, compile_config=None, **config: Any):
     """Compile the selected specialization before GPU assignment."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
@@ -914,14 +920,25 @@ def prepare_bench(**config: Any):
     state = {
         "config": config,
         "executable": _compiled_specialization(
-            str(config["mode"]), str(config["output_format"]), bool(config["use_input_sf_scale"])
+            str(config["mode"]),
+            str(config["output_format"]),
+            bool(config["use_input_sf_scale"]),
+            compile_config=compile_config,
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state)
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
 def run_gpu(
-    prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs: Any
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **kwargs: Any,
 ):
     """Construct and prevalidate two direct single-kernel launch closures."""
     import torch
@@ -972,10 +989,11 @@ def run_bench(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    compile_config=None,
     **config: Any,
 ) -> dict[str, Any]:
     """Benchmark the TIRx kernel against one direct FlashInfer CUDA launch."""
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, compile_config=compile_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
@@ -1248,7 +1266,9 @@ def _launch_tirx(executable, data, output, config: dict[str, Any]):
 
 
 @functools.cache
-def _compiled_specialization(mode: str, output_format: str, use_input_sf_scale: bool):
+def _compiled_specialization(
+    mode: str, output_format: str, use_input_sf_scale: bool, *, compile_config=None
+):
     from tirx_kernels.runner import compile_kernel
 
     return compile_kernel(
@@ -1264,7 +1284,9 @@ def _compiled_specialization(mode: str, output_format: str, use_input_sf_scale: 
             auxiliary_ndim=3,
             bias_ndim=2,
             epsilon=_DEFAULT_EPSILON,
-        )
+            compile_config=compile_config,
+        ),
+        compile_config=compile_config,
     )
 
 

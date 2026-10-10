@@ -89,7 +89,7 @@ def _resolve_splits(value):
     return int(value)
 
 
-def make_forward_kernel(**config):
+def make_forward_kernel(*, compile_config=None, **config):
     batch = int(config["batch"])
     num_heads = int(config["num_q_heads"])
     if int(config["num_kv_heads"]) != num_heads:
@@ -107,7 +107,7 @@ def make_forward_kernel(**config):
     q_blocks = (seqlen_q + QUERY_TILE - 1) // QUERY_TILE
     grid = (q_blocks, num_heads if use_clc else num_heads * num_splits, batch)
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def forward(
         q: txl.gptr[txl.bf16],
         k: txl.gptr[txl.bf16],
@@ -130,6 +130,7 @@ def make_forward_kernel(**config):
                 grid=grid, block=16 * 32, cluster=(q_blocks, num_heads, batch) if use_clc else None
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         if use_clc:
@@ -240,7 +241,7 @@ def make_forward_kernel(**config):
     return forward
 
 
-def make_combine_kernel(**config):
+def make_combine_kernel(*, compile_config=None, **config):
     batch = int(config["batch"])
     num_heads = int(config["num_q_heads"])
     seqlen_q = int(config["seqlen_q"])
@@ -254,7 +255,7 @@ def make_combine_kernel(**config):
     smem_bytes = o_ring_offset + 4 * 16 * 64 * 4
     row_tiles = (seqlen_q * num_heads + 15) // 16
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def combine(
         out_partial: txl.gptr[txl.f32],
         lse_partial: txl.gptr[txl.f32],
@@ -264,6 +265,7 @@ def make_combine_kernel(**config):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(row_tiles, 2, batch), block=4 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         row_tile, dim_tile, batch_idx = (
@@ -479,8 +481,8 @@ def make_combine_kernel(**config):
     return combine
 
 
-def get_kernel(**config):
-    forward = source_kernel.make_forward_kernel(**config).func
+def get_kernel(*, compile_config=None, **config):
+    forward = source_kernel.make_forward_kernel(**config, compile_config=compile_config).func
     if _resolve_splits(config["kv_splits"]) == 1:
         return [forward]
-    return [forward, make_combine_kernel(**config).func]
+    return [forward, make_combine_kernel(**config, compile_config=compile_config).func]

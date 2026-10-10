@@ -10,10 +10,8 @@ Upstream source:
 (``prologue_kernel``, ``kernel``, and the two-launch ``run_bwd`` entry).
 """
 
-import os
-
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, hardware_num_sms
+from tirx_kernels.runner import hardware_num_sms, resolve_compile_config
 
 KERNEL_META = {
     "name": "cudnn_sm100_kda_bprop_f16",
@@ -540,12 +538,14 @@ def _tmem_cell(base, row, row_delta, column):
     return base + column + txl.shift_left(row + row_delta, txl.int32(16))
 
 
-def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out):
+def _make_prologue(
+    *, run_order, order_generate, dynamic_scheduler, n_heads_out, compile_config=None
+):
     prologue_warps = (
-        10 if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a" and not run_order else 32
+        10 if resolve_compile_config(compile_config).arch == "sm_110a" and not run_order else 32
     )
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def prologue(
         base_q: txl.gptr[txl.i64],
         base_k: txl.gptr[txl.i64],
@@ -586,7 +586,10 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out)
         checkpoint_row_stride_bytes: txl.i32,
         checkpoint_every_n: txl.i32,
     ):
-        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=prologue_warps * 32))
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=1, block=prologue_warps * 32),
+            compile_config=resolve_compile_config(compile_config),
+        )
 
         thread = txl.thread_id()
         warp = txl.warp_id()
@@ -847,15 +850,16 @@ def _make_main(
     q_ratio,
     k_ratio,
     v_ratio,
+    compile_config=None,
 ):
     beta_dtype = txl.bf16 if beta_sigmoid else txl.f32
-    thor_state_path = os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a" and (
+    thor_state_path = resolve_compile_config(compile_config).arch == "sm_110a" and (
         use_initial_state or use_dstate_in or use_dstate0
     )
     cg1_regs = 184 if thor_state_path else 168
     support_regs = 40 if thor_state_path else 56
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def main(
         descriptor_workspace: txl.gptr[txl.i64],
         n_desc: txl.i32,
@@ -875,6 +879,7 @@ def _make_main(
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_sms, block=16 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=resolve_compile_config(compile_config),
         )
 
         arena = txl.alloc_tensor((_MAIN_SMEM_BYTES,), txl.u8, scope="shared.dyn", align=1024)
@@ -3520,14 +3525,14 @@ def _make_main(
     return main
 
 
-def _normalized_config(config):
+def _normalized_config(config, *, compile_config=None):
     config = {key: value for key, value in config.items() if key != "label"}
     config.setdefault("seq_lens", (64,))
     config.setdefault("heads", 1)
     config.setdefault("q_heads", config["heads"])
     config.setdefault("k_heads", config["heads"])
     config.setdefault("v_heads", config["heads"])
-    if "num_sms" not in config and os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+    if "num_sms" not in config and resolve_compile_config(compile_config).arch == "sm_110a":
         if config.get("beta_sigmoid", False):
             config["num_sms"] = hardware_num_sms()
         elif config.get("dynamic_scheduler", False) or config.get("run_order", False):
@@ -3557,14 +3562,15 @@ def _normalized_config(config):
     return config
 
 
-def get_kernel(**config):
-    config = _normalized_config(config)
+def get_kernel(*, compile_config=None, **config):
+    config = _normalized_config(config, compile_config=compile_config)
     num_sms = int(config.get("num_sms", 148))
     prologue = _make_prologue(
         run_order=bool(config.get("run_order", False)),
         order_generate=bool(config.get("order_generate", False)),
         dynamic_scheduler=bool(config.get("dynamic_scheduler", False)),
         n_heads_out=int(config.get("n_heads_out", config.get("heads", 1))),
+        compile_config=compile_config,
     )
     main = _make_main(
         num_sms=num_sms,
@@ -3580,6 +3586,7 @@ def get_kernel(**config):
         q_ratio=int(config.get("q_ratio", config["heads"] // config["q_heads"])),
         k_ratio=int(config.get("k_ratio", config["heads"] // config["k_heads"])),
         v_ratio=int(config.get("v_ratio", config["heads"] // config["v_heads"])),
+        compile_config=compile_config,
     )
     return [prologue.func, main.func]
 
@@ -3653,10 +3660,10 @@ def _prepare_work_tables(torch, config):
     return {"tirx": one_side(base), "source": one_side(source_work_items(torch, base, _BT))}
 
 
-def _prepare_data(config):
+def _prepare_data(config, *, compile_config=None):
     import torch
 
-    config = _normalized_config(config)
+    config = _normalized_config(config, compile_config=compile_config)
     torch.manual_seed(20260823)
     total_tokens = sum(config["seq_lens"])
     heads = config["heads"]
@@ -3732,9 +3739,9 @@ def _prepare_data(config):
     }
 
 
-def prepare_data(**config):
+def prepare_data(*, compile_config=None, **config):
     """Allocate the shared input set plus source/TIRx output buffers."""
-    return _prepare_data(config)
+    return _prepare_data(config, compile_config=compile_config)
 
 
 def _encode_tiled_map(tensor, dimensions, strides, box):
@@ -3987,34 +3994,31 @@ def _validate_outputs(data, *, sources):
         raise AssertionError(f"KDA backward validation failed for {config}: {failures}")
 
 
-def _compile_tirx(config):
+def _compile_tirx(config, *, compile_config=None):
     from tirx_kernels.runner import compile_kernel
 
-    previous = os.environ.get("TVM_CUDA_PTXAS_REG_LEVEL")
+    pass
     state_path = bool(
         config["use_initial_state"] or config["use_dstate_in"] or config["use_dstate0"]
     )
-    if os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a":
+    if resolve_compile_config(compile_config).arch == "sm_110a":
         if state_path:
-            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = "0"
+            compile_config = resolve_compile_config(compile_config, ptxas_reg_usage_level=0)
         elif config["beta_sigmoid"]:
-            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = "3"
-    try:
-        return [compile_kernel(func) for func in get_kernel(**config)]
-    finally:
-        if previous is None:
-            os.environ.pop("TVM_CUDA_PTXAS_REG_LEVEL", None)
-        else:
-            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = previous
+            compile_config = resolve_compile_config(compile_config, ptxas_reg_usage_level=3)
+    return [
+        compile_kernel(func, compile_config=compile_config)
+        for func in get_kernel(**config, compile_config=compile_config)
+    ]
 
 
-def run_test(**config):
+def run_test(*, compile_config=None, **config):
     """Compare TIRx with the upstream kernel on identical inputs."""
     import torch
 
-    kernel_config = _normalized_config(config)
-    data = _prepare_data(kernel_config)
-    executables = _compile_tirx(kernel_config)
+    kernel_config = _normalized_config(config, compile_config=compile_config)
+    data = _prepare_data(kernel_config, compile_config=compile_config)
+    executables = _compile_tirx(kernel_config, compile_config=compile_config)
     tirx_launch = _tirx_launch(executables, data)
     source_launch = _source_launch(data)
     tirx_launch()
@@ -4024,23 +4028,36 @@ def run_test(**config):
     return {"tokens": sum(kernel_config["seq_lens"]), "heads": kernel_config["heads"]}
 
 
-def prepare_bench(**config):
+def prepare_bench(*, compile_config=None, **config):
     """Compile the two TIRx launches without importing torch or touching CUDA."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
-    kernel_config = _normalized_config(config)
-    state = {"config": kernel_config, "executables": _compile_tirx(kernel_config)}
-    return prepared_gpu_benchmark(run_gpu, state)
+    kernel_config = _normalized_config(config, compile_config=compile_config)
+    state = {
+        "config": kernel_config,
+        "executables": _compile_tirx(kernel_config, compile_config=compile_config),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    compile_config=None,
+    **kwargs,
+):
     """Validate once, then let bench_suite time the exact two-launch paths."""
     import torch
 
     from tirx_kernels.runner import bench, external_references_enabled
 
-    config = _normalized_config({**prepared["config"], **kwargs})
-    data = _prepare_data(config)
+    config = _normalized_config({**prepared["config"], **kwargs}, compile_config=compile_config)
+    data = _prepare_data(config, compile_config=compile_config)
     tirx_launch = _tirx_launch(prepared["executables"], data)
     tirx_launch()
     torch.cuda.synchronize()
@@ -4063,8 +4080,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

@@ -44,9 +44,9 @@ def _without_label(config):
     return {key: value for key, value in config.items() if key != "label"}
 
 
-def get_kernel(**config):
+def get_kernel(*, compile_config=None, **config):
     """Return the launch sequence for one static specialization."""
-    return _kernel.get_kernel(**config)
+    return _kernel.get_kernel(**config, compile_config=compile_config)
 
 
 def prepare_data(**config):
@@ -54,7 +54,7 @@ def prepare_data(**config):
     return _data.prepare_data(**config)
 
 
-def run_test(**config):
+def run_test(*, compile_config=None, **config):
     """Compare TIRx with the pinned upstream kernel and the FP32 oracle."""
     import torch
 
@@ -62,7 +62,10 @@ def run_test(**config):
 
     kernel_config = _without_label(config)
     data = prepare_data(**kernel_config)
-    executables = [compile_kernel(func) for func in get_kernel(**kernel_config)]
+    executables = [
+        compile_kernel(func, compile_config=compile_config)
+        for func in get_kernel(**kernel_config, compile_config=compile_config)
+    ]
     tirx_launch = _data.tirx_launch(executables, data)
     tirx_launch()
     if _spec.upstream_disagrees_with_reference(kernel_config):
@@ -78,19 +81,32 @@ def run_test(**config):
     return {"tokens": data["derived"]["tokens_total"], "N": data["derived"]["N"]}
 
 
-def prepare_bench(**config):
+def prepare_bench(*, compile_config=None, **config):
     """Compile only TIRx; reference imports and CUDA work stay in ``run_gpu``."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     kernel_config = _without_label(config)
     state = {
         "config": kernel_config,
-        "executables": [compile_kernel(func) for func in get_kernel(**kernel_config)],
+        "executables": [
+            compile_kernel(func, compile_config=compile_config)
+            for func in get_kernel(**kernel_config, compile_config=compile_config)
+        ],
     }
-    return prepared_gpu_benchmark(run_gpu, state)
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    compile_config=None,
+    **kwargs,
+):
     """Validate once against the upstream kernel, then time pure launches."""
     import torch
 
@@ -126,8 +142,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

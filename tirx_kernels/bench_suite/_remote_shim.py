@@ -212,14 +212,8 @@ def _link_reference_deps(spec: dict, roots: list[str]) -> str | None:
 
 def _apply_environment(spec: dict, *, tree_root: str, after_root: str | None) -> None:
     env = os.environ
-    env["TIRX_PREPARE_CUDA_ARCH"] = str(spec["cuda_arch"])
     env["TIRX_PREPARE_NUM_SMS"] = str(spec["num_sms"])
     env["TVM_FFI_DISABLE_TORCH_C_DLPACK"] = "1"
-    # nvrtc calls cuInit, which the cpu_only guard rejects; on-lease prepare
-    # leaves the kernel's own choice (some kernels insist on the default).
-    env.pop("TVM_CUDA_COMPILE_MODE", None)
-    if spec.get("prepare_mode") == "cpu":
-        env["TVM_CUDA_COMPILE_MODE"] = str(spec.get("cuda_compile_mode") or "nvcc")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     cache_dir = spec.get("cache_dir") or os.path.join(
         env.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"),
@@ -366,8 +360,14 @@ def prepare(tar_bytes: bytes, before_tar_bytes: bytes | None, spec_json: str) ->
         config = _find_bench_config(ab_current_benchmark_module(module), spec["config"])
         meta["timings"]["config_resolve_s"] = time.time() - config_started
         prepare_started = time.time()
+        from tvm.backend.cuda import CompileConfig
+
         prepared = prepare_kernel_bench(
-            spec["kernel"], config, module=module, require_cuda_uninitialized=False
+            spec["kernel"],
+            config,
+            module=module,
+            require_cuda_uninitialized=spec.get("prepare_mode") == "cpu",
+            compile_config=CompileConfig(**spec["compile_config"]),
         )
         meta["timings"]["prepare_s"] = time.time() - prepare_started
         if prepared.required_num_gpus != 1:

@@ -13,36 +13,43 @@ import tirx_kernels.tirx_lite as txl
 from tvm import ir
 
 
-def test_kernel_target_honors_prepared_compile_arch(monkeypatch):
-    @txl.kernel(arch="sm_100a")
-    def probe(out: txl.gptr("float32")):
-        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
+def test_kernel_compile_receives_explicit_settings(monkeypatch):
+    import tvm
 
+    @txl.kernel()
+    def probe(out: txl.gptr("float32")):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32))
         txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(1.0))
 
-    monkeypatch.delenv("TIRX_PREPARE_CUDA_ARCH", raising=False)
-    assert probe.target().arch == "sm_100a"
-    assert probe.func.attrs["tirx.cuda_arch"] == "sm_100a"
-
-    monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_103a")
-    assert probe.target().arch == "sm_103a"
-
-    monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_107a")
-    assert probe.target().arch == "sm_107a"
-    # The override selects a compile target; it must not rewrite the authored
-    # architecture retained in the immutable PrimFunc.
-    assert probe.func.attrs["tirx.cuda_arch"] == "sm_100a"
+    calls = []
+    monkeypatch.setattr(tvm, "compile", lambda *args, **kwargs: calls.append(kwargs))
+    config = txl.cuda.CompileConfig(arch="sm_107a", fast_math=False)
+    probe.compile(compile_config=config)
+    assert calls[0]["compile_config"] is config
+    assert "tirx.cuda_arch" not in probe.func.attrs
+    assert not hasattr(probe, "arch")
+    with pytest.raises(TypeError, match="CompileConfig"):
+        txl.kernel(arch="sm_107a")
 
 
-def test_kernel_primfunc_preserves_sm107_architecture():
-    @txl.kernel(arch="sm_107a")
+def test_kernel_entry_preserves_local_architecture():
+    config = txl.cuda.CompileConfig(arch="sm_107a")
+
+    @txl.kernel()
     def probe(out: txl.gptr("float32")):
-        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
-
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32), compile_config=config)
         txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(1.0))
 
-    assert probe.arch == "sm_107a"
-    assert probe.func.attrs["tirx.cuda_arch"] == "sm_107a"
+    entries = []
+    structural_walk(
+        probe.func,
+        lambda node: (
+            entries.append(node)
+            if isinstance(node, ir.RegionStmt) and node.op.name == "tirx.device_entry"
+            else None
+        ),
+    )
+    assert txl.cuda.CompileConfig.from_json(entries[0].attrs["cuda.compile_config"]) == config
 
 
 def test_device_entry_keeps_runtime_values_as_region_operands():
@@ -86,7 +93,7 @@ def test_launch_rejects_blocks_outside_tirx_lite_contract(block):
 
 
 def _tir(build_body):
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def probe(out: txl.gptr("float32")):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -113,7 +120,7 @@ def test_mma_desc_loop_invariance_handles_unstaged_and_staged_tiles():
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
 
-            @txl.kernel(arch="sm_100a")
+            @txl.kernel()
             def probe(out: txl.gptr("uint64")):
                 txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -155,7 +162,7 @@ def test_local_scalar_accepts_explicit_trace_name():
 
 
 def test_warp_scan_keeps_collectives_outside_guards():
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def probe(out: txl.gptr("float32")):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -183,7 +190,7 @@ def test_mma_chain_encodes_descriptor_before_branch_guard():
         64, 64, 16, "float32", "float16", "float16", False, False
     )
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def probe():
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -217,7 +224,7 @@ def test_mma_chain_encodes_descriptor_before_branch_guard():
 
 
 def test_sigmoid_tanh_approx_f32_has_materialized_ptx_call_contract():
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def probe(out: txl.gptr("float32")):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -234,7 +241,7 @@ def test_sigmoid_tanh_approx_f32_has_materialized_ptx_call_contract():
 
 
 def test_sigmoid_tanh_approx_f32_preserves_tanh_input():
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def probe(out: txl.gptr("float32")):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -245,20 +252,26 @@ def test_sigmoid_tanh_approx_f32_preserves_tanh_input():
     assert float(tanh.args[1]) == 0.25
 
 
-def test_mamba_stochastic_conversion_uses_thor_fallback(monkeypatch):
+def test_mamba_stochastic_conversion_uses_thor_fallback():
     from tirx_kernels.ported.flashinfer.mamba.selective_state_update_mtp_simple import (
         _cvt_rs_f16x2_f32,
     )
 
     for arch in ("sm_100a", "sm_103a", "sm_107a", "sm_110a"):
-        monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", arch)
+        compile_config = txl.cuda.CompileConfig(arch=arch)
 
-        @txl.kernel(arch="sm_100a")
+        @txl.kernel()
         def probe(out: txl.gptr("uint32")):
             txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
             result = txl.local_scalar("uint32")
-            _cvt_rs_f16x2_f32(result, txl.float32(1.0), txl.float32(-1.0), txl.uint32(0x12340567))
+            _cvt_rs_f16x2_f32(
+                result,
+                txl.float32(1.0),
+                txl.float32(-1.0),
+                txl.uint32(0x12340567),
+                compile_config=compile_config,
+            )
             txl.ptx.st.global_.b32(out.ptr_to([0]), result)
 
         native = _calls_named(probe.func, "tirx.ptx.cvt_rs_f16x2_f32")
@@ -266,7 +279,7 @@ def test_mamba_stochastic_conversion_uses_thor_fallback(monkeypatch):
 
 
 def test_mbarrier_arrive_forwards_count_and_predicate():
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def probe(out: txl.gptr("float32")):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -282,7 +295,7 @@ def test_mbarrier_arrive_forwards_count_and_predicate():
 
 
 def test_stack_alloca_is_bound_exactly_once():
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def probe(out: txl.gptr("float32")):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -302,7 +315,7 @@ def test_stack_alloca_is_bound_exactly_once():
 
 
 def test_call_packed_has_statement_semantics():
-    @txl.kernel(arch="sm_100a", check_ir=False)
+    @txl.kernel(check_ir=False)
     def probe(out: txl.gptr("float32")):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -321,7 +334,7 @@ def test_call_packed_has_statement_semantics():
 
 
 def test_cu_tensor_map_encode_tiled_emits_typed_encode():
-    @txl.kernel(arch="sm_100a", check_ir=False)
+    @txl.kernel(check_ir=False)
     def probe(out: txl.gptr("float32")):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -356,7 +369,7 @@ def test_cu_tensor_map_encode_tiled_emits_typed_encode():
 def test_cu_tensor_map_encode_tiled_rejects_wrong_operand_count():
     with pytest.raises(ValueError, match="rank-2 tensor map"):
 
-        @txl.kernel(arch="sm_100a", check_ir=False)
+        @txl.kernel(check_ir=False)
         def probe(out: txl.gptr("float32")):
             txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -380,7 +393,7 @@ def test_kernel_build_runs_low_level_ir_check_by_default():
     from tirx_kernels.tirx_lite.low_level_ir import LowLevelIRContractError
 
     def build(**kw):
-        @txl.kernel(arch="sm_100a", **kw)
+        @txl.kernel(**kw)
         def probe(out: txl.gptr("float32")):
             # a direct shared-memory buffer store is a contract violation
             txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
@@ -401,7 +414,7 @@ def test_specialize_register_targets_require_min_blocks_per_sm():
 
     with pytest.raises(ValueError, match=r"setmaxnreg requires txl\.device_entry"):
 
-        @txl.kernel(arch="sm_100a")
+        @txl.kernel()
         def probe():
             txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=4 * 32))
 
@@ -410,7 +423,7 @@ def test_specialize_register_targets_require_min_blocks_per_sm():
             with compute:
                 pass
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def unpinned_partition_without_register_targets():
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=4 * 32))
 
@@ -471,7 +484,7 @@ def test_decl_tensor_strided_shared_alias_is_rejected():
     # The original #8 shape must fail while tracing, before CUDA can be emitted.
     with pytest.raises(TypeError, match="strides"):
 
-        @txl.kernel(arch="sm_100a")
+        @txl.kernel()
         def probe():
             txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=4 * 32))
 
@@ -516,7 +529,7 @@ def test_thread_layout_is_not_a_kernel_entry_option():
 
     with pytest.raises(TypeError, match="thread_layout"):
 
-        @txl.kernel(arch="sm_100a", thread_layout=False)
+        @txl.kernel(thread_layout=False)
         def probe(out: txl.gptr(txl.f32)):
             txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -532,7 +545,7 @@ def test_entry_usage_cap_does_not_shrink_cta_register_pool():
     assert entry_regs(warps=4, min_blocks_per_sm=2) == 255
     assert cta_register_pool(warps=4, min_blocks_per_sm=2) == 32768
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def probe(out: txl.gptr(txl.f32)):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=1, block=4 * 32),
@@ -552,7 +565,7 @@ def test_specialize_uses_rounded_cta_register_pool_as_ceiling():
     import pytest
 
     def build(aux_regs):
-        @txl.kernel(arch="sm_100a")
+        @txl.kernel()
         def probe(out: txl.gptr(txl.f32)):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=1, block=20 * 32),
@@ -583,7 +596,7 @@ def test_specialize_uses_rounded_cta_register_pool_as_ceiling():
 
 
 def test_gptr_shape_reuses_entry_scalar_parameters():
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def probe(
         out: txl.gptr(txl.f32, shape=lambda p: (p["rows"], p["cols"])), rows: txl.i32, cols: txl.i32
     ):
@@ -601,7 +614,7 @@ def test_gptr_shape_rejects_unknown_scalar_parameters():
 
     with pytest.raises(ValueError, match="unknown scalar parameter 'missing'"):
 
-        @txl.kernel(arch="sm_100a")
+        @txl.kernel()
         def probe(out: txl.gptr(txl.f32, shape=lambda p: (p["missing"],))):
             txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -630,7 +643,7 @@ def test_kernel_records_python_source_spans():
     def emit(out):
         txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def probe(out: txl.gptr(txl.f32)):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -674,7 +687,7 @@ def test_kernel_source_span_tracer_is_restored_after_failure():
     previous_trace = sys.gettrace()
     with pytest.raises(RuntimeError, match="trace failed"):
 
-        @txl.kernel(arch="sm_100a")
+        @txl.kernel()
         def probe(out: txl.gptr(txl.f32)):
             txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 

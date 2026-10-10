@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import inspect
 import linecache
-import os
 import sys
 import sysconfig
 import threading
@@ -271,10 +270,9 @@ class Session:
     ``specialize`` object the body is allowed to create.
     """
 
-    def __init__(self, name, warps, arch, min_blocks_per_sm):
+    def __init__(self, name, warps, min_blocks_per_sm):
         self.name = name
         self.warps = warps
-        self.arch = arch
         self.min_blocks_per_sm = min_blocks_per_sm
         # None means the entry is UNPINNED: ptxas is free to choose, so there
         # is no promised occupancy to divide by. Keep the one-CTA model for
@@ -324,30 +322,32 @@ class Kernel:
         self.session = session
         self.name = session.name
         self.warps = session.warps
-        self.arch = session.arch
         self.entry_regs = session.entry_regs
 
     @property
     def mod(self):
         return tvm.IRModule({"main": self.func})
 
-    def target(self):
-        # The decorator records the author's native/default target. Prepared
-        # runs compile for the GPU that will execute the kernel, including
-        # callers using Kernel.compile() instead of runner.compile_kernel().
-        arch = os.environ.get("TIRX_PREPARE_CUDA_ARCH", self.arch)
-        return tvm.target.Target({"kind": "cuda", "arch": arch})
+    def compile(self, target=None, *, compile_config=None):
+        """Compile with build defaults overridden by the device entry settings."""
+        if target is None and compile_config is None:
+            from tvm.backend.cuda import CompileConfig
 
-    def compile(self, target=None):
-        """Compile to a runnable module (``tir_pipeline="tirx"``)."""
-        return tvm.compile(self.mod, target=target or self.target(), tir_pipeline="tirx")
+            compile_config = CompileConfig()
+        return tvm.compile(
+            self.mod, target=target, tir_pipeline="tirx", compile_config=compile_config
+        )
 
-    def source(self, target=None):
-        """The generated CUDA source."""
-        return self.compile(target).mod.imports[0].inspect_source()
+    def source(self, target=None, *, compile_config=None):
+        """Return the CUDA source generated for the supplied compile settings."""
+        return (
+            self.compile(target, compile_config=compile_config)
+            .mod.imports[0]
+            .inspect_source("cuda")
+        )
 
     def __repr__(self):
-        return f"<txl.kernel {self.name} warps={self.warps} arch={self.arch}>"
+        return f"<txl.kernel {self.name} warps={self.warps}>"
 
 
 def _scalar_param(name, ann):
@@ -420,9 +420,8 @@ def _declare_param(name, ann, scalar_params):
 class _TraceContext:
     """Function-wide tracing state; device state exists only inside its entry."""
 
-    def __init__(self, name, arch, params, builder):
+    def __init__(self, name, params, builder):
         self.name = name
-        self.arch = arch
         self.params = params
         self.builder = builder
         self.function_frame = builder.frames[-1]
@@ -432,7 +431,7 @@ class _TraceContext:
 class _DeviceEntry:
     """One native region, closed by a with block or by the kernel decorator."""
 
-    def __init__(self, context, launch, kernel_attrs):
+    def __init__(self, context, launch, kernel_attrs, compile_config):
         from tvm.backend.cuda.launch import KernelAttributes, LaunchConfig
         from tvm.backend.cuda.launch._impl import _integer
 
@@ -452,11 +451,13 @@ class _DeviceEntry:
         if nthreads is None or nthreads % 32 or not 32 <= nthreads <= 1024:
             raise ValueError("tirx-lite block must be a static multiple of 32 between 32 and 1024")
         min_blocks = kernel_attrs.min_blocks_per_sm if kernel_attrs is not None else None
-        self.session = Session(context.name, nthreads // 32, context.arch, min_blocks)
+        self.session = Session(context.name, nthreads // 32, min_blocks)
         self.session.params = context.params
         self.session.launch = launch
         self.session.kernel_attrs = kernel_attrs
-        self.frame = I.device_entry(launch=launch, kernel_attrs=kernel_attrs)
+        self.frame = I.device_entry(
+            launch=launch, kernel_attrs=kernel_attrs, compile_config=compile_config
+        )
         self.closed = False
         self.managed = False
         self.frame.__enter__()
@@ -498,7 +499,7 @@ class _DeviceEntry:
             _TLS.session = None
 
 
-def device_entry(*, launch, kernel_attrs=None):
+def device_entry(*, launch, kernel_attrs=None, compile_config=None):
     """Start the kernel's device region with explicit CUDA launch configuration.
 
     A flat call covers the remainder of the traced function. A ``with`` block
@@ -514,18 +515,22 @@ def device_entry(*, launch, kernel_attrs=None):
     context = getattr(_TLS, "trace", None)
     if context is None:
         raise RuntimeError("device_entry is only valid inside a @txl.kernel body")
-    return _DeviceEntry(context, launch, kernel_attrs)
+    return _DeviceEntry(context, launch, kernel_attrs, compile_config)
 
 
-def kernel(
-    *, arch: str = "sm_100a", allowed_func_calls: tuple[str, ...] = (), check_ir: bool = True
-):
+def kernel(*, allowed_func_calls: tuple[str, ...] = (), check_ir: bool = True, **obsolete):
     """Trace a host function containing one explicit ``txl.device_entry``.
 
     Annotations bind the host entry's ABI. The function prepares host values
     and declares its launch configuration in the body, using those parameters
     directly. Only values used by the device body become device parameters.
     """
+
+    if obsolete:
+        raise TypeError(
+            f"Unsupported txl.kernel options {tuple(obsolete)}; pass CompileConfig to "
+            "Kernel.compile() or device_entry(compile_config=...)"
+        )
 
     def decorator(fn):
         sig = inspect.signature(fn)
@@ -539,7 +544,7 @@ def kernel(
             with IRBuilder() as ib:
                 with I.function_():
                     I.func_name_(fn.__name__)
-                    I.func_attr({"global_symbol": fn.__name__, "tirx.cuda_arch": arch})
+                    I.func_attr({"global_symbol": fn.__name__})
                     args, kwargs = [], {}
                     scalar_params = {
                         pname: _scalar_param(pname, param.annotation)
@@ -555,7 +560,7 @@ def kernel(
                             kwargs[pname] = value
                         else:
                             args.append(value)
-                    context = _TraceContext(fn.__name__, arch, params, ib)
+                    context = _TraceContext(fn.__name__, params, ib)
                     _TLS.trace = context
                     with _SourceSpanTracer(ib):
                         try:

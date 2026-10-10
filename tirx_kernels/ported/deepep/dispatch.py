@@ -198,7 +198,12 @@ def _warp_inclusive_sum(value, lane):
 
 
 def _build_dispatch_kernel(
-    num_sms: int, num_max_tokens_per_rank: int, expert_alignment: int, num_ranks: int
+    num_sms: int,
+    num_max_tokens_per_rank: int,
+    expert_alignment: int,
+    num_ranks: int,
+    *,
+    compile_config=None,
 ) -> Any:
     """`dispatch_impl` for the direct single-domain path (frozen sketch kernel 1)."""
 
@@ -213,7 +218,7 @@ def _build_dispatch_kernel(
     cluster = 2 - num_sms % 2
     recv_region_bytes_per_rank = num_max_tokens_per_rank * TOKEN_BYTES_GMEM
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def deepep_dispatch(
         x: txl.gptr[txl.u8],
         topk_idx: txl.gptr[txl.i64],
@@ -238,6 +243,7 @@ def _build_dispatch_kernel(
                 cooperative=True,
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         smem = txl.smem_pool().alloc([SMEM_TOTAL], "uint8")
@@ -678,7 +684,12 @@ def _build_dispatch_kernel(
 
 
 def _build_epilogue_kernel(
-    num_sms: int, num_max_tokens_per_rank: int, expert_alignment: int, num_ranks: int
+    num_sms: int,
+    num_max_tokens_per_rank: int,
+    expert_alignment: int,
+    num_ranks: int,
+    *,
+    compile_config=None,
 ) -> Any:
     """`dispatch_copy_epilogue_impl` (frozen sketch kernel 2)."""
 
@@ -689,7 +700,7 @@ def _build_epilogue_kernel(
     num_threads = num_warps * 32
     recv_region_bytes_per_rank = num_max_tokens_per_rank * TOKEN_BYTES_GMEM
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def deepep_dispatch_copy_epilogue(
         buffer_addr: txl.i64,
         psum_rank: txl.gptr[txl.i32, (NUM_RANKS,)],
@@ -707,6 +718,7 @@ def _build_epilogue_kernel(
                 grid=num_sms, block=num_warps * 32, programmatic_stream_serialization=True
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         smem = txl.smem_pool().alloc([SMEM_TOTAL], "uint8")
@@ -913,6 +925,8 @@ def get_kernel(
     num_topk: int = NUM_TOPK,
     expert_alignment: int = 1,
     num_sms: int = 0,
+    *,
+    compile_config=None,
     **_: Any,
 ) -> list[Any]:
     """Return the dispatch kernel pair (main + copy epilogue), closure-specialized."""
@@ -930,8 +944,16 @@ def get_kernel(
     # not the dispatch kernel's num_sms.
     epilogue_num_sms = _device_num_sms()
     return [
-        _build_dispatch_kernel(num_sms, num_tokens, expert_alignment, world_size),
-        _build_epilogue_kernel(epilogue_num_sms, num_tokens, expert_alignment, world_size),
+        _build_dispatch_kernel(
+            num_sms, num_tokens, expert_alignment, world_size, compile_config=compile_config
+        ),
+        _build_epilogue_kernel(
+            epilogue_num_sms,
+            num_tokens,
+            expert_alignment,
+            world_size,
+            compile_config=compile_config,
+        ),
     ]
 
 
@@ -1201,19 +1223,22 @@ def _resolve_num_sms(config: dict[str, Any]) -> int:
     )
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, compile_config=None, **config: Any) -> None:
     """Correctness entry point used by the runner."""
 
     from .utils._runtime import run_distributed
 
     num_sms = _resolve_num_sms(config)
-    dispatch_kernel, epilogue_kernel = get_kernel(**config, num_sms=num_sms)
+    dispatch_kernel, epilogue_kernel = get_kernel(
+        **config, num_sms=num_sms, compile_config=compile_config
+    )
     run_distributed(
         {"dispatch": dispatch_kernel, "epilogue": epilogue_kernel},
         world_size=config["world_size"],
         worker=_run_worker,
         mode="test",
         worker_kwargs={**config, "num_sms": num_sms},
+        compile_config=compile_config,
     )
 
 
@@ -1244,7 +1269,7 @@ def _resolve_num_sms_cpu(config: dict[str, Any]) -> int:
     return min(num_sms, device_sms)
 
 
-def _run_bench_gpu(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+def _run_bench_gpu(state: dict[str, Any], *, compile_config=None, **kwargs: Any) -> dict[str, Any]:
     """Launch ranks against libraries compiled by the CPU prepare stage."""
 
     from .utils._runtime import run_distributed
@@ -1262,10 +1287,11 @@ def _run_bench_gpu(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
             "cooldown_s": kwargs.get("cooldown_s", 1.0),
         },
         prepared_libraries=state["library_paths"],
+        compile_config=compile_config,
     )
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, compile_config=None, **config: Any):
     """Specialize and compile without initializing CUDA, then await GPU assignment."""
 
     import tempfile
@@ -1279,10 +1305,14 @@ def prepare_bench(**config: Any):
             f"deepep_dispatch is distributed and supports only kineto, got {config['timer']}"
         )
     num_sms = _resolve_num_sms_cpu(config)
-    dispatch_kernel, epilogue_kernel = get_kernel(**config, num_sms=num_sms)
+    dispatch_kernel, epilogue_kernel = get_kernel(
+        **config, num_sms=num_sms, compile_config=compile_config
+    )
     tmpdir = tempfile.TemporaryDirectory(prefix="tirx-deepep-prepare-")
     library_paths = compile_kernels(
-        {"dispatch": dispatch_kernel, "epilogue": epilogue_kernel}, tmpdir.name
+        {"dispatch": dispatch_kernel, "epilogue": epilogue_kernel},
+        tmpdir.name,
+        compile_config=compile_config,
     )
     state = {
         "config": dict(config),
@@ -1291,7 +1321,11 @@ def prepare_bench(**config: Any):
         "tmpdir": tmpdir,
     }
     return prepared_gpu_benchmark(
-        _run_bench_gpu, state, required_num_gpus=config["world_size"], close=state["tmpdir"].cleanup
+        _run_bench_gpu,
+        state,
+        required_num_gpus=config["world_size"],
+        close=state["tmpdir"].cleanup,
+        compile_config=compile_config,
     )
 
 
@@ -1302,6 +1336,7 @@ def run_bench(
     timer: Any = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    compile_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Benchmark entry point used by the runner (kineto only, distributed)."""
@@ -1313,7 +1348,9 @@ def run_bench(
     config = dict(kwargs)
     if args:
         raise TypeError(f"unexpected positional arguments: {args}")
-    return prepare_bench(**config).run_gpu(rounds=rounds, cooldown_s=cooldown_s)
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+        rounds=rounds, cooldown_s=cooldown_s
+    )
 
 
 __all__ = [

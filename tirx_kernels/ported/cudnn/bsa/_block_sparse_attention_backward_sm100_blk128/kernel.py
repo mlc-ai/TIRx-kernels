@@ -231,7 +231,7 @@ def _tmem_load32(dst, base, address):
     txl.ptx[TMEM_LD32](*(dst[base + i] for i in range(32)), txl.cast(address, "uint32"))
 
 
-def get_kernel(**config):
+def get_kernel(*, compile_config=None, **config):
     batch = int(config["batch"])
     heads = int(config["num_heads"])
     seqlen_q = int(config["seqlen_q"])
@@ -273,7 +273,7 @@ def get_kernel(**config):
     id_dkdv = 0x08110490 if head_dim == 64 else 0x08210490
     id_dq = 0x08118490 if head_dim == 64 else 0x08218490
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def preprocess(
         o: txl.gptr[txl.bf16],
         do: txl.gptr[txl.bf16],
@@ -285,6 +285,7 @@ def get_kernel(**config):
                 grid=((seqlen_q + 127) // 128, heads, batch), block=8 * 32
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+            compile_config=compile_config,
         )
 
         txl.ptx.griddepcontrol.wait()
@@ -384,7 +385,7 @@ def get_kernel(**config):
                 workspace.ptr_to([dst]), txl.uint32(0), txl.uint32(0), txl.uint32(0), txl.uint32(0)
             )
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def bwd(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -403,6 +404,7 @@ def get_kernel(**config):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(tasks * groups, heads, batch), block=WARPS * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
+            compile_config=compile_config,
         )
 
         block, head, batch_idx = txl.cta_id()
@@ -1121,7 +1123,7 @@ def get_kernel(**config):
             pass
 
     def make_postprocess(seq_len, padded_len, source_base):
-        @txl.kernel(arch="sm_100a")
+        @txl.kernel()
         def postprocess(
             workspace: txl.gptr[txl.f32], output: txl.gptr[txl.bf16], output_scale: txl.f32
         ):
@@ -1132,6 +1134,7 @@ def get_kernel(**config):
                 kernel_attrs=txl.cuda.KernelAttributes(
                     min_blocks_per_sm=1, required_block_size=True
                 ),
+                compile_config=compile_config,
             )
 
             seq_tile, head, batch_idx = txl.cta_id()

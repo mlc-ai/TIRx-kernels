@@ -465,6 +465,8 @@ def _make_kernel(
     glu_clamp_min,
     situ_beta1,
     situ_beta2,
+    *,
+    compile_config=None,
 ):
     """Build the launch sequence for one static specialization.
 
@@ -805,6 +807,7 @@ def _make_kernel(
                 preferred_cluster=(cluster_m, cluster_n),
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
         named = dict(zip(annotations, operands))
         maps = dict(zip(map_names, host))
@@ -2831,6 +2834,7 @@ def _make_kernel(
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(block=32, grid=list(derived["helper_grid"])),
                 kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+                compile_config=compile_config,
             )
             b, sfb, workspace = operands
             expert = txl.cta_id()[0]
@@ -2874,17 +2878,17 @@ def _make_kernel(
             "sfb": txl.gptr[pointer_dtype, (L,)],
             "workspace": txl.gptr[txl.u8, (max(1, derived["workspace_bytes"]),)],
         }
-        return txl.kernel(arch="sm_100a")(helper_body)
+        return txl.kernel()(helper_body)
 
     kernel = _entry_point(list(annotations), body)
     kernel.__annotations__ = dict(annotations)
-    main = txl.kernel(arch="sm_100a")(kernel)
+    main = txl.kernel()(kernel)
     if derived["needs_helper"]:
         return [build_helper().func, main.func]
     return [main.func]
 
 
-def get_kernel(**config):
+def get_kernel(*, compile_config=None, **config):
     config = {key: value for key, value in config.items() if key != "label"}
     return _make_kernel(
         group_m_list=tuple(config["group_m_list"]),
@@ -2912,4 +2916,5 @@ def get_kernel(**config):
         glu_clamp_min=config["glu_clamp_min"],
         situ_beta1=config["situ_beta1"],
         situ_beta2=config["situ_beta2"],
+        compile_config=compile_config,
     )

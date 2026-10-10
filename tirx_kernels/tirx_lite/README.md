@@ -9,7 +9,7 @@ traced, PTX-level DSL over TIRx:
 import tirx_kernels.tirx_lite as txl
 
 
-@txl.kernel(arch="sm_100a")
+@txl.kernel()
 def zero(out: txl.gptr(txl.f32)):
     txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32))
     txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
@@ -94,7 +94,7 @@ used only by launch configuration remain host arguments; only device-body
 dependencies become GPU kernel parameters. The external call signature stays
 the same when the grid changes between invocations.
 
-The decorator accepts `arch`, `allowed_func_calls`, and `check_ir`. It no longer
+The decorator accepts `allowed_func_calls` and `check_ir`. It no longer
 accepts launch configuration or host preparation callbacks, and `host` is not a
 special injected parameter. Move former launch factories into `device_entry`
 and call preparation helpers directly from the function body.
@@ -139,3 +139,30 @@ a_desc, a_off = a_tile.encode(major="k", mma_k=16)
 b_desc, b_off = b_tile.encode(major="k", mma_k=16)
 selected = txl.Select(choose_a, a_desc + a_off(kp), b_desc + b_off(kp))
 ```
+
+## CUDA compiler settings
+
+Pass the same immutable `CompileConfig` to the factory and compile entry:
+
+```python
+config = txl.cuda.CompileConfig(arch="sm_100a", compiler="nvrtc", ftz=False)
+kernel = make_kernel(..., compile_config=config)
+executable = kernel.compile(compile_config=config)
+```
+
+A factory that chooses Python code by architecture resolves the configuration
+before tracing and records it on `txl.device_entry(..., compile_config=config)`.
+Factories that do not inspect architecture can leave it unspecified until compile.
+Entry fields override compile defaults; `False`, `0`, and empty option sequences
+are explicit overrides. The decorator no longer owns an architecture.
+
+Registered `get_kernel`, `run_test`, and `prepare_bench` functions receive
+`compile_config` as a keyword argument. `prepare_kernel_bench` requires an
+explicit architecture for CPU preparation and defaults to NVCC. The prepared
+benchmark carries that configuration into its GPU stage. Kernel caches include
+configuration in their keys. Compiler settings do not belong in `prepare_data`
+unless it actually chooses architecture-dependent data or descriptors.
+
+The test, benchmark, and remote benchmark CLIs accept, for example,
+`--compile-config '{"compiler":"nvcc","ftz":false}'`. Remote requests serialize
+these fields; their architecture must agree with the assigned server.

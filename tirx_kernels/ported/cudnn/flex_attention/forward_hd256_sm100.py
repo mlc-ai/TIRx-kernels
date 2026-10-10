@@ -47,6 +47,7 @@ import random
 from array import array
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import resolve_compile_config
 
 KERNEL_META = {
     "name": "cudnn_sm100_flex_attention_forward_hd256",
@@ -370,7 +371,7 @@ def _tmem_store16(src, address):
     txl.ptx[_TMEM_ST16](txl.cast(address, "uint32"), *(src[i] for i in range(16)))
 
 
-def _make_kernel(**config):
+def _make_kernel(*, compile_config=None, **config):
     hq = int(config["num_q_heads"])
     hkv = int(config["num_kv_heads"])
     total_q = int(config["seqlen"])
@@ -1580,6 +1581,7 @@ def _make_kernel(**config):
             kernel_attrs=txl.cuda.KernelAttributes(
                 min_blocks_per_sm=1, required_block_size=cta_group == 2
             ),
+            compile_config=compile_config,
         )
 
         if cta_group == 2:
@@ -1647,11 +1649,11 @@ def _make_kernel(**config):
         "softmax_scale_log2": txl.f32,
         "softmax_scale": txl.f32,
     }
-    return txl.kernel(arch="sm_100a")(kernel)
+    return txl.kernel()(kernel)
 
 
-def get_kernel(**config):
-    return _make_kernel(**config).func
+def get_kernel(*, compile_config=None, **config):
+    return _make_kernel(**config, compile_config=compile_config).func
 
 
 def _torch_dtype(torch, name):
@@ -2187,28 +2189,23 @@ def _ptxas_register_usage_level(config):
     return 0
 
 
-def _compile_tirx(config):
-    import os
-
+def _compile_tirx(config, *, compile_config=None):
     from tirx_kernels.runner import compile_kernel
 
-    name = "TVM_CUDA_PTXAS_REG_LEVEL"
-    previous = os.environ.get(name)
-    os.environ[name] = str(_ptxas_register_usage_level(config))
-    try:
-        return compile_kernel(get_kernel(**config))
-    finally:
-        if previous is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = previous
+    pass
+    compile_config = resolve_compile_config(
+        compile_config, ptxas_reg_usage_level=int(str(_ptxas_register_usage_level(config)))
+    )
+    return compile_kernel(
+        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+    )
 
 
-def run_test(**config):
+def run_test(*, compile_config=None, **config):
     import torch
 
     data = prepare_data(**config)
-    executable = _compile_tirx(config)
+    executable = _compile_tirx(config, compile_config=compile_config)
     tirx_launch = _tirx_launch(executable, data)
     source_launch = _compile_reference(data)
     source_launch()
@@ -2230,14 +2227,26 @@ def run_test(**config):
     _assert_immutable(torch, data)
 
 
-def prepare_bench(**config):
+def prepare_bench(*, compile_config=None, **config):
     from tirx_kernels.runner import prepared_gpu_benchmark
 
-    executable = _compile_tirx(config)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(config), "executable": executable})
+    executable = _compile_tirx(config, compile_config=compile_config)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(config), "executable": executable}, compile_config=compile_config
+    )
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **kwargs,
+):
     from tirx_kernels.runner import bench, defer_gpu_interrupts, external_references_enabled
 
     with defer_gpu_interrupts():
@@ -2286,8 +2295,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

@@ -338,7 +338,7 @@ def _resolve_splits(value):
     return 2 if value == "auto" else int(value)
 
 
-def make_forward_kernel(**config):
+def make_forward_kernel(*, compile_config=None, **config):
     batch = int(config["batch"])
     heads = int(config["num_q_heads"])
     kv_heads = int(config["num_kv_heads"])
@@ -358,7 +358,7 @@ def make_forward_kernel(**config):
     q_blocks = (seqlen_q + 63) // 64
     grid = (q_blocks, heads if use_clc else heads * splits, batch)
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def forward(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -376,6 +376,7 @@ def make_forward_kernel(**config):
                 grid=grid, block=WARPS * 32, cluster=(1, 1, 1) if use_clc else None
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         if use_clc:

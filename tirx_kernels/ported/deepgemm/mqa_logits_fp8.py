@@ -9,7 +9,6 @@ Upstream source: deep_gemm/include/deep_gemm/impls/sm100_mqa_logits.cuh.
 """
 
 import ctypes
-import os
 from dataclasses import asdict, dataclass
 from functools import cache
 from typing import Any
@@ -19,6 +18,7 @@ import torch
 
 import tirx_kernels.tirx_lite as txl
 import tvm
+from tirx_kernels.runner import resolve_compile_config
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
@@ -351,7 +351,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     }
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, compile_config=None, **kwargs: Any):
     config = _make_config(**kwargs)
     num_heads = config.num_heads
     head_dim = config.head_dim
@@ -398,7 +398,7 @@ def get_kernel(**kwargs: Any):
     desc_sdo = head_dim // 2
     desc_swizzle = {32: 1, 64: 2, 128: 3}[head_dim]
 
-    @txl.kernel(arch="sm_100f")
+    @txl.kernel()
     def sm100_fp8_mqa_logits(
         seq_len: txl.u32,
         seq_len_kv: txl.u32,
@@ -418,6 +418,7 @@ def get_kernel(**kwargs: Any):
                 grid=config.num_sms, block=num_warps * 32, programmatic_stream_serialization=True
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         cache_policy_evict_normal = txl.uint64(0x1000000000000000)
@@ -823,10 +824,13 @@ def _compile_tirx_mqa_for_config(
     disable_cp: bool,
     num_sms: int,
     logits_stride_override: int | None,
+    compile_config=None,
 ) -> Any:
     import tvm
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100f"})
+    target = tvm.target.Target(
+        {"kind": "cuda", "arch": resolve_compile_config(compile_config).arch}
+    )
     kernel = get_kernel(
         seq_len=seq_len,
         seq_len_kv=seq_len_kv,
@@ -837,15 +841,18 @@ def _compile_tirx_mqa_for_config(
         disable_cp=disable_cp,
         num_sms=num_sms,
         logits_stride_override=logits_stride_override,
+        compile_config=compile_config,
     )
     with target:
         mod = tvm.IRModule({"main": kernel})
         # --ftz=false lets abs fold into FADD2 operand modifiers (ftz blocks it).
-        os.environ["TVM_CUDA_NVRTC_EXTRA_OPTS"] = "--ftz=false"
-        os.environ["TVM_CUDA_PTXAS_EXTRA_OPTS"] = "--allow-expensive-optimizations=true"
+        compile_config = resolve_compile_config(compile_config, ftz=False)
+        compile_config = resolve_compile_config(
+            compile_config, ptxas_options=("--allow-expensive-optimizations=true",)
+        )
         # Level 6 avoids math-loop spills on the bf16 shapes (swept 4-10).
-        os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = "6"
-        return tvm.compile(mod, target=target, tir_pipeline="tirx")
+        compile_config = resolve_compile_config(compile_config, ptxas_reg_usage_level=6)
+        return tvm.compile(mod, target=target, tir_pipeline="tirx", compile_config=compile_config)
 
 
 _compile_tirx_mqa_for_config = cache(_compile_tirx_mqa_for_config)
@@ -869,13 +876,13 @@ def _compile_tirx_mqa_key(config: MQALogitsFP8Config) -> tuple[tuple[str, Any], 
     return tuple(_compile_tirx_mqa_kwargs(config).items())
 
 
-def _compile_tirx_mqa(config: MQALogitsFP8Config, max_seqlen_k: int) -> Any:
+def _compile_tirx_mqa(config: MQALogitsFP8Config, max_seqlen_k: int, *, compile_config=None) -> Any:
     # The kernel is independent of seq_len/seq_len_kv/disable_cp/logits_stride (all
     # runtime): canonical values let the cache dedup to one kernel per structural config.
     del max_seqlen_k
 
     compile_kwargs = _compile_tirx_mqa_kwargs(config)
-    return _compile_tirx_mqa_for_config(**compile_kwargs)
+    return _compile_tirx_mqa_for_config(**compile_kwargs, compile_config=compile_config)
 
 
 def _logits_storage_shape(config: MQALogitsFP8Config, max_seqlen_k: int) -> tuple[int, int]:
@@ -905,13 +912,17 @@ def _prepare_global_barrier(executable: Any) -> None:
 
 
 def _prepare_tirx_invocation(
-    data: dict[str, Any], logits: torch.Tensor | None = None, *, executable: Any | None = None
+    data: dict[str, Any],
+    logits: torch.Tensor | None = None,
+    *,
+    executable: Any | None = None,
+    compile_config=None,
 ) -> dict[str, Any]:
     config: MQALogitsFP8Config = data["config"]
     if logits is None:
         logits = _allocate_logits(config, data["max_seqlen_k"])
     if executable is None:
-        executable = _compile_tirx_mqa(config, data["max_seqlen_k"])
+        executable = _compile_tirx_mqa(config, data["max_seqlen_k"], compile_config=compile_config)
     return {
         "executable": executable,
         "logits": logits,
@@ -939,8 +950,12 @@ def _run_tirx_invocation(data: dict[str, Any], invocation: dict[str, Any]) -> to
     return logits
 
 
-def _launch_tirx_mqa(data: dict[str, Any], logits: torch.Tensor | None = None) -> torch.Tensor:
-    return _run_tirx_invocation(data, _prepare_tirx_invocation(data, logits))
+def _launch_tirx_mqa(
+    data: dict[str, Any], logits: torch.Tensor | None = None, *, compile_config=None
+) -> torch.Tensor:
+    return _run_tirx_invocation(
+        data, _prepare_tirx_invocation(data, logits, compile_config=compile_config)
+    )
 
 
 def _run_deepgemm_mqa(data: dict[str, Any], *, clean_logits: bool) -> torch.Tensor:
@@ -996,7 +1011,7 @@ def _assert_correct(data: dict[str, Any], logits: torch.Tensor, *, name: str) ->
     return diff
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, compile_config=None, **kwargs: Any) -> None:
     data = prepare_data(**kwargs)
     config: MQALogitsFP8Config = data["config"]
     clean_logits = not config.compressed_logits
@@ -1004,7 +1019,7 @@ def run_test(**kwargs: Any) -> None:
     # Library-anchored: the torch ref is a yardstick, not the arbiter --
     # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
     deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
-    tirx_logits = _launch_tirx_mqa(data)
+    tirx_logits = _launch_tirx_mqa(data, compile_config=compile_config)
     torch.cuda.synchronize()
     tirx_diff = _assert_correct(data, tirx_logits, name="TIRx")
     if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
@@ -1013,16 +1028,18 @@ def run_test(**kwargs: Any) -> None:
         )
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Compile the TIRx executable without allocating CUDA data."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _make_config(**kwargs)
-    executable = _compile_tirx_mqa(config, 0)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+    executable = _compile_tirx_mqa(config, 0, compile_config=compile_config)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(kwargs), "executable": executable}, compile_config=compile_config
+    )
 
 
-def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
+def run_gpu(prepared, *, compile_config=None, **kwargs: Any) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
     from tirx_kernels.runner import bench
 
@@ -1036,7 +1053,9 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     data = prepare_data(**config_kwargs)
-    invocation = _prepare_tirx_invocation(data, executable=tirx_executable)
+    invocation = _prepare_tirx_invocation(
+        data, executable=tirx_executable, compile_config=compile_config
+    )
 
     # Correctness gate before timing (preserves the old validate_case behavior).
     tirx_logits = _run_tirx_invocation(data, invocation)
@@ -1064,13 +1083,13 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     return result
 
 
-def run_bench(**kwargs: Any) -> dict[str, Any]:
+def run_bench(*, compile_config=None, **kwargs: Any) -> dict[str, Any]:
     protocol = {
         name: kwargs.pop(name)
         for name in ("warmup", "repeat", "timer", "rounds", "cooldown_s")
         if name in kwargs
     }
-    return prepare_bench(**kwargs).run_gpu(**protocol)
+    return prepare_bench(**kwargs, compile_config=compile_config).run_gpu(**protocol)
 
 
 __all__ = [

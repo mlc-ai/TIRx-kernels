@@ -143,6 +143,7 @@ def make_kernel(
     temperature: bool = False,
     output_scale: bool = False,
     seqused: bool = False,
+    compile_config=None,
 ):
     """Trace one specialization of the combine kernel.
 
@@ -190,7 +191,7 @@ def make_kernel(
     NUM_ROWS, OUT_ROWS, SPLITS_PT = o_rows, out_rows, splits_pt
     NUM_VALS = o_elems
 
-    @txl.kernel(arch="sm_100a")
+    @txl.kernel()
     def msa_sparse_atten_fwd_combine(
         o_partial: txl.gptr[partial_ty],
         lse_partial: txl.gptr[txl.f32],
@@ -234,6 +235,7 @@ def make_kernel(
                 programmatic_stream_serialization=True,
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks_per_sm),
+            compile_config=compile_config,
         )
 
         m_block, k_block, batch = (
@@ -1033,7 +1035,7 @@ def make_kernel(
     return msa_sparse_atten_fwd_combine
 
 
-def get_kernel(**config):
+def get_kernel(*, compile_config=None, **config):
     """Return the TIRx specialization selected by one config."""
     config.pop("label", None)
     kernel = make_kernel(
@@ -1042,6 +1044,7 @@ def get_kernel(**config):
         temperature=bool(config.get("temperature", False)),
         output_scale=bool(config.get("output_scale", False)),
         seqused=bool(config.get("seqused", False)),
+        compile_config=compile_config,
     )
     return kernel.func.with_attr("global_symbol", KERNEL_META["name"])
 
@@ -1530,7 +1533,7 @@ def assert_outputs_match(
             raise AssertionError("the kernel wrote rows past seqused")
 
 
-def run_test(**config):
+def run_test(*, compile_config=None, **config):
     """Compile, launch, and validate one config against MSA's own kernel."""
     import unittest
 
@@ -1551,25 +1554,34 @@ def run_test(**config):
 
     expected = make_outputs(data)
     try:
-        compiled_sparse_atten_combine(reference_case(data, expected))()
+        compiled_sparse_atten_combine(
+            reference_case(data, expected), compile_config=compile_config
+        )()
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
     torch.cuda.synchronize()
 
-    executable = compile_kernel(get_kernel(**config))
+    executable = compile_kernel(
+        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+    )
     outputs = make_outputs(data)
     executable(*tirx_args(data, outputs))
     torch.cuda.synchronize()
     assert_outputs_match(data, outputs, expected)
 
 
-def prepare_bench(**config):
+def prepare_bench(*, compile_config=None, **config):
     """Compile the TIRx specialization without initializing CUDA."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     config.pop("label", None)
-    state = {"config": dict(config), "executable": compile_kernel(get_kernel(**config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(config),
+        "executable": compile_kernel(
+            get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
 
 
 # ---------------------------------------------------------------------------
@@ -1579,7 +1591,17 @@ def prepare_bench(**config):
 # without touching them and overwrites -- never accumulates into -- the outputs
 # it owns, so the hundredth launch does exactly the work the first one did.
 # ---------------------------------------------------------------------------
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    compile_config=None,
+    **config,
+):
     """Kernel-only comparison against MSA's compiled combine launch."""
     from tirx_kernels.runner import bench
 
@@ -1597,7 +1619,9 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     def build_reference():
         from tirx_kernels.ported.msa.utils._msa_bench import compiled_sparse_atten_combine
 
-        launch = compiled_sparse_atten_combine(reference_case(data, make_outputs(data)))
+        launch = compiled_sparse_atten_combine(
+            reference_case(data, make_outputs(data)), compile_config=compile_config
+        )
         launch()  # pay the CuTeDSL compile and first-launch cost outside timing
         return launch
 
@@ -1612,8 +1636,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+):
+    return prepare_bench(**config, compile_config=compile_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

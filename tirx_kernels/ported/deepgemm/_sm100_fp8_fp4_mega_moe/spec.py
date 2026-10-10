@@ -18,8 +18,6 @@ import ctypes
 import ctypes.util
 import math
 import os
-import threading
-from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cache
 from typing import Any
@@ -28,7 +26,6 @@ import torch
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 DEEPGEMM_SYM_BUFFER_MAX_RANKS = 72
-_CUDA_COMPILE_MODE_LOCK = threading.RLock()
 _PREPARED_LIBRARY_ENV = {
     False: "TIRX_PREPARED_MEGAMOE_LIBRARY_NO_STATS",
     True: "TIRX_PREPARED_MEGAMOE_LIBRARY_STATS",
@@ -1281,30 +1278,6 @@ def _view_symm_matrix(
     return case.symm_buffer.buffer.narrow(0, offset, rows * cols).view(rows, cols)
 
 
-def _get_mega_moe_cuda_compile_mode() -> str:
-    mode = os.environ.get(
-        "TIRX_MEGAMOE_CUDA_COMPILE_MODE", os.environ.get("TVM_CUDA_COMPILE_MODE", "nvcc")
-    ).lower()
-    if mode not in ("nvcc", "nvrtc"):
-        raise ValueError(f"TIRX_MEGAMOE_CUDA_COMPILE_MODE must be 'nvcc' or 'nvrtc', got {mode!r}")
-    return mode
-
-
-@contextmanager
-def _cuda_compile_mode(mode: str):
-    """Select the synchronous TVM CUDA callback backend without leaking it."""
-    with _CUDA_COMPILE_MODE_LOCK:
-        previous = os.environ.get("TVM_CUDA_COMPILE_MODE")
-        os.environ["TVM_CUDA_COMPILE_MODE"] = mode
-        try:
-            yield
-        finally:
-            if previous is None:
-                os.environ.pop("TVM_CUDA_COMPILE_MODE", None)
-            else:
-                os.environ["TVM_CUDA_COMPILE_MODE"] = previous
-
-
 @cache
 def _compile_tirx_mega_moe_for_config(
     *,
@@ -1319,11 +1292,13 @@ def _compile_tirx_mega_moe_for_config(
     activation_clamp: float,
     fast_math: int,
     collect_stats: bool,
-    cuda_compile_mode: str,
     emit_nvl_barrier_timeout_printf: bool = True,
+    compile_config=None,
 ) -> Any:
     import tvm
-    from tirx_kernels.runner import cuda_target
+    from tirx_kernels.runner import cuda_target, resolve_compile_config
+
+    compile_config = resolve_compile_config(compile_config, compiler="nvcc")
 
     # Deferred: `kernel` imports this module for its layout and launch config.
     from .kernel import get_kernel
@@ -1341,18 +1316,20 @@ def _compile_tirx_mega_moe_for_config(
         fast_math=fast_math,
         collect_stats=collect_stats,
         emit_nvl_barrier_timeout_printf=emit_nvl_barrier_timeout_printf,
+        compile_config=compile_config,
     )
     # The block-scale tcgen05 MMA below uses ``scale_vec::1X``, which ptxas
     # rejects for a family-only target. The prepared compile profile therefore
     # supplies the exact architecture-specific target validated for the runtime
     # GPU (currently sm_100a, sm_103a, or sm_107a).
-    target = cuda_target()
+    target = cuda_target(compile_config=compile_config)
     mod = tvm.IRModule({"main": kernel})
-    with _cuda_compile_mode(cuda_compile_mode):
-        return tvm.compile(mod, target=target, tir_pipeline="tirx")
+    return tvm.compile(mod, target=target, tir_pipeline="tirx", compile_config=compile_config)
 
 
-def _compile_tirx_mega_moe(case: MegaMoeCase | TirxMegaMoeLaunchContext) -> Any:
+def _compile_tirx_mega_moe(
+    case: MegaMoeCase | TirxMegaMoeLaunchContext, *, compile_config=None
+) -> Any:
     config = case.config
     collect_stats = getattr(case, "cumulative_local_expert_recv_stats", None) is not None
     prepared_path = os.environ.get(_PREPARED_LIBRARY_ENV[collect_stats])
@@ -1370,7 +1347,7 @@ def _compile_tirx_mega_moe(case: MegaMoeCase | TirxMegaMoeLaunchContext) -> Any:
         activation_clamp=config.activation_clamp,
         fast_math=config.fast_math,
         collect_stats=collect_stats,
-        cuda_compile_mode=_get_mega_moe_cuda_compile_mode(),
+        compile_config=compile_config,
     )
 
 
@@ -1548,7 +1525,10 @@ def _make_tirx_mega_moe_launch_context(
 
 
 def _prepare_tirx_invocation(
-    case: MegaMoeCase | TirxMegaMoeLaunchContext, y: torch.Tensor | None = None
+    case: MegaMoeCase | TirxMegaMoeLaunchContext,
+    y: torch.Tensor | None = None,
+    *,
+    compile_config=None,
 ) -> TirxMegaMoeInvocation:
     l1_weights = case.transformed_l1_weights[0]
     l1_weights_sf = case.transformed_l1_weights[1].permute(0, 2, 1)
@@ -1611,7 +1591,7 @@ def _prepare_tirx_invocation(
             case.config.num_experts_per_rank, dtype=torch.int32, device=y.device
         )
     return TirxMegaMoeInvocation(
-        executable=_compile_tirx_mega_moe(case),
+        executable=_compile_tirx_mega_moe(case, compile_config=compile_config),
         y=y,
         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
         symm_buffer_offsets=_make_symm_buffer_offsets(case),
@@ -1673,6 +1653,8 @@ def prepare_tirx_fp8_fp4_mega_moe(
     activation: str = "swiglu",
     activation_clamp: float | None = None,
     fast_math: bool = True,
+    *,
+    compile_config=None,
 ) -> TirxMegaMoePrepared:
     context = _make_tirx_mega_moe_launch_context(
         y=y,
@@ -1687,7 +1669,10 @@ def prepare_tirx_fp8_fp4_mega_moe(
         activation_clamp=activation_clamp,
         fast_math=fast_math,
     )
-    return TirxMegaMoePrepared(context=context, invocation=_prepare_tirx_invocation(context, y=y))
+    return TirxMegaMoePrepared(
+        context=context,
+        invocation=_prepare_tirx_invocation(context, y=y, compile_config=compile_config),
+    )
 
 
 def launch_prepared_tirx_fp8_fp4_mega_moe(prepared: TirxMegaMoePrepared) -> None:
@@ -1706,6 +1691,8 @@ def fp8_fp4_mega_moe(
     activation: str = "swiglu",
     activation_clamp: float | None = None,
     fast_math: bool = True,
+    *,
+    compile_config=None,
 ) -> None:
     prepared = prepare_tirx_fp8_fp4_mega_moe(
         y,
@@ -1719,5 +1706,6 @@ def fp8_fp4_mega_moe(
         activation=activation,
         activation_clamp=activation_clamp,
         fast_math=fast_math,
+        compile_config=compile_config,
     )
     launch_prepared_tirx_fp8_fp4_mega_moe(prepared)

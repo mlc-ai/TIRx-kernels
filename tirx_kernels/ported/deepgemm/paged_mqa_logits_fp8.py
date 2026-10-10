@@ -13,6 +13,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import resolve_compile_config
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
@@ -549,7 +550,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     return _prepare_data(_make_config(**kwargs), compute_reference=True)
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, compile_config=None, **kwargs: Any):
     config = _make_config(**kwargs)
 
     num_heads = config.num_heads
@@ -605,7 +606,7 @@ def get_kernel(**kwargs: Any):
     MMA = "tcgen05.mma.cta_group::1.kind::f8f6f4"
     TC_LD = f"tcgen05.ld.sync.aligned.32x32b.x{num_heads}.b32"
 
-    @txl.kernel(arch="sm_100f")
+    @txl.kernel()
     def sm100_fp8_paged_mqa_logits(
         batch_size: txl.u32,
         logits_stride: txl.u32,
@@ -625,6 +626,7 @@ def get_kernel(**kwargs: Any):
                 grid=config.num_sms, block=num_warps * 32, programmatic_stream_serialization=True
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            compile_config=compile_config,
         )
 
         cache_policy_evict_normal = txl.uint64(1152921504606846976)
@@ -1425,10 +1427,13 @@ def _compile_tirx_paged_mqa_for_config(
     context_lens_2d: bool,
     varlen: bool,
     indices_pair_stride: int,
+    compile_config=None,
 ) -> Any:
     import tvm
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100f"})
+    target = tvm.target.Target(
+        {"kind": "cuda", "arch": resolve_compile_config(compile_config).arch}
+    )
     kernel = get_kernel(
         batch_size=batch_size,
         next_n=next_n,
@@ -1442,10 +1447,11 @@ def _compile_tirx_paged_mqa_for_config(
         context_lens_2d=context_lens_2d,
         varlen=varlen,
         indices_pair_stride=indices_pair_stride,
+        compile_config=compile_config,
     )
     with target:
         mod = tvm.IRModule({"main": kernel})
-        return tvm.compile(mod, target=target, tir_pipeline="tirx")
+        return tvm.compile(mod, target=target, tir_pipeline="tirx", compile_config=compile_config)
 
 
 _compile_tirx_paged_mqa_for_config = cache(_compile_tirx_paged_mqa_for_config)
@@ -1472,9 +1478,9 @@ def _compile_tirx_paged_mqa_key(config: PagedMQALogitsFP8Config) -> tuple[tuple[
     return tuple(_compile_tirx_paged_mqa_kwargs(config).items())
 
 
-def _compile_tirx_paged_mqa(config: PagedMQALogitsFP8Config) -> Any:
+def _compile_tirx_paged_mqa(config: PagedMQALogitsFP8Config, *, compile_config=None) -> Any:
     compile_kwargs = _compile_tirx_paged_mqa_kwargs(config)
-    return _compile_tirx_paged_mqa_for_config(**compile_kwargs)
+    return _compile_tirx_paged_mqa_for_config(**compile_kwargs, compile_config=compile_config)
 
 
 def _run_deepgemm_paged_mqa(data: dict[str, Any], *, clean_logits: bool = False) -> torch.Tensor:
@@ -1696,13 +1702,17 @@ def _prepare_global_barrier(executable: Any) -> None:
 
 
 def _prepare_tirx_invocation(
-    data: dict[str, Any], logits: torch.Tensor | None = None, *, executable: Any | None = None
+    data: dict[str, Any],
+    logits: torch.Tensor | None = None,
+    *,
+    executable: Any | None = None,
+    compile_config=None,
 ) -> dict[str, Any]:
     config: PagedMQALogitsFP8Config = data["config"]
     if logits is None:
         logits = _allocate_logits(config)
     if executable is None:
-        executable = _compile_tirx_paged_mqa(config)
+        executable = _compile_tirx_paged_mqa(config, compile_config=compile_config)
     return {
         "executable": executable,
         "logits": logits,
@@ -1739,9 +1749,11 @@ def _run_tirx_invocation(data: dict[str, Any], invocation: dict[str, Any]) -> to
 
 
 def _launch_tirx_paged_mqa(
-    data: dict[str, Any], logits: torch.Tensor | None = None
+    data: dict[str, Any], logits: torch.Tensor | None = None, *, compile_config=None
 ) -> torch.Tensor:
-    return _run_tirx_invocation(data, _prepare_tirx_invocation(data, logits))
+    return _run_tirx_invocation(
+        data, _prepare_tirx_invocation(data, logits, compile_config=compile_config)
+    )
 
 
 def _calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
@@ -1803,14 +1815,14 @@ def _assert_valid_correct(
     return diff
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, compile_config=None, **kwargs: Any) -> None:
     data = prepare_data(**kwargs)
     config: PagedMQALogitsFP8Config = data["config"]
     deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
     # Library-anchored: the torch ref is a yardstick, not the arbiter --
     # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
     deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
-    tirx_logits = _launch_tirx_paged_mqa(data)
+    tirx_logits = _launch_tirx_paged_mqa(data, compile_config=compile_config)
     torch.cuda.synchronize()
     tirx_diff = _assert_correct(data, tirx_logits, name="TIRx")
     if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
@@ -1824,16 +1836,18 @@ def run_test(**kwargs: Any) -> None:
         _assert_correct(data, cutedsl_logits, name="SGLang CuTeDSL")
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, compile_config=None, **kwargs: Any):
     """Compile the paged MQA executable without allocating CUDA data."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _make_config(**kwargs)
-    executable = _compile_tirx_paged_mqa(config)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+    executable = _compile_tirx_paged_mqa(config, compile_config=compile_config)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(kwargs), "executable": executable}, compile_config=compile_config
+    )
 
 
-def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
+def run_gpu(prepared, *, compile_config=None, **kwargs: Any) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
     from tirx_kernels.runner import bench, external_references_enabled
 
@@ -1856,7 +1870,9 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     # The independent Python reference is intentionally omitted here: it iterates
     # page-by-page and is prohibitively slow for SGLang's 131K-context sweep.
     data = _prepare_data(config, compute_reference=False)
-    invocation = _prepare_tirx_invocation(data, executable=tirx_executable)
+    invocation = _prepare_tirx_invocation(
+        data, executable=tirx_executable, compile_config=compile_config
+    )
     deepgemm_logits = None
     max_diff = None
     if external_references_enabled():
@@ -1895,13 +1911,13 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     return result
 
 
-def run_bench(**kwargs: Any) -> dict[str, Any]:
+def run_bench(*, compile_config=None, **kwargs: Any) -> dict[str, Any]:
     protocol = {
         name: kwargs.pop(name)
         for name in ("warmup", "repeat", "timer", "rounds", "cooldown_s")
         if name in kwargs
     }
-    return prepare_bench(**kwargs).run_gpu(**protocol)
+    return prepare_bench(**kwargs, compile_config=compile_config).run_gpu(**protocol)
 
 
 __all__ = [
