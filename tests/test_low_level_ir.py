@@ -9,7 +9,6 @@ import tirx_kernels.tirx_lite as txl
 from tirx_kernels.runner import run_kernel_test
 from tirx_kernels.tirx_lite.low_level_ir import LowLevelIRContractError, check_low_level_ir
 from tvm.script import tirx as T
-from tvm.script.tirx import tile as Tx
 
 
 def _build_kernel_with_buffer_access(scope: str, access: str):
@@ -83,15 +82,21 @@ def test_address_of_still_checks_memory_reads_in_its_index():
     assert len(report.address_only_loads) == 1
 
 
-def test_tile_primitive_is_rejected_before_lowering():
+@pytest.mark.parametrize("composite", [False, True])
+def test_tile_primitive_is_rejected_before_lowering(composite):
+    instruction = T.cuda.tile.compose.exp if composite else T.cuda.tile.ld
+
     @T.function
     def probe(a: T.Tensor((32,), "float32"), b: T.Tensor((32,), "float32")):
-        Tx.copy(b[:], a[:])
+        instruction(b[:], a[:])
 
     with pytest.raises(LowLevelIRContractError) as error:
         check_low_level_ir(probe)
 
-    assert any(item.kind == "tile_primitive" for item in error.value.report.violations)
+    assert any(
+        item.kind == ("tile_composite" if composite else "tile_primitive")
+        for item in error.value.report.violations
+    )
 
 
 def test_func_call_is_rejected_by_default_and_reports_callee():

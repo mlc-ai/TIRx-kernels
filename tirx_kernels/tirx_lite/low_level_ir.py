@@ -121,13 +121,12 @@ class _LowLevelIRInspector:
         self.setmaxnreg_calls: list[LowLevelIRFinding] = []
         self.has_min_blocks_per_sm = False
 
-    def __call__(self, body: tirx.Stmt) -> None:
+    def __call__(self, body: tvm.ir.Stmt) -> None:
         structural_visit(
             body,
             [
-                (tirx.TilePrimitiveCall, self._visit_tile_call),
                 (tvm.ir.TensorLoad, self._visit_load),
-                (tirx.TensorStore, self._visit_store),
+                (tvm.ir.TensorStore, self._visit_store),
                 (tvm.ir.Call, self._visit_call),
             ],
         )
@@ -144,10 +143,6 @@ class _LowLevelIRInspector:
             span=_span_text(node),
         )
 
-    def _visit_tile_call(self, op: Any, visitor: Any) -> None:
-        self.violations.append(self._finding(op, "tile_primitive"))
-        visitor.default_visit(op)
-
     def _visit_load(self, op: tvm.ir.TensorLoad, visitor: Any) -> None:
         scope = str(op.source.scope())
         if _is_forbidden_scope(scope):
@@ -155,8 +150,8 @@ class _LowLevelIRInspector:
         for index in op.indices:
             visitor.visit(index)
 
-    def _visit_store(self, op: tirx.TensorStore, visitor: Any) -> None:
-        scope = str(op.buffer.scope())
+    def _visit_store(self, op: tvm.ir.TensorStore, visitor: Any) -> None:
+        scope = str(op.dest.scope())
         if _is_forbidden_scope(scope):
             self.violations.append(self._finding(op, "buffer_store", scope))
         visitor.visit(op.value)
@@ -165,6 +160,9 @@ class _LowLevelIRInspector:
 
     def _visit_call(self, op: tvm.ir.Call, visitor: Any) -> None:
         op_name = getattr(op.op, "name", None)
+        category = op.op.get_attr("TIRxOpCategory") if isinstance(op.op, tvm.ir.Op) else None
+        if category in {"tile_primitive", "tile_composite"}:
+            self.violations.append(self._finding(op, str(category), callee=op_name))
         if op_name == _MIN_BLOCKS_PER_SM_OP:
             self.has_min_blocks_per_sm = True
         if op_name == _SETMAXNREG_OP:

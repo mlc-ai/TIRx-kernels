@@ -79,16 +79,14 @@ class SmemDescriptor:
     def make_lo_uniform(self):
         """Broadcast the descriptor's low half without a device helper call.
 
-        The TVM ``lang.smem_desc`` helper emits a ``tirx.cuda.func_call`` for
-        this operation.  tirx-lite descriptors stay inside the low-level IR
-        contract by spelling the same operation as the two descriptor moves
-        and one warp shuffle directly.
+        Spell the operation as two descriptor moves and one warp shuffle so
+        it stays inside the low-level IR contract.
         """
         desc_lo = T.alloc_local((1,), "uint32")
         desc_hi = T.alloc_local((1,), "uint32")
         T.evaluate(T.ptx.mov.b64(desc_lo[0], desc_hi[0], self._buf[0]))
         _I.tensor_store(
-            desc_lo, T.tvm_warp_shuffle(T.uint32(0xFFFFFFFF), desc_lo[0], 0, 32, 32), [0]
+            desc_lo, [0], T.gpu_warp_shuffle(T.uint32(0xFFFFFFFF), desc_lo[0], 0, 32, 32)
         )
         T.evaluate(T.ptx.mov.b64(self._buf[0], desc_lo[0], desc_hi[0]))
 

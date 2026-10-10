@@ -246,18 +246,12 @@ class _IRScanner:
         self.findings: list[Finding] = []
 
     def __call__(self, body) -> None:
-        structural_walk(
-            body, [(tvm.tirx.TilePrimitiveCall, self._visit_tile), (tvm.ir.Call, self._visit_call)]
-        )
+        structural_walk(body, [(tvm.ir.Call, self._visit_call)])
 
     def _record(self, node: Any, detail: str) -> None:
         span = getattr(node, "span", None)
         suffix = f" span={span}" if span is not None else ""
         self.findings.append(Finding("IR", self.specialization, detail + suffix))
-
-    def _visit_tile(self, op: Any) -> None:
-        op_name = getattr(getattr(op, "op", None), "name", "<unknown>")
-        self._record(op, f"TilePrimitiveCall op={op_name}")
 
     def _visit_call(self, call: tvm.ir.Call) -> None:
         op = getattr(call, "op", None)
@@ -265,8 +259,8 @@ class _IRScanner:
         category = op.get_attr("TIRxOpCategory") if isinstance(op, tvm.ir.Op) else None
         if op_name is not None and op_name.startswith("tirx.tile."):
             self._record(call, f"forbidden operator {op_name}")
-        elif category == "tile_primitive":
-            self._record(call, f"operator {op_name} has TIRxOpCategory=tile_primitive")
+        elif category in {"tile_primitive", "tile_composite"}:
+            self._record(call, f"operator {op_name} has TIRxOpCategory={category}")
 
 
 def _ir_findings() -> list[Finding]:

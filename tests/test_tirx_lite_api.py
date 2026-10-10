@@ -10,7 +10,7 @@ import pytest
 from tvm_ffi import structural_walk
 
 import tirx_kernels.tirx_lite as txl
-from tvm import ir, tirx
+from tvm import ir
 
 
 def test_kernel_target_honors_prepared_compile_arch(monkeypatch):
@@ -116,10 +116,10 @@ def test_warp_scan_keeps_collectives_outside_guards():
         txl.ptx.st.global_.f32(out.ptr_to([txl.lane_id()]), values[0])
 
     branches = []
-    structural_walk(probe.func.body, (tirx.IfThenElse, branches.append))
+    structural_walk(probe.func.body, (ir.If, branches.append))
     assert len(branches) == 5
-    assert len(_calls_named(probe.func, "tirx.tvm_warp_shuffle_up")) == 10
-    assert len(_calls_named(probe.func, "tirx.tvm_warp_shuffle")) == 1
+    assert len(_calls_named(probe.func, "tirx.gpu_warp_shuffle_up")) == 10
+    assert len(_calls_named(probe.func, "tirx.gpu_warp_shuffle")) == 1
     for branch in branches:
         calls = []
         structural_walk(branch.then_case, (ir.Call, calls.append))
@@ -153,7 +153,7 @@ def test_mma_chain_encodes_descriptor_before_branch_guard():
         probe.func.body,
         [
             (ir.Call, lambda call: events.append(call.op.name)),
-            (tirx.IfThenElse, lambda _: events.append("branch")),
+            (ir.If, lambda _: events.append("branch")),
         ],
         order="pre",
     )
@@ -229,10 +229,10 @@ def test_stack_alloca_is_bound_exactly_once():
         txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
     statements = []
-    structural_walk(probe.func.body, (tirx.Bind, lambda op: statements.append(op)))
+    structural_walk(probe.func.body, (ir.Bind, lambda op: statements.append(op)))
     assert (
         sum(
-            getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_stack_alloca"
+            getattr(getattr(op.value, "op", None), "name", None) == "tirx.stack_alloca"
             for op in statements
         )
         == 1
@@ -246,10 +246,10 @@ def test_call_packed_has_statement_semantics():
         txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
     statements = []
-    structural_walk(probe.func.body, (tirx.Evaluate, lambda op: statements.append(op)))
+    structural_walk(probe.func.body, (ir.Evaluate, lambda op: statements.append(op)))
     assert (
         sum(
-            getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_call_packed"
+            getattr(getattr(op.value, "op", None), "name", None) == "tirx.call_packed"
             for op in statements
         )
         == 1
@@ -267,11 +267,11 @@ def test_cu_tensor_map_encode_tiled_emits_typed_encode():
         txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
     values = []
-    structural_walk(probe.func.body, (tirx.Evaluate, lambda op: values.append(op.value)))
+    structural_walk(probe.func.body, (ir.Evaluate, lambda op: values.append(op.value)))
     encodes = [
         value
         for value in values
-        if getattr(getattr(value, "op", None), "name", None) == "tirx.tensormap_encode_tiled"
+        if getattr(getattr(value, "op", None), "name", None) == "tirx.cuda.tensormap_encode_tiled"
     ]
     assert len(encodes) == 1
     attrs = encodes[0].attrs
@@ -553,7 +553,7 @@ def test_kernel_records_python_source_spans():
     structural_walk(
         probe.func.body,
         (
-            tirx.Evaluate,
+            ir.Evaluate,
             lambda stmt: stores.append(stmt)
             if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tirx.ptx.st"
             else None,
