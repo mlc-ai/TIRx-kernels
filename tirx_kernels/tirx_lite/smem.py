@@ -26,8 +26,8 @@ import warnings
 from tvm import DataType
 from tvm.backend.cuda.lang import SMEMPool
 from tvm.backend.cuda.lang.alloc_pool import _validate_mma_alloc_shape
-from tvm.backend.cuda.tile_primitive.layout_utils import strip_swizzle_to_tile
-from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
+from tvm.backend.cuda.tile.layout_utils import strip_swizzle_to_tile
+from tvm.backend.cuda.tile.tma_utils import SwizzleMode, mma_shared_layout
 from tvm.script import tirx as T
 from tvm.tirx.analysis import undefined_vars
 from tvm.tirx.script import ir_builder as _I

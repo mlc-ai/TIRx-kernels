@@ -339,7 +339,7 @@ class _PersistentScheduler:
 
 def build_kernel(spec: GemmSpec, *, backend_config=None):
     """Build the TIRx `PrimFunc` for one `sm100_fp8_fp4_gemm_1d1d_impl` instantiation."""
-    from tvm.ir.type import PointerType, PrimType
+    from tvm.ir.type import PrimType, PtrType
 
     _validate(spec)
 
@@ -700,9 +700,7 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
             )
         smem.commit(spec.smem_size)
 
-        smem_cd_word_data = txl.reinterpret(
-            PointerType(PrimType("uint32")), smem_cd.ptr_to([0, 0, 0])
-        )
+        smem_cd_word_data = txl.reinterpret(PtrType(PrimType("uint32")), smem_cd.ptr_to([0, 0, 0]))
         smem_cd_u32 = txl.decl_tensor(
             (NUM_TMA_STORE_STAGES * cd_stage_bytes // 4,),
             "uint32",

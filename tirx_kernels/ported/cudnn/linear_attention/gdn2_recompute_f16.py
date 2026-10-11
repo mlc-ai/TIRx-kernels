@@ -13,7 +13,7 @@ driven by ``chunk_gdn2_recompute_sm100``).
 
 import tirx_kernels.tirx_lite as txl
 from tirx_kernels.runner import hardware_num_sms, resolve_backend_config
-from tvm.ir.type import PointerType, PrimType
+from tvm.ir.type import PrimType, PtrType
 
 KERNEL_META = {
     "name": "cudnn_sm100_gdn2_recompute_f16",
@@ -308,7 +308,7 @@ def _copy_tensormap(src_map, dst):
     source = txl.decl_tensor(
         (_TENSOR_MAP_WORDS,),
         txl.u64,
-        data=txl.reinterpret(PointerType(PrimType("uint64"), "param"), txl.address_of(src_map)),
+        data=txl.reinterpret(PtrType(PrimType("uint64"), "param"), txl.address_of(src_map)),
         scope="param",
     )
     target = txl.reinterpret("uint64", dst)

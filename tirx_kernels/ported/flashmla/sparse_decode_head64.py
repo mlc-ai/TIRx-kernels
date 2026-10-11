@@ -16,7 +16,7 @@ import torch
 import tirx_kernels.tirx_lite as txl
 import tvm
 from tirx_kernels.runner import cache_backend_config
-from tvm.ir import PointerType, PrimType
+from tvm.ir import PrimType, PtrType
 
 B_H = 64
 B_TOPK = 64
@@ -1571,7 +1571,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                             values[pair_i, 2],
                                             values[pair_i, 3],
                                             txl.reinterpret(
-                                                PointerType(PrimType("float32")),
+                                                PtrType(PrimType("float32")),
                                                 scales_ptr_u64 + byte_offsets[pair_i],
                                             ),
                                         )
@@ -1592,7 +1592,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                                 txl.ptx.ld.global_.nc.u64(
                                                     words[pair_i],
                                                     txl.reinterpret(
-                                                        PointerType(PrimType("uint64")),
+                                                        PtrType(PrimType("uint64")),
                                                         scales_ptr_u64 + byte_offsets[pair_i],
                                                     ),
                                                 )
@@ -1853,10 +1853,10 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                             rs_buf.stage == 0, raw_nope0_base_u64, raw_nope1_base_u64
                         )
                         cur_nope_base_uint_addr = txl.cuda.cvta_generic_to_shared(
-                            txl.reinterpret(PointerType(PrimType("bfloat16")), cur_nope_base_u64)
+                            txl.reinterpret(PtrType(PrimType("bfloat16")), cur_nope_base_u64)
                         )
                         cur_raw_nope_base_uint_addr = txl.cuda.cvta_generic_to_shared(
-                            txl.reinterpret(PointerType(PrimType("uint64")), cur_raw_nope_base_u64)
+                            txl.reinterpret(PtrType(PrimType("uint64")), cur_raw_nope_base_u64)
                         )
                         with txl.unroll(rows_per_group) as local_row:
                             row_idx = local_row * (128 // 8) + group_idx

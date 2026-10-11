@@ -95,7 +95,7 @@ def _tile_call_reason(name: str | None, call: ast.Call) -> str | None:
     leaf = parts[-1]
     if leaf == "TilePrimitiveCall" or ".tile." in name:
         return f"explicit tile primitive call {name}"
-    if "tile_primitive" in parts and leaf not in {"SwizzleMode", "sf_smem_layout"}:
+    if "tile" in parts and leaf not in {"SwizzleMode", "sf_smem_layout"}:
         return f"tile-primitive helper call {name}"
 
     # TIRx script exposes both direct and execution-scope tile APIs.  Cast has
