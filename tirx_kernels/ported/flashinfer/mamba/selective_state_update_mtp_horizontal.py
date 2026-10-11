@@ -15,7 +15,7 @@ from typing import Any
 import torch
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import resolve_compile_config
+from tirx_kernels.runner import resolve_backend_config
 from tvm.ir import PointerType, PrimType
 
 from . import selective_state_update_mtp_simple as _simple
@@ -82,7 +82,7 @@ def _store_state_tile(
     STATE_DTYPE,
     PAIRS_PER_TILE_MEMBER,
     PHILOX_ROUNDS,
-    compile_config=None,
+    backend_config=None,
 ):
     if STATE_DTYPE == "float32":
         words = txl.alloc_local((4,), "uint32")
@@ -102,7 +102,7 @@ def _store_state_tile(
                 txl.cuda.float2_y(packed),
                 txl.cuda.float2_x(packed),
                 random_words[random_base + pair // 2 * 4 + pair % 2],
-                compile_config=compile_config,
+                backend_config=backend_config,
             )
         txl.ptx.st.global_.v4.b32(
             destination_ptr, packed_words[0], packed_words[1], packed_words[2], packed_words[3]
@@ -531,9 +531,9 @@ def _ptxas_level(spec: dict[str, Any], arch: str) -> str:
     return ptxas_level
 
 
-def get_kernel(*, compile_config=None, **kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     spec = _specialization(kwargs)
-    arch = resolve_compile_config(compile_config).arch
+    arch = resolve_backend_config(backend_config)["cuda"]["arch"]
     if _use_simple_dispatch(spec, arch):
         simple_kwargs = dict(kwargs)
         simple_kwargs["_assume_no_pad"] = int(kwargs.get("pad_every", 0)) == 0
@@ -551,7 +551,7 @@ def get_kernel(*, compile_config=None, **kwargs: Any):
         min_blocks = _simple_min_blocks_per_sm(spec, arch)
         if min_blocks is not None:
             simple_kwargs["_min_blocks_per_sm"] = min_blocks
-        return _simple.get_kernel(**simple_kwargs, compile_config=compile_config)
+        return _simple.get_kernel(**simple_kwargs, backend_config=backend_config)
     NHEADS = spec["NHEADS"]
     DIM = spec["DIM"]
     DSTATE = spec["DSTATE"]
@@ -751,7 +751,7 @@ def get_kernel(*, compile_config=None, **kwargs: Any):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(spec["BATCH"], spec["NHEADS"]), block=5 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         batch_i, head = txl.cta_id()
@@ -1101,7 +1101,7 @@ def get_kernel(*, compile_config=None, **kwargs: Any):
                                         STATE_DTYPE=STATE_DTYPE,
                                         PAIRS_PER_TILE_MEMBER=PAIRS_PER_TILE_MEMBER,
                                         PHILOX_ROUNDS=PHILOX_ROUNDS,
-                                        compile_config=compile_config,
+                                        backend_config=backend_config,
                                     )
                             txl.assign(
                                 intermediate_step_addr,
@@ -1128,7 +1128,7 @@ def get_kernel(*, compile_config=None, **kwargs: Any):
                                             STATE_DTYPE=STATE_DTYPE,
                                             PAIRS_PER_TILE_MEMBER=PAIRS_PER_TILE_MEMBER,
                                             PHILOX_ROUNDS=PHILOX_ROUNDS,
-                                            compile_config=compile_config,
+                                            backend_config=backend_config,
                                         )
 
                 txl.ptx.mbarrier.arrive.shared__cta.b64(empty_barriers.ptr_to([state_pipe.stage]))
@@ -1422,8 +1422,8 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     return case
 
 
-def _tirx_args(case: dict[str, Any], *, compile_config=None) -> tuple[Any, ...]:
-    if _use_simple_dispatch(case["spec"], resolve_compile_config(compile_config).arch):
+def _tirx_args(case: dict[str, Any], *, backend_config=None) -> tuple[Any, ...]:
+    if _use_simple_dispatch(case["spec"], resolve_backend_config(backend_config)["cuda"]["arch"]):
         return _simple._tirx_args(case)
     maps = case["tensor_maps"]
     return (
@@ -1490,10 +1490,10 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
     return result
 
 
-def _compile_tirx(config: dict[str, Any], *, compile_config=None):
+def _compile_tirx(config: dict[str, Any], *, backend_config=None):
     from tirx_kernels.runner import compile_kernel
 
-    arch = resolve_compile_config(compile_config).arch
+    arch = resolve_backend_config(backend_config)["cuda"]["arch"]
     spec = _specialization(config)
     ptxas_level = (
         _simple_ptxas_level(spec, arch)
@@ -1502,26 +1502,35 @@ def _compile_tirx(config: dict[str, Any], *, compile_config=None):
     )
     pass
     if ptxas_level is not None:
-        compile_config = resolve_compile_config(
-            compile_config, ptxas_reg_usage_level=int(ptxas_level)
+        backend_config = resolve_backend_config(
+            backend_config,
+            defaults={
+                "cuda": {
+                    "ptxas": [
+                        "-v",
+                        "--warn-on-local-memory-usage",
+                        "--register-usage-level=" + str(int(ptxas_level)),
+                    ]
+                }
+            },
         )
     return compile_kernel(
-        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+        get_kernel(**config, backend_config=backend_config), backend_config=backend_config
     )
 
 
-def prepare_bench(*, compile_config=None, **kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     state = {
         "config": dict(kwargs),
-        "executable": _compile_tirx(kwargs, compile_config=compile_config),
+        "executable": _compile_tirx(kwargs, backend_config=backend_config),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(*, compile_config=None, **kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     expected_rejection = kwargs.pop("expected_rejection", None)
     if expected_rejection is not None:
         try:
@@ -1534,8 +1543,8 @@ def run_test(*, compile_config=None, **kwargs: Any) -> None:
             return
         raise AssertionError(f"expected horizontal rejection containing {expected_rejection!r}")
     case = prepare_data(**kwargs)
-    executable = _compile_tirx(kwargs, compile_config=compile_config)
-    executable(*_tirx_args(case, compile_config=compile_config))
+    executable = _compile_tirx(kwargs, backend_config=backend_config)
+    executable(*_tirx_args(case, backend_config=backend_config))
     torch.cuda.synchronize()
     _run_reference(case)
     torch.cuda.synchronize()
@@ -1550,7 +1559,7 @@ def run_gpu(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1560,7 +1569,7 @@ def run_gpu(
     from tirx_kernels.runner import bench
 
     case = prepare_data(**kwargs)
-    args = _tirx_args(case, compile_config=compile_config)
+    args = _tirx_args(case, backend_config=backend_config)
 
     def source_builder():
         executable(*args)
@@ -1594,10 +1603,10 @@ def run_bench(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    return prepare_bench(**kwargs, compile_config=compile_config).run_gpu(
+    return prepare_bench(**kwargs, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

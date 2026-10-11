@@ -52,10 +52,10 @@ from unittest import SkipTest
 
 import torch
 
-from tirx_kernels.runner import cuda_target, resolve_compile_config
+from tirx_kernels.runner import backend_config_key, cuda_target, resolve_backend_config
 
 
-def _make_base(*, compile_config=None):
+def _make_base(*, backend_config=None):
     """KDA recurrent decode, family "colreg-persist" (v4, warp-autonomous phases): persistent register-resident recurrence.
 
     Unit = (sequence n, value head hv, column slice of CPT rows). A persistent CTA (4 warps)
@@ -152,7 +152,7 @@ def _make_base(*, compile_config=None):
         vec_split=True,
         nw=4,
         l2pf=False,
-        compile_config=None,
+        backend_config=None,
     ):
         assert D % cpt == 0 and cpt % (4 * nw) == 0, "each warp needs a multiple of 4 rows"
         G = HV // H
@@ -207,7 +207,7 @@ def _make_base(*, compile_config=None):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
                 kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
-                compile_config=compile_config,
+                backend_config=backend_config,
             )
 
             cta = txl.cta_id()
@@ -1095,21 +1095,22 @@ def _make_base(*, compile_config=None):
             by_regs = {32: 3, 64: 2, 128: 1}[cpt]
         return max(1, min(by_smem, by_regs))
 
-    def _compile(*, compile_config=None, **kw):
-        cache_config = resolve_compile_config(compile_config)
+    def _compile(*, backend_config=None, **kw):
+        backend_config = resolve_backend_config(backend_config)
+        cache_config = backend_config_key(backend_config)
         key = tuple(sorted(kw.items()))
         exe = _COMPILED.get((cache_config, key))
         if exe is None:
-            kernel = build_kernel(**kw, compile_config=compile_config)
-            target = cuda_target(compile_config=compile_config)
+            kernel = build_kernel(**kw, backend_config=backend_config)
+            target = cuda_target(backend_config=backend_config)
             with target:
                 exe = tvm.compile(
-                    kernel.mod, target=target, tir_pipeline="tirx", compile_config=compile_config
+                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
                 )
             _COMPILED[(cache_config, key)] = exe
         return exe
 
-    def setup(data, N, T, *, compile_config=None):
+    def setup(data, N, T, *, backend_config=None):
         q, k, v, g, beta = data["q"], data["k"], data["v"], data["g"], data["beta"]
         initial_state, final_state, output = (
             data["initial_state"],
@@ -1157,7 +1158,7 @@ def _make_base(*, compile_config=None):
             per_sm=per_sm,
             copy_est=copy_est,
             **extra,
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         dummy_f32 = torch.zeros(4, dtype=torch.float32, device=device)
@@ -1203,7 +1204,7 @@ _BASE_SETUP = _make_base()
 del _make_base
 
 
-def _make_defer(*, compile_config=None):
+def _make_defer(*, backend_config=None):
     """KDA recurrent decode, family "colreg-persist" (v10: safe deferred checkpoint hand-off): persistent register-resident recurrence.
 
     Unit = (sequence n, value head hv, column slice of CPT rows). A persistent CTA (4 warps)
@@ -1323,7 +1324,7 @@ def _make_defer(*, compile_config=None):
         warp_auto=True,
         bar_arrive=False,
         l2pf=False,
-        compile_config=None,
+        backend_config=None,
     ):
         assert D % cpt == 0 and cpt % (4 * nw) == 0, "each warp needs a multiple of 4 rows"
         del bar_arrive
@@ -1382,7 +1383,7 @@ def _make_defer(*, compile_config=None):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
                 kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
-                compile_config=compile_config,
+                backend_config=backend_config,
             )
 
             cta = txl.cta_id()
@@ -2280,21 +2281,22 @@ def _make_defer(*, compile_config=None):
             by_regs = {32: 3, 64: 2, 128: 1}[cpt]
         return max(1, min(by_smem, by_regs))
 
-    def _compile(*, compile_config=None, **kw):
-        cache_config = resolve_compile_config(compile_config)
+    def _compile(*, backend_config=None, **kw):
+        backend_config = resolve_backend_config(backend_config)
+        cache_config = backend_config_key(backend_config)
         key = tuple(sorted(kw.items()))
         exe = _COMPILED.get((cache_config, key))
         if exe is None:
-            kernel = build_kernel(**kw, compile_config=compile_config)
-            target = cuda_target(compile_config=compile_config)
+            kernel = build_kernel(**kw, backend_config=backend_config)
+            target = cuda_target(backend_config=backend_config)
             with target:
                 exe = tvm.compile(
-                    kernel.mod, target=target, tir_pipeline="tirx", compile_config=compile_config
+                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
                 )
             _COMPILED[(cache_config, key)] = exe
         return exe
 
-    def setup(data, N, T, *, compile_config=None):
+    def setup(data, N, T, *, backend_config=None):
         q, k, v, g, beta = data["q"], data["k"], data["v"], data["g"], data["beta"]
         initial_state, final_state, output = (
             data["initial_state"],
@@ -2342,7 +2344,7 @@ def _make_defer(*, compile_config=None):
             per_sm=per_sm,
             copy_est=copy_est,
             **extra,
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         dummy_f32 = torch.zeros(4, dtype=torch.float32, device=device)
@@ -2384,7 +2386,7 @@ def _make_defer(*, compile_config=None):
     return setup
 
 
-def _make_dyn(*, compile_config=None):
+def _make_dyn(*, backend_config=None):
     """KDA recurrent decode, family "colreg-persist" (v4, warp-autonomous phases): persistent register-resident recurrence.
 
     Unit = (sequence n, value head hv, column slice of CPT rows). A persistent CTA (4 warps)
@@ -2482,7 +2484,7 @@ def _make_dyn(*, compile_config=None):
         vec_split=True,
         nw=4,
         l2pf=False,
-        compile_config=None,
+        backend_config=None,
     ):
         l2pf = False
         static_tickets = bool(OVERRIDE.get("static_tickets", False))
@@ -2540,7 +2542,7 @@ def _make_dyn(*, compile_config=None):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
                 kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
-                compile_config=compile_config,
+                backend_config=backend_config,
             )
 
             cta = txl.cta_id()
@@ -3421,21 +3423,22 @@ def _make_dyn(*, compile_config=None):
             by_regs = {32: 3, 64: 2, 128: 1}[cpt]
         return max(1, min(by_smem, by_regs))
 
-    def _compile(*, compile_config=None, **kw):
-        cache_config = resolve_compile_config(compile_config)
+    def _compile(*, backend_config=None, **kw):
+        backend_config = resolve_backend_config(backend_config)
+        cache_config = backend_config_key(backend_config)
         key = tuple(sorted(kw.items()))
         exe = _COMPILED.get((cache_config, key))
         if exe is None:
-            kernel = build_kernel(**kw, compile_config=compile_config)
-            target = cuda_target(compile_config=compile_config)
+            kernel = build_kernel(**kw, backend_config=backend_config)
+            target = cuda_target(backend_config=backend_config)
             with target:
                 exe = tvm.compile(
-                    kernel.mod, target=target, tir_pipeline="tirx", compile_config=compile_config
+                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
                 )
             _COMPILED[(cache_config, key)] = exe
         return exe
 
-    def setup(data, N, T, *, compile_config=None):
+    def setup(data, N, T, *, backend_config=None):
         q, k, v, g, beta = data["q"], data["k"], data["v"], data["g"], data["beta"]
         initial_state, final_state, output = (
             data["initial_state"],
@@ -3480,7 +3483,7 @@ def _make_dyn(*, compile_config=None):
             per_sm=per_sm,
             copy_est=copy_est,
             **extra,
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         dummy_f32 = torch.zeros(4, dtype=torch.float32, device=device)
@@ -3560,10 +3563,10 @@ def _items_per_cta(data, N, T):
     return (units + copies) / max(1, num_main)
 
 
-def _incumbent_setup(data, N, T, *, compile_config=None):
+def _incumbent_setup(data, N, T, *, backend_config=None):
     if T in DYN_RULE and _items_per_cta(data, N, T) >= DYN_RULE[T]:
-        return _DYN_SETUP(data, N, T, compile_config=compile_config)
-    return (_DEFER_SETUP if T == 6 else _BASE_SETUP)(data, N, T, compile_config=compile_config)
+        return _DYN_SETUP(data, N, T, backend_config=backend_config)
+    return (_DEFER_SETUP if T == 6 else _BASE_SETUP)(data, N, T, backend_config=backend_config)
 
 
 """KDA recurrent decode, family colreg-persist (split-tail candidate): the v4c persistent column-register
@@ -3573,7 +3576,7 @@ CTAs without a half unit.  Half units reuse the phase code through a geometry fa
 """
 
 
-def _make_split(*, compile_config=None):
+def _make_split(*, backend_config=None):
     """KDA recurrent decode, family "colreg-persist" (v4, warp-autonomous phases): persistent register-resident recurrence.
 
     Unit = (sequence n, value head hv, column slice of CPT rows). A persistent CTA (4 warps)
@@ -3670,7 +3673,7 @@ def _make_split(*, compile_config=None):
         vec_split=True,
         nw=4,
         l2pf=False,
-        compile_config=None,
+        backend_config=None,
     ):
         assert D % cpt == 0 and cpt % (4 * nw) == 0, "each warp needs a multiple of 4 rows"
         G = HV // H
@@ -3733,7 +3736,7 @@ def _make_split(*, compile_config=None):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
                 kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
-                compile_config=compile_config,
+                backend_config=backend_config,
             )
 
             cta = txl.cta_id()
@@ -4768,21 +4771,22 @@ def _make_split(*, compile_config=None):
             by_regs = {32: 3, 64: 2, 128: 1}[cpt]
         return max(1, min(by_smem, by_regs))
 
-    def _compile(*, compile_config=None, **kw):
-        cache_config = resolve_compile_config(compile_config)
+    def _compile(*, backend_config=None, **kw):
+        backend_config = resolve_backend_config(backend_config)
+        cache_config = backend_config_key(backend_config)
         key = tuple(sorted(kw.items()))
         exe = _COMPILED.get((cache_config, key))
         if exe is None:
-            kernel = build_kernel(**kw, compile_config=compile_config)
-            target = cuda_target(compile_config=compile_config)
+            kernel = build_kernel(**kw, backend_config=backend_config)
+            target = cuda_target(backend_config=backend_config)
             with target:
                 exe = tvm.compile(
-                    kernel.mod, target=target, tir_pipeline="tirx", compile_config=compile_config
+                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
                 )
             _COMPILED[(cache_config, key)] = exe
         return exe
 
-    def setup(data, N, T, *, compile_config=None):
+    def setup(data, N, T, *, backend_config=None):
         q, k, v, g, beta = data["q"], data["k"], data["v"], data["g"], data["beta"]
         initial_state, final_state, output = (
             data["initial_state"],
@@ -4827,7 +4831,7 @@ def _make_split(*, compile_config=None):
             per_sm=per_sm,
             copy_est=copy_est,
             **extra,
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         dummy_f32 = torch.zeros(4, dtype=torch.float32, device=device)
@@ -4872,8 +4876,8 @@ def _make_split(*, compile_config=None):
 _SPLIT_SETUP = _make_split()
 
 
-def _split_public_setup(data, N, T, *, compile_config=None):
-    return _SPLIT_SETUP(data, N, T, compile_config=compile_config)
+def _split_public_setup(data, N, T, *, backend_config=None):
+    return _SPLIT_SETUP(data, N, T, backend_config=backend_config)
 
 
 # Same-input paired measurements select only rows where the half-unit route
@@ -4882,13 +4886,13 @@ def _split_public_setup(data, N, T, *, compile_config=None):
 SPLIT_ROWS = frozenset({(3, 2), (3, 4), (4, 32), (5, 32), (6, 8)})
 
 
-def _frontier_setup(data, N, T, *, compile_config=None):
+def _frontier_setup(data, N, T, *, backend_config=None):
     if (T, N) in SPLIT_ROWS:
-        return _SPLIT_SETUP(data, N, T, compile_config=compile_config)
-    return _incumbent_setup(data, N, T, compile_config=compile_config)
+        return _SPLIT_SETUP(data, N, T, backend_config=backend_config)
+    return _incumbent_setup(data, N, T, backend_config=backend_config)
 
 
-def _make_clc(*, compile_config=None):
+def _make_clc(*, backend_config=None):
     """KDA recurrent decode, family "colreg-persist" (v4, warp-autonomous phases): persistent register-resident recurrence.
 
     Unit = (sequence n, value head hv, column slice of CPT rows). A persistent CTA (4 warps)
@@ -4989,7 +4993,7 @@ def _make_clc(*, compile_config=None):
         vec_split=True,
         nw=4,
         l2pf=False,
-        compile_config=None,
+        backend_config=None,
     ):
         assert D % cpt == 0 and cpt % (4 * nw) == 0, "each warp needs a multiple of 4 rows"
         G = HV // H
@@ -5045,7 +5049,7 @@ def _make_clc(*, compile_config=None):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
                 kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
-                compile_config=compile_config,
+                backend_config=backend_config,
             )
 
             cta = txl.cta_id()
@@ -5931,21 +5935,22 @@ def _make_clc(*, compile_config=None):
             by_regs = {32: 3, 64: 2, 128: 1}[cpt]
         return max(1, min(by_smem, by_regs))
 
-    def _compile(*, compile_config=None, **kw):
-        cache_config = resolve_compile_config(compile_config)
+    def _compile(*, backend_config=None, **kw):
+        backend_config = resolve_backend_config(backend_config)
+        cache_config = backend_config_key(backend_config)
         key = tuple(sorted(kw.items()))
         exe = _COMPILED.get((cache_config, key))
         if exe is None:
-            kernel = build_kernel(**kw, compile_config=compile_config)
-            target = cuda_target(compile_config=compile_config)
+            kernel = build_kernel(**kw, backend_config=backend_config)
+            target = cuda_target(backend_config=backend_config)
             with target:
                 exe = tvm.compile(
-                    kernel.mod, target=target, tir_pipeline="tirx", compile_config=compile_config
+                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
                 )
             _COMPILED[(cache_config, key)] = exe
         return exe
 
-    def setup(data, N, T, *, compile_config=None):
+    def setup(data, N, T, *, backend_config=None):
         q, k, v, g, beta = data["q"], data["k"], data["v"], data["g"], data["beta"]
         initial_state, final_state, output = (
             data["initial_state"],
@@ -5993,7 +5998,7 @@ def _make_clc(*, compile_config=None):
             per_sm=per_sm,
             copy_est=copy_est,
             **extra,
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         dummy_f32 = torch.zeros(4, dtype=torch.float32, device=device)
@@ -6039,11 +6044,11 @@ _CLC_SETUP = _make_clc()
 del _make_clc
 
 
-def _candidate_setup(data, N, T, *, compile_config=None):
+def _candidate_setup(data, N, T, *, backend_config=None):
     """The candidate's own dispatch entry (its optimization-harness ``setup``)."""
     if T == 1 and N in (8, 32, 64, 128):
-        return _CLC_SETUP(data, N, T, compile_config=compile_config)
-    return _frontier_setup(data, N, T, compile_config=compile_config)
+        return _CLC_SETUP(data, N, T, backend_config=backend_config)
+    return _frontier_setup(data, N, T, backend_config=backend_config)
 
 
 # ---------------------------------------------------------------------------
@@ -6128,7 +6133,7 @@ def _assert_supported_arch() -> None:
         )
 
 
-def get_kernel(*, compile_config=None, **config: Any):
+def get_kernel(*, backend_config=None, **config: Any):
     """Return the traced tirx-lite PrimFunc this config dispatches to.
 
     The runtime path builds and compiles through the candidate's own ``setup``,
@@ -6227,12 +6232,12 @@ def prepare_data(**config: Any) -> dict[str, Any]:
     }
 
 
-def _launch_state(case: dict[str, Any], *, compile_config=None):
+def _launch_state(case: dict[str, Any], *, backend_config=None):
     """Bind the launch through the candidate's own shape dispatch."""
     q, cu_seqlens = case["q"], case["cu_seqlens"]
     num_seqs = q.shape[0] if cu_seqlens is None else cu_seqlens.numel() - 1
     tokens = q.shape[0] * q.shape[1] // num_seqs
-    return _candidate_setup(case, int(num_seqs), int(tokens), compile_config=compile_config)
+    return _candidate_setup(case, int(num_seqs), int(tokens), backend_config=backend_config)
 
 
 # ---------------------------------------------------------------------------
@@ -6318,11 +6323,11 @@ def check_correctness(outputs: dict[str, Any], **config: Any) -> None:
     )
 
 
-def run_test(*, compile_config=None, **config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     """Run one config through the dispatch and gate it against the oracle."""
     _assert_supported_arch()
     case = prepare_data(**config)
-    run = _launch_state(case, compile_config=compile_config)
+    run = _launch_state(case, backend_config=backend_config)
     run()
     torch.cuda.synchronize()
     check_correctness(
@@ -6411,14 +6416,14 @@ def _recurrent_kda_builder(case: dict[str, Any]):
 # ---------------------------------------------------------------------------
 
 
-def prepare_bench(*, compile_config=None, **config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Build the row and bind its launch, so nothing compiles in the GPU stage."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     case = prepare_data(**config)
-    run = _launch_state(case, compile_config=compile_config)
+    run = _launch_state(case, backend_config=backend_config)
     return prepared_gpu_benchmark(
-        run_gpu, {"config": dict(config), "case": case, "run": run}, compile_config=compile_config
+        run_gpu, {"config": dict(config), "case": case, "run": run}, backend_config=backend_config
     )
 
 
@@ -6428,7 +6433,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     _assert_supported_arch()
@@ -6459,12 +6464,12 @@ def run_bench(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
-    compile_config=None,
+    backend_config=None,
     **config: Any,
 ) -> dict[str, Any]:
     values = dict(config)
     protocol = {name: values.pop(name) for name in ("rounds", "cooldown_s") if name in values}
-    prepared = prepare_bench(**values, compile_config=compile_config)
+    prepared = prepare_bench(**values, backend_config=backend_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

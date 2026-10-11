@@ -344,7 +344,7 @@ def get_kernel(
     row_to_batch: bool = False,
     trivial: bool = False,
     *,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Return the TIRx specialization for one launcher dispatch cell."""
@@ -405,7 +405,7 @@ def get_kernel(
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=grid, block=BLOCK_THREADS // 32 * 32),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         group_id = txl.cta_id()
@@ -1238,7 +1238,7 @@ def _assert_device_matches_compile_profile() -> None:
         )
 
 
-def run_test(*, compile_config=None, **config):
+def run_test(*, backend_config=None, **config):
     """Compile, launch, and validate one config against the FlashInfer source."""
     import unittest
 
@@ -1272,7 +1272,7 @@ def run_test(*, compile_config=None, **config):
     assert_reference_is_top_k(cfg, data, ref_out)
 
     ex = compile_kernel(
-        get_kernel(**cfg, compile_config=compile_config), compile_config=compile_config
+        get_kernel(**cfg, backend_config=backend_config), backend_config=backend_config
     )
     tirx_out = _alloc_outputs(cfg)
     _launch_tirx(ex, cfg, data, tirx_out)
@@ -1451,7 +1451,7 @@ def assert_reference_is_top_k(
 # ---------------------------------------------------------------------------
 # Benchmark entry points.
 # ---------------------------------------------------------------------------
-def prepare_bench(*, compile_config=None, **kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
@@ -1459,10 +1459,10 @@ def prepare_bench(*, compile_config=None, **kwargs: Any):
     state = {
         "config": cfg,
         "executable": compile_kernel(
-            get_kernel(**cfg, compile_config=compile_config), compile_config=compile_config
+            get_kernel(**cfg, backend_config=backend_config), backend_config=backend_config
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -1473,7 +1473,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Kernel-only comparison against the FlashInfer source launch."""
@@ -1503,9 +1503,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, backend_config=None, **config
 ):
-    prepared = prepare_bench(**config, compile_config=compile_config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

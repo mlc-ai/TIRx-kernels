@@ -11,7 +11,7 @@ Upstream source:
 """
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import hardware_num_sms, resolve_compile_config
+from tirx_kernels.runner import hardware_num_sms, resolve_backend_config
 
 KERNEL_META = {
     "name": "cudnn_sm100_kda_bprop_f16",
@@ -539,10 +539,12 @@ def _tmem_cell(base, row, row_delta, column):
 
 
 def _make_prologue(
-    *, run_order, order_generate, dynamic_scheduler, n_heads_out, compile_config=None
+    *, run_order, order_generate, dynamic_scheduler, n_heads_out, backend_config=None
 ):
     prologue_warps = (
-        10 if resolve_compile_config(compile_config).arch == "sm_110a" and not run_order else 32
+        10
+        if resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a" and not run_order
+        else 32
     )
 
     @txl.kernel()
@@ -588,7 +590,7 @@ def _make_prologue(
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=1, block=prologue_warps * 32),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         thread = txl.thread_id()
@@ -850,10 +852,10 @@ def _make_main(
     q_ratio,
     k_ratio,
     v_ratio,
-    compile_config=None,
+    backend_config=None,
 ):
     beta_dtype = txl.bf16 if beta_sigmoid else txl.f32
-    thor_state_path = resolve_compile_config(compile_config).arch == "sm_110a" and (
+    thor_state_path = resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a" and (
         use_initial_state or use_dstate_in or use_dstate0
     )
     cg1_regs = 184 if thor_state_path else 168
@@ -879,7 +881,7 @@ def _make_main(
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_sms, block=16 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         arena = txl.alloc_tensor((_MAIN_SMEM_BYTES,), txl.u8, scope="shared.dyn", align=1024)
@@ -3525,14 +3527,17 @@ def _make_main(
     return main
 
 
-def _normalized_config(config, *, compile_config=None):
+def _normalized_config(config, *, backend_config=None):
     config = {key: value for key, value in config.items() if key != "label"}
     config.setdefault("seq_lens", (64,))
     config.setdefault("heads", 1)
     config.setdefault("q_heads", config["heads"])
     config.setdefault("k_heads", config["heads"])
     config.setdefault("v_heads", config["heads"])
-    if "num_sms" not in config and resolve_compile_config(compile_config).arch == "sm_110a":
+    if (
+        "num_sms" not in config
+        and resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a"
+    ):
         if config.get("beta_sigmoid", False):
             config["num_sms"] = hardware_num_sms()
         elif config.get("dynamic_scheduler", False) or config.get("run_order", False):
@@ -3562,15 +3567,15 @@ def _normalized_config(config, *, compile_config=None):
     return config
 
 
-def get_kernel(*, compile_config=None, **config):
-    config = _normalized_config(config, compile_config=compile_config)
+def get_kernel(*, backend_config=None, **config):
+    config = _normalized_config(config, backend_config=backend_config)
     num_sms = int(config.get("num_sms", 148))
     prologue = _make_prologue(
         run_order=bool(config.get("run_order", False)),
         order_generate=bool(config.get("order_generate", False)),
         dynamic_scheduler=bool(config.get("dynamic_scheduler", False)),
         n_heads_out=int(config.get("n_heads_out", config.get("heads", 1))),
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     main = _make_main(
         num_sms=num_sms,
@@ -3586,7 +3591,7 @@ def get_kernel(*, compile_config=None, **config):
         q_ratio=int(config.get("q_ratio", config["heads"] // config["q_heads"])),
         k_ratio=int(config.get("k_ratio", config["heads"] // config["k_heads"])),
         v_ratio=int(config.get("v_ratio", config["heads"] // config["v_heads"])),
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     return [prologue.func, main.func]
 
@@ -3660,10 +3665,10 @@ def _prepare_work_tables(torch, config):
     return {"tirx": one_side(base), "source": one_side(source_work_items(torch, base, _BT))}
 
 
-def _prepare_data(config, *, compile_config=None):
+def _prepare_data(config, *, backend_config=None):
     import torch
 
-    config = _normalized_config(config, compile_config=compile_config)
+    config = _normalized_config(config, backend_config=backend_config)
     torch.manual_seed(20260823)
     total_tokens = sum(config["seq_lens"])
     heads = config["heads"]
@@ -3739,9 +3744,9 @@ def _prepare_data(config, *, compile_config=None):
     }
 
 
-def prepare_data(*, compile_config=None, **config):
+def prepare_data(*, backend_config=None, **config):
     """Allocate the shared input set plus source/TIRx output buffers."""
-    return _prepare_data(config, compile_config=compile_config)
+    return _prepare_data(config, backend_config=backend_config)
 
 
 def _encode_tiled_map(tensor, dimensions, strides, box):
@@ -3994,31 +3999,53 @@ def _validate_outputs(data, *, sources):
         raise AssertionError(f"KDA backward validation failed for {config}: {failures}")
 
 
-def _compile_tirx(config, *, compile_config=None):
+def _compile_tirx(config, *, backend_config=None):
     from tirx_kernels.runner import compile_kernel
 
     pass
     state_path = bool(
         config["use_initial_state"] or config["use_dstate_in"] or config["use_dstate0"]
     )
-    if resolve_compile_config(compile_config).arch == "sm_110a":
+    if resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a":
         if state_path:
-            compile_config = resolve_compile_config(compile_config, ptxas_reg_usage_level=0)
+            backend_config = resolve_backend_config(
+                backend_config,
+                defaults={
+                    "cuda": {
+                        "ptxas": [
+                            "-v",
+                            "--warn-on-local-memory-usage",
+                            "--register-usage-level=" + str(0),
+                        ]
+                    }
+                },
+            )
         elif config["beta_sigmoid"]:
-            compile_config = resolve_compile_config(compile_config, ptxas_reg_usage_level=3)
+            backend_config = resolve_backend_config(
+                backend_config,
+                defaults={
+                    "cuda": {
+                        "ptxas": [
+                            "-v",
+                            "--warn-on-local-memory-usage",
+                            "--register-usage-level=" + str(3),
+                        ]
+                    }
+                },
+            )
     return [
-        compile_kernel(func, compile_config=compile_config)
-        for func in get_kernel(**config, compile_config=compile_config)
+        compile_kernel(func, backend_config=backend_config)
+        for func in get_kernel(**config, backend_config=backend_config)
     ]
 
 
-def run_test(*, compile_config=None, **config):
+def run_test(*, backend_config=None, **config):
     """Compare TIRx with the upstream kernel on identical inputs."""
     import torch
 
-    kernel_config = _normalized_config(config, compile_config=compile_config)
-    data = _prepare_data(kernel_config, compile_config=compile_config)
-    executables = _compile_tirx(kernel_config, compile_config=compile_config)
+    kernel_config = _normalized_config(config, backend_config=backend_config)
+    data = _prepare_data(kernel_config, backend_config=backend_config)
+    executables = _compile_tirx(kernel_config, backend_config=backend_config)
     tirx_launch = _tirx_launch(executables, data)
     source_launch = _source_launch(data)
     tirx_launch()
@@ -4028,16 +4055,16 @@ def run_test(*, compile_config=None, **config):
     return {"tokens": sum(kernel_config["seq_lens"]), "heads": kernel_config["heads"]}
 
 
-def prepare_bench(*, compile_config=None, **config):
+def prepare_bench(*, backend_config=None, **config):
     """Compile the two TIRx launches without importing torch or touching CUDA."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
-    kernel_config = _normalized_config(config, compile_config=compile_config)
+    kernel_config = _normalized_config(config, backend_config=backend_config)
     state = {
         "config": kernel_config,
-        "executables": _compile_tirx(kernel_config, compile_config=compile_config),
+        "executables": _compile_tirx(kernel_config, backend_config=backend_config),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -4048,7 +4075,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=0.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Validate once, then let bench_suite time the exact two-launch paths."""
@@ -4056,8 +4083,8 @@ def run_gpu(
 
     from tirx_kernels.runner import bench, external_references_enabled
 
-    config = _normalized_config({**prepared["config"], **kwargs}, compile_config=compile_config)
-    data = _prepare_data(config, compile_config=compile_config)
+    config = _normalized_config({**prepared["config"], **kwargs}, backend_config=backend_config)
+    data = _prepare_data(config, backend_config=backend_config)
     tirx_launch = _tirx_launch(prepared["executables"], data)
     tirx_launch()
     torch.cuda.synchronize()
@@ -4081,9 +4108,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, backend_config=None, **config
 ):
-    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

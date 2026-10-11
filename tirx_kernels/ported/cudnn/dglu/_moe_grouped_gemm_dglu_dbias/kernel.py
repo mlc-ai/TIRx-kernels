@@ -31,9 +31,8 @@ atom each CTA stages only its half of the N operand, so a B stage is
 ``(tile_n / atom_thr) * k_tile * 2`` bytes.
 """
 
-from functools import cache
-
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import cache_backend_config
 
 from . import spec
 
@@ -380,7 +379,7 @@ def _entry_point(names, body):
     return namespace["kernel"]
 
 
-@cache
+@cache_backend_config
 def _make_kernel(
     group_m_list,
     N,
@@ -397,7 +396,7 @@ def _make_kernel(
     with_dbias,
     linear_offset,
     *,
-    compile_config=None,
+    backend_config=None,
 ):
     """Build the launch sequence for one static specialization.
 
@@ -644,7 +643,7 @@ def _make_kernel(
                 preferred_cluster=(cluster_m, cluster_n),
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
         named = dict(zip(annotations, operands))
         maps = dict(zip(map_names, host))
@@ -2123,7 +2122,7 @@ def _make_kernel(
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(block=32, grid=list(derived["helper_grid"])),
                 kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-                compile_config=compile_config,
+                backend_config=backend_config,
             )
             b, workspace = operands
             expert = txl.cta_id()[0]
@@ -2165,7 +2164,7 @@ def _make_kernel(
     return [main.func]
 
 
-def get_kernel(*, compile_config=None, **config):
+def get_kernel(*, backend_config=None, **config):
     config = {key: value for key, value in config.items() if key != "label"}
     return _make_kernel(
         group_m_list=tuple(config["group_m_list"]),
@@ -2182,5 +2181,5 @@ def get_kernel(*, compile_config=None, **config):
         vectorized_f32=config["vectorized_f32"],
         with_dbias=config["with_dbias"],
         linear_offset=config["linear_offset"],
-        compile_config=compile_config,
+        backend_config=backend_config,
     )

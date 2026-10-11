@@ -139,7 +139,7 @@ def _rank_entry(
         result_queue.put(result)
 
 
-def compile_kernels(kernels: dict[str, Any], tmpdir: str, *, compile_config=None) -> dict[str, str]:
+def compile_kernels(kernels: dict[str, Any], tmpdir: str, *, backend_config=None) -> dict[str, str]:
     """Compile every kernel once and export loadable libraries into `tmpdir`."""
 
     library_paths: dict[str, str] = {}
@@ -149,7 +149,7 @@ def compile_kernels(kernels: dict[str, Any], tmpdir: str, *, compile_config=None
             tvm.IRModule({"main": func}),
             target="cuda",
             tir_pipeline="tirx",
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
         executable.export_library(str(library_path))
         library_paths[name] = str(library_path)
@@ -164,7 +164,7 @@ def run_distributed(
     mode: str,
     worker_kwargs: dict[str, Any],
     prepared_libraries: dict[str, str] | None = None,
-    compile_config=None,
+    backend_config=None,
 ) -> dict[str, Any]:
     """Compile every kernel once in the parent, then run one rank-local worker per GPU.
 
@@ -181,7 +181,7 @@ def run_distributed(
         if prepared_libraries is not None:
             library_paths = prepared_libraries
         else:
-            library_paths = compile_kernels(kernels, tmpdir, compile_config=compile_config)
+            library_paths = compile_kernels(kernels, tmpdir, backend_config=backend_config)
 
         context = mp.get_context("spawn")
         result_queue = context.SimpleQueue()

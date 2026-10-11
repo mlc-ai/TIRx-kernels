@@ -48,6 +48,7 @@ from pathlib import Path
 
 import tirx_kernels.tirx_lite as txl
 from tirx_kernels.ported.flashinfer.utils.source_checkout import flashinfer_source_root
+from tirx_kernels.runner import cache_backend_config
 
 KERNEL_META = {
     "name": "dense_blockscaled_gemm_sm107",
@@ -221,8 +222,8 @@ def _validate_problem(M, N, K_dim, sf_mode, out_dtype, alpha, tactic):
         raise ValueError("problem does not fill the selected source cluster")
 
 
-@cache
-def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, compile_config=None):
+@cache_backend_config
+def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_config=None):
     _validate_problem(M, N, K_dim, sf_mode, out_dtype, alpha, tactic)
     (tile_m, n_tile), (inst_m, inst_n), (cluster_m, cluster_n), swap, prefetch = TACTICS[tactic]
     sf_dtype, sf_vec_size = _SF_MODES[sf_mode]
@@ -456,7 +457,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, compile_conf
                 preferred_cluster=[cluster_m, cluster_n],
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         del a, b, sfa, sfb, c
@@ -1594,10 +1595,10 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, compile_conf
     return txl.kernel()(kernel)
 
 
-def get_kernel(M, N, K, sf_mode, out_dtype, alpha, tactic, *, compile_config=None):
+def get_kernel(M, N, K, sf_mode, out_dtype, alpha, tactic, *, backend_config=None):
     """Return the concrete batchless SM107 kernel specialization."""
     return _make_kernel(
-        M, N, K, sf_mode, out_dtype, alpha, tactic, compile_config=compile_config
+        M, N, K, sf_mode, out_dtype, alpha, tactic, backend_config=backend_config
     ).func
 
 
@@ -1732,13 +1733,13 @@ def prepare_data(M, N, K, sf_mode, out_dtype, alpha, tactic):
     }
 
 
-@cache
-def _compile_executable(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, compile_config=None):
+@cache_backend_config
+def _compile_executable(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_config=None):
     from tirx_kernels.runner import compile_kernel
 
     return compile_kernel(
-        get_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, compile_config=compile_config),
-        compile_config=compile_config,
+        get_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, backend_config=backend_config),
+        backend_config=backend_config,
     )
 
 
@@ -1921,12 +1922,12 @@ def _validate_outputs(data, *, with_source, with_oracle):
     return result
 
 
-def run_test(M, N, K, sf_mode, out_dtype, alpha, tactic, *, compile_config=None):
+def run_test(M, N, K, sf_mode, out_dtype, alpha, tactic, *, backend_config=None):
     import torch
 
     data = prepare_data(M, N, K, sf_mode, out_dtype, alpha, tactic)
     executable = _compile_executable(
-        M, N, K, sf_mode, out_dtype, alpha, tactic, compile_config=compile_config
+        M, N, K, sf_mode, out_dtype, alpha, tactic, backend_config=backend_config
     )
     tirx_launch = _tirx_launch(executable, data)
     source_launch = _source_launch(data)
@@ -1942,7 +1943,7 @@ def run_test(M, N, K, sf_mode, out_dtype, alpha, tactic, *, compile_config=None)
     return _validate_outputs(data, with_source=True, with_oracle=True)
 
 
-def prepare_bench(M, N, K, sf_mode, out_dtype, alpha, tactic, *, compile_config=None):
+def prepare_bench(M, N, K, sf_mode, out_dtype, alpha, tactic, *, backend_config=None):
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     _validate_problem(M, N, K, sf_mode, out_dtype, alpha, tactic)
@@ -1957,10 +1958,10 @@ def prepare_bench(M, N, K, sf_mode, out_dtype, alpha, tactic, *, compile_config=
             "tactic": tactic,
         },
         "executable": _compile_executable(
-            M, N, K, sf_mode, out_dtype, alpha, tactic, compile_config=compile_config
+            M, N, K, sf_mode, out_dtype, alpha, tactic, backend_config=backend_config
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -1971,7 +1972,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     import torch
@@ -2016,10 +2017,10 @@ def run_bench(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
 ):
     return prepare_bench(
-        M, N, K, sf_mode, out_dtype, alpha, tactic, compile_config=compile_config
+        M, N, K, sf_mode, out_dtype, alpha, tactic, backend_config=backend_config
     ).run_gpu(warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s)
 
 

@@ -219,7 +219,7 @@ def _spec(side="after", prepare_mode="cpu"):
 def test_workload_spec_only_forwards_explicit_bench_overrides():
     spec = _spec()
     assert spec["bench"] == {"rounds": 5, "cooldown": 0.0, "timer": "proton"}
-    assert spec["compile_config"] == {"arch": "sm_100a", "compiler": "nvcc"}
+    assert spec["backend_config"] == {"cuda": {"arch": "sm_100a", "compiler": "nvcc"}}
     assert spec["side"] == "after"
     with pytest.raises(ValueError):
         _spec(prepare_mode="tpu")

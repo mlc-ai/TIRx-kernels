@@ -61,7 +61,7 @@ import torch
 
 import tirx_kernels.tirx_lite as txl
 import tvm
-from tirx_kernels.runner import resolve_compile_config
+from tirx_kernels.runner import backend_config_key, resolve_backend_config
 from tvm.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
 
 BK = 128
@@ -179,7 +179,7 @@ def _rng_end(token):
     txl.cuda.iket.range_end(token[0])
 
 
-def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, compile_config=None):
+def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
     TAGGED = M <= 32
     assert cs == CS
     NGU = 2 * INTER
@@ -250,7 +250,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, compile_config=None):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=G, block=NWARPS * 32, cluster=(CS,)),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         cta = txl.cta_id()
@@ -1907,7 +1907,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, compile_config=None):
     return alphamoe_cluster
 
 
-def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, compile_config=None):
+def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
     """M=1: one 8-CTA cluster per route (K-split gate/up, DSMEM all-reduce, H-split down); loads first (v2)."""
 
     CS8 = 8
@@ -1955,7 +1955,7 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, compile_config=None):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=G, block=NWARPS * 32, cluster=(CS8,)),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         cta = txl.cta_id()
@@ -2461,13 +2461,14 @@ def choose_splits(M):
 _COMPILED = {}
 
 
-def _executable(G, M, TOPK, E, HID, INTER, cs, *, compile_config=None):
-    cache_config = resolve_compile_config(compile_config)
+def _executable(G, M, TOPK, E, HID, INTER, cs, *, backend_config=None):
+    backend_config = resolve_backend_config(backend_config)
+    cache_config = backend_config_key(backend_config)
     key = (G, M, TOPK, E, HID, INTER, cs)
     if (cache_config, key) not in _COMPILED:
         _COMPILED[(cache_config, key)] = build_kernel(
-            G, M, TOPK, E, HID, INTER, cs, compile_config=compile_config
-        ).compile(compile_config=compile_config)
+            G, M, TOPK, E, HID, INTER, cs, backend_config=backend_config
+        ).compile(backend_config=backend_config)
     return _COMPILED[(cache_config, key)]
 
 
@@ -2484,23 +2485,25 @@ def _grid_for(M, topk, sms):
     return G - G % cs
 
 
-def _precompile(M, topk, E, HID, INTER, sms, *, compile_config=None):
+def _precompile(M, topk, E, HID, INTER, sms, *, backend_config=None):
     """Populate the compile cache with the exact keys ``setup`` will look up."""
-    cache_config = resolve_compile_config(compile_config)
+    backend_config = resolve_backend_config(backend_config)
+    cache_config = backend_config_key(backend_config)
     G = _grid_for(M, topk, sms)
     if int(M) == 1:
         key = ("wide", G, 1, topk, int(E), int(HID), INTER)
         if (cache_config, key) not in _COMPILED:
             _COMPILED[(cache_config, key)] = build_wide_kernel(
-                G, 1, topk, int(E), int(HID), INTER, compile_config=compile_config
-            ).compile(compile_config=compile_config)
+                G, 1, topk, int(E), int(HID), INTER, backend_config=backend_config
+            ).compile(backend_config=backend_config)
         return _COMPILED[(cache_config, key)]
     (cs,) = choose_splits(int(M))
-    return _executable(G, int(M), topk, int(E), int(HID), INTER, cs, compile_config=compile_config)
+    return _executable(G, int(M), topk, int(E), int(HID), INTER, cs, backend_config=backend_config)
 
 
-def setup(data, M, *, compile_config=None):
-    cache_config = resolve_compile_config(compile_config)
+def setup(data, M, *, backend_config=None):
+    backend_config = resolve_backend_config(backend_config)
+    cache_config = backend_config_key(backend_config)
     hidden = data["hidden_states"]
     w1 = data["gemm1_weights"]
     w2 = data["gemm2_weights"]
@@ -2516,12 +2519,12 @@ def setup(data, M, *, compile_config=None):
         key = ("wide", G, 1, topk, int(E), int(HID), INTER)
         if (cache_config, key) not in _COMPILED:
             _COMPILED[(cache_config, key)] = build_wide_kernel(
-                G, 1, topk, int(E), int(HID), INTER, compile_config=compile_config
-            ).compile(compile_config=compile_config)
+                G, 1, topk, int(E), int(HID), INTER, backend_config=backend_config
+            ).compile(backend_config=backend_config)
         return make_wide_runner(_COMPILED[(cache_config, key)], data, M)
     (cs,) = choose_splits(int(M))
     executable = _executable(
-        G, int(M), topk, int(E), int(HID), INTER, cs, compile_config=compile_config
+        G, int(M), topk, int(E), int(HID), INTER, cs, backend_config=backend_config
     )
     return make_runner(executable, data, M, cs)
 
@@ -2762,18 +2765,18 @@ def _num_ctas(**kwargs: Any) -> int:
     return value
 
 
-def get_kernel(*, compile_config=None, **kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     """The tirx-lite PrimFunc for the configured row (wide cluster at M=1)."""
     cfg = _cfg(**kwargs)
     num_tokens = int(cfg.num_tokens)
     grid = _grid_for(num_tokens, TOPK, _num_ctas(**kwargs))
     if num_tokens == 1:
         return build_wide_kernel(
-            grid, 1, TOPK, NUM_EXPERTS, HIDDEN, INTERMEDIATE, compile_config=compile_config
+            grid, 1, TOPK, NUM_EXPERTS, HIDDEN, INTERMEDIATE, backend_config=backend_config
         ).func
     (cs,) = choose_splits(num_tokens)
     return build_kernel(
-        grid, num_tokens, TOPK, NUM_EXPERTS, HIDDEN, INTERMEDIATE, cs, compile_config=compile_config
+        grid, num_tokens, TOPK, NUM_EXPERTS, HIDDEN, INTERMEDIATE, cs, backend_config=backend_config
     ).func
 
 
@@ -2886,9 +2889,9 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     return case
 
 
-def _launcher(case: dict[str, Any], *, compile_config=None):
+def _launcher(case: dict[str, Any], *, backend_config=None):
     """``setup`` compiles for the row's shape and returns the timed callable."""
-    launch = setup(case["data"], int(case["config"].num_tokens), compile_config=compile_config)
+    launch = setup(case["data"], int(case["config"].num_tokens), backend_config=backend_config)
     launch._keep_alive_case = case
     return launch
 
@@ -2978,7 +2981,7 @@ def check_correctness(outputs: dict[str, Any], **kwargs: Any) -> None:
         raise AssertionError("fixed-order route accumulation is not repeatable")
 
 
-def _check_route_rounding(packed_f32: bool, *, compile_config=None) -> None:
+def _check_route_rounding(packed_f32: bool, *, backend_config=None) -> None:
     """Exact counterexamples for cancellation and split/FTZ regressions."""
     experts = torch.zeros((4, TOPK, 2), dtype=torch.bfloat16, device="cuda")
     weights = torch.zeros((4, TOPK), dtype=torch.float32, device="cuda")
@@ -3007,7 +3010,7 @@ def _check_route_rounding(packed_f32: bool, *, compile_config=None) -> None:
         output: txl.gptr[txl.u32],
     ):
         txl.device_entry(
-            launch=txl.cuda.LaunchConfig(grid=4, block=1 * 32), compile_config=compile_config
+            launch=txl.cuda.LaunchConfig(grid=4, block=1 * 32), backend_config=backend_config
         )
 
         row = txl.cta_id()
@@ -3060,13 +3063,13 @@ def _check_cancellation(case: dict[str, Any], launch) -> None:
     torch.testing.assert_close(case["output"], expected, atol=0, rtol=0)
 
 
-def run_test(*, compile_config=None, **kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     _assert_supported_arch()
     config = dict(kwargs)
     config.pop("num_ctas", None)
     num_ctas = _num_ctas(**config)
     case = prepare_data(**config, num_ctas=num_ctas)
-    launch = _launcher(case, compile_config=compile_config)
+    launch = _launcher(case, backend_config=backend_config)
     case["output"].fill_(float("nan"))
     launch()
     torch.cuda.synchronize()
@@ -3080,7 +3083,7 @@ def run_test(*, compile_config=None, **kwargs: Any) -> None:
     check_correctness(
         {"first": first, "actual": actual, "reference": reference, "abs_sum": abs_sum}, **config
     )
-    _check_route_rounding(packed_f32=case["config"].num_tokens != 8, compile_config=compile_config)
+    _check_route_rounding(packed_f32=case["config"].num_tokens != 8, backend_config=backend_config)
     if case["config"].num_tokens in (1, 128):
         _check_cancellation(case, launch)
 
@@ -3162,7 +3165,7 @@ def _flashinfer_builder(case: dict[str, Any]):
     return build
 
 
-def prepare_bench(*, compile_config=None, **kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Trace and compile before the bench suite assigns a GPU."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
@@ -3177,10 +3180,10 @@ def prepare_bench(*, compile_config=None, **kwargs: Any):
         HIDDEN,
         INTERMEDIATE,
         num_ctas,
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     state = {"config": config, "num_ctas": num_ctas}
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -3189,7 +3192,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     _assert_supported_arch()
@@ -3199,7 +3202,7 @@ def run_gpu(
     cooldown_s = config.pop("cooldown_s", 1.0)
     config.pop("num_ctas", None)
     case = prepare_data(**config, num_ctas=prepared["num_ctas"])
-    launch = _launcher(case, compile_config=compile_config)
+    launch = _launcher(case, backend_config=backend_config)
     launch()
     torch.cuda.synchronize()
 
@@ -3221,12 +3224,12 @@ def run_bench(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    prepared = prepare_bench(**config, compile_config=compile_config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

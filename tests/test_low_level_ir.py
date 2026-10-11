@@ -176,8 +176,8 @@ def test_correctness_runner_does_not_rebuild_an_already_checked_kernel():
             raise AssertionError("correctness runner rebuilt the kernel")
 
         @staticmethod
-        def run_test(*, compile_config, **params):
-            assert compile_config.arch.startswith("sm_")
+        def run_test(*, backend_config, **params):
+            assert backend_config.get("cuda", {}).get("arch").startswith("sm_")
             assert params == {"value": 3}
 
     run_kernel_test("probe", {"label": "case", "value": 3}, registry={"probe": KernelModule})

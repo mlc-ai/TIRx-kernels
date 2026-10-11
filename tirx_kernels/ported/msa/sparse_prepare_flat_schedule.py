@@ -335,7 +335,7 @@ def _kernel(
         txl.assign(chunk_idx, chunk_idx + 32)
 
 
-def get_kernel(*, compile_config=None, **config):
+def get_kernel(*, backend_config=None, **config):
     """Return the TIRx specialization of `SparseAttentionPrepareFlatScheduleSm100`.
 
     Nothing about a config reaches the kernel as a compile-time constant: the
@@ -791,7 +791,7 @@ def assert_schedule_matches(data: dict[str, Any], outputs: dict[str, Any]) -> No
     torch.testing.assert_close(sorted_rows(produced), sorted_rows(expected), rtol=0, atol=0)
 
 
-def run_test(*, compile_config=None, **config):
+def run_test(*, backend_config=None, **config):
     """Compile, launch, and validate one config against MSA's own kernel."""
     import unittest
 
@@ -819,7 +819,7 @@ def run_test(*, compile_config=None, **config):
     assert_schedule_matches(data, reference_outputs)
 
     executable = compile_kernel(
-        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+        get_kernel(**config, backend_config=backend_config), backend_config=backend_config
     )
     outputs = make_outputs(data)
     executable(*tirx_args(data, outputs))
@@ -884,7 +884,7 @@ def _counter_slots(counters):
     return [counters[i * COUNTER_STRIDE : i * COUNTER_STRIDE + 1] for i in range(COUNTER_SLOTS)]
 
 
-def prepare_bench(*, compile_config=None, **config):
+def prepare_bench(*, backend_config=None, **config):
     """Compile the TIRx specialization without initializing CUDA."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
@@ -892,10 +892,10 @@ def prepare_bench(*, compile_config=None, **config):
     state = {
         "config": dict(config),
         "executable": compile_kernel(
-            get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+            get_kernel(**config, backend_config=backend_config), backend_config=backend_config
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -906,7 +906,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **config,
 ):
     """Kernel-only comparison against MSA's compiled flat-schedule launch."""
@@ -947,7 +947,7 @@ def run_gpu(
             "head_kv": data["head_kv"],
             "blk_kv": data["blk_kv"],
         }
-        compiled = compiled_flat_schedule(case, compile_config=compile_config)
+        compiled = compiled_flat_schedule(case, backend_config=backend_config)
         metadata = reference_outputs["scheduler_metadata"]
         step = [0]
 
@@ -986,9 +986,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, backend_config=None, **config
 ):
-    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

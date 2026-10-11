@@ -369,7 +369,7 @@ def get_kernel(
     fast_math: int = 1,
     collect_stats: bool = False,
     emit_nvl_barrier_timeout_printf: bool = True,
-    compile_config=None,
+    backend_config=None,
 ):
     # ---- compile-time constants (all Python ints; nothing below is emitted) ----
     runtime_config = MegaMoeConfig(
@@ -982,7 +982,7 @@ def get_kernel(
                 cluster=(kernel_config.num_ctas_per_cluster,),
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         symm_rank_offsets = (

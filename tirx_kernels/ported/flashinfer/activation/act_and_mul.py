@@ -18,7 +18,7 @@ remainder loop, and ``griddepcontrol`` PDL intrinsics.
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import bench, resolve_compile_config
+from tirx_kernels.runner import bench, resolve_backend_config
 
 KERNEL_META = {
     "name": "act_and_mul",
@@ -99,14 +99,16 @@ def _unpack_hi(word, dtype):
     )
 
 
-def get_kernel(act: str, dtype: str, num_tokens: int, d: int, *, compile_config=None, **kwargs):
+def get_kernel(act: str, dtype: str, num_tokens: int, d: int, *, backend_config=None, **kwargs):
     """Return the TIRx specialization for one (act, dtype, num_tokens, d) config."""
     _validate(act, dtype, d)
     block_size = _block_size(d)
     n_vec = d // VEC_SIZE
     rem = d % (block_size * VEC_SIZE)
     rem_off = d - rem
-    thor_bf16 = dtype == "bfloat16" and resolve_compile_config(compile_config).arch == "sm_110a"
+    thor_bf16 = (
+        dtype == "bfloat16" and resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a"
+    )
     compact_vector_offset = thor_bf16 and num_tokens * (2 * d) < 2**32
 
     def vector_offset(token, idx, stride):
@@ -135,7 +137,7 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, *, compile_config=
     def act_and_mul(input_global: txl.gptr[dtype, 2], out_global: txl.gptr[dtype, 2]):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_tokens, block=(block_size + 31) // 32 * 32),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         token = txl.cta_id()
@@ -284,20 +286,20 @@ def prepare_data(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     return (input_data,)
 
 
-def prepare_bench(*, compile_config=None, **kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     state = {
         "config": dict(kwargs),
         "executable": compile_kernel(
-            get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(act: str, dtype: str, num_tokens: int, d: int, *, compile_config=None, **kwargs):
+def run_test(act: str, dtype: str, num_tokens: int, d: int, *, backend_config=None, **kwargs):
     """Compile, launch, and validate one config against the flashinfer source."""
     import torch
 
@@ -305,9 +307,9 @@ def run_test(act: str, dtype: str, num_tokens: int, d: int, *, compile_config=No
 
     (input_data,) = prepare_data(act=act, dtype=dtype, num_tokens=num_tokens, d=d)
     kernel = get_kernel(
-        act=act, dtype=dtype, num_tokens=num_tokens, d=d, compile_config=compile_config
+        act=act, dtype=dtype, num_tokens=num_tokens, d=d, backend_config=backend_config
     )
-    ex = compile_kernel(kernel, compile_config=compile_config)
+    ex = compile_kernel(kernel, backend_config=backend_config)
     out_tirx = torch.empty((num_tokens, d), dtype=_torch_dtype(dtype), device="cuda")
     ex(input_data, out_tirx)
     torch.cuda.synchronize()
@@ -327,7 +329,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Benchmark the TIRx port against the flashinfer source kernel."""
@@ -376,12 +378,12 @@ def run_bench(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     config = dict(kwargs)
     prepared = prepare_bench(
-        act=act, dtype=dtype, num_tokens=num_tokens, d=d, **config, compile_config=compile_config
+        act=act, dtype=dtype, num_tokens=num_tokens, d=d, **config, backend_config=backend_config
     )
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s

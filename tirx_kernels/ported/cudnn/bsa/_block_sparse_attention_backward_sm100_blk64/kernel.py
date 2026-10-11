@@ -204,7 +204,7 @@ def _tmem_load32(dst, base, address):
     txl.ptx[TMEM_LD32](*(dst[base + i] for i in range(32)), txl.cast(address, "uint32"))
 
 
-def get_kernel(*, compile_config=None, **config):
+def get_kernel(*, backend_config=None, **config):
     batch = int(config["batch"])
     heads = int(config["num_heads"])
     seqlen_q = int(config["seqlen_q"])
@@ -234,7 +234,7 @@ def get_kernel(*, compile_config=None, **config):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=((seqlen_q + 15) // 16, heads, batch), block=4 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         q_tile, head, batch_idx = txl.cta_id()
@@ -298,7 +298,7 @@ def get_kernel(*, compile_config=None, **config):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(tasks * groups, heads, batch), block=WARPS * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         block, head, batch_idx = txl.cta_id()
@@ -959,7 +959,7 @@ def get_kernel(*, compile_config=None, **config):
                 grid=((max(seqlen_q, seqlen_kv) + 7) // 8, heads, batch), block=4 * 32
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         seq_tile, head, batch_idx = txl.cta_id()

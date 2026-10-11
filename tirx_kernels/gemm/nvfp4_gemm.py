@@ -14,7 +14,7 @@ from pathlib import Path
 
 import tirx_kernels.tirx_lite as txl
 import tvm
-from tirx_kernels.runner import bench, resolve_compile_config
+from tirx_kernels.runner import bench, resolve_backend_config
 
 
 class WarpRole(IntEnum):
@@ -68,7 +68,7 @@ def prepare_data(M: int, N: int, K: int, *, return_origin: bool = False):
 _CUBLASLT_EXT = None
 
 
-def _load_cublaslt_nvfp4_ext(*, compile_config=None):
+def _load_cublaslt_nvfp4_ext(*, backend_config=None):
     """Build if needed, then load the shape-independent cuBLASLt reference."""
     global _CUBLASLT_EXT
     if _CUBLASLT_EXT is not None:
@@ -251,7 +251,7 @@ void nvfp4_cublaslt(torch::Tensor A, torch::Tensor B, torch::Tensor A_scale,
         # PyTorch's FileBaton is not process-death-safe. The outer flock proves
         # no suite process is building here, so a remaining baton is stale.
         (build_directory / "lock").unlink(missing_ok=True)
-        prepare_arch = resolve_compile_config(compile_config).arch
+        prepare_arch = resolve_backend_config(backend_config)["cuda"]["arch"]
         arch = prepare_arch.removeprefix("sm_")
         extra_cuda_cflags = [f"-gencode=arch=compute_{arch},code=sm_{arch}"]
         _CUBLASLT_EXT = cpp_extension.load_inline(
@@ -328,7 +328,7 @@ def _mul_f32x2_inplace(values, index, multiplier):
     txl.ptx.mov.b64(values[index], values[index + 1], packed)
 
 
-def make_kernel(M, N, KDIM, *, compile_config=None):
+def make_kernel(M, N, KDIM, *, backend_config=None):
     """Trace one registry shape with every original config value baked in."""
     if M % 128 != 0 or N % 256 != 0 or KDIM % 256 != 0:
         raise ValueError("M, N, K must be divisible by 128, 256, 256 respectively")
@@ -388,7 +388,7 @@ def make_kernel(M, N, KDIM, *, compile_config=None):
                 cluster=(CLUSTER_SIZE,),
                 preferred_cluster=[CLUSTER_SIZE],
             ),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         cluster_rank = txl.cuda.cluster_cta_id("x")
@@ -985,10 +985,10 @@ def _build_tensor_maps(M, N, K, A, B, SFA, SFB, D):
 
 
 class _Runner:
-    def __init__(self, M, N, K, *, compile_config=None):
+    def __init__(self, M, N, K, *, backend_config=None):
         self.shape = M, N, K
-        self.lib = make_kernel(M, N, K, compile_config=compile_config).compile(
-            compile_config=compile_config
+        self.lib = make_kernel(M, N, K, backend_config=backend_config).compile(
+            backend_config=backend_config
         )
         self._maps = None
         self._map_key = None
@@ -1022,15 +1022,15 @@ CONFIGS = [
 ]
 
 
-def get_kernel(M, N, K, *, compile_config=None):
-    return make_kernel(M, N, K, compile_config=compile_config).func
+def get_kernel(M, N, K, *, backend_config=None):
+    return make_kernel(M, N, K, backend_config=backend_config).func
 
 
 def _compile_executable(M: int, N: int, K: int):
     return _Runner(M, N, K)
 
 
-def run_test(M=1024, N=1024, K=1024, *, compile_config=None):
+def run_test(M=1024, N=1024, K=1024, *, backend_config=None):
     """Compile, run, and verify kernel."""
     import torch
     import torch.nn.functional as F
@@ -1125,7 +1125,7 @@ def _flashinfer_tuned_choice(
 # cudaDeviceSynchronize), and since the nvfp4 kernel (~28µs) is faster than that dispatch,
 # event wall-clock is host-starved and over-credits us ~4x. Proton measures pure GPU
 # kernel time -> honest ~parity (verified 0.996 vs event 4.11).
-def prepare_bench(M=1024, N=1024, K=1024, *, compile_config=None, **kwargs):
+def prepare_bench(M=1024, N=1024, K=1024, *, backend_config=None, **kwargs):
     """Compile TIRx and populate the cuBLASLt extension cache before READY."""
     from tirx_kernels.runner import external_references_enabled, prepared_gpu_benchmark
 
@@ -1135,10 +1135,10 @@ def prepare_bench(M=1024, N=1024, K=1024, *, compile_config=None, **kwargs):
         "config": {"M": M, "N": N, "K": K, **kwargs},
         "executable": _compile_executable(M, N, K),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, compile_config=None, **kwargs):
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, backend_config=None, **kwargs):
     """Benchmark."""
     import flashinfer
     import torch
@@ -1241,7 +1241,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, compile_config=No
         return run
 
     def _cublaslt():
-        ext = _load_cublaslt_nvfp4_ext(compile_config=compile_config)
+        ext = _load_cublaslt_nvfp4_ext(backend_config=backend_config)
         out_cublaslt = torch.empty_like(out_tir)
         return lambda: ext.nvfp4_cublaslt(
             A_fp4, B_fp4, A_sf, B_sf, alpha_value, out_cublaslt, M, N, K
@@ -1267,9 +1267,9 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, compile_config=No
 
 
 def run_bench(
-    M=1024, N=1024, K=1024, *, warmup=None, repeat=None, timer=None, compile_config=None, **kwargs
+    M=1024, N=1024, K=1024, *, warmup=None, repeat=None, timer=None, backend_config=None, **kwargs
 ):
     protocol = {name: kwargs.pop(name) for name in ("rounds", "cooldown_s") if name in kwargs}
-    return prepare_bench(M=M, N=N, K=K, **kwargs, compile_config=compile_config).run_gpu(
+    return prepare_bench(M=M, N=N, K=K, **kwargs, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, **protocol
     )

@@ -337,7 +337,7 @@ class _PersistentScheduler:
         txl.assign(self.it, self.it + 1)
 
 
-def build_kernel(spec: GemmSpec, *, compile_config=None):
+def build_kernel(spec: GemmSpec, *, backend_config=None):
     """Build the TIRx `PrimFunc` for one `sm100_fp8_fp4_gemm_1d1d_impl` instantiation."""
     from tvm.ir.type import PointerType, PrimType
 
@@ -646,7 +646,7 @@ def build_kernel(spec: GemmSpec, *, compile_config=None):
                 cluster=(cta_group,) if cta_group > 1 else None,
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         sm_idx = txl.cta_id()

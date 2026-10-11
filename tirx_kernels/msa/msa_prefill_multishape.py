@@ -58,7 +58,7 @@ import torch
 
 import tirx_kernels.tirx_lite as txl
 import tvm
-from tirx_kernels.runner import resolve_compile_config
+from tirx_kernels.runner import backend_config_key, resolve_backend_config
 
 SPIN_WAITS = os.environ.get("MSA_SPIN_WAITS", "0") == "1"
 if SPIN_WAITS:
@@ -182,7 +182,7 @@ def make_union_kernel(
     kv_fp8,
     num_ctas,
     kv_depth,
-    compile_config=None,
+    backend_config=None,
 ):
     assert hq % hkv == 0
     GQA = hq // hkv
@@ -222,7 +222,7 @@ def make_union_kernel(
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_ctas, block=16 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         warp_cta = txl.warp_id()
@@ -1472,7 +1472,7 @@ def make_prep_kernel(
     num_chunks,
     item_batch,
     num_ctas_main,
-    compile_config=None,
+    backend_config=None,
 ):
     GQA = hq // hkv
     NBLK = nblk
@@ -1503,7 +1503,7 @@ def make_prep_kernel(
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(num_chunks, hkv), block=PREP_THREADS // 32 * 32),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         cid = txl.cta_id()
@@ -1739,7 +1739,7 @@ def make_main_kernel(
     num_ctas,
     compact_s2f6=False,
     fused_combine=False,
-    compile_config=None,
+    backend_config=None,
 ):
     GQA = hq // hkv
     assert GQA in (4, 8, 16)
@@ -1793,7 +1793,7 @@ def make_main_kernel(
                 grid=num_ctas, block=16 * 32, programmatic_stream_serialization=USE_PDL
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         warp_cta = txl.warp_id()
@@ -3061,7 +3061,7 @@ def make_main_kernel(
     return msa_reverse_main
 
 
-def make_combine_kernel_legacy(*, total_q, hq, hkv, topk, num_ctas, compile_config=None):
+def make_combine_kernel_legacy(*, total_q, hq, hkv, topk, num_ctas, backend_config=None):
     GQA = hq // hkv
     TOPK = topk
     TOTAL_Q = total_q
@@ -3081,7 +3081,7 @@ def make_combine_kernel_legacy(*, total_q, hq, hkv, topk, num_ctas, compile_conf
             launch=txl.cuda.LaunchConfig(
                 grid=num_ctas, block=8 * 32, programmatic_stream_serialization=USE_PDL
             ),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         if USE_PDL:
@@ -3158,7 +3158,7 @@ def make_combine_kernel_legacy(*, total_q, hq, hkv, topk, num_ctas, compile_conf
     return msa_reverse_combine_legacy
 
 
-def make_combine_kernel(*, total_q, hq, hkv, topk, num_ctas, compile_config=None):
+def make_combine_kernel(*, total_q, hq, hkv, topk, num_ctas, backend_config=None):
     GQA = hq // hkv
     TOPK = topk
     TOTAL_Q = total_q
@@ -3178,7 +3178,7 @@ def make_combine_kernel(*, total_q, hq, hkv, topk, num_ctas, compile_config=None
             launch=txl.cuda.LaunchConfig(
                 grid=num_ctas, block=8 * 32, programmatic_stream_serialization=USE_PDL
             ),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         if USE_PDL:
@@ -3271,7 +3271,7 @@ def make_combine_kernel(*, total_q, hq, hkv, topk, num_ctas, compile_config=None
 
 
 def make_combine_kernel_tma(
-    *, total_q, hq, hkv, topk, num_ctas, compact_s2f6=False, compile_config=None
+    *, total_q, hq, hkv, topk, num_ctas, compact_s2f6=False, backend_config=None
 ):
     """Top-k-4/8 merge with one overlapped TMA load per CTA."""
     assert topk in (4, 8)
@@ -3297,7 +3297,7 @@ def make_combine_kernel_tma(
             launch=txl.cuda.LaunchConfig(
                 grid=num_ctas, block=WARPS * 32, programmatic_stream_serialization=USE_PDL
             ),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         if USE_PDL:
@@ -3552,20 +3552,32 @@ def _encode(tensor, dtype_name, dims, strides, box):
 _COMPILED = {}
 
 
-def _compiled(key, factory, dims=1, pdl=False, *, compile_config=None, **kw):
-    cache_config = resolve_compile_config(compile_config)
+def _compiled(key, factory, dims=1, pdl=False, *, backend_config=None, **kw):
+    backend_config = resolve_backend_config(backend_config)
+    cache_config = backend_config_key(backend_config)
     exe = _COMPILED.get((cache_config, key))
     if exe is None:
         from tirx_kernels.runner import compile_kernel
 
-        compile_config = resolve_compile_config(compile_config, ptxas_reg_usage_level=6)
-        func = factory(**kw, compile_config=compile_config).func
-        exe = compile_kernel(func, compile_config=compile_config)
+        backend_config = resolve_backend_config(
+            backend_config,
+            defaults={
+                "cuda": {
+                    "ptxas": [
+                        "-v",
+                        "--warn-on-local-memory-usage",
+                        "--register-usage-level=" + str(6),
+                    ]
+                }
+            },
+        )
+        func = factory(**kw, backend_config=backend_config).func
+        exe = compile_kernel(func, backend_config=backend_config)
         _COMPILED[(cache_config, key)] = exe
     return exe
 
 
-def setup_reverse(data, total_q, B, *, compile_config=None):
+def setup_reverse(data, total_q, B, *, backend_config=None):
     q, k, v = data["q"], data["k"], data["v"]
     q2k = data["q2k_indices"]
     cu_q = data["cu_seqlens_q"]
@@ -3620,7 +3632,7 @@ def setup_reverse(data, total_q, B, *, compile_config=None):
         num_chunks=num_chunks,
         item_batch=item_batch,
         num_ctas_main=num_sms,
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     main = _compiled(
         (
@@ -3655,7 +3667,7 @@ def setup_reverse(data, total_q, B, *, compile_config=None):
         num_ctas=num_sms,
         compact_s2f6=compact_s2f6,
         fused_combine=FUSED_COMBINE,
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     combine_rows = 16 if topk == 8 else 32
     n_comb_ctas = ceildiv(total_q * hq, combine_rows)
@@ -3677,7 +3689,7 @@ def setup_reverse(data, total_q, B, *, compile_config=None):
             topk=topk,
             num_ctas=n_comb_ctas,
             compact_s2f6=compact_s2f6,
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
     else:
         comb = _compiled(
@@ -3690,7 +3702,7 @@ def setup_reverse(data, total_q, B, *, compile_config=None):
             hkv=hkv,
             topk=topk,
             num_ctas=n_comb_ctas,
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
     gqa = hq // hkv
@@ -3860,7 +3872,7 @@ def setup_reverse(data, total_q, B, *, compile_config=None):
 DENSITY_THRESHOLD = 0.25
 
 
-def setup_union(data, total_q, B, *, compile_config=None):
+def setup_union(data, total_q, B, *, backend_config=None):
     q, k, v = data["q"], data["k"], data["v"]
     q2k = data["q2k_indices"]
     cu_q = data["cu_seqlens_q"]
@@ -3897,7 +3909,7 @@ def setup_union(data, total_q, B, *, compile_config=None):
         kv_fp8=kv_fp8,
         num_ctas=num_sms,
         kv_depth=kv_depth,
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     gqa = hq // hkv
     tok_per_tile = BLK_M // gqa
@@ -3990,7 +4002,7 @@ def setup_union(data, total_q, B, *, compile_config=None):
     return run
 
 
-def setup(data, total_q, B, *, compile_config=None):
+def setup(data, total_q, B, *, backend_config=None):
     q, k = data["q"], data["k"]
     q2k = data["q2k_indices"]
     page_table = data["page_table"]
@@ -4001,8 +4013,8 @@ def setup(data, total_q, B, *, compile_config=None):
         selectable = ceildiv(k.shape[0], BLK_N)
     density = topk / max(selectable, 1)
     if density >= DENSITY_THRESHOLD:
-        return setup_union(data, total_q, B, compile_config=compile_config)
-    return setup_reverse(data, total_q, B, compile_config=compile_config)
+        return setup_union(data, total_q, B, backend_config=backend_config)
+    return setup_reverse(data, total_q, B, backend_config=backend_config)
 
 
 # ---------------------------------------------------------------------------
@@ -4128,7 +4140,7 @@ def _route(resolved: dict[str, Any]) -> str:
     return "union" if density >= DENSITY_THRESHOLD else "reverse"
 
 
-def get_kernel(*, compile_config=None, **config: Any):
+def get_kernel(*, backend_config=None, **config: Any):
     """Return the traced tirx-lite PrimFuncs this config's route builds.
 
     Both routes compile inside the candidate's own `setup`, which pins per-route
@@ -4162,7 +4174,7 @@ def get_kernel(*, compile_config=None, **config: Any):
                 kv_fp8=kv_fp8,
                 num_ctas=num_sms,
                 kv_depth=3 if kv_fp8 else 4,
-                compile_config=compile_config,
+                backend_config=backend_config,
             ).func
         }
     num_chunks = ceildiv(total_q, PREP_THREADS)
@@ -4181,7 +4193,7 @@ def get_kernel(*, compile_config=None, **config: Any):
             num_chunks=num_chunks,
             item_batch=10 if kv_fp8 else BATCH,
             num_ctas_main=num_sms,
-            compile_config=compile_config,
+            backend_config=backend_config,
         ).func,
         "main": make_main_kernel(
             total_q=total_q,
@@ -4197,7 +4209,7 @@ def get_kernel(*, compile_config=None, **config: Any):
             num_ctas=num_sms,
             compact_s2f6=compact,
             fused_combine=FUSED_COMBINE,
-            compile_config=compile_config,
+            backend_config=backend_config,
         ).func,
     }
 
@@ -4422,15 +4434,15 @@ def check_correctness(outputs: dict[str, Any], **config: Any) -> None:
         raise AssertionError(f"normalized RMS error ratio {rms_ratio:.6e} must be below 5e-2")
 
 
-def _launch(case: dict[str, Any], *, compile_config=None):
+def _launch(case: dict[str, Any], *, backend_config=None):
     """Build the candidate's own dispatch closure for this shape."""
-    return setup(case, case["total_q"], case["batch_size"], compile_config=compile_config)
+    return setup(case, case["total_q"], case["batch_size"], backend_config=backend_config)
 
 
-def run_test(*, compile_config=None, **config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     _assert_supported_arch()
     case = prepare_data(**config)
-    run = _launch(case, compile_config=compile_config)
+    run = _launch(case, backend_config=backend_config)
     case["output"].fill_(float("nan"))
     run()
     torch.cuda.synchronize()
@@ -4652,11 +4664,11 @@ def _minimax_reference(case: dict[str, Any]):
     return replay
 
 
-def prepare_bench(*, compile_config=None, **config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Resolve the config before bench-suite assigns a GPU."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(config)}, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, {"config": dict(config)}, backend_config=backend_config)
 
 
 def run_gpu(
@@ -4665,7 +4677,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     _assert_supported_arch()
@@ -4676,7 +4688,7 @@ def run_gpu(
     rounds = config.pop("rounds", 5)
     cooldown_s = config.pop("cooldown_s", 1.0)
     case = prepare_data(**config)
-    run = _launch(case, compile_config=compile_config)
+    run = _launch(case, backend_config=backend_config)
     run()
     torch.cuda.synchronize()
 
@@ -4696,12 +4708,12 @@ def run_bench(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
-    compile_config=None,
+    backend_config=None,
     **config: Any,
 ) -> dict[str, Any]:
     values = dict(config)
     protocol = {name: values.pop(name) for name in ("rounds", "cooldown_s") if name in values}
-    prepared = prepare_bench(**values, compile_config=compile_config)
+    prepared = prepare_bench(**values, backend_config=backend_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

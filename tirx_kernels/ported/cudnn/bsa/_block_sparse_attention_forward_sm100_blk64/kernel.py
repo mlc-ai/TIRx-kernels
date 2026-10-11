@@ -89,7 +89,7 @@ def _resolve_splits(value):
     return int(value)
 
 
-def make_forward_kernel(*, compile_config=None, **config):
+def make_forward_kernel(*, backend_config=None, **config):
     batch = int(config["batch"])
     num_heads = int(config["num_q_heads"])
     if int(config["num_kv_heads"]) != num_heads:
@@ -130,7 +130,7 @@ def make_forward_kernel(*, compile_config=None, **config):
                 grid=grid, block=16 * 32, cluster=(q_blocks, num_heads, batch) if use_clc else None
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         if use_clc:
@@ -241,7 +241,7 @@ def make_forward_kernel(*, compile_config=None, **config):
     return forward
 
 
-def make_combine_kernel(*, compile_config=None, **config):
+def make_combine_kernel(*, backend_config=None, **config):
     batch = int(config["batch"])
     num_heads = int(config["num_q_heads"])
     seqlen_q = int(config["seqlen_q"])
@@ -265,7 +265,7 @@ def make_combine_kernel(*, compile_config=None, **config):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(row_tiles, 2, batch), block=4 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         row_tile, dim_tile, batch_idx = (
@@ -481,8 +481,8 @@ def make_combine_kernel(*, compile_config=None, **config):
     return combine
 
 
-def get_kernel(*, compile_config=None, **config):
-    forward = source_kernel.make_forward_kernel(**config, compile_config=compile_config).func
+def get_kernel(*, backend_config=None, **config):
+    forward = source_kernel.make_forward_kernel(**config, backend_config=backend_config).func
     if _resolve_splits(config["kv_splits"]) == 1:
         return [forward]
-    return [forward, make_combine_kernel(**config, compile_config=compile_config).func]
+    return [forward, make_combine_kernel(**config, backend_config=backend_config).func]

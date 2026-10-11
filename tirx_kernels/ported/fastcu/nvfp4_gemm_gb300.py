@@ -15,7 +15,7 @@ from typing import Any
 
 import tirx_kernels.tirx_lite as txl
 import tvm
-from tirx_kernels.runner import resolve_compile_config
+from tirx_kernels.runner import cache_backend_config, resolve_backend_config
 
 KERNEL_META = {
     "name": "fastcu_nvfp4_gemm_gb300",
@@ -213,8 +213,8 @@ def _uceil(x, divisor):
     return txl.cast((txl.cast(x, "uint32") + du - txl.uint32(1)) // du, "int32")
 
 
-@functools.lru_cache(maxsize=1)
-def make_kernel(*, compile_config=None):
+@cache_backend_config(maxsize=1)
+def make_kernel(*, backend_config=None):
     """Build the fixed-topology r9 kernel with runtime M/N/K."""
 
     @txl.kernel()
@@ -237,7 +237,7 @@ def make_kernel(*, compile_config=None):
                 grid=(2, 1, _NUM_CLUSTERS), block=7 * 32, cluster=(2,), preferred_cluster=[2]
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         crank = txl.cuda.cluster_cta_id("x")
@@ -1256,11 +1256,21 @@ def prepare_data(M: int, N: int, K: int, **_: Any):
 
 
 class _Runner:
-    def __init__(self, *, compile_config=None):
-        compile_config = resolve_compile_config(
-            compile_config, compiler="nvcc", ptxas_reg_usage_level=4
+    def __init__(self, *, backend_config=None):
+        backend_config = resolve_backend_config(
+            backend_config,
+            defaults={
+                "cuda": {
+                    "compiler": "nvcc",
+                    "ptxas": [
+                        "-v",
+                        "--warn-on-local-memory-usage",
+                        "--register-usage-level=" + str(4),
+                    ],
+                }
+            },
         )
-        self.lib = make_kernel(compile_config=compile_config).compile(compile_config=compile_config)
+        self.lib = make_kernel(backend_config=backend_config).compile(backend_config=backend_config)
         self._maps = None
         self._map_key = None
 
@@ -1374,7 +1384,7 @@ def _check_bitwise(data, M, N):
     )
 
 
-def run_test(*, compile_config=None, **config: Any):
+def run_test(*, backend_config=None, **config: Any):
     """Compile and compare one deterministic configuration to frozen gemm9."""
     import torch
 
@@ -1404,13 +1414,13 @@ def run_test(*, compile_config=None, **config: Any):
         source.close()
 
 
-def prepare_bench(*, compile_config=None, **config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Compile the TIRx kernel before GPU benchmark setup."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     M, N, K_dim = (int(config[name]) for name in ("M", "N", "K"))
     state = {"config": {"M": M, "N": N, "K": K_dim}, "runner": _runner()}
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -1421,7 +1431,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **_,
 ):
     """Benchmark one TIRx launch and optionally the pinned gemm9 launch."""
@@ -1482,10 +1492,10 @@ def run_bench(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **config: Any,
 ):
-    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

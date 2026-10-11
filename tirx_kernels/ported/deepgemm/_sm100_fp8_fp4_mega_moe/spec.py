@@ -24,6 +24,8 @@ from typing import Any
 
 import torch
 
+from tirx_kernels.runner import cache_backend_config
+
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 DEEPGEMM_SYM_BUFFER_MAX_RANKS = 72
 _PREPARED_LIBRARY_ENV = {
@@ -1278,7 +1280,7 @@ def _view_symm_matrix(
     return case.symm_buffer.buffer.narrow(0, offset, rows * cols).view(rows, cols)
 
 
-@cache
+@cache_backend_config
 def _compile_tirx_mega_moe_for_config(
     *,
     num_processes: int,
@@ -1293,12 +1295,12 @@ def _compile_tirx_mega_moe_for_config(
     fast_math: int,
     collect_stats: bool,
     emit_nvl_barrier_timeout_printf: bool = True,
-    compile_config=None,
+    backend_config=None,
 ) -> Any:
     import tvm
-    from tirx_kernels.runner import cuda_target, resolve_compile_config
+    from tirx_kernels.runner import cuda_target, resolve_backend_config
 
-    compile_config = resolve_compile_config(compile_config, compiler="nvcc")
+    backend_config = resolve_backend_config(backend_config, defaults={"cuda": {"compiler": "nvcc"}})
 
     # Deferred: `kernel` imports this module for its layout and launch config.
     from .kernel import get_kernel
@@ -1316,19 +1318,19 @@ def _compile_tirx_mega_moe_for_config(
         fast_math=fast_math,
         collect_stats=collect_stats,
         emit_nvl_barrier_timeout_printf=emit_nvl_barrier_timeout_printf,
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     # The block-scale tcgen05 MMA below uses ``scale_vec::1X``, which ptxas
     # rejects for a family-only target. The prepared compile profile therefore
     # supplies the exact architecture-specific target validated for the runtime
     # GPU (currently sm_100a, sm_103a, or sm_107a).
-    target = cuda_target(compile_config=compile_config)
+    target = cuda_target(backend_config=backend_config)
     mod = tvm.IRModule({"main": kernel})
-    return tvm.compile(mod, target=target, tir_pipeline="tirx", compile_config=compile_config)
+    return tvm.compile(mod, target=target, tir_pipeline="tirx", backend_config=backend_config)
 
 
 def _compile_tirx_mega_moe(
-    case: MegaMoeCase | TirxMegaMoeLaunchContext, *, compile_config=None
+    case: MegaMoeCase | TirxMegaMoeLaunchContext, *, backend_config=None
 ) -> Any:
     config = case.config
     collect_stats = getattr(case, "cumulative_local_expert_recv_stats", None) is not None
@@ -1347,7 +1349,7 @@ def _compile_tirx_mega_moe(
         activation_clamp=config.activation_clamp,
         fast_math=config.fast_math,
         collect_stats=collect_stats,
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
 
 
@@ -1528,7 +1530,7 @@ def _prepare_tirx_invocation(
     case: MegaMoeCase | TirxMegaMoeLaunchContext,
     y: torch.Tensor | None = None,
     *,
-    compile_config=None,
+    backend_config=None,
 ) -> TirxMegaMoeInvocation:
     l1_weights = case.transformed_l1_weights[0]
     l1_weights_sf = case.transformed_l1_weights[1].permute(0, 2, 1)
@@ -1591,7 +1593,7 @@ def _prepare_tirx_invocation(
             case.config.num_experts_per_rank, dtype=torch.int32, device=y.device
         )
     return TirxMegaMoeInvocation(
-        executable=_compile_tirx_mega_moe(case, compile_config=compile_config),
+        executable=_compile_tirx_mega_moe(case, backend_config=backend_config),
         y=y,
         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
         symm_buffer_offsets=_make_symm_buffer_offsets(case),
@@ -1654,7 +1656,7 @@ def prepare_tirx_fp8_fp4_mega_moe(
     activation_clamp: float | None = None,
     fast_math: bool = True,
     *,
-    compile_config=None,
+    backend_config=None,
 ) -> TirxMegaMoePrepared:
     context = _make_tirx_mega_moe_launch_context(
         y=y,
@@ -1671,7 +1673,7 @@ def prepare_tirx_fp8_fp4_mega_moe(
     )
     return TirxMegaMoePrepared(
         context=context,
-        invocation=_prepare_tirx_invocation(context, y=y, compile_config=compile_config),
+        invocation=_prepare_tirx_invocation(context, y=y, backend_config=backend_config),
     )
 
 
@@ -1692,7 +1694,7 @@ def fp8_fp4_mega_moe(
     activation_clamp: float | None = None,
     fast_math: bool = True,
     *,
-    compile_config=None,
+    backend_config=None,
 ) -> None:
     prepared = prepare_tirx_fp8_fp4_mega_moe(
         y,
@@ -1706,6 +1708,6 @@ def fp8_fp4_mega_moe(
         activation=activation,
         activation_clamp=activation_clamp,
         fast_math=fast_math,
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     launch_prepared_tirx_fp8_fp4_mega_moe(prepared)

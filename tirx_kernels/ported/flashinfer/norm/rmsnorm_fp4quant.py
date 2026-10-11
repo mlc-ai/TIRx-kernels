@@ -22,7 +22,7 @@ from tirx_kernels.ported.flashinfer.utils.fp_quant import (
     pack_u32x2_to_u64,
     sf_offset_128x4,
 )
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import bench, cache_backend_config
 
 KERNEL_META = {
     "name": "flashinfer_rmsnorm_fp4quant",
@@ -712,7 +712,7 @@ def get_kernel(
     swizzled: bool,
     enable_pdl: bool,
     *,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ):
     """Return the compact source-faithful RMSNorm/FP4 specialization."""
@@ -991,7 +991,7 @@ def get_kernel(
                 programmatic_stream_serialization=enable_pdl,
             ),
             kernel_attrs=txl.cuda.KernelAttributes(required_block_size=True),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         kernel_body(x, weight, y, scales, global_scale, runtime_M, runtime_eps)
@@ -1131,7 +1131,7 @@ def _launch_tirx(executable, data, output, config: dict[str, Any]):
     )
 
 
-@functools.cache
+@cache_backend_config
 def _compiled_test_specialization(
     input_dtype: str,
     H: int,
@@ -1140,7 +1140,7 @@ def _compiled_test_specialization(
     swizzled: bool,
     enable_pdl: bool,
     *,
-    compile_config=None,
+    backend_config=None,
 ):
     from tirx_kernels.runner import compile_kernel
 
@@ -1153,9 +1153,9 @@ def _compiled_test_specialization(
             scale_format=scale_format,
             swizzled=swizzled,
             enable_pdl=enable_pdl,
-            compile_config=compile_config,
+            backend_config=backend_config,
         ),
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
 
 
@@ -1309,7 +1309,7 @@ def _check_public_allocation(data, reference, config: dict[str, Any]) -> None:
         raise AssertionError("public auto-allocated scale output differs from kernel oracle")
 
 
-def run_test(*, compile_config=None, **config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     """Compile, launch, and validate one source-domain specialization."""
     import torch
 
@@ -1332,7 +1332,7 @@ def run_test(*, compile_config=None, **config: Any) -> None:
         str(config["scale_format"]),
         bool(config["swizzled"]),
         bool(config["enable_pdl"]),
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     if _launch_tirx(executable, data, output, config) is not None:
         raise AssertionError("TIRx RMSNormFP4Quant ABI must return None")
@@ -1347,17 +1347,17 @@ def run_test(*, compile_config=None, **config: Any) -> None:
     _check_public_allocation(data, reference, config)
 
 
-def prepare_bench(*, compile_config=None, **config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Compile the specialization before the bench suite assigns a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     state = {
         "config": dict(config),
         "executable": compile_kernel(
-            get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+            get_kernel(**config, backend_config=backend_config), backend_config=backend_config
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -1368,7 +1368,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ):
     """Build and prevalidate source and TIRx single-launch closures."""
@@ -1416,11 +1416,11 @@ def run_bench(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **config: Any,
 ):
     """Benchmark one specialization against the CuTeDSL kernel reference."""
-    prepared = prepare_bench(**config, compile_config=compile_config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

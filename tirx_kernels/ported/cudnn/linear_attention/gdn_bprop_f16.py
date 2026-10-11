@@ -981,7 +981,7 @@ def _tcgen_mma_ts(
 
 
 def _make_prologue(
-    *, run_order, order_generate, dynamic_scheduler, n_heads_out, cu_dtype, compile_config=None
+    *, run_order, order_generate, dynamic_scheduler, n_heads_out, cu_dtype, backend_config=None
 ):
     cu_t = txl.i64 if cu_dtype == "int64" else txl.i32
 
@@ -1021,7 +1021,7 @@ def _make_prologue(
         checkpoint_every_n: txl.i32,
     ):
         txl.device_entry(
-            launch=txl.cuda.LaunchConfig(grid=1, block=32 * 32), compile_config=compile_config
+            launch=txl.cuda.LaunchConfig(grid=1, block=32 * 32), backend_config=backend_config
         )
 
         thread = txl.thread_id()
@@ -1241,7 +1241,7 @@ def _make_main(
     k_ratio,
     v_ratio,
     n_heads_out,
-    compile_config=None,
+    backend_config=None,
 ):
     io_t = txl.f16 if io_dtype == "float16" else txl.bf16
     cu_t = txl.i64 if cu_dtype == "int64" else txl.i32
@@ -1276,7 +1276,7 @@ def _make_main(
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_sms, block=12 * 32, cluster=(1, 1, 1)),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         arena = txl.alloc_tensor((_ARENA_BYTES,), txl.u8, scope="shared.dyn", align=1024)
@@ -3860,7 +3860,7 @@ def _work_rows(seq_lens, heads, *, split):
     return rows
 
 
-def get_kernel(*, compile_config=None, **config):
+def get_kernel(*, backend_config=None, **config):
     """Return the source-ordered TensorMap prologue and persistent main."""
     config = _normalized_config(config)
     prologue = _make_prologue(
@@ -3869,7 +3869,7 @@ def get_kernel(*, compile_config=None, **config):
         dynamic_scheduler=bool(config["dynamic_scheduler"]),
         n_heads_out=int(config["heads"]),
         cu_dtype=config["cu_dtype"],
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     main = _make_main(
         num_sms=int(config["num_sms"]),
@@ -3886,7 +3886,7 @@ def get_kernel(*, compile_config=None, **config):
         k_ratio=int(config["heads"]) // int(config["k_heads"]),
         v_ratio=int(config["heads"]) // int(config["v_heads"]),
         n_heads_out=int(config["heads"]),
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     return [prologue.func, main.func]
 
@@ -4417,7 +4417,7 @@ def _validate_outputs(data, *, sources):
             )
 
 
-def run_test(*, compile_config=None, **config):
+def run_test(*, backend_config=None, **config):
     """Compare TIRx with the pinned source and exact replay."""
     import torch
 
@@ -4426,8 +4426,8 @@ def run_test(*, compile_config=None, **config):
     config = _normalized_config(config)
     data = _prepare_data(config)
     executables = [
-        compile_kernel(func, compile_config=compile_config)
-        for func in get_kernel(**config, compile_config=compile_config)
+        compile_kernel(func, backend_config=backend_config)
+        for func in get_kernel(**config, backend_config=backend_config)
     ]
     tirx_launch = _tirx_launch(executables, data)
     source_launch = _source_launch(data)
@@ -4449,7 +4449,7 @@ def run_test(*, compile_config=None, **config):
     return {"tokens": sum(config["seq_lens"]), "heads": config["heads"]}
 
 
-def prepare_bench(*, compile_config=None, **config):
+def prepare_bench(*, backend_config=None, **config):
     """Compile the two TIRx launches without importing torch or touching CUDA."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
@@ -4457,11 +4457,11 @@ def prepare_bench(*, compile_config=None, **config):
     state = {
         "config": config,
         "executables": [
-            compile_kernel(func, compile_config=compile_config)
-            for func in get_kernel(**config, compile_config=compile_config)
+            compile_kernel(func, backend_config=backend_config)
+            for func in get_kernel(**config, backend_config=backend_config)
         ],
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -4472,7 +4472,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=0.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Prepare checkpoints, validate once, then time only prologue plus main."""
@@ -4510,9 +4510,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, backend_config=None, **config
 ):
-    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

@@ -131,7 +131,7 @@ def _issue_cluster_tma(opcode, varlen, dst, tensor_map, feature, seq, head, batc
         txl.ptx[opcode](dst, tensor_map, feature, seq, head, batch, barrier, TMA_CACHE)
 
 
-def get_kernel_2cta(*, compile_config=None, **config):
+def get_kernel_2cta(*, backend_config=None, **config):
     """Build the exact D128 or D192 cooperative specialization."""
     head_dim = int(config["head_dim"])
     head_dim_v = int(config["head_dim_v"])
@@ -377,7 +377,7 @@ def get_kernel_2cta(*, compile_config=None, **config):
                 preferred_cluster=[2],
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         cluster_rank = txl.uniform(txl.cuda.cluster_cta_id("x"))

@@ -38,7 +38,7 @@ region.
 """
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import resolve_compile_config
+from tirx_kernels.runner import resolve_backend_config
 
 from ._flex_attention_backward_sm100 import data as _data
 from ._flex_attention_backward_sm100 import kernel as _kernel
@@ -344,9 +344,9 @@ _BENCH_KERNEL_CONFIGS = tuple(
 )
 
 
-def get_kernel(*, compile_config=None, **config):
+def get_kernel(*, backend_config=None, **config):
     """Return the specialized direct main-kernel PrimFunc."""
-    return _kernel.get_kernel(**config, compile_config=compile_config)
+    return _kernel.get_kernel(**config, backend_config=backend_config)
 
 
 def prepare_data(**config):
@@ -356,27 +356,36 @@ def prepare_data(**config):
 _PTXAS_REG_LEVEL = "5"
 
 
-def _compile_kernel(kernel_config, *, compile_config=None):
+def _compile_kernel(kernel_config, *, backend_config=None):
     """Compile with the measured source-native ptxas schedule via NVRTC."""
 
     from tirx_kernels.runner import compile_kernel
 
     _data.assert_nvrtc_ptx92()
     pass
-    compile_config = resolve_compile_config(
-        compile_config, ptxas_reg_usage_level=int(_PTXAS_REG_LEVEL)
+    backend_config = resolve_backend_config(
+        backend_config,
+        defaults={
+            "cuda": {
+                "ptxas": [
+                    "-v",
+                    "--warn-on-local-memory-usage",
+                    "--register-usage-level=" + str(int(_PTXAS_REG_LEVEL)),
+                ]
+            }
+        },
     )
     return compile_kernel(
-        get_kernel(**kernel_config, compile_config=compile_config), compile_config=compile_config
+        get_kernel(**kernel_config, backend_config=backend_config), backend_config=backend_config
     )
 
 
-def run_test(*, compile_config=None, **config):
+def run_test(*, backend_config=None, **config):
     import torch
 
     kernel_config = {key: value for key, value in config.items() if key != "label"}
     data = prepare_data(**kernel_config)
-    executable = _compile_kernel(kernel_config, compile_config=compile_config)
+    executable = _compile_kernel(kernel_config, backend_config=backend_config)
     # Mask planning and preprocessing run through PyTorch, while the compiled
     # TIRx executable launches through TVM.  Complete all setup work before
     # crossing that stream boundary.
@@ -396,7 +405,7 @@ def run_test(*, compile_config=None, **config):
     _data.validate_outputs(data, with_oracle=kernel_config not in _BENCH_KERNEL_CONFIGS)
 
 
-def prepare_bench(*, compile_config=None, **config):
+def prepare_bench(*, backend_config=None, **config):
     """Compile TIRx with default NVRTC before the benchmark GPU stage."""
     import os
     from pathlib import Path
@@ -407,7 +416,7 @@ def prepare_bench(*, compile_config=None, **config):
     _data.assert_nvrtc_ptx92()
     capture_dir = os.environ.get("TIRX_FLEX_BWD_TARGET_CAPTURE_DIR")
     if capture_dir is None:
-        executable = _compile_kernel(kernel_config, compile_config=compile_config)
+        executable = _compile_kernel(kernel_config, backend_config=backend_config)
     else:
         # bench_suite compiles inside its CPU-prepare scope, which calls
         # tvm.support.nvcc.compile_cuda directly.  Capture that returned NVRTC
@@ -428,11 +437,11 @@ def prepare_bench(*, compile_config=None, **config):
 
         nvcc.compile_cuda = capture_compile_cuda
         try:
-            executable = _compile_kernel(kernel_config, compile_config=compile_config)
+            executable = _compile_kernel(kernel_config, backend_config=backend_config)
         finally:
             nvcc.compile_cuda = original_compile_cuda
     state = {"config": kernel_config, "executable": executable}
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -443,7 +452,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=0.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Validate once, then time only matching source/TIRx direct main kernels."""
@@ -503,9 +512,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, backend_config=None, **config
 ):
-    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

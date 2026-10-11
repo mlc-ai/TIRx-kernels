@@ -359,7 +359,7 @@ def _specialization(kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_kernel(*, compile_config=None, **kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     """Build the K entry for one simple specialization."""
     spec = _specialization(kwargs)
 
@@ -418,7 +418,7 @@ def get_kernel(*, compile_config=None, **kwargs: Any):
             launch=txl.cuda.LaunchConfig(
                 grid=(spec["BATCH"], spec["NHEADS"], dim_tiles_runtime), block=4 * 32
             ),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         batch_i, head, dim_tile = txl.cta_id()
@@ -1380,25 +1380,25 @@ def _assert_case_close(case: dict[str, Any]) -> None:
         )
 
 
-def prepare_bench(*, compile_config=None, **kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     state = {
         "config": dict(kwargs),
         "executable": compile_kernel(
-            get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(*, compile_config=None, **kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     from tirx_kernels.runner import compile_kernel
 
     case = prepare_data(**kwargs)
     executable = compile_kernel(
-        get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+        get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
     )
     executable(*_tirx_args(case))
     _run_reference(case)
@@ -1412,7 +1412,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1456,12 +1456,12 @@ def run_bench(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    prepared = prepare_bench(**config, compile_config=compile_config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

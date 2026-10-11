@@ -97,7 +97,7 @@ from tirx_kernels.ported.flashinfer.utils.topk_radix import (
     st_global_u16,
     st_global_u32,
 )
-from tirx_kernels.runner import bench, resolve_compile_config
+from tirx_kernels.runner import bench, resolve_backend_config
 
 # Patterns whose whole purpose is to overflow the candidate arena; prepare_data
 # asserts on the host that they still do.
@@ -283,20 +283,31 @@ def _select_ptxas_reg_level(
     return "10"
 
 
-def _thor_compile_config(config, compile_config):
-    if resolve_compile_config(compile_config).arch != "sm_110a":
-        return compile_config
-    return resolve_compile_config(
-        compile_config,
-        ptxas_reg_usage_level=int(
-            _select_ptxas_reg_level(
-                config["num_rows"],
-                config["length"],
-                config["k"],
-                config["deterministic"],
-                config["tie_break"],
-            )
-        ),
+def _thor_backend_config(config, backend_config):
+    if resolve_backend_config(backend_config)["cuda"]["arch"] != "sm_110a":
+        return backend_config
+    return resolve_backend_config(
+        backend_config,
+        defaults={
+            "cuda": {
+                "ptxas": [
+                    "-v",
+                    "--warn-on-local-memory-usage",
+                    "--register-usage-level="
+                    + str(
+                        int(
+                            _select_ptxas_reg_level(
+                                config["num_rows"],
+                                config["length"],
+                                config["k"],
+                                config["deterministic"],
+                                config["tie_break"],
+                            )
+                        )
+                    ),
+                ]
+            }
+        },
     )
 
 
@@ -315,7 +326,7 @@ def get_kernel(
     trivial: bool = False,
     pattern: str = "random",
     *,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Return the TIRx specialization of `FilteredTopKUnifiedKernel` for one cell."""
@@ -381,7 +392,7 @@ def get_kernel(
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=grid, block=FILTERED_TOPK_BLOCK_THREADS // 32 * 32),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         row = txl.cta_id()
@@ -550,7 +561,7 @@ def get_finalize_kernel(
     trivial: bool = False,
     pattern: str = "random",
     *,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Return the TIRx specialization of `FinalizeTopKIndicesKernel`, or None.
@@ -586,7 +597,7 @@ def get_finalize_kernel(
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_rows, block=block_threads // 32 * 32),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         row = txl.cta_id()
@@ -1003,7 +1014,7 @@ def _launch_tirx(ex, ex_finalize, args) -> None:
         ex_finalize(*args["finalize"])
 
 
-def run_test(*, compile_config=None, **config):
+def run_test(*, backend_config=None, **config):
     """Compile, launch, and validate one config against the FlashInfer source."""
     import unittest
 
@@ -1039,12 +1050,12 @@ def run_test(*, compile_config=None, **config):
     assert_reference_is_top_k(cfg, data, ref_out)
     assert_reference_tie_break(cfg, data, ref_out)
 
-    compile_config = _thor_compile_config(cfg, compile_config, compile_config=compile_config)
-    kernel = get_kernel(**cfg, compile_config=compile_config)
-    finalize = get_finalize_kernel(**cfg, compile_config=compile_config)
-    ex = compile_kernel(kernel, compile_config=compile_config)
+    backend_config = _thor_backend_config(cfg, backend_config, backend_config=backend_config)
+    kernel = get_kernel(**cfg, backend_config=backend_config)
+    finalize = get_finalize_kernel(**cfg, backend_config=backend_config)
+    ex = compile_kernel(kernel, backend_config=backend_config)
     ex_finalize = (
-        compile_kernel(finalize, compile_config=compile_config) if finalize is not None else None
+        compile_kernel(finalize, backend_config=backend_config) if finalize is not None else None
     )
 
     tirx_out = alloc_outputs(cfg)
@@ -1200,24 +1211,24 @@ def compare_filtered_outputs(
 # ---------------------------------------------------------------------------
 # Benchmark entry points.
 # ---------------------------------------------------------------------------
-def prepare_bench(*, compile_config=None, **kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile both executables before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     cfg = _normalize_config(kwargs)
-    compile_config = _thor_compile_config(cfg, compile_config, compile_config=compile_config)
-    finalize = get_finalize_kernel(**cfg, compile_config=compile_config)
+    backend_config = _thor_backend_config(cfg, backend_config, backend_config=backend_config)
+    finalize = get_finalize_kernel(**cfg, backend_config=backend_config)
     state = {
         "config": cfg,
         "executable": compile_kernel(
-            get_kernel(**cfg, compile_config=compile_config), compile_config=compile_config
+            get_kernel(**cfg, backend_config=backend_config), backend_config=backend_config
         ),
         # None where `finalize_plan` says the dispatcher issues no second launch.
-        "finalize": compile_kernel(finalize, compile_config=compile_config)
+        "finalize": compile_kernel(finalize, backend_config=backend_config)
         if finalize is not None
         else None,
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -1228,7 +1239,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Timed comparison against the FlashInfer source pipeline.
@@ -1265,9 +1276,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, backend_config=None, **config
 ):
-    prepared = prepare_bench(**config, compile_config=compile_config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tvm.backend.config import merge_backend_configs
+
 SERVER_URL_ENV = "TIRX_BENCH_SERVER"
 REFERENCE_DEPS_DIR_ENV = "TIRX_BENCH_REFERENCE_DEPS"
 DEFAULT_SERVER_URL = "http://127.0.0.1:8901"
@@ -389,18 +391,17 @@ def workload_spec(
     for key in ("warmup", "repeat", "timer"):
         if workload.get(key) is not None:
             bench[key] = workload[key]
-    from tvm.backend.cuda import CompileConfig
-
-    config = CompileConfig(
-        arch=cuda_arch, compiler="nvcc" if prepare_mode == "cpu" else None
-    ).overlay(CompileConfig(**workload.get("compile_config", {})))
-    if config.arch != cuda_arch:
-        raise ValueError("Remote CompileConfig.arch must match the assigned server architecture")
+    defaults = {"cuda": {"arch": cuda_arch}}
+    if prepare_mode == "cpu":
+        defaults["cuda"]["compiler"] = "nvcc"
+    config = merge_backend_configs(defaults, workload.get("backend_config"))
+    if config["cuda"]["arch"] != cuda_arch:
+        raise ValueError("Remote backend_config arch must match the assigned server architecture")
     return {
         "kernel": workload["kernel"],
         "config": workload["config"],
         "side": side,
-        "compile_config": config.to_dict(),
+        "backend_config": config,
         "num_sms": int(num_sms),
         "references": bool(references_enabled),
         "cupti_workaround": True,
@@ -667,9 +668,11 @@ def outcome_to_record(
         "transport_retries": submission.transport_retries,
         "wall_s": submission.wall_s,
         "prepare_mode": prepare_mode,
-        "compile_config": {
-            "arch": profile.arch,
-            **({"compiler": "nvcc"} if prepare_mode == "cpu" else {}),
+        "backend_config": {
+            "cuda": {
+                "arch": profile.arch,
+                **({"compiler": "nvcc"} if prepare_mode == "cpu" else {}),
+            }
         },
         "tree_sha256": tree_sha256,
         "before_tree_sha256": before_tree_sha256,
@@ -1020,9 +1023,11 @@ def pipeline_metadata(
             "is_default": rounds == DEFAULT_BENCH_ROUNDS and cooldown == DEFAULT_BENCH_COOLDOWN_S,
         },
         "prepare_mode": prepare_mode,
-        "compile_config": {
-            "arch": profile.arch,
-            **({"compiler": "nvcc"} if prepare_mode == "cpu" else {}),
+        "backend_config": {
+            "cuda": {
+                "arch": profile.arch,
+                **({"compiler": "nvcc"} if prepare_mode == "cpu" else {}),
+            }
         },
         "max_in_flight": max_in_flight,
         "request_timeout_s": request_timeout_s,

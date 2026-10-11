@@ -58,7 +58,7 @@ import tirx_kernels.tirx_lite as txl
 from tirx_kernels.ported.flashinfer.utils import topk_radix as R
 from tirx_kernels.ported.flashinfer.utils.filtered_topk_ops import st_global_bits
 from tirx_kernels.ported.flashinfer.utils.topk_harness import source_module, torch_dtype
-from tirx_kernels.runner import bench, hardware_num_sms, resolve_compile_config
+from tirx_kernels.runner import bench, hardware_num_sms, resolve_backend_config
 
 KERNEL_META = {
     "name": "fast_topk_clusters",
@@ -138,11 +138,11 @@ def clusters_for(batch_size: int, seq_len: int) -> int:
     return 1
 
 
-def _tirx_clusters_for(batch_size: int, seq_len: int, *, compile_config=None) -> int:
+def _tirx_clusters_for(batch_size: int, seq_len: int, *, backend_config=None) -> int:
     """Use row-level parallelism when it already supplies three Thor waves."""
     source_clusters = clusters_for(batch_size, seq_len)
     if (
-        resolve_compile_config(compile_config).arch == "sm_110a"
+        resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a"
         and source_clusters > 1
         and batch_size >= 3 * hardware_num_sms()
     ):
@@ -231,7 +231,7 @@ def get_kernel(
     pattern: str = "unique",
     idx_dtype: str = "int32",
     *,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ):
     """One PrimFunc per reachable specialization of `fast_topk_cuda_v4`.
@@ -243,7 +243,7 @@ def get_kernel(
     is32 = dtype == "float32"
     rounds = 4 if is32 else 2  # NRemainingRounds + 1 (:90)
     lshift_start = 8 * (4 if is32 else 2) - 8  # (:91)
-    nc = _tirx_clusters_for(batch, seq_len, compile_config=compile_config)
+    nc = _tirx_clusters_for(batch, seq_len, backend_config=backend_config)
     num_cached = num_cached_for_device(k)
     ovf_stride = seq_len // nc  # binding:47, from the row stride
     plain = mode == "plain"
@@ -878,7 +878,7 @@ def get_kernel(
                 launch=txl.cuda.LaunchConfig(
                     grid=grid, block=BLOCK_THREADS, cluster=nc if nc > 1 else None
                 ),
-                compile_config=resolve_compile_config(compile_config),
+                backend_config=resolve_backend_config(backend_config),
             )
 
             _emit(logits, indices, values, None, None, overflow)
@@ -897,7 +897,7 @@ def get_kernel(
                 launch=txl.cuda.LaunchConfig(
                     grid=grid, block=BLOCK_THREADS, cluster=nc if nc > 1 else None
                 ),
-                compile_config=resolve_compile_config(compile_config),
+                backend_config=resolve_backend_config(backend_config),
             )
 
             _emit(logits, indices, None, seq_lens, aux, overflow)
@@ -1178,7 +1178,7 @@ def compare_outputs(data: dict[str, Any], mine: dict[str, Any], theirs: dict[str
             )
 
 
-def run_test(*, compile_config=None, **config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     import unittest
 
     try:
@@ -1195,7 +1195,7 @@ def run_test(*, compile_config=None, **config: Any) -> None:
 
     mine = alloc_outputs(data)
     ex = compile_kernel(
-        get_kernel(**cfg, compile_config=compile_config), compile_config=compile_config
+        get_kernel(**cfg, backend_config=backend_config), backend_config=backend_config
     )
     ex(*build_tirx_args(data, mine))
     torch.cuda.synchronize()
@@ -1207,7 +1207,7 @@ def run_test(*, compile_config=None, **config: Any) -> None:
     compare_outputs(data, mine, theirs)
 
 
-def prepare_bench(*, compile_config=None, **kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU.
 
     The reference is NOT built here. `source_module()` JITs the FlashInfer module,
@@ -1224,10 +1224,10 @@ def prepare_bench(*, compile_config=None, **kwargs: Any):
         {
             "config": cfg,
             "executable": compile_kernel(
-                get_kernel(**cfg, compile_config=compile_config), compile_config=compile_config
+                get_kernel(**cfg, backend_config=backend_config), backend_config=backend_config
             ),
         },
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
 
 
@@ -1239,7 +1239,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Kernel-only comparison against the source launch.
@@ -1345,8 +1345,8 @@ def run_gpu(
     )
 
 
-def run_bench(*, compile_config=None, **config: Any):
-    prepared = prepare_bench(**config, compile_config=compile_config)
+def run_bench(*, backend_config=None, **config: Any):
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu()
 
 

@@ -16,13 +16,12 @@ annotations directly.
 
 import ctypes
 import math
-from functools import cache
 
 import torch
 
 import tirx_kernels.tirx_lite as txl
 import tvm
-from tirx_kernels.runner import resolve_compile_config
+from tirx_kernels.runner import cache_backend_config, resolve_backend_config
 from tvm.backend.cuda.cpp.descriptors import encode_smem_descriptor_base_uint64
 
 HEAD_DIM = 128
@@ -121,7 +120,7 @@ def build_tensor_maps(Q, Kt, V, dO, dK, dV, dQ_acc, B, H, S, D):
 # ---------------------------------------------------------------------------
 
 
-def build_preprocess(B, S, H, D, *, compile_config=None):
+def build_preprocess(B, S, H, D, *, backend_config=None):
     """dPsum/LSE-log2 and the dQ accumulation clear, in one pass.
 
     Sixteen lanes own one row, reduce with width-16 shuffles, and clear the
@@ -133,7 +132,7 @@ def build_preprocess(B, S, H, D, *, compile_config=None):
     rows_per_wave = PRE_BLOCK // PRE_THREADS_PER_ROW
     row_iters = PRE_ROWS_PER_BLOCK // rows_per_wave
     nblk = S // PRE_ROWS_PER_BLOCK
-    thor = resolve_compile_config(compile_config).arch == "sm_110a"
+    thor = resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a"
 
     @txl.kernel()
     def preprocess_kernel(
@@ -146,7 +145,7 @@ def build_preprocess(B, S, H, D, *, compile_config=None):
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(nblk, H, B), block=PRE_BLOCK // 32 * 32),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         bx, by, bz = txl.cta_id()
@@ -248,7 +247,7 @@ def build_preprocess(B, S, H, D, *, compile_config=None):
 # ---------------------------------------------------------------------------
 
 
-def _build_cast_f32_to_f16_default(B, S, H, D, scale, *, compile_config=None):
+def _build_cast_f32_to_f16_default(B, S, H, D, scale, *, backend_config=None):
     """Build the original cast path used by the existing SM100 family."""
     groups_per_block = CAST_BLOCK * CAST_GROUPS_PER_THREAD
     num_groups = B * S * H * (D // CAST_GROUP_WIDTH)
@@ -258,7 +257,7 @@ def _build_cast_f32_to_f16_default(B, S, H, D, scale, *, compile_config=None):
     def cast_kernel(src: txl.gptr[txl.f32], dst: txl.gptr[txl.f16]):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=nblk, block=CAST_BLOCK // 32 * 32),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         bx = txl.cta_id()
@@ -300,7 +299,7 @@ def _build_cast_f32_to_f16_default(B, S, H, D, scale, *, compile_config=None):
     return cast_kernel
 
 
-def _build_cast_f32_to_f16_thor(B, S, H, D, scale, *, compile_config=None):
+def _build_cast_f32_to_f16_thor(B, S, H, D, scale, *, backend_config=None):
     """Scale and transpose the head-major accumulator to sequence-major f16."""
     if S % 128:
         raise ValueError("the SM100 backward cast requires seq_len divisible by 128")
@@ -313,7 +312,7 @@ def _build_cast_f32_to_f16_thor(B, S, H, D, scale, *, compile_config=None):
     def cast_kernel(src: txl.gptr[txl.f32], dst: txl.gptr[txl.f16]):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(S // tile_rows, H, B), block=4 * 32),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         bx, by, bz = txl.cta_id()
@@ -372,11 +371,11 @@ def _build_cast_f32_to_f16_thor(B, S, H, D, scale, *, compile_config=None):
     return cast_kernel
 
 
-def build_cast_f32_to_f16(B, S, H, D, scale, *, compile_config=None):
+def build_cast_f32_to_f16(B, S, H, D, scale, *, backend_config=None):
     """Scale and transpose dQ, selecting Thor's coalesced staging schedule."""
-    if resolve_compile_config(compile_config).arch == "sm_110a":
-        return _build_cast_f32_to_f16_thor(B, S, H, D, scale, compile_config=compile_config)
-    return _build_cast_f32_to_f16_default(B, S, H, D, scale, compile_config=compile_config)
+    if resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a":
+        return _build_cast_f32_to_f16_thor(B, S, H, D, scale, backend_config=backend_config)
+    return _build_cast_f32_to_f16_default(B, S, H, D, scale, backend_config=backend_config)
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +392,7 @@ def build_kernel(
     causal=False,
     attention_scale=None,
     sm_count=148,
-    compile_config=None,
+    backend_config=None,
 ):
     if HEAD_DIM != 128:
         raise ValueError("the SM100 2-CTA backward kernel currently requires head_dim=128")
@@ -507,7 +506,7 @@ def build_kernel(
         dv_map: txl.TensorMap,
         dq_map: txl.TensorMap,
     ):
-        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=(XN, NUM_HEADS), block=16 * 32, cluster=(CLUSTER_SIZE,), preferred_cluster=[CLUSTER_SIZE]), kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1), compile_config=resolve_compile_config(compile_config))
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=(XN, NUM_HEADS), block=16 * 32, cluster=(CLUSTER_SIZE,), preferred_cluster=[CLUSTER_SIZE]), kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1), backend_config=resolve_backend_config(backend_config))
 
         cluster_rank_ = txl.cuda.cluster_cta_id('x')
         bx, by = txl.cta_id()
@@ -1418,26 +1417,37 @@ def build_kernel(
     return kernel
 
 
-@cache
+@cache_backend_config
 def _compile_pipeline(
-    B: int, H: int, S: int, D: int, causal: bool, attention_scale: float, *, compile_config=None
+    B: int, H: int, S: int, D: int, causal: bool, attention_scale: float, *, backend_config=None
 ):
-    preprocess = build_preprocess(B, S, H, D, compile_config=compile_config).compile(
-        compile_config=compile_config
+    preprocess = build_preprocess(B, S, H, D, backend_config=backend_config).compile(
+        backend_config=backend_config
     )
-    core_config = compile_config
-    if resolve_compile_config(compile_config).arch == "sm_110a" and S >= 8192:
-        core_config = resolve_compile_config(compile_config, ptxas_reg_usage_level=5)
+    core_config = backend_config
+    if resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a" and S >= 8192:
+        core_config = resolve_backend_config(
+            backend_config,
+            defaults={
+                "cuda": {
+                    "ptxas": [
+                        "-v",
+                        "--warn-on-local-memory-usage",
+                        "--register-usage-level=" + str(5),
+                    ]
+                }
+            },
+        )
     core = build_kernel(
-        B, H, S, D, causal=causal, attention_scale=attention_scale, compile_config=core_config
-    ).compile(compile_config=core_config)
+        B, H, S, D, causal=causal, attention_scale=attention_scale, backend_config=core_config
+    ).compile(backend_config=core_config)
     cast = build_cast_f32_to_f16(
-        B, S, H, D, attention_scale, compile_config=compile_config
-    ).compile(compile_config=compile_config)
+        B, S, H, D, attention_scale, backend_config=backend_config
+    ).compile(backend_config=backend_config)
     return preprocess, core, cast
 
 
-def setup(data, B, H, S, D, *, executables=None, compile_config=None):
+def setup(data, B, H, S, D, *, executables=None, backend_config=None):
     """Prepare GPU resources and return one full backward-pipeline launch."""
     Q = data["Q"]
     K_t = data["K"]
@@ -1457,7 +1467,7 @@ def setup(data, B, H, S, D, *, executables=None, compile_config=None):
 
     if executables is None:
         executables = _compile_pipeline(
-            B, H, S, D, causal, attention_scale, compile_config=compile_config
+            B, H, S, D, causal, attention_scale, backend_config=backend_config
         )
     preprocess_ex, kernel_ex, cast_ex = executables
 
@@ -1551,7 +1561,7 @@ def get_kernel(
     head_dim: int = 128,
     is_causal: bool = False,
     *,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Return the raw backward core PrimFunc for the registry configuration."""
@@ -1562,7 +1572,7 @@ def get_kernel(
         head_dim,
         causal=is_causal,
         attention_scale=1.0 / math.sqrt(head_dim),
-        compile_config=compile_config,
+        backend_config=backend_config,
     ).func
 
 
@@ -1619,12 +1629,12 @@ def run_test(
     head_dim: int = 128,
     is_causal: bool = False,
     *,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Compile the three-kernel pipeline and compare it with current FA4."""
     data, expected = _prepare_official_workload(batch_size, seq_len, num_heads, head_dim, is_causal)
-    setup(data, batch_size, num_heads, seq_len, head_dim, compile_config=compile_config)
+    setup(data, batch_size, num_heads, seq_len, head_dim, backend_config=backend_config)
     torch.cuda.synchronize()
     for name, actual, reference in zip(
         ("dQ", "dK", "dV"), (data["dQ"], data["dK"], data["dV"]), expected, strict=True
@@ -1643,7 +1653,7 @@ def prepare_bench(
     head_dim: int = 128,
     is_causal: bool = False,
     *,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Compile the preprocess/core/cast pipeline before CUDA setup."""
@@ -1666,13 +1676,13 @@ def prepare_bench(
             head_dim,
             is_causal,
             scale,
-            compile_config=compile_config,
+            backend_config=backend_config,
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, compile_config=None, **kwargs):
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, backend_config=None, **kwargs):
     """Benchmark the full preprocess/core/cast pipeline against current FA4."""
     from flash_attn.cute.interface import _flash_attn_bwd
 
@@ -1694,7 +1704,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, compile_config=No
         seq_len,
         head_dim,
         executables=prepared["executables"],
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
 
     def official_factory():
@@ -1732,7 +1742,7 @@ def run_bench(
     repeat=None,
     timer=None,
     *,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     rounds = kwargs.pop("rounds", None)
@@ -1749,5 +1759,5 @@ def run_bench(
         head_dim=head_dim,
         is_causal=is_causal,
         **kwargs,
-        compile_config=compile_config,
+        backend_config=backend_config,
     ).run_gpu(**protocol)

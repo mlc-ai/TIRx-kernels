@@ -12,7 +12,7 @@ driven by the ``chunk_gdn_sm100`` THD/varlen host entry).
 """
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import resolve_compile_config
+from tirx_kernels.runner import resolve_backend_config
 
 KERNEL_META = {
     "name": "cudnn_sm100_gdn_prefill_f16",
@@ -903,7 +903,7 @@ def _make_prologue(
     n_heads_out,
     checkpoints,
     cu_dtype,
-    compile_config=None,
+    backend_config=None,
 ):
     cu_t = txl.i64 if cu_dtype == "int64" else txl.i32
 
@@ -935,7 +935,7 @@ def _make_prologue(
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=1, block=32 * 32),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         thread = txl.thread_id()
@@ -1154,7 +1154,7 @@ def _make_main(
     v_ratio,
     n_heads_out,
     full_tiles,
-    compile_config=None,
+    backend_config=None,
 ):
     io_t = txl.f16 if io_dtype == "float16" else txl.bf16
     state_t = txl.bf16 if state_dtype == "bfloat16" else txl.f32
@@ -1196,7 +1196,7 @@ def _make_main(
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_sms, block=12 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         arena = txl.alloc_tensor((_ARENA_BYTES,), txl.u8, scope="shared.dyn", align=1024)
@@ -2969,7 +2969,7 @@ def _work_rows(seq_lens, heads, *, split):
     return rows
 
 
-def get_kernel(*, compile_config=None, **config):
+def get_kernel(*, backend_config=None, **config):
     """Return the source-ordered prologue and persistent main kernels."""
     config = _normalized_config(config)
     rows = _work_rows(config["seq_lens"], config["heads"], split=config["split"])
@@ -2981,7 +2981,7 @@ def get_kernel(*, compile_config=None, **config):
         n_heads_out=int(config["heads"]),
         checkpoints=int(config["checkpoint_every_n_tokens"]) > 0,
         cu_dtype=config["cu_dtype"],
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     main = _make_main(
         num_sms=num_ctas,
@@ -3000,7 +3000,7 @@ def get_kernel(*, compile_config=None, **config):
         v_ratio=int(config["heads"]) // int(config["v_heads"]),
         n_heads_out=int(config["heads"]),
         full_tiles=all(length % _BT == 0 for length in config["seq_lens"]),
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     return [prologue.func, main.func]
 
@@ -3406,25 +3406,36 @@ def _validate_outputs(data, *, sources):
         )
 
 
-def _compile_tirx(config, *, compile_config=None):
-    from tirx_kernels.runner import compile_kernel, resolve_compile_config
+def _compile_tirx(config, *, backend_config=None):
+    from tirx_kernels.runner import compile_kernel, resolve_backend_config
 
     pass
-    if resolve_compile_config(compile_config).arch == "sm_110a":
-        compile_config = resolve_compile_config(compile_config, ptxas_reg_usage_level=6)
+    if resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a":
+        backend_config = resolve_backend_config(
+            backend_config,
+            defaults={
+                "cuda": {
+                    "ptxas": [
+                        "-v",
+                        "--warn-on-local-memory-usage",
+                        "--register-usage-level=" + str(6),
+                    ]
+                }
+            },
+        )
     return [
-        compile_kernel(func, compile_config=compile_config)
-        for func in get_kernel(**config, compile_config=compile_config)
+        compile_kernel(func, backend_config=backend_config)
+        for func in get_kernel(**config, backend_config=backend_config)
     ]
 
 
-def run_test(*, compile_config=None, **config):
+def run_test(*, backend_config=None, **config):
     """Compare TIRx with the upstream kernel on identical inputs."""
     import torch
 
     config = _normalized_config(config)
     data = _prepare_data(config)
-    executables = _compile_tirx(config, compile_config=compile_config)
+    executables = _compile_tirx(config, backend_config=backend_config)
     tirx_launch = _tirx_launch(executables, data)
     source_launch = _source_launch(data)
     tirx_launch()
@@ -3434,13 +3445,13 @@ def run_test(*, compile_config=None, **config):
     return {"tokens": sum(config["seq_lens"]), "heads": config["heads"]}
 
 
-def prepare_bench(*, compile_config=None, **config):
+def prepare_bench(*, backend_config=None, **config):
     """Compile both TIRx launches without importing torch or touching CUDA."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _normalized_config(config)
-    state = {"config": config, "executables": _compile_tirx(config, compile_config=compile_config)}
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    state = {"config": config, "executables": _compile_tirx(config, backend_config=backend_config)}
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -3451,7 +3462,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=0.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Validate once, then expose the exact two-launch paths to bench_suite."""
@@ -3483,9 +3494,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, backend_config=None, **config
 ):
-    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

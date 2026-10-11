@@ -50,8 +50,8 @@ def _max(a, b):
     return out[0]
 ```
 
-Both CUDA compiler paths accept explicit `CompileConfig(fast_math=False)`
-or the narrower `CompileConfig(ftz=False)` at the build or device entry.
+Both CUDA compiler paths accept explicit `BackendConfig(fast_math=False)`
+or the narrower `BackendConfig(ftz=False)` at the build or device entry.
 Use per-op pinning when the contract belongs to an individual instruction:
 it holds regardless of compile defaults and documents intent at the use site.
 

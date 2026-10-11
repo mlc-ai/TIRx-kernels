@@ -210,16 +210,16 @@ def _store_state_row(
     STATE_VALUES_PER_THREAD,
     HAS_INTERMEDIATE_STATES,
     PHILOX_ROUNDS,
-    compile_config=None,
+    backend_config=None,
 ):
     if PHILOX_ROUNDS > 0:
         pair0 = txl.local_scalar("uint32")
         pair1 = txl.local_scalar("uint32")
         _cvt_rs_f16x2_f32(
-            pair0, values[wr, 1], values[wr, 0], random_words[0], compile_config=compile_config
+            pair0, values[wr, 1], values[wr, 0], random_words[0], backend_config=backend_config
         )
         _cvt_rs_f16x2_f32(
-            pair1, values[wr, 3], values[wr, 2], random_words[1], compile_config=compile_config
+            pair1, values[wr, 3], values[wr, 2], random_words[1], backend_config=backend_config
         )
         if HAS_INTERMEDIATE_STATES:
             txl.ptx.st.global_.v2.b32(intermediate_states.ptr_to([intermediate_base]), pair0, pair1)
@@ -375,7 +375,7 @@ def _specialization(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_kernel(*, compile_config=None, **kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     spec = _specialization(kwargs)
     NHEADS = spec["NHEADS"]
     DIM = spec["DIM"]
@@ -450,7 +450,7 @@ def get_kernel(*, compile_config=None, **kwargs: Any):
                 grid=(spec["BATCH"], spec["NUM_HEAD_CHUNKS"]), block=16 * 32
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         batch_i, head_chunk = txl.cta_id()
@@ -780,7 +780,7 @@ def get_kernel(*, compile_config=None, **kwargs: Any):
                                             STATE_VALUES_PER_THREAD=STATE_VALUES_PER_THREAD,
                                             HAS_INTERMEDIATE_STATES=True,
                                             PHILOX_ROUNDS=PHILOX_ROUNDS,
-                                            compile_config=compile_config,
+                                            backend_config=backend_config,
                                         )
                                 with txl.Else():
                                     with txl.unroll(4) as wr:
@@ -809,7 +809,7 @@ def get_kernel(*, compile_config=None, **kwargs: Any):
                                             STATE_VALUES_PER_THREAD=STATE_VALUES_PER_THREAD,
                                             HAS_INTERMEDIATE_STATES=True,
                                             PHILOX_ROUNDS=PHILOX_ROUNDS,
-                                            compile_config=compile_config,
+                                            backend_config=backend_config,
                                         )
                         else:
                             with txl.If(write_final != 0), txl.Then():
@@ -838,7 +838,7 @@ def get_kernel(*, compile_config=None, **kwargs: Any):
                                         STATE_VALUES_PER_THREAD=STATE_VALUES_PER_THREAD,
                                         HAS_INTERMEDIATE_STATES=False,
                                         PHILOX_ROUNDS=PHILOX_ROUNDS,
-                                        compile_config=compile_config,
+                                        backend_config=backend_config,
                                     )
                     txl.assign(step, step + 1)
                 txl.assign(pass_idx, pass_idx + 1)
@@ -1237,20 +1237,20 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
     return result
 
 
-def prepare_bench(*, compile_config=None, **kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     state = {
         "config": dict(kwargs),
         "executable": compile_kernel(
-            get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(*, compile_config=None, **kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     expected_rejection = kwargs.pop("expected_rejection", None)
     if expected_rejection is not None:
         try:
@@ -1267,7 +1267,7 @@ def run_test(*, compile_config=None, **kwargs: Any) -> None:
 
     case = prepare_data(**kwargs)
     executable = compile_kernel(
-        get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+        get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
     )
     executable(*_tirx_args(case))
     torch.cuda.synchronize()
@@ -1284,7 +1284,7 @@ def run_gpu(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1328,10 +1328,10 @@ def run_bench(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    return prepare_bench(**kwargs, compile_config=compile_config).run_gpu(
+    return prepare_bench(**kwargs, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

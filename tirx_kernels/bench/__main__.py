@@ -97,9 +97,9 @@ def main():
         default=None,
         help=("Seconds before every implementation in every round (default: runner protocol)"),
     )
-    from tvm.backend.cuda.compile_config import add_compile_config_argument
+    from tvm.backend.config import add_backend_config_argument
 
-    add_compile_config_argument(parser)
+    add_backend_config_argument(parser)
     args = parser.parse_args()
 
     if args.json or args.json_file:
@@ -159,7 +159,7 @@ def main():
                     name,
                     cfg,
                     registry=all_kernels,
-                    compile_config=args.compile_config,
+                    backend_config=args.backend_config,
                     warmup=args.warmup,
                     repeat=args.repeat,
                     timer=args.timer,

@@ -228,10 +228,10 @@ def test_before_uses_current_config_after_package_move_with_own_run_gpu(
     old_module.__package__ = "tirx_kernels"
     old_module.KERNEL_META = {"name": "fake"}
 
-    def old_run_gpu(state, *, compile_config=None, **kwargs):
+    def old_run_gpu(state, *, backend_config=None, **kwargs):
         return {"callback": "old", "state": state, "kwargs": kwargs}
 
-    def old_prepare_bench(*, compile_config=None, **config):
+    def old_prepare_bench(*, backend_config=None, **config):
         return prepared_gpu_benchmark(
             old_run_gpu,
             {"compiled_by": "old", "config": config},

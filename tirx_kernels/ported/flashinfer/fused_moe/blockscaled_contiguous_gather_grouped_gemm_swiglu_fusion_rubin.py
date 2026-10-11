@@ -35,6 +35,7 @@ from functools import cache
 
 import tirx_kernels.tirx_lite as txl
 from tirx_kernels.ported.flashinfer.utils.source_checkout import flashinfer_source_root
+from tirx_kernels.runner import cache_backend_config
 
 KERNEL_META = {
     "name": "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin",
@@ -237,8 +238,8 @@ def _validate_config(config):
             raise ValueError(f"production Rubin specialization requires {key}={expected!r}")
 
 
-@cache
-def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, compile_config=None):
+@cache_backend_config
+def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, backend_config=None):
     counts, permuted_m, permuted_tiles = _problem(num_experts, seq_len, N, K_dim, routing)
     del counts
     n_tiles = N // _TILE_N
@@ -379,7 +380,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, c
                 block=20 * 32, grid=(1, 1, num_clusters), cluster=[1, 1], preferred_cluster=[1, 1]
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         del b, sfb, c
@@ -1203,7 +1204,7 @@ def _config_dict(**config):
     return answer
 
 
-def get_kernel(*, compile_config=None, **raw_config):
+def get_kernel(*, backend_config=None, **raw_config):
     """Return the fixed production Rubin specialization for one concrete shape."""
     from tirx_kernels.runner import hardware_num_sms
 
@@ -1216,7 +1217,7 @@ def get_kernel(*, compile_config=None, **raw_config):
         config["routing"],
         hardware_num_sms(216),
         config["use_pdl"],
-        compile_config=compile_config,
+        backend_config=backend_config,
     ).func
 
 
@@ -1315,8 +1316,8 @@ def prepare_data(**raw_config):
     }
 
 
-@cache
-def _compile_executable(num_experts, seq_len, N, K_dim, routing, use_pdl, *, compile_config=None):
+@cache_backend_config
+def _compile_executable(num_experts, seq_len, N, K_dim, routing, use_pdl, *, backend_config=None):
     from tirx_kernels.runner import compile_kernel
 
     return compile_kernel(
@@ -1327,9 +1328,9 @@ def _compile_executable(num_experts, seq_len, N, K_dim, routing, use_pdl, *, com
             K=K_dim,
             routing=routing,
             use_pdl=use_pdl,
-            compile_config=compile_config,
+            backend_config=backend_config,
         ),
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
 
 
@@ -1412,7 +1413,7 @@ def _check_outputs(data, with_source):
     return {"bitwise": True, "differing_bytes": 0}
 
 
-def _executable_for(config, *, compile_config=None):
+def _executable_for(config, *, backend_config=None):
     return _compile_executable(
         config["num_experts"],
         config["seq_len"],
@@ -1420,16 +1421,16 @@ def _executable_for(config, *, compile_config=None):
         config["K"],
         config["routing"],
         config["use_pdl"],
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
 
 
-def run_test(*, compile_config=None, **raw_config):
+def run_test(*, backend_config=None, **raw_config):
     import torch
 
     config = _config_dict(**raw_config)
     data = prepare_data(**config)
-    tirx = _tirx_launch(_executable_for(config, compile_config=compile_config), data)
+    tirx = _tirx_launch(_executable_for(config, backend_config=backend_config), data)
     source = _source_launch(data)
     tirx()
     source()
@@ -1448,14 +1449,14 @@ def run_test(*, compile_config=None, **raw_config):
     return result
 
 
-def prepare_bench(*, compile_config=None, **raw_config):
+def prepare_bench(*, backend_config=None, **raw_config):
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _config_dict(**raw_config)
     return prepared_gpu_benchmark(
         run_gpu,
-        {"config": config, "executable": _executable_for(config, compile_config=compile_config)},
-        compile_config=compile_config,
+        {"config": config, "executable": _executable_for(config, backend_config=backend_config)},
+        backend_config=backend_config,
     )
 
 
@@ -1467,7 +1468,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **_,
 ):
     import torch
@@ -1499,9 +1500,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, backend_config=None, **config
 ):
-    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

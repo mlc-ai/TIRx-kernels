@@ -180,7 +180,7 @@ def _validate_config(tokens, k_dim, num_heads):
         )
 
 
-def _make_kernel(tokens, k_dim, num_heads, *, compile_config=None):
+def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
     _validate_config(tokens, k_dim, num_heads)
     total_work = (tokens // _TILE_M) * num_heads
     num_clusters = min(total_work, _MAX_ACTIVE_CLUSTERS)
@@ -260,7 +260,7 @@ def _make_kernel(tokens, k_dim, num_heads, *, compile_config=None):
         )
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(block=14 * 32, grid=(1, 1, num_clusters)),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         del x_code, w_code
@@ -798,8 +798,8 @@ def _make_kernel(tokens, k_dim, num_heads, *, compile_config=None):
     return txl.kernel()(kernel)
 
 
-def get_kernel(tokens, k_dim, num_heads, *, compile_config=None):
-    return _make_kernel(tokens, k_dim, num_heads, compile_config=compile_config).func
+def get_kernel(tokens, k_dim, num_heads, *, backend_config=None):
+    return _make_kernel(tokens, k_dim, num_heads, backend_config=backend_config).func
 
 
 def _quantize_mxfp8(torch, values):
@@ -979,7 +979,7 @@ def _validate_outputs(data):
     return {"row_match": row_match, "col_match": col_match}
 
 
-def run_test(*, compile_config=None, **config):
+def run_test(*, backend_config=None, **config):
     """Compile, run, and compare one specialization with the pinned source."""
     import torch
 
@@ -989,8 +989,8 @@ def run_test(*, compile_config=None, **config):
     data = prepare_data(**kernel_config)
     tirx_launch = _tirx_launch(
         compile_kernel(
-            get_kernel(**kernel_config, compile_config=compile_config),
-            compile_config=compile_config,
+            get_kernel(**kernel_config, backend_config=backend_config),
+            backend_config=backend_config,
         ),
         data,
     )
@@ -1001,18 +1001,18 @@ def run_test(*, compile_config=None, **config):
     return _validate_outputs(data)
 
 
-def prepare_bench(*, compile_config=None, **config):
+def prepare_bench(*, backend_config=None, **config):
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     kernel_config = _without_label(config)
     state = {
         "config": kernel_config,
         "executable": compile_kernel(
-            get_kernel(**kernel_config, compile_config=compile_config),
-            compile_config=compile_config,
+            get_kernel(**kernel_config, backend_config=backend_config),
+            backend_config=backend_config,
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -1023,7 +1023,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=0.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Validate once, then time closures containing exactly one kernel launch."""
@@ -1076,9 +1076,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, backend_config=None, **config
 ):
-    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

@@ -301,7 +301,7 @@ def run_tirx_mega_moe(
     case: MegaMoeCase,
     cumulative_local_expert_recv_stats: torch.Tensor | None = None,
     *,
-    compile_config=None,
+    backend_config=None,
 ) -> torch.Tensor:
     _copy_inputs_into_symm_buffer(case)
     y = torch.empty(
@@ -317,7 +317,7 @@ def run_tirx_mega_moe(
         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
         activation_clamp=case.config.activation_clamp,
         fast_math=bool(case.config.fast_math),
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     return y
 
@@ -438,7 +438,7 @@ def _run_worker(
     cfg_dict: dict[str, Any],
     mode: str,
     *,
-    compile_config=None,
+    backend_config=None,
 ) -> dict[str, Any]:
     worker_kwargs = dict(cfg_dict)
     warmup = worker_kwargs.pop("warmup", None)
@@ -502,7 +502,7 @@ def _run_worker(
             try:
                 if torch.distributed.is_initialized():
                     torch.distributed.barrier()
-                y_tir = run_tirx_mega_moe(case, tirx_stats, compile_config=compile_config)
+                y_tir = run_tirx_mega_moe(case, tirx_stats, backend_config=backend_config)
                 if torch.distributed.is_initialized():
                     torch.distributed.barrier()
             except NotImplementedError as exc:
@@ -569,7 +569,7 @@ def _run_worker(
                 y_deepgemm = torch.empty(
                     (config.num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda"
                 )
-            tirx_invocation = _prepare_tirx_invocation(tirx_case, compile_config=compile_config)
+            tirx_invocation = _prepare_tirx_invocation(tirx_case, backend_config=backend_config)
 
             def deepgemm_step() -> None:
                 assert dg_case is not None and y_deepgemm is not None
@@ -701,7 +701,7 @@ def _worker_entry(
     mode: str,
     result_queue: mp.SimpleQueue | None,
     *,
-    compile_config=None,
+    backend_config=None,
 ) -> None:
     result = _run_worker(
         local_rank,
@@ -709,7 +709,7 @@ def _worker_entry(
         str(device_uuids[local_rank]),
         cfg_dict,
         mode,
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     if result_queue is not None:
         result_queue.put((local_rank, result))
@@ -790,7 +790,7 @@ def _run_distributed(
     *,
     device_indices: tuple[int, ...] | None = None,
     device_uuids: tuple[str, ...] | None = None,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ) -> dict[str, Any]:
     cfg_dict = {**asdict(config), **kwargs}
@@ -822,7 +822,7 @@ def _run_distributed(
                         str(device_uuids[0]),
                         cfg_dict,
                         mode,
-                        compile_config=compile_config,
+                        backend_config=backend_config,
                     )
             except Exception as exc:
                 message = str(exc)

@@ -142,27 +142,35 @@ selected = txl.Select(choose_a, a_desc + a_off(kp), b_desc + b_off(kp))
 
 ## CUDA compiler settings
 
-Pass the same immutable `CompileConfig` to the factory and compile entry:
+Pass the same nested `backend_config` mapping to the factory and compile entry.
+`txl.cuda.BackendConfig` is a `TypedDict` helper returning an ordinary dictionary:
 
 ```python
-config = txl.cuda.CompileConfig(arch="sm_100a", compiler="nvrtc", ftz=False)
-kernel = make_kernel(..., compile_config=config)
-executable = kernel.compile(compile_config=config)
+config = {"cuda": txl.cuda.BackendConfig(
+    arch="sm_100a", compiler="nvrtc",
+    nvrtc=["--use_fast_math", "--ftz=false"],
+)}
+kernel = make_kernel(..., backend_config=config)
+executable = kernel.compile(backend_config=config)
 ```
 
-A factory that chooses Python code by architecture resolves the configuration
-before tracing and records it on `txl.device_entry(..., compile_config=config)`.
-Factories that do not inspect architecture can leave it unspecified until compile.
-Entry fields override compile defaults; `False`, `0`, and empty option sequences
-are explicit overrides. The decorator no longer owns an architecture.
+A factory that chooses Python code by architecture resolves its architecture
+before tracing and records it on `txl.device_entry(..., backend_config=config)`.
+Factories can use `runner.resolve_backend_config` to pin that architecture while
+leaving unspecified compiler defaults inheritable. Entry keys override compile
+settings, which override Target/tag settings and backend defaults. Each toolchain
+argument list replaces the inherited list, and `[]` clears it.
 
 Registered `get_kernel`, `run_test`, and `prepare_bench` functions receive
-`compile_config` as a keyword argument. `prepare_kernel_bench` requires an
+`backend_config` as a keyword argument. `prepare_kernel_bench` requires an
 explicit architecture for CPU preparation and defaults to NVCC. The prepared
-benchmark carries that configuration into its GPU stage. Kernel caches include
-configuration in their keys. Compiler settings do not belong in `prepare_data`
-unless it actually chooses architecture-dependent data or descriptors.
+benchmark carries that configuration into its GPU stage. Decorate cached
+factories with `runner.cache_backend_config`; it keys the cache on stable JSON
+snapshots, including the resolved architecture and target defaults. Compiler
+settings do not belong in `prepare_data` unless it chooses architecture-dependent
+data or descriptors.
 
 The test, benchmark, and remote benchmark CLIs accept, for example,
-`--compile-config '{"compiler":"nvcc","ftz":false}'`. Remote requests serialize
-these fields; their architecture must agree with the assigned server.
+`--backend-config '{"cuda":{"compiler":"nvcc","nvcc":["--ftz=false"]}}'`.
+Remote requests serialize the same nested mapping; their architecture must agree
+with the assigned server. Configuration boundaries copy mutable input lists.

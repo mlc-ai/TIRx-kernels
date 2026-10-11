@@ -360,14 +360,12 @@ def prepare(tar_bytes: bytes, before_tar_bytes: bytes | None, spec_json: str) ->
         config = _find_bench_config(ab_current_benchmark_module(module), spec["config"])
         meta["timings"]["config_resolve_s"] = time.time() - config_started
         prepare_started = time.time()
-        from tvm.backend.cuda import CompileConfig
-
         prepared = prepare_kernel_bench(
             spec["kernel"],
             config,
             module=module,
             require_cuda_uninitialized=spec.get("prepare_mode") == "cpu",
-            compile_config=CompileConfig(**spec["compile_config"]),
+            backend_config=spec["backend_config"],
         )
         meta["timings"]["prepare_s"] = time.time() - prepare_started
         if prepared.required_num_gpus != 1:

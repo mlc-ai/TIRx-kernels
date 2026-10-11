@@ -46,6 +46,7 @@ from pathlib import Path
 
 import tirx_kernels.tirx_lite as txl
 from tirx_kernels.ported.flashinfer.utils.source_checkout import flashinfer_source_root
+from tirx_kernels.runner import cache_backend_config
 
 KERNEL_META = {
     "name": "grouped_gemm_masked_rubin",
@@ -374,7 +375,7 @@ def _validate_problem(
         raise ValueError("cluster M must be divisible by the CTA group")
 
 
-@cache
+@cache_backend_config
 def _make_kernel(
     num_groups,
     max_m,
@@ -388,7 +389,7 @@ def _make_kernel(
     tactic,
     num_sms,
     *,
-    compile_config=None,
+    backend_config=None,
 ):
     _validate_problem(
         num_groups, max_m, N, K_dim, ab_dtype, sf_mode, out_dtype, alpha, signals, tactic
@@ -652,7 +653,7 @@ def _make_kernel(
                 preferred_cluster=[cluster_m, cluster_n],
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         del a, b, sfa, sfb, c
@@ -2138,7 +2139,7 @@ def get_kernel(
     signals=False,
     tactic=0,
     *,
-    compile_config=None,
+    backend_config=None,
 ):
     """Return one concrete masked-grouped SM107 specialization."""
     from tirx_kernels.runner import hardware_num_sms
@@ -2155,7 +2156,7 @@ def get_kernel(
         signals,
         tactic,
         hardware_num_sms(216),
-        compile_config=compile_config,
+        backend_config=backend_config,
     ).func
 
 
@@ -2347,7 +2348,7 @@ def prepare_data(
     }
 
 
-@cache
+@cache_backend_config
 def _compile_executable(
     num_groups,
     max_m,
@@ -2360,7 +2361,7 @@ def _compile_executable(
     signals,
     tactic,
     *,
-    compile_config=None,
+    backend_config=None,
 ):
     from tirx_kernels.runner import compile_kernel
 
@@ -2376,9 +2377,9 @@ def _compile_executable(
             alpha,
             signals,
             tactic,
-            compile_config=compile_config,
+            backend_config=backend_config,
         ),
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
 
 
@@ -2478,7 +2479,7 @@ def _config_dict(**config):
     }
 
 
-def run_test(*, compile_config=None, **raw_config):
+def run_test(*, backend_config=None, **raw_config):
     import torch
 
     config = _config_dict(**raw_config)
@@ -2499,7 +2500,7 @@ def run_test(*, compile_config=None, **raw_config):
                 "tactic",
             )
         ],
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     tirx = _tirx_launch(executable, data)
     source = _source_launch(data, config)
@@ -2520,7 +2521,7 @@ def run_test(*, compile_config=None, **raw_config):
     return result
 
 
-def prepare_bench(*, compile_config=None, **raw_config):
+def prepare_bench(*, backend_config=None, **raw_config):
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _config_dict(**raw_config)
@@ -2540,10 +2541,10 @@ def prepare_bench(*, compile_config=None, **raw_config):
                 "tactic",
             )
         ],
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     return prepared_gpu_benchmark(
-        run_gpu, {"config": config, "executable": executable}, compile_config=compile_config
+        run_gpu, {"config": config, "executable": executable}, backend_config=backend_config
     )
 
 
@@ -2555,7 +2556,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **_,
 ):
     import torch
@@ -2588,9 +2589,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, backend_config=None, **config
 ):
-    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

@@ -555,7 +555,7 @@ def _bwd_load_kv(
         txl.assign(tile_index, tile_index - txl.int32(1))
 
 
-def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, compile_config=None):
+def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, backend_config=None):
     """Trace the main backward kernel for one static specialization (``:740-1110``).
 
     One CTA per query token; the 64 attention heads form the MMA M dimension, so
@@ -598,7 +598,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, com
                 grid=[seqlen_q, (num_head + block - 1) // block, 1], block=BWD_WARPS * 32
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         token, head_block, _z = txl.cta_id()
@@ -1537,7 +1537,7 @@ def _butterfly_sum_f32(value, lane_xors):
     return value
 
 
-def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk, compile_config=None):
+def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk, backend_config=None):
     """Trace the delta / sink-folded-LSE preprocess kernel (``:648-707``).
 
     Writes, per ``(head, query)``, ``sum_OdO = -sum_d(O * dO)`` and
@@ -1571,7 +1571,7 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk, compile_config=N
                 block=SUM_ODO_THREADS_D * SUM_ODO_THREADS_Q // 32 * 32,
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         tid = txl.thread_id()
@@ -1674,7 +1674,7 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk, compile_config=N
     return sum_odo
 
 
-def make_convert_kernel(*, head_dim, dtype, max_topk, compile_config=None):
+def make_convert_kernel(*, head_dim, dtype, max_topk, backend_config=None):
     """Trace the FP32 dKV workspace to element-dtype conversion (``:609-646``).
 
     Inverts the two fragment scrambles ``reduce_dKV`` wrote with: the 128-wide
@@ -1698,7 +1698,7 @@ def make_convert_kernel(*, head_dim, dtype, max_topk, compile_config=None):
                 grid=[(seqlen_kv + block_seq - 1) // block_seq, 1, 1],
                 block=threads_d * threads_seq // 32 * 32,
             ),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         seq_block, _y, _z = txl.cta_id()
@@ -1742,7 +1742,7 @@ DSINK_BLOCK_Q = 256
 DSINK_THREADS = 32
 
 
-def make_sum_dsink_kernel(*, num_head, compile_config=None):
+def make_sum_dsink_kernel(*, num_head, backend_config=None):
     """Trace the attention-sink gradient reduction kernel (``:709-738``).
 
     ``d_sink[h] += sum_q exp2(sink*log2e + scaled_lse[h,q]) * sum_OdO[h,q]``,
@@ -1764,7 +1764,7 @@ def make_sum_dsink_kernel(*, num_head, compile_config=None):
                 block=DSINK_THREADS // 32 * 32,
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         q_block, head, _b = txl.cta_id()
@@ -1806,7 +1806,7 @@ def make_sum_dsink_kernel(*, num_head, compile_config=None):
     return sum_dsink
 
 
-def get_kernel(*, compile_config=None, **config):
+def get_kernel(*, backend_config=None, **config):
     """Return the four device functions in the upstream launch order."""
     head_dim = config["head_dim"]
     num_head = config["num_head"]
@@ -1819,7 +1819,7 @@ def get_kernel(*, compile_config=None, **config):
             num_head=num_head,
             dtype=dtype,
             max_topk=max_topk,
-            compile_config=compile_config,
+            backend_config=backend_config,
         ).func,
         make_bwd_kernel(
             head_dim=head_dim,
@@ -1827,10 +1827,10 @@ def get_kernel(*, compile_config=None, **config):
             dtype=dtype,
             max_topk=max_topk,
             has_topk_length=has_topk_length,
-            compile_config=compile_config,
+            backend_config=backend_config,
         ).func,
         make_convert_kernel(
-            head_dim=head_dim, dtype=dtype, max_topk=max_topk, compile_config=compile_config
+            head_dim=head_dim, dtype=dtype, max_topk=max_topk, backend_config=backend_config
         ).func,
-        make_sum_dsink_kernel(num_head=num_head, compile_config=compile_config).func,
+        make_sum_dsink_kernel(num_head=num_head, backend_config=backend_config).func,
     ]

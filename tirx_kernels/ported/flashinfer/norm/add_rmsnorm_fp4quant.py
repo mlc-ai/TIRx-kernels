@@ -43,7 +43,7 @@ from tirx_kernels.ported.flashinfer.norm.rmsnorm_fp4quant import (
     _widen_and_scale_16,
 )
 from tirx_kernels.ported.flashinfer.utils.fp_quant import absmax_8, hmax2
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import bench, cache_backend_config
 
 KERNEL_META = {
     "name": "flashinfer_add_rmsnorm_fp4quant",
@@ -789,7 +789,7 @@ def _validate(config: dict[str, Any]) -> None:
         raise ValueError("scale_format must be e4m3 or ue8m0")
 
 
-def get_kernel(*, compile_config=None, **config: Any):
+def get_kernel(*, backend_config=None, **config: Any):
     """Return one source-faithful Add/RMSNorm/FP4 specialization."""
     _validate(config)
     input_dtype = str(config["input_dtype"])
@@ -1224,7 +1224,7 @@ def get_kernel(*, compile_config=None, **config: Any):
                 programmatic_stream_serialization=enable_pdl,
             ),
             kernel_attrs=txl.cuda.KernelAttributes(required_block_size=True),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         kernel_body(
@@ -1419,7 +1419,7 @@ def _launch_tirx(executable, data, output, config: dict[str, Any]):
     )
 
 
-@functools.cache
+@cache_backend_config
 def _compiled_test_specialization(
     input_dtype: str,
     H: int,
@@ -1430,7 +1430,7 @@ def _compiled_test_specialization(
     enable_pdl: bool,
     output_norm: bool,
     *,
-    compile_config=None,
+    backend_config=None,
 ):
     from tirx_kernels.runner import compile_kernel
 
@@ -1452,9 +1452,9 @@ def _compiled_test_specialization(
             global_scale_mode="none",
             allocation="preallocated",
             data_mode="random",
-            compile_config=compile_config,
+            backend_config=backend_config,
         ),
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
 
 
@@ -1715,7 +1715,7 @@ def _check_public_allocation(reference, reference_data, config: dict[str, Any]) 
         raise AssertionError("public residual update differs from direct source kernel")
 
 
-def run_test(*, compile_config=None, **config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     """Compile, launch, and validate one source-domain specialization."""
     import torch
 
@@ -1736,7 +1736,7 @@ def run_test(*, compile_config=None, **config: Any) -> None:
         bool(config["output_both_sf_layouts"]),
         bool(config["enable_pdl"]),
         bool(config["output_norm"]),
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     if _launch_tirx(executable, tirx_data, tirx_output, config) is not None:
         raise AssertionError("TIRx AddRMSNormFP4Quant ABI must return None")
@@ -1756,17 +1756,17 @@ def run_test(*, compile_config=None, **config: Any) -> None:
     _check_public_allocation(source_output, source_data, config)
 
 
-def prepare_bench(*, compile_config=None, **config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Compile the specialization before the bench suite assigns a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     state = {
         "config": dict(config),
         "executable": compile_kernel(
-            get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+            get_kernel(**config, backend_config=backend_config), backend_config=backend_config
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -1777,7 +1777,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ):
     """Build and prevalidate independent TIRx and CuTeDSL launch closures."""
@@ -1829,11 +1829,11 @@ def run_bench(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **config: Any,
 ):
     """Benchmark one specialization against the CuTeDSL kernel reference."""
-    prepared = prepare_bench(**config, compile_config=compile_config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

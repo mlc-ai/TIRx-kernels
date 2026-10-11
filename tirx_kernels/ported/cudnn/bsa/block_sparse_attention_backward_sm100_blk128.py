@@ -35,16 +35,16 @@ def _without_label(config):
     return {key: value for key, value in config.items() if key != "label"}
 
 
-def get_kernel(*, compile_config=None, **config):
+def get_kernel(*, backend_config=None, **config):
     """Return sum_OdO, main backward, and convert in source launch order."""
-    return _kernel.get_kernel(**config, compile_config=compile_config)
+    return _kernel.get_kernel(**config, backend_config=backend_config)
 
 
 def prepare_data(**config):
     return _data.prepare_data(**config)
 
 
-def run_test(*, compile_config=None, **config):
+def run_test(*, backend_config=None, **config):
     """Validate TIRx against the analytic oracle and usable upstream specializations."""
     import torch
 
@@ -53,8 +53,8 @@ def run_test(*, compile_config=None, **config):
     kernel_config = _without_label(config)
     data = prepare_data(**kernel_config)
     executables = [
-        compile_kernel(func, compile_config=compile_config)
-        for func in get_kernel(**kernel_config, compile_config=compile_config)
+        compile_kernel(func, backend_config=backend_config)
+        for func in get_kernel(**kernel_config, backend_config=backend_config)
     ]
     tirx_launch = _data.tirx_launch(executables, data)
     tirx_launch()
@@ -64,18 +64,18 @@ def run_test(*, compile_config=None, **config):
     _data.validate_outputs(data, sources=("tirx", "source"))
 
 
-def prepare_bench(*, compile_config=None, **config):
+def prepare_bench(*, backend_config=None, **config):
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     kernel_config = _without_label(config)
     state = {
         "config": kernel_config,
         "executables": [
-            compile_kernel(func, compile_config=compile_config)
-            for func in get_kernel(**kernel_config, compile_config=compile_config)
+            compile_kernel(func, backend_config=backend_config)
+            for func in get_kernel(**kernel_config, backend_config=backend_config)
         ],
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -86,7 +86,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=0.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     import torch
@@ -120,9 +120,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, backend_config=None, **config
 ):
-    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

@@ -9,7 +9,7 @@ import torch
 
 import tirx_kernels.tirx_lite as txl
 import tvm
-from tirx_kernels.runner import bench, resolve_compile_config
+from tirx_kernels.runner import bench, resolve_backend_config
 
 
 def prepare_data(dtype, M, N, K):
@@ -246,8 +246,8 @@ def _thor_heuristic_cfg(M, N, K):
     raise ValueError(f"no valid GEMM config for M={M} N={N} K={K}")
 
 
-def _cfg_for(M, N, K, *, compile_config=None):
-    if resolve_compile_config(compile_config).arch == "sm_110a":
+def _cfg_for(M, N, K, *, backend_config=None):
+    if resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a":
         override = _THOR_SHAPE_CONFIGS.get((M, N, K))
         if override is not None:
             cfg = dict(_DEFAULT_CONFIG)
@@ -263,12 +263,12 @@ def _cfg_for(M, N, K, *, compile_config=None):
     return GEMM_CONFIGS.get(N, _DEFAULT_CONFIG)
 
 
-def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, compile_config=None):
+def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config=None):
     """Trace the kernel for one (dtype, M, N, K). Every knob is baked."""
     if dtype not in _DTYPE_MAP:
         raise ValueError(f"Unsupported dtype: {dtype}")
     ab_type = _DTYPE_MAP[dtype]
-    cfg = _cfg_for(M, N, Kdim, compile_config=compile_config)
+    cfg = _cfg_for(M, N, Kdim, backend_config=backend_config)
     MMA_N = cfg["cta_n"]
     BLK_K = cfg["cta_k"]
     PIPE_DEPTH = cfg["pipe_depth"]
@@ -347,7 +347,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, compile_config
                 preferred_cluster=[2, 1],
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         a_map, b_map, d_map = host
@@ -801,8 +801,8 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, compile_config
     return txl.kernel()(gemm)
 
 
-def make_kernel(dtype: str, M: int, N: int, Kdim: int, *, compile_config=None):
-    return _make_device_kernel(dtype, M, N, Kdim, compile_config=compile_config).func
+def make_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config=None):
+    return _make_device_kernel(dtype, M, N, Kdim, backend_config=backend_config).func
 
 
 KERNEL_META = {
@@ -833,20 +833,20 @@ CONFIGS = [
 ]
 
 
-def get_kernel(dtype, M, N, K, *, compile_config=None, **kwargs):
-    return make_kernel(dtype, M, N, K, compile_config=compile_config)
+def get_kernel(dtype, M, N, K, *, backend_config=None, **kwargs):
+    return make_kernel(dtype, M, N, K, backend_config=backend_config)
 
 
-def run_test(dtype, M, N, K, *, compile_config=None, **kwargs):
+def run_test(dtype, M, N, K, *, backend_config=None, **kwargs):
     """Compile, run, and verify fp16/bf16 GEMM kernel."""
     from tirx_kernels.runner import compile_kernel, cuda_target
 
     A, B, C = prepare_data(dtype, M, N, K)
-    kernel = get_kernel(dtype, M, N, K, compile_config=compile_config)
+    kernel = get_kernel(dtype, M, N, K, backend_config=backend_config)
     C_tvm = torch.zeros_like(C)
-    target = cuda_target(compile_config=compile_config)
+    target = cuda_target(backend_config=backend_config)
     with target:
-        ex = compile_kernel(kernel, compile_config=compile_config)
+        ex = compile_kernel(kernel, backend_config=backend_config)
         ex(A, B, C_tvm)
     # cuBLAS baseline: torch.matmul dispatches to cuBLAS, so this IS the
     # library comparison.
@@ -866,7 +866,7 @@ class PreparedBench:
 
 
 def run_gpu(
-    prepared: PreparedBench, *, warmup=None, repeat=None, timer=None, compile_config=None, **kwargs
+    prepared: PreparedBench, *, warmup=None, repeat=None, timer=None, backend_config=None, **kwargs
 ):
     """Allocate inputs/references and run the unchanged GPU timing protocol."""
     A, B, C = prepare_data(prepared.dtype, prepared.M, prepared.N, prepared.K)
@@ -901,24 +901,24 @@ def run_gpu(
     return bench(funcs, warmup=warmup, repeat=repeat, timer=timer, references=references, **kwargs)
 
 
-def prepare_bench(dtype, M, N, K, *, compile_config=None, **kwargs):
+def prepare_bench(dtype, M, N, K, *, backend_config=None, **kwargs):
     """Specialize and compile the GEMM without initializing CUDA."""
     from tirx_kernels.runner import cuda_initialization_guard, cuda_target, prepared_gpu_benchmark
 
     with cuda_initialization_guard():
-        kernel = get_kernel(dtype, M, N, K, compile_config=compile_config)
-        target = cuda_target(compile_config=compile_config)
+        kernel = get_kernel(dtype, M, N, K, backend_config=backend_config)
+        target = cuda_target(backend_config=backend_config)
         with target:
             mod = tvm.IRModule({"main": kernel})
-            ex = tvm.compile(mod, target=target, tir_pipeline="tirx", compile_config=compile_config)
+            ex = tvm.compile(mod, target=target, tir_pipeline="tirx", backend_config=backend_config)
     state = PreparedBench(dtype=dtype, M=M, N=N, K=K, executable=ex)
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_bench(
-    dtype, M, N, K, warmup=None, repeat=None, timer=None, *, compile_config=None, **kwargs
+    dtype, M, N, K, warmup=None, repeat=None, timer=None, *, backend_config=None, **kwargs
 ):
     """Benchmark fp16/bf16 GEMM."""
-    return prepare_bench(dtype, M, N, K, compile_config=compile_config).run_gpu(
+    return prepare_bench(dtype, M, N, K, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, **kwargs
     )

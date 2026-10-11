@@ -15,6 +15,7 @@ from functools import cache
 from itertools import combinations
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import cache_backend_config
 
 _TRY_WAIT_TICKS = 10_000_000
 _SMEM_CAPACITY = 232_448
@@ -1585,7 +1586,7 @@ CONFIGS = _correctness_configs()
 BENCH_CONFIGS = _benchmark_configs()
 
 
-@cache
+@cache_backend_config
 def _make_kernel(
     M,
     N,
@@ -1603,7 +1604,7 @@ def _make_kernel(
     cluster_shape_mn,
     vector_f32,
     *,
-    compile_config=None,
+    backend_config=None,
 ):
     if ab_dtype == "uint8":
         raise ValueError("the non-running uint8 packed-FP4 alias is not supported")
@@ -1921,7 +1922,7 @@ def _make_kernel(
                 preferred_cluster=[cluster_m, cluster_n],
             ),
             kernel_attrs=txl.cuda.KernelAttributes(max_registers_per_thread=entry_max_registers),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         del a, b, sfa, sfb, c, d
@@ -3035,7 +3036,7 @@ def get_kernel(
     vector_f32,
     alpha=None,
     *,
-    compile_config=None,
+    backend_config=None,
 ):
     del alpha
     return _make_kernel(
@@ -3054,7 +3055,7 @@ def get_kernel(
         tuple(mma_tiler_mn),
         tuple(cluster_shape_mn),
         vector_f32,
-        compile_config=compile_config,
+        backend_config=backend_config,
     ).func
 
 
@@ -3340,7 +3341,7 @@ def _validate_outputs(data, config, *, with_source):
     )
 
 
-def run_test(*, compile_config=None, **config):
+def run_test(*, backend_config=None, **config):
     """Compare TIRx with the cuDNN Frontend kernel on identical inputs."""
     import torch
 
@@ -3349,7 +3350,7 @@ def run_test(*, compile_config=None, **config):
     kernel_config = _without_label(config)
     data = prepare_data(**kernel_config)
     executable = compile_kernel(
-        get_kernel(**kernel_config, compile_config=compile_config), compile_config=compile_config
+        get_kernel(**kernel_config, backend_config=backend_config), backend_config=backend_config
     )
     tirx_launch = _tirx_launch(executable, data, kernel_config["alpha"])
     source_launch = _compile_reference(data, kernel_config)
@@ -3362,7 +3363,7 @@ def run_test(*, compile_config=None, **config):
     return {"amax": float(data["source_amax"].item())}
 
 
-def prepare_bench(*, compile_config=None, **config):
+def prepare_bench(*, backend_config=None, **config):
     """Compile TIRx before entering the GPU benchmark child."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
@@ -3370,11 +3371,11 @@ def prepare_bench(*, compile_config=None, **config):
     state = {
         "config": kernel_config,
         "executable": compile_kernel(
-            get_kernel(**kernel_config, compile_config=compile_config),
-            compile_config=compile_config,
+            get_kernel(**kernel_config, backend_config=backend_config),
+            backend_config=backend_config,
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -3385,7 +3386,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=0.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Validate once, then time closures containing exactly one kernel launch."""
@@ -3441,9 +3442,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, backend_config=None, **config
 ):
-    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

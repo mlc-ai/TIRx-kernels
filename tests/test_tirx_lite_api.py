@@ -11,6 +11,7 @@ from tvm_ffi import structural_walk
 
 import tirx_kernels.tirx_lite as txl
 from tvm import ir
+from tvm.backend.config import parse_backend_config
 
 
 def test_kernel_compile_receives_explicit_settings(monkeypatch):
@@ -23,21 +24,21 @@ def test_kernel_compile_receives_explicit_settings(monkeypatch):
 
     calls = []
     monkeypatch.setattr(tvm, "compile", lambda *args, **kwargs: calls.append(kwargs))
-    config = txl.cuda.CompileConfig(arch="sm_107a", fast_math=False)
-    probe.compile(compile_config=config)
-    assert calls[0]["compile_config"] is config
+    config = {"cuda": {"arch": "sm_107a", "nvcc": [], "nvrtc": []}}
+    probe.compile(backend_config=config)
+    assert calls[0]["backend_config"] is config
     assert "tirx.cuda_arch" not in probe.func.attrs
     assert not hasattr(probe, "arch")
-    with pytest.raises(TypeError, match="CompileConfig"):
+    with pytest.raises(TypeError, match="BackendConfig"):
         txl.kernel(arch="sm_107a")
 
 
 def test_kernel_entry_preserves_local_architecture():
-    config = txl.cuda.CompileConfig(arch="sm_107a")
+    config = {"cuda": {"arch": "sm_107a"}}
 
     @txl.kernel()
     def probe(out: txl.gptr("float32")):
-        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32), compile_config=config)
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32), backend_config=config)
         txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(1.0))
 
     entries = []
@@ -49,7 +50,7 @@ def test_kernel_entry_preserves_local_architecture():
             else None
         ),
     )
-    assert txl.cuda.CompileConfig.from_json(entries[0].attrs["cuda.compile_config"]) == config
+    assert parse_backend_config(entries[0].attrs["backend_config"]) == config
 
 
 def test_device_entry_keeps_runtime_values_as_region_operands():
@@ -258,7 +259,7 @@ def test_mamba_stochastic_conversion_uses_thor_fallback():
     )
 
     for arch in ("sm_100a", "sm_103a", "sm_107a", "sm_110a"):
-        compile_config = txl.cuda.CompileConfig(arch=arch)
+        backend_config = {"cuda": {"arch": arch}}
 
         @txl.kernel()
         def probe(out: txl.gptr("uint32")):
@@ -270,7 +271,7 @@ def test_mamba_stochastic_conversion_uses_thor_fallback():
                 txl.float32(1.0),
                 txl.float32(-1.0),
                 txl.uint32(0x12340567),
-                compile_config=compile_config,
+                backend_config=backend_config,
             )
             txl.ptx.st.global_.b32(out.ptr_to([0]), result)
 

@@ -73,7 +73,7 @@ class PreparedMegaMoeBench:
         timer: str | None = None,
         rounds: int = 1,
         cooldown_s: float = 1.0,
-        compile_config=None,
+        backend_config=None,
     ) -> dict[str, Any]:
         from tirx_kernels.runner import current_cuda_assignment
 
@@ -100,7 +100,7 @@ class PreparedMegaMoeBench:
                 cooldown_s=cooldown_s,
                 device_indices=device_indices,
                 device_uuids=device_uuids,
-                compile_config=compile_config,
+                backend_config=backend_config,
             )
         finally:
             for name, value in previous.items():
@@ -114,7 +114,7 @@ class PreparedMegaMoeBench:
 
 
 def run_gpu(
-    prepared: PreparedMegaMoeBench, *, compile_config=None, **kwargs: Any
+    prepared: PreparedMegaMoeBench, *, backend_config=None, **kwargs: Any
 ) -> dict[str, Any]:
     """Run the prepared distributed MegaMoE stage after GPU assignment."""
     return prepared.run_gpu(**kwargs)
@@ -289,7 +289,7 @@ def check_correctness(
     activation_clamp=10.0,
     fast_math=1,
     *,
-    compile_config=None,
+    backend_config=None,
 ) -> None:
     result = outputs.get("result")
     if result is None:
@@ -307,7 +307,7 @@ def check_correctness(
                 fast_math=fast_math,
             ),
             "test",
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
     _assert_correctness_result(result)
 
@@ -324,7 +324,7 @@ def run_test(
     activation_clamp=10.0,
     fast_math=1,
     *,
-    compile_config=None,
+    backend_config=None,
 ):
     config = _make_config(
         num_processes=num_processes,
@@ -338,7 +338,7 @@ def run_test(
         activation_clamp=activation_clamp,
         fast_math=fast_math,
     )
-    result = _run_distributed(config, "test", compile_config=compile_config)
+    result = _run_distributed(config, "test", backend_config=backend_config)
     _assert_correctness_result(result)
 
 
@@ -357,7 +357,7 @@ def run_bench(
     warmup=None,
     repeat=None,
     timer=None,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     config = _make_config(
@@ -372,7 +372,7 @@ def run_bench(
         activation_clamp=activation_clamp,
         fast_math=fast_math,
     )
-    return prepare_bench(**asdict(config), compile_config=compile_config).run_gpu(
+    return prepare_bench(**asdict(config), backend_config=backend_config).run_gpu(
         warmup=warmup,
         repeat=repeat,
         timer=timer,
@@ -393,7 +393,7 @@ def prepare_bench(
     activation_clamp=10.0,
     fast_math=1,
     *,
-    compile_config=None,
+    backend_config=None,
 ):
     """Compile both legal benchmark specializations before GPU assignment."""
     from tirx_kernels.runner import prepared_gpu_benchmark
@@ -416,7 +416,7 @@ def prepare_bench(
     try:
         for collect_stats in (False, True):
             executable = _compile_tirx_mega_moe_for_config(
-                **asdict(config), collect_stats=collect_stats, compile_config=compile_config
+                **asdict(config), collect_stats=collect_stats, backend_config=backend_config
             )
             library_path = Path(temporary_directory.name) / (
                 "mega_moe_stats.so" if collect_stats else "mega_moe_no_stats.so"
@@ -438,5 +438,5 @@ def prepare_bench(
         state,
         required_num_gpus=config.num_processes,
         close=state.close,
-        compile_config=compile_config,
+        backend_config=backend_config,
     )

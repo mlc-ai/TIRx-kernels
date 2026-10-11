@@ -83,7 +83,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import resolve_compile_config
+from tirx_kernels.runner import backend_config_key, resolve_backend_config
 
 D = 128
 CHUNK = 64
@@ -316,7 +316,7 @@ def _state_needs_stable(g_last):
     )
 
 
-def make_range_guard(HV, PARTS, *, compile_config=None):
+def make_range_guard(HV, PARTS, *, backend_config=None):
     @txl.kernel()
     def guard(
         v: txl.gptr[txl.bf16],
@@ -330,7 +330,7 @@ def make_range_guard(HV, PARTS, *, compile_config=None):
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_entries, block=4 * 32),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         guard_tid = txl.thread_id()
@@ -416,7 +416,7 @@ def make_range_guard(HV, PARTS, *, compile_config=None):
     return guard
 
 
-def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, compile_config=None):
+def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_config=None):
     txl.MBarrier._wait = _ptx_mbarrier_wait
     G = HV // HQ
     HALF_DA_READOUT = HQ < 96
@@ -499,7 +499,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, compile_confi
                 grid=num_ctas if static_grid is None else static_grid, block=12 * 32
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         native_modes = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -3324,7 +3324,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, compile_confi
 AQK_BYTES = CHUNK * CHUNK * 2
 
 
-def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, compile_config=None):
+def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, backend_config=None):
     txl.MBarrier._wait = _ptx_mbarrier_wait
     G = HV // HQ
     HALF_DA_READOUT = HQ < 96
@@ -3408,7 +3408,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, com
                 grid=num_ctas if static_grid is None else static_grid, block=12 * 32
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         range_bad = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -7154,9 +7154,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, com
     return kda_bwd_mega
 
 
-def make_retry_mega_kernel(HQ: int, HV: int, static_grid=None, *, compile_config=None):
+def make_retry_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_config=None):
     return make_mega_kernel(
-        HQ, HV, static_grid=static_grid, item_only=True, compile_config=compile_config
+        HQ, HV, static_grid=static_grid, item_only=True, backend_config=backend_config
     )
 
 
@@ -7164,7 +7164,7 @@ AQK_BYTES = CHUNK * CHUNK * 2
 
 
 def make_native_fused_kernel(
-    H: int, sched_maxp2: int, sched_maxp1: int, static_grid=None, *, compile_config=None
+    H: int, sched_maxp2: int, sched_maxp1: int, static_grid=None, *, backend_config=None
 ):
     txl.MBarrier._wait = _CUDA_MBAR_WAIT
     TM_DH = 0
@@ -7231,7 +7231,7 @@ def make_native_fused_kernel(
                 grid=num_ctas if static_grid is None else static_grid, block=12 * 32
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         native_modes = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -9205,7 +9205,7 @@ def make_native_fused_kernel(
 
 
 def make_fused_kernel(
-    H: int, sched_maxp2: int, sched_maxp1: int, static_grid=None, *, compile_config=None
+    H: int, sched_maxp2: int, sched_maxp1: int, static_grid=None, *, backend_config=None
 ):
     txl.MBarrier._wait = _CUDA_MBAR_WAIT
     TM_DH = 0
@@ -9273,7 +9273,7 @@ def make_fused_kernel(
                 grid=num_ctas if static_grid is None else static_grid, block=12 * 32
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         range_bad = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -12288,16 +12288,17 @@ _KERNEL_CACHE = {}
 _DEBUG = {}
 
 
-def _target(*, compile_config=None):
-    return cuda_target(compile_config=compile_config)
+def _target(*, backend_config=None):
+    return cuda_target(backend_config=backend_config)
 
 
 def _range_parts(num_chains):
     return min(16, max(1, (1024 + num_chains - 1) // num_chains))
 
 
-def _compile(kind, *key_args, compile_config=None):
-    cache_config = resolve_compile_config(compile_config)
+def _compile(kind, *key_args, backend_config=None):
+    backend_config = resolve_backend_config(backend_config)
+    cache_config = backend_config_key(backend_config)
     key = (kind, *key_args)
     if (cache_config, key) not in _KERNEL_CACHE:
         import tvm
@@ -12309,31 +12310,40 @@ def _compile(kind, *key_args, compile_config=None):
             "guard": make_range_guard,
             "native_mega": make_native_mega_kernel,
             "native_fused": make_native_fused_kernel,
-        }[kind](*key_args, compile_config=compile_config)
-        target = _target(compile_config=compile_config)
+        }[kind](*key_args, backend_config=backend_config)
+        target = _target(backend_config=backend_config)
         pass
         # Ordinary specializations keep the original compile setting. The
         # extended mega body has a separately measured register-usage level.
-        compile_config = resolve_compile_config(
-            compile_config,
-            ptxas_reg_usage_level=int("5" if kind in ("mega", "retry_mega") else "10"),
+        backend_config = resolve_backend_config(
+            backend_config,
+            defaults={
+                "cuda": {
+                    "ptxas": [
+                        "-v",
+                        "--warn-on-local-memory-usage",
+                        "--register-usage-level="
+                        + str(int("5" if kind in ("mega", "retry_mega") else "10")),
+                    ]
+                }
+            },
         )
         with target:
             _KERNEL_CACHE[(cache_config, key)] = tvm.compile(
-                kernel.mod, target=target, tir_pipeline="tirx", compile_config=compile_config
+                kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
             )
     return _KERNEL_CACHE[(cache_config, key)]
 
 
-def build_kernels_for_shape(H, num_chains=768, num_ctas=152, HV=None, *, compile_config=None):
+def build_kernels_for_shape(H, num_chains=768, num_ctas=152, HV=None, *, backend_config=None):
     """Trace-only entry for offline tooling."""
     HV = H if HV is None else HV
     out = {
         "kda_bwd_guard": make_range_guard(
-            HV, _range_parts(num_chains), compile_config=compile_config
+            HV, _range_parts(num_chains), backend_config=backend_config
         ),
-        "kda_bwd_native_mega": make_native_mega_kernel(H, HV, compile_config=compile_config),
-        "kda_bwd_mega": make_mega_kernel(H, HV, compile_config=compile_config),
+        "kda_bwd_native_mega": make_native_mega_kernel(H, HV, backend_config=backend_config),
+        "kda_bwd_mega": make_mega_kernel(H, HV, backend_config=backend_config),
     }
     if H == HV and H % 8 == 0:
         classes = (
@@ -12343,8 +12353,8 @@ def build_kernels_for_shape(H, num_chains=768, num_ctas=152, HV=None, *, compile
         )
         p2, p1 = build_schedule(num_chains, num_ctas, classes)
         key = (H, max(1, max(len(l) for l in p2)), max(1, max(len(l) for l in p1)))
-        out["kda_bwd_native_fused"] = make_native_fused_kernel(*key, compile_config=compile_config)
-        out["kda_bwd_fused"] = make_fused_kernel(*key, compile_config=compile_config)
+        out["kda_bwd_native_fused"] = make_native_fused_kernel(*key, backend_config=backend_config)
+        out["kda_bwd_fused"] = make_fused_kernel(*key, backend_config=backend_config)
     return out
 
 
@@ -12354,7 +12364,7 @@ def _count_chunks(cu_seqlens):
     return int(((lens + CHUNK - 1) // CHUNK).sum()), bool(((lens % CHUNK) == 0).all())
 
 
-def setup(data, B, T, H, *, compile_config=None):
+def setup(data, B, T, H, *, backend_config=None):
     from tirx_kernels.runner import hardware_num_sms
 
     q, k, v, beta = data["q"], data["k"], data["v"], data["beta"]
@@ -12424,7 +12434,7 @@ def setup(data, B, T, H, *, compile_config=None):
     range_flags = torch.empty((range_entries + retry_words,), dtype=torch.int32, device=device)
     if retry_words:
         range_flags[range_entries:].zero_()
-    range_guard = _compile("guard", HV, range_parts, compile_config=compile_config)
+    range_guard = _compile("guard", HV, range_parts, backend_config=backend_config)
     range_allowed = int(int(torch.diff(cu_seqlens.cpu()).max()) <= 4096)
 
     def check_range():
@@ -12450,8 +12460,8 @@ def setup(data, B, T, H, *, compile_config=None):
         sched, maxp2, maxp1 = build_schedule_tensor(num_chains, num_ctas, classes, device)
         flags = torch.zeros((num_chains,), dtype=torch.int32, device=device)
         maps["beta"] = token_map(beta, T, HV // 8, 8, 8, swizzle=0)
-        fused = _compile("fused", HV, maxp2, maxp1, compile_config=compile_config)
-        native_fused = _compile("native_fused", HV, maxp2, maxp1, compile_config=compile_config)
+        fused = _compile("fused", HV, maxp2, maxp1, backend_config=backend_config)
+        native_fused = _compile("native_fused", HV, maxp2, maxp1, backend_config=backend_config)
         args = (
             q.view(-1),
             k.view(-1),
@@ -12516,9 +12526,9 @@ def setup(data, B, T, H, *, compile_config=None):
         stream_tab = stream_tab.to(device)
         item_tab = item_tab.to(device)
         seq_tab = seq_tab.to(device)
-        mega = _compile("mega", HQ, HV, compile_config=compile_config)
-        retry_mega = _compile("retry_mega", HQ, HV, compile_config=compile_config)
-        native_mega = _compile("native_mega", HQ, HV, compile_config=compile_config)
+        mega = _compile("mega", HQ, HV, backend_config=backend_config)
+        retry_mega = _compile("retry_mega", HQ, HV, backend_config=backend_config)
+        native_mega = _compile("native_mega", HQ, HV, backend_config=backend_config)
         args = (
             q.view(-1),
             k.view(-1),
@@ -12819,7 +12829,7 @@ def _launch_cache_keys(cfg: KDABackwardConfig) -> tuple[tuple, ...]:
     )
 
 
-def get_kernel(*, compile_config=None, **kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     """Return every PrimFunc in the GPU-guarded launch sequence."""
     builders = {
         "guard": make_range_guard,
@@ -12989,11 +12999,11 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     return case
 
 
-def _launcher(case: dict[str, Any], *, compile_config=None):
+def _launcher(case: dict[str, Any], *, backend_config=None):
     """Bind the kernel-owned scratch, schedule tables and tensor maps."""
     cfg: KDABackwardConfig = case["config"]
     return setup(
-        case, cfg.batch_size, cfg.total_tokens, cfg.num_qk_heads, compile_config=compile_config
+        case, cfg.batch_size, cfg.total_tokens, cfg.num_qk_heads, backend_config=backend_config
     )
 
 
@@ -13078,10 +13088,10 @@ def _poison_outputs(case: dict[str, Any], value: float) -> None:
         case[name].fill_(value)
 
 
-def run_test(*, compile_config=None, **kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     _assert_supported_arch()
     case = prepare_data(**kwargs)
-    launch = _launcher(case, compile_config=compile_config)
+    launch = _launcher(case, backend_config=backend_config)
     _poison_outputs(case, float("nan"))
     launch()
     torch.cuda.synchronize()
@@ -13100,7 +13110,7 @@ def run_test(*, compile_config=None, **kwargs: Any) -> None:
 # ----------------------------------------------------------------------------
 
 
-def prepare_bench(*, compile_config=None, **kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Trace and compile before bench-suite assigns a GPU.
 
     ``setup`` compiles through this module's own ``_KERNEL_CACHE``, so priming
@@ -13110,8 +13120,8 @@ def prepare_bench(*, compile_config=None, **kwargs: Any):
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     for key in _launch_cache_keys(_cfg(**kwargs)):
-        _compile(*key, compile_config=compile_config)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs)}, compile_config=compile_config)
+        _compile(*key, backend_config=backend_config)
+    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs)}, backend_config=backend_config)
 
 
 def run_gpu(
@@ -13120,7 +13130,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     _assert_supported_arch()
@@ -13129,7 +13139,7 @@ def run_gpu(
     rounds = config.pop("rounds", 5)
     cooldown_s = config.pop("cooldown_s", 1.0)
     case = prepare_data(**config)
-    launch = _launcher(case, compile_config=compile_config)
+    launch = _launcher(case, backend_config=backend_config)
     torch.cuda.synchronize()
 
     def _fla_builder():
@@ -13153,12 +13163,12 @@ def run_bench(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    prepared = prepare_bench(**config, compile_config=compile_config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

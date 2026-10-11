@@ -156,7 +156,7 @@ def _shfl_idx(dst, src, src_lane):
 
 
 def _build_combine_kernel(
-    num_sms: int, num_max_tokens_per_rank: int, num_ranks: int, *, compile_config=None
+    num_sms: int, num_max_tokens_per_rank: int, num_ranks: int, *, backend_config=None
 ) -> Any:
     """`combine_impl` (frozen sketch kernel 1)."""
 
@@ -181,7 +181,7 @@ def _build_combine_kernel(
                 grid=num_sms, block=NUM_WARPS * 32, cluster=(cluster,) if cluster > 1 else None
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         smem = txl.smem_pool().alloc([SMEM_TOTAL], "uint8")
@@ -359,7 +359,7 @@ def _build_combine_kernel(
 
 
 def _build_reduce_epilogue_kernel(
-    num_sms: int, num_max_tokens_per_rank: int, num_ranks: int, *, compile_config=None
+    num_sms: int, num_max_tokens_per_rank: int, num_ranks: int, *, backend_config=None
 ) -> Any:
     """`combine_reduce_epilogue_impl` (frozen sketch kernel 2)."""
 
@@ -381,7 +381,7 @@ def _build_reduce_epilogue_kernel(
                 grid=num_sms, block=NUM_WARPS * 32, programmatic_stream_serialization=True
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         smem = txl.smem_pool().alloc([SMEM_TOTAL], "uint8")
@@ -640,7 +640,7 @@ def get_kernel(
     expert_alignment: int = 1,
     num_sms: int = 0,
     *,
-    compile_config=None,
+    backend_config=None,
     **_: Any,
 ) -> list[Any]:
     """Return the combine kernel pair (main + reduce epilogue), closure-specialized."""
@@ -660,9 +660,9 @@ def get_kernel(
     # not the combine kernel's num_sms.
     epilogue_num_sms = _device_num_sms()
     return [
-        _build_combine_kernel(num_sms, num_tokens, world_size, compile_config=compile_config),
+        _build_combine_kernel(num_sms, num_tokens, world_size, backend_config=backend_config),
         _build_reduce_epilogue_kernel(
-            epilogue_num_sms, num_tokens, world_size, compile_config=compile_config
+            epilogue_num_sms, num_tokens, world_size, backend_config=backend_config
         ),
     ]
 
@@ -883,14 +883,14 @@ def _resolve_num_sms(config: dict[str, Any]) -> int:
     )
 
 
-def run_test(*, compile_config=None, **config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     """Correctness entry point used by the runner."""
 
     from .utils._runtime import run_distributed
 
     num_sms = _resolve_num_sms(config)
     combine_kernel, epilogue_kernel = get_kernel(
-        **config, num_sms=num_sms, compile_config=compile_config
+        **config, num_sms=num_sms, backend_config=backend_config
     )
     run_distributed(
         {"combine": combine_kernel, "reduce_epilogue": epilogue_kernel},
@@ -898,7 +898,7 @@ def run_test(*, compile_config=None, **config: Any) -> None:
         worker=_run_worker,
         mode="test",
         worker_kwargs={**config, "num_sms": num_sms},
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
 
 
@@ -940,7 +940,7 @@ def _resolve_num_sms_cpu(config: dict[str, Any]) -> int:
     return min(num_sms, device_sms)
 
 
-def _run_bench_gpu(state: dict[str, Any], *, compile_config=None, **kwargs: Any) -> dict[str, Any]:
+def _run_bench_gpu(state: dict[str, Any], *, backend_config=None, **kwargs: Any) -> dict[str, Any]:
     """GPU stage of the two-stage benchmark contract (ranks start CUDA here).
 
     All TIRx specialization and compilation completed in prepare_bench; this
@@ -962,11 +962,11 @@ def _run_bench_gpu(state: dict[str, Any], *, compile_config=None, **kwargs: Any)
             "cooldown_s": kwargs.get("cooldown_s", 1.0),
         },
         prepared_libraries=state["library_paths"],
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
 
 
-def prepare_bench(*, compile_config=None, **config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """CPU-side prepare for the two-stage benchmark contract.
 
     Completes every CUDA-free step the suite requires before READY: SM-count
@@ -986,13 +986,13 @@ def prepare_bench(*, compile_config=None, **config: Any):
         )
     num_sms = _resolve_num_sms_cpu(config)
     combine_kernel, epilogue_kernel = get_kernel(
-        **config, num_sms=num_sms, compile_config=compile_config
+        **config, num_sms=num_sms, backend_config=backend_config
     )
     tmpdir = tempfile.TemporaryDirectory(prefix="tirx-deepep-prepare-")
     library_paths = compile_kernels(
         {"combine": combine_kernel, "reduce_epilogue": epilogue_kernel},
         tmpdir.name,
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     state = {
         "config": dict(config),
@@ -1005,7 +1005,7 @@ def prepare_bench(*, compile_config=None, **config: Any):
         state,
         required_num_gpus=config["world_size"],
         close=state["tmpdir"].cleanup,
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
 
 
@@ -1016,7 +1016,7 @@ def run_bench(
     timer: Any = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Benchmark entry point used by the runner (kineto only, distributed)."""
@@ -1028,7 +1028,7 @@ def run_bench(
     config = dict(kwargs)
     if args:
         raise TypeError(f"unexpected positional arguments: {args}")
-    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         rounds=rounds, cooldown_s=cooldown_s
     )
 

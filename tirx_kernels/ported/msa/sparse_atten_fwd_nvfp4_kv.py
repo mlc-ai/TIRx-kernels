@@ -1218,7 +1218,7 @@ def _resolve_gather4_rows(
 # ---------------------------------------------------------------------------
 # Target entry.
 # ---------------------------------------------------------------------------
-def _make_kernel(*, compile_config=None, **config):
+def _make_kernel(*, backend_config=None, **config):
     """Trace one native tirx-lite specialization and its exact launch ABI."""
     qheadperkv = int(config["qhead_per_kv"])
     causal = bool(config.get("causal", True))
@@ -3144,7 +3144,7 @@ def _make_kernel(*, compile_config=None, **config):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(block=TOTAL_WARPS * 32, grid=values["work_capacity"]),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
         trace(values, host)
 
@@ -3163,10 +3163,10 @@ def _make_kernel(*, compile_config=None, **config):
     return kernel.func
 
 
-def get_kernel(*, compile_config=None, **config):
+def get_kernel(*, backend_config=None, **config):
     """Return the native tirx-lite specialization for one compile key."""
     config.pop("label", None)
-    return _make_kernel(**config, compile_config=compile_config)
+    return _make_kernel(**config, backend_config=backend_config)
 
 
 # ---------------------------------------------------------------------------
@@ -3959,7 +3959,7 @@ def reference_case(data: dict[str, Any], outputs: dict[str, Any]) -> dict[str, A
     }
 
 
-def run_test(*, compile_config=None, **config) -> None:
+def run_test(*, backend_config=None, **config) -> None:
     """Compile, launch and validate one config against the MSA source kernel.
 
     Two oracles. The gate is bitwise against the compiled NVFP4 source on
@@ -3991,14 +3991,14 @@ def run_test(*, compile_config=None, **config) -> None:
     expected = make_outputs(data)
     try:
         compiled_sparse_atten_nvfp4_kv(
-            reference_case(data, expected), compile_config=compile_config
+            reference_case(data, expected), backend_config=backend_config
         )()
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
     torch.cuda.synchronize()
 
     executable = compile_kernel(
-        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+        get_kernel(**config, backend_config=backend_config), backend_config=backend_config
     )
     outputs = make_outputs(data)
     executable(*tirx_args(data, outputs))
@@ -4006,7 +4006,7 @@ def run_test(*, compile_config=None, **config) -> None:
     assert_partials_match(data, outputs, expected)
 
     if data["q_dtype"] == "bfloat16":
-        _assert_matches_dequantized_twin(data, outputs, compile_config=compile_config)
+        _assert_matches_dequantized_twin(data, outputs, backend_config=backend_config)
 
 
 def _twin_case(data: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]:
@@ -4053,7 +4053,7 @@ def _twin_case(data: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _assert_matches_dequantized_twin(
-    data: dict[str, Any], outputs: dict[str, Any], *, compile_config=None
+    data: dict[str, Any], outputs: dict[str, Any], *, backend_config=None
 ) -> None:
     """Second oracle: the BF16 sibling on the dequantized twins of this K/V.
 
@@ -4077,7 +4077,7 @@ def _assert_matches_dequantized_twin(
         raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
 
     twin = make_outputs(data)
-    compiled_sparse_atten_fwd(_twin_case(data, twin), compile_config=compile_config)()
+    compiled_sparse_atten_fwd(_twin_case(data, twin), backend_config=backend_config)()
     torch.cuda.synchronize()
 
     mask = live_partial_mask(data)
@@ -4100,7 +4100,7 @@ def _assert_matches_dequantized_twin(
 # touching them and overwrites -- never accumulates into -- the partial slots it
 # owns, so the hundredth launch does exactly the work the first one did.
 # ---------------------------------------------------------------------------
-def prepare_bench(*, compile_config=None, **config):
+def prepare_bench(*, backend_config=None, **config):
     """Compile the TIRx specialization without initializing CUDA."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
@@ -4108,10 +4108,10 @@ def prepare_bench(*, compile_config=None, **config):
     state = {
         "config": dict(config),
         "executable": compile_kernel(
-            get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+            get_kernel(**config, backend_config=backend_config), backend_config=backend_config
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -4122,7 +4122,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **config,
 ):
     """Kernel-only comparison against MSA's compiled NVFP4 forward launch."""
@@ -4143,7 +4143,7 @@ def run_gpu(
         from tirx_kernels.ported.msa.utils._msa_bench import compiled_sparse_atten_nvfp4_kv
 
         launch = compiled_sparse_atten_nvfp4_kv(
-            reference_case(data, make_outputs(data)), compile_config=compile_config
+            reference_case(data, make_outputs(data)), backend_config=backend_config
         )
         launch()  # pay the CuTeDSL compile and first-launch cost outside timing
         return launch
@@ -4160,9 +4160,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, backend_config=None, **config
 ):
-    return prepare_bench(**config, compile_config=compile_config).run_gpu(
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

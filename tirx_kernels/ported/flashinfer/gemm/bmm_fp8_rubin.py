@@ -48,6 +48,7 @@ from typing import Any
 
 import tirx_kernels.tirx_lite as txl
 from tirx_kernels.ported.flashinfer.utils.source_checkout import flashinfer_source_root
+from tirx_kernels.runner import cache_backend_config
 
 KERNEL_META = {
     "name": "bmm_fp8_rubin",
@@ -243,7 +244,7 @@ def _instruction_descriptor(n_tile: int, instruction_k: int, ab_dtype: str) -> i
     return descriptors[(n_tile, instruction_k, ab_dtype)]
 
 
-@cache
+@cache_backend_config
 def _make_bmm_kernel(
     B: int,
     M: int,
@@ -253,7 +254,7 @@ def _make_bmm_kernel(
     c_dtype: str,
     tactic: int,
     *,
-    compile_config=None,
+    backend_config=None,
 ):
     _validate_problem(B, M, N, K_dim, ab_dtype, c_dtype, tactic)
     mma_tiler, mma_instruction, (cluster_m, cluster_n), raster = TACTICS[tactic]
@@ -363,7 +364,7 @@ def _make_bmm_kernel(
                 preferred_cluster=[cluster_m, cluster_n],
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         del a, b, c
@@ -884,11 +885,11 @@ def _make_bmm_kernel(
 
 
 def get_kernel(
-    B: int, M: int, N: int, K: int, ab_dtype: str, c_dtype: str, tactic: int, *, compile_config=None
+    B: int, M: int, N: int, K: int, ab_dtype: str, c_dtype: str, tactic: int, *, backend_config=None
 ):
     _validate_problem(B, M, N, K, ab_dtype, c_dtype, tactic)
     return _make_bmm_kernel(
-        B, M, N, K, ab_dtype, c_dtype, tactic, compile_config=compile_config
+        B, M, N, K, ab_dtype, c_dtype, tactic, backend_config=backend_config
     ).func
 
 
@@ -941,7 +942,7 @@ def prepare_data(
     }
 
 
-@cache
+@cache_backend_config
 def _compile_executable(
     B: int,
     M: int,
@@ -951,13 +952,13 @@ def _compile_executable(
     c_dtype: str,
     tactic: int,
     *,
-    compile_config=None,
+    backend_config=None,
 ):
     from tirx_kernels.runner import compile_kernel
 
     return compile_kernel(
-        get_kernel(B, M, N, K_dim, ab_dtype, c_dtype, tactic, compile_config=compile_config),
-        compile_config=compile_config,
+        get_kernel(B, M, N, K_dim, ab_dtype, c_dtype, tactic, backend_config=backend_config),
+        backend_config=backend_config,
     )
 
 
@@ -1035,13 +1036,13 @@ def _validate_outputs(data, *, with_source: bool) -> dict[str, Any]:
 
 
 def run_test(
-    B: int, M: int, N: int, K: int, ab_dtype: str, c_dtype: str, tactic: int, *, compile_config=None
+    B: int, M: int, N: int, K: int, ab_dtype: str, c_dtype: str, tactic: int, *, backend_config=None
 ) -> dict[str, Any]:
     import torch
 
     data = prepare_data(B, M, N, K, ab_dtype, c_dtype, tactic)
     executable = _compile_executable(
-        B, M, N, K, ab_dtype, c_dtype, tactic, compile_config=compile_config
+        B, M, N, K, ab_dtype, c_dtype, tactic, backend_config=backend_config
     )
     tirx_launch = _tirx_launch(executable, data)
     source_launch = _source_launch(data, c_dtype, tactic)
@@ -1052,7 +1053,7 @@ def run_test(
 
 
 def prepare_bench(
-    B: int, M: int, N: int, K: int, ab_dtype: str, c_dtype: str, tactic: int, *, compile_config=None
+    B: int, M: int, N: int, K: int, ab_dtype: str, c_dtype: str, tactic: int, *, backend_config=None
 ):
     from tirx_kernels.runner import prepared_gpu_benchmark
 
@@ -1068,10 +1069,10 @@ def prepare_bench(
             "tactic": tactic,
         },
         "executable": _compile_executable(
-            B, M, N, K, ab_dtype, c_dtype, tactic, compile_config=compile_config
+            B, M, N, K, ab_dtype, c_dtype, tactic, backend_config=backend_config
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -1082,7 +1083,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     import torch
@@ -1127,10 +1128,10 @@ def run_bench(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
 ):
     return prepare_bench(
-        B, M, N, K, ab_dtype, c_dtype, tactic, compile_config=compile_config
+        B, M, N, K, ab_dtype, c_dtype, tactic, backend_config=backend_config
     ).run_gpu(warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s)
 
 

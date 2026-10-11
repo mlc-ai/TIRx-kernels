@@ -58,7 +58,7 @@ from tirx_kernels.ported.flashinfer.utils.topk_radix import (
     st_global_u16,
     st_global_u32,
 )
-from tirx_kernels.runner import bench, resolve_compile_config
+from tirx_kernels.runner import bench, resolve_backend_config
 
 KERNEL_META = {
     "name": "stable_sort_topk_by_value",
@@ -191,7 +191,7 @@ def get_kernel(
     k: int = 256,
     pattern: str = "unique",
     *,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Return the TIRx specialization of `StableSortTopKByValueKernel` for one cell."""
@@ -207,7 +207,7 @@ def get_kernel(
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_rows, block=block_threads // 32 * 32),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         row = txl.cta_id()
@@ -388,7 +388,7 @@ void stable_sort_ref(at::Tensor indices, at::Tensor values, int64_t num_rows, in
 """
 
 
-def load_reference_ext(*, compile_config=None):
+def load_reference_ext(*, backend_config=None):
     """Build and load the shape-independent reference extension.
 
     JIT-compiling the extension initializes CUDA, so this must only run in the
@@ -406,9 +406,9 @@ def load_reference_ext(*, compile_config=None):
 
     from torch.utils import cpp_extension
 
-    from tirx_kernels.runner import resolve_compile_config
+    from tirx_kernels.runner import resolve_backend_config
 
-    arch = resolve_compile_config(compile_config).arch.removeprefix("sm_")
+    arch = resolve_backend_config(backend_config)["cuda"]["arch"].removeprefix("sm_")
     cuda_flags = [
         # torch's cpp_extension injects these unconditionally; FlashInfer's own
         # JIT never defines them, and they break vec_dtypes.cuh's half/bf16 ->
@@ -568,11 +568,11 @@ def clone_inputs(data: dict[str, Any]):
     return {"indices": data["indices"].clone(), "values": data["values"].clone()}
 
 
-def run_reference(cfg: dict[str, Any], buffers: dict[str, Any], *, compile_config=None) -> None:
+def run_reference(cfg: dict[str, Any], buffers: dict[str, Any], *, backend_config=None) -> None:
     """One launch of the source kernel over the given buffers, in place."""
     import torch
 
-    ext = load_reference_ext(compile_config=compile_config)
+    ext = load_reference_ext(backend_config=backend_config)
     ext.stable_sort_ref(
         buffers["indices"].reshape(-1),
         buffers["values"].reshape(-1),
@@ -601,7 +601,7 @@ def assert_reference_is_stable_sort(cfg, data, ref) -> None:
     torch.testing.assert_close(ref["indices"], want_i, rtol=0, atol=0)
 
 
-def run_test(*, compile_config=None, **config):
+def run_test(*, backend_config=None, **config):
     """Compile, launch, and validate one config against the FlashInfer source."""
     import unittest
 
@@ -622,11 +622,11 @@ def run_test(*, compile_config=None, **config):
     data = prepare_data(**cfg)
 
     ref = clone_inputs(data)
-    run_reference(cfg, ref, compile_config=compile_config)
+    run_reference(cfg, ref, backend_config=backend_config)
     assert_reference_is_stable_sort(cfg, data, ref)
 
     ex = compile_kernel(
-        get_kernel(**cfg, compile_config=compile_config), compile_config=compile_config
+        get_kernel(**cfg, backend_config=backend_config), backend_config=backend_config
     )
     got = clone_inputs(data)
     ex(*build_tirx_args(cfg, data, got))
@@ -647,7 +647,7 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Benchmark entry points.
 # ---------------------------------------------------------------------------
-def prepare_bench(*, compile_config=None, **kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU.
 
     The reference is NOT built here. `load_reference_ext()` JITs a CUDA
@@ -664,10 +664,10 @@ def prepare_bench(*, compile_config=None, **kwargs: Any):
         {
             "config": cfg,
             "executable": compile_kernel(
-                get_kernel(**cfg, compile_config=compile_config), compile_config=compile_config
+                get_kernel(**cfg, backend_config=backend_config), backend_config=backend_config
             ),
         },
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
 
 
@@ -679,7 +679,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs,
 ):
     """Kernel-only comparison against the source launch.
@@ -730,7 +730,7 @@ def run_gpu(
         ex(*tirx_args[step & 1])
 
     def build_reference():
-        ext = load_reference_ext(compile_config=compile_config)
+        ext = load_reference_ext(backend_config=backend_config)
         flat = tuple(
             (buffers["indices"].reshape(-1), buffers["values"].reshape(-1)) for buffers in clones
         )
@@ -757,9 +757,9 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, compile_config=None, **config
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, backend_config=None, **config
 ):
-    prepared = prepare_bench(**config, compile_config=compile_config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

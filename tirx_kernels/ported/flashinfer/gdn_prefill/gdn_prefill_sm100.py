@@ -116,7 +116,7 @@ def tmem_row(n):
     return n << 16
 
 
-def make_kernel(HQ: int, HV: int, *, compile_config=None):
+def make_kernel(HQ: int, HV: int, *, backend_config=None):
     """Trace the kernel for one (HQ, HV) specialization. HQ/HV are baked."""
     SUBHEADS = HV // HQ  # value sub-heads per q head
     RANK = 3 if HQ == HV else 4  # V/O tensormap rank
@@ -154,7 +154,7 @@ def make_kernel(HQ: int, HV: int, *, compile_config=None):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=txl.min(num_sequences * HV, num_sms), block=12 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         total_work = num_sequences * HV
@@ -1852,25 +1852,25 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     return case
 
 
-def get_kernel(*, compile_config=None, **kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     cfg = _cfg(**kwargs)
-    return make_kernel(cfg.hq, cfg.hv, compile_config=compile_config).func
+    return make_kernel(cfg.hq, cfg.hv, backend_config=backend_config).func
 
 
-def prepare_bench(*, compile_config=None, **kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     state = {
         "config": dict(kwargs),
         "executable": compile_kernel(
-            get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(*, compile_config=None, **kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for GDN prefill SM100")
     capability = torch.cuda.get_device_capability()
@@ -1881,7 +1881,7 @@ def run_test(*, compile_config=None, **kwargs: Any) -> None:
 
     case = prepare_data(**kwargs)
     executable = compile_kernel(
-        get_kernel(**kwargs, compile_config=compile_config), compile_config=compile_config
+        get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
     )
     executable(*_tirx_args(case))
     torch.cuda.synchronize()
@@ -1911,7 +1911,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1963,12 +1963,12 @@ def run_bench(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    prepared = prepare_bench(**config, compile_config=compile_config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

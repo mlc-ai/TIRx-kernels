@@ -328,20 +328,18 @@ class Kernel:
     def mod(self):
         return tvm.IRModule({"main": self.func})
 
-    def compile(self, target=None, *, compile_config=None):
+    def compile(self, target=None, *, backend_config=None):
         """Compile with build defaults overridden by the device entry settings."""
-        if target is None and compile_config is None:
-            from tvm.backend.cuda import CompileConfig
-
-            compile_config = CompileConfig()
+        if target is None and (backend_config is None or backend_config == {}):
+            backend_config = {"cuda": {}}
         return tvm.compile(
-            self.mod, target=target, tir_pipeline="tirx", compile_config=compile_config
+            self.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
         )
 
-    def source(self, target=None, *, compile_config=None):
+    def source(self, target=None, *, backend_config=None):
         """Return the CUDA source generated for the supplied compile settings."""
         return (
-            self.compile(target, compile_config=compile_config)
+            self.compile(target, backend_config=backend_config)
             .mod.imports[0]
             .inspect_source("cuda")
         )
@@ -431,7 +429,7 @@ class _TraceContext:
 class _DeviceEntry:
     """One native region, closed by a with block or by the kernel decorator."""
 
-    def __init__(self, context, launch, kernel_attrs, compile_config):
+    def __init__(self, context, launch, kernel_attrs, backend_config):
         from tvm.backend.cuda.launch import KernelAttributes, LaunchConfig
         from tvm.backend.cuda.launch._impl import _integer
 
@@ -456,7 +454,7 @@ class _DeviceEntry:
         self.session.launch = launch
         self.session.kernel_attrs = kernel_attrs
         self.frame = I.device_entry(
-            launch=launch, kernel_attrs=kernel_attrs, compile_config=compile_config
+            launch=launch, kernel_attrs=kernel_attrs, backend_config=backend_config
         )
         self.closed = False
         self.managed = False
@@ -499,7 +497,7 @@ class _DeviceEntry:
             _TLS.session = None
 
 
-def device_entry(*, launch, kernel_attrs=None, compile_config=None):
+def device_entry(*, launch, kernel_attrs=None, backend_config=None):
     """Start the kernel's device region with explicit CUDA launch configuration.
 
     A flat call covers the remainder of the traced function. A ``with`` block
@@ -515,7 +513,7 @@ def device_entry(*, launch, kernel_attrs=None, compile_config=None):
     context = getattr(_TLS, "trace", None)
     if context is None:
         raise RuntimeError("device_entry is only valid inside a @txl.kernel body")
-    return _DeviceEntry(context, launch, kernel_attrs, compile_config)
+    return _DeviceEntry(context, launch, kernel_attrs, backend_config)
 
 
 def kernel(*, allowed_func_calls: tuple[str, ...] = (), check_ir: bool = True, **obsolete):
@@ -528,8 +526,8 @@ def kernel(*, allowed_func_calls: tuple[str, ...] = (), check_ir: bool = True, *
 
     if obsolete:
         raise TypeError(
-            f"Unsupported txl.kernel options {tuple(obsolete)}; pass CompileConfig to "
-            "Kernel.compile() or device_entry(compile_config=...)"
+            f"Unsupported txl.kernel options {tuple(obsolete)}; pass BackendConfig to "
+            "Kernel.compile() or device_entry(backend_config=...)"
         )
 
     def decorator(fn):

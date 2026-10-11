@@ -5,7 +5,6 @@
 
 import ctypes
 from dataclasses import asdict, dataclass
-from functools import cache
 from typing import Any
 from unittest import SkipTest
 
@@ -13,6 +12,7 @@ import torch
 
 import tirx_kernels.tirx_lite as txl
 import tvm
+from tirx_kernels.runner import cache_backend_config
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
@@ -333,7 +333,7 @@ class TF32HCBenchCase:
 
 
 def _make_kernel(
-    *, m: int, n: int, k: int, num_splits: int, seed: int, num_sms: int, compile_config=None
+    *, m: int, n: int, k: int, num_splits: int, seed: int, num_sms: int, backend_config=None
 ):
     """Trace the canonical K-owned device body for one specialization."""
     config = _make_config(m=m, n=n, k=k, num_splits=num_splits, seed=seed, num_sms=num_sms)
@@ -426,7 +426,7 @@ def _make_kernel(
                 programmatic_stream_serialization=True,
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         warp_idx = txl.warp_id()
@@ -967,17 +967,17 @@ def _build_tirx_tensor_maps(data: dict[str, Any]) -> tuple[Any, Any, Any]:
     return a_map, b_map, d_map
 
 
-def get_kernel(*, compile_config=None, **kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     config = _make_config(**kwargs)
-    return _make_kernel(**asdict(config), compile_config=compile_config).func
+    return _make_kernel(**asdict(config), backend_config=backend_config).func
 
 
 def _compile_tirx_tf32_hc_for_config(
-    *, m: int, n: int, k: int, num_splits: int, seed: int, num_sms: int, compile_config=None
+    *, m: int, n: int, k: int, num_splits: int, seed: int, num_sms: int, backend_config=None
 ) -> Any:
     from tirx_kernels.runner import cuda_target
 
-    target = cuda_target(compile_config=compile_config)
+    target = cuda_target(backend_config=backend_config)
     kernel = get_kernel(
         m=m,
         n=n,
@@ -985,27 +985,27 @@ def _compile_tirx_tf32_hc_for_config(
         num_splits=num_splits,
         seed=seed,
         num_sms=num_sms,
-        compile_config=compile_config,
+        backend_config=backend_config,
     )
     with target:
         return tvm.compile(
             tvm.IRModule({"main": kernel}),
             target=target,
             tir_pipeline="tirx",
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
 
-_compile_tirx_tf32_hc_for_config = cache(_compile_tirx_tf32_hc_for_config)
+_compile_tirx_tf32_hc_for_config = cache_backend_config(_compile_tirx_tf32_hc_for_config)
 
 
 def _compile_tirx_tf32_hc_key(config: TF32HCPrenormGemmConfig) -> tuple[tuple[str, Any], ...]:
     return tuple(asdict(config).items())
 
 
-def _compile_tirx_tf32_hc(config: TF32HCPrenormGemmConfig, *, compile_config=None) -> Any:
+def _compile_tirx_tf32_hc(config: TF32HCPrenormGemmConfig, *, backend_config=None) -> Any:
     compile_kwargs = asdict(config)
-    return _compile_tirx_tf32_hc_for_config(**compile_kwargs, compile_config=compile_config)
+    return _compile_tirx_tf32_hc_for_config(**compile_kwargs, backend_config=backend_config)
 
 
 def _run_tirx_with_tensor_maps(
@@ -1024,11 +1024,11 @@ def _run_tirx_with_tensor_maps(
 
 
 def _launch_tirx_hc(
-    data: dict[str, Any], *, compile_config=None
+    data: dict[str, Any], *, backend_config=None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return _run_tirx_with_tensor_maps(
         data,
-        _compile_tirx_tf32_hc(data["config"], compile_config=compile_config),
+        _compile_tirx_tf32_hc(data["config"], backend_config=backend_config),
         _build_tirx_tensor_maps(data),
     )
 
@@ -1086,14 +1086,14 @@ def _assert_correct_case(
     return diff
 
 
-def run_test(*, compile_config=None, **kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     data = prepare_data(**kwargs)
     deepgemm_d, deepgemm_sqr = _run_deepgemm_hc(data)
     torch.cuda.synchronize()
     # Library-anchored: the torch ref is a yardstick, not the arbiter --
     # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
     deepgemm_diff = _assert_correct(data, deepgemm_d, deepgemm_sqr, name="DeepGEMM")
-    tirx_d, tirx_sqr = _launch_tirx_hc(data, compile_config=compile_config)
+    tirx_d, tirx_sqr = _launch_tirx_hc(data, backend_config=backend_config)
     torch.cuda.synchronize()
     tirx_diff = _assert_correct(data, tirx_d, tirx_sqr, name="TIRx")
     if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
@@ -1142,7 +1142,7 @@ def _bench_deepgemm_case(case: TF32HCBenchCase) -> tuple[torch.Tensor, torch.Ten
     return case.d_deepgemm, case.sqr_deepgemm
 
 
-def prepare_bench(*, compile_config=None, **kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Compile the hardware-profile specialization before GPU assignment."""
     from tirx_kernels.runner import hardware_num_sms, prepared_gpu_benchmark
 
@@ -1150,13 +1150,13 @@ def prepare_bench(*, compile_config=None, **kwargs: Any):
     runtime_config = TF32HCPrenormGemmConfig(
         **{**asdict(config), "num_sms": hardware_num_sms(config.num_sms)}
     )
-    executable = _compile_tirx_tf32_hc(runtime_config, compile_config=compile_config)
+    executable = _compile_tirx_tf32_hc(runtime_config, backend_config=backend_config)
     return prepared_gpu_benchmark(
-        run_gpu, {"config": dict(kwargs), "executable": executable}, compile_config=compile_config
+        run_gpu, {"config": dict(kwargs), "executable": executable}, backend_config=backend_config
     )
 
 
-def run_gpu(prepared, *, compile_config=None, **kwargs: Any) -> dict[str, Any]:
+def run_gpu(prepared, *, backend_config=None, **kwargs: Any) -> dict[str, Any]:
     from tirx_kernels.runner import bench
 
     kwargs = {**prepared["config"], **kwargs}
@@ -1198,13 +1198,13 @@ def run_gpu(prepared, *, compile_config=None, **kwargs: Any) -> dict[str, Any]:
     return result
 
 
-def run_bench(*, compile_config=None, **kwargs: Any) -> dict[str, Any]:
+def run_bench(*, backend_config=None, **kwargs: Any) -> dict[str, Any]:
     protocol = {
         name: kwargs.pop(name)
         for name in ("warmup", "repeat", "timer", "rounds", "cooldown_s")
         if name in kwargs
     }
-    return prepare_bench(**kwargs, compile_config=compile_config).run_gpu(**protocol)
+    return prepare_bench(**kwargs, backend_config=backend_config).run_gpu(**protocol)
 
 
 __all__ = [

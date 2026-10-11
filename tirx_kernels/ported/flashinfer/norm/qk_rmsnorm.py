@@ -13,7 +13,7 @@ public dispatch is in ``flashinfer/norm/__init__.py``.
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import bench, resolve_compile_config
+from tirx_kernels.runner import bench, resolve_backend_config
 
 KERNEL_META = {
     "name": "flashinfer_qk_rmsnorm",
@@ -50,8 +50,8 @@ _FMA_HALF_TO_F32 = {"float16": "fma.rn.f32.f16", "bfloat16": "fma.rn.f32.bf16"}
 _CP_ASYNC = "cp.async.ca.shared.global"
 
 
-def _preparing_for_thor(*, compile_config=None) -> bool:
-    return resolve_compile_config(compile_config).arch == "sm_110a"
+def _preparing_for_thor(*, backend_config=None) -> bool:
+    return resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a"
 
 
 def _ceil_div(lhs: int, rhs: int) -> int:
@@ -397,7 +397,7 @@ def get_kernel(
     B: int = 1,
     N: int = 1,
     eps: float = _DEFAULT_EPS,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ):
     """Return the source-shaped dynamic-stride QK RMSNorm specialization."""
@@ -434,7 +434,7 @@ def get_kernel(
     # The packed x staging is only reachable on the synchronous full-tile
     # power-of-two shape; elsewhere the f32 lanes carry x directly.
     packed_x_pairs = not use_async and full_tile and vb_pow2
-    thor_predicated_async = _preparing_for_thor(compile_config=compile_config) and H == 128
+    thor_predicated_async = _preparing_for_thor(backend_config=backend_config) and H == 128
     thor_static_n = thor_predicated_async and N & (N - 1) == 0
 
     for name in ("x_batch_stride", "x_head_stride", "y_batch_stride", "y_head_stride"):
@@ -475,7 +475,7 @@ def get_kernel(
                 block=threads // 32 * 32,
                 programmatic_stream_serialization=enable_pdl,
             ),
-            compile_config=resolve_compile_config(compile_config),
+            backend_config=resolve_backend_config(backend_config),
         )
 
         block_raw = txl.cuda.block_idx("x")
@@ -972,7 +972,7 @@ def _assert_inputs_unchanged(data, snapshot, B: int, N: int, H: int) -> None:
     _assert_all_guard(data["weight_backing"][H:], name="weight")
 
 
-def run_test(*, compile_config=None, **config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     """Compile, launch, and validate one QK RMSNorm config."""
     import torch
 
@@ -996,7 +996,7 @@ def run_test(*, compile_config=None, **config: Any) -> None:
     )
 
     executable = compile_kernel(
-        get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+        get_kernel(**config, backend_config=backend_config), backend_config=backend_config
     )
     _launch_tirx(executable, data, output, config)
 
@@ -1054,17 +1054,17 @@ def run_test(*, compile_config=None, **config: Any) -> None:
     )
 
 
-def prepare_bench(*, compile_config=None, **config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Compile the selected specialization before GPU assignment."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     state = {
         "config": dict(config),
         "executable": compile_kernel(
-            get_kernel(**config, compile_config=compile_config), compile_config=compile_config
+            get_kernel(**config, backend_config=backend_config), backend_config=backend_config
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state, compile_config=compile_config)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -1075,7 +1075,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **kwargs: Any,
 ):
     """Construct and validate both single-launch timed closures."""
@@ -1138,11 +1138,11 @@ def run_bench(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
-    compile_config=None,
+    backend_config=None,
     **config: Any,
 ):
     """Benchmark QK RMSNorm against FlashInfer CuTe-DSL."""
-    prepared = prepare_bench(**config, compile_config=compile_config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

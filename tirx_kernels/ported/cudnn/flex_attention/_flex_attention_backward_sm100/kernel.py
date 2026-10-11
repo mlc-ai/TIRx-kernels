@@ -340,7 +340,7 @@ def _tmem_load(dst, base, address, count):
     txl.ptx[mnemonic](*(dst[base + i] for i in range(count)), txl.cast(address, "uint32"))
 
 
-def get_kernel(*, compile_config=None, **config):
+def get_kernel(*, backend_config=None, **config):
     varlen = bool(config.get("varlen", False))
     batch = int(config["batch"])
     heads = int(config["num_q_heads"])
@@ -391,7 +391,7 @@ def get_kernel(*, compile_config=None, **config):
     if (head_dim, head_dim_v) in ((128, 128), (192, 128)):
         from .kernel_2cta import get_kernel_2cta
 
-        return get_kernel_2cta(**config, compile_config=compile_config)
+        return get_kernel_2cta(**config, backend_config=backend_config)
     if tile_dim > 128 or tile_dim_v > 128:
         raise ValueError("unsupported cooperative dimension pair")
     qhead_per_kvhead = heads // kv_heads
@@ -614,7 +614,7 @@ def get_kernel(*, compile_config=None, **config):
                 grid=((seqlen_q + 127) // 128, heads, batch), block=8 * 32
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1, required_block_size=True),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         txl.ptx.griddepcontrol.wait()
@@ -756,7 +756,7 @@ def get_kernel(*, compile_config=None, **config):
                 block=WARPS * 32,
             ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
-            compile_config=compile_config,
+            backend_config=backend_config,
         )
 
         block, head_axis, batch_axis = txl.cta_id()
@@ -1888,7 +1888,7 @@ def get_kernel(*, compile_config=None, **config):
                 kernel_attrs=txl.cuda.KernelAttributes(
                     min_blocks_per_sm=1, required_block_size=True
                 ),
-                compile_config=compile_config,
+                backend_config=backend_config,
             )
 
             seq_tile, head, batch_idx = txl.cta_id()
