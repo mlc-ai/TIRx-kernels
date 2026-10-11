@@ -910,7 +910,7 @@ def prepare_bench(dtype, M, N, K, *, backend_config=None, **kwargs):
         target = cuda_target(backend_config=backend_config)
         with target:
             mod = tvm.IRModule({"main": kernel})
-            ex = tvm.compile(mod, target=target, tir_pipeline="tirx", backend_config=backend_config)
+            ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
     state = PreparedBench(dtype=dtype, M=M, N=N, K=K, executable=ex)
     return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 

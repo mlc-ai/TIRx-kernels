@@ -1448,7 +1448,7 @@ def _compile_tirx_paged_mqa_for_config(
     )
     with target:
         mod = tvm.IRModule({"main": kernel})
-        return tvm.compile(mod, target=target, tir_pipeline="tirx", backend_config=backend_config)
+        return tvm.compile(mod, target=target, tir_pipeline="tirx")
 
 
 _compile_tirx_paged_mqa_for_config = cache_backend_config(_compile_tirx_paged_mqa_for_config)

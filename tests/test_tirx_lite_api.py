@@ -10,8 +10,9 @@ import pytest
 from tvm_ffi import structural_walk
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import cuda_target
 from tvm import ir
-from tvm.backend.config import parse_backend_config
+from tvm.backend.config import copy_backend_config, parse_backend_config
 
 
 def test_kernel_compile_receives_explicit_settings(monkeypatch):
@@ -25,8 +26,8 @@ def test_kernel_compile_receives_explicit_settings(monkeypatch):
     calls = []
     monkeypatch.setattr(tvm, "compile", lambda *args, **kwargs: calls.append(kwargs))
     config = {"cuda": {"arch": "sm_107a", "nvcc": [], "nvrtc": []}}
-    probe.compile(backend_config=config)
-    assert calls[0]["backend_config"] is config
+    probe.compile(target=cuda_target(backend_config=config))
+    assert copy_backend_config(calls[0]["target"].attrs["backend_config"]) == config
     assert "tirx.cuda_arch" not in probe.func.attrs
     assert not hasattr(probe, "arch")
     with pytest.raises(TypeError, match="BackendConfig"):

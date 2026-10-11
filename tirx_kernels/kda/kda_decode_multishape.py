@@ -1104,9 +1104,7 @@ def _make_base(*, backend_config=None):
             kernel = build_kernel(**kw, backend_config=backend_config)
             target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(
-                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
-                )
+                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
             _COMPILED[(cache_config, key)] = exe
         return exe
 
@@ -2290,9 +2288,7 @@ def _make_defer(*, backend_config=None):
             kernel = build_kernel(**kw, backend_config=backend_config)
             target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(
-                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
-                )
+                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
             _COMPILED[(cache_config, key)] = exe
         return exe
 
@@ -3432,9 +3428,7 @@ def _make_dyn(*, backend_config=None):
             kernel = build_kernel(**kw, backend_config=backend_config)
             target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(
-                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
-                )
+                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
             _COMPILED[(cache_config, key)] = exe
         return exe
 
@@ -4780,9 +4774,7 @@ def _make_split(*, backend_config=None):
             kernel = build_kernel(**kw, backend_config=backend_config)
             target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(
-                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
-                )
+                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
             _COMPILED[(cache_config, key)] = exe
         return exe
 
@@ -5944,9 +5936,7 @@ def _make_clc(*, backend_config=None):
             kernel = build_kernel(**kw, backend_config=backend_config)
             target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(
-                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
-                )
+                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
             _COMPILED[(cache_config, key)] = exe
         return exe
 

@@ -2457,9 +2457,7 @@ def _compile(kernel, reg_level=None, *, backend_config=None):
         )
     target = cuda_target(backend_config=backend_config)
     with target:
-        return tvm.compile(
-            kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
-        )
+        return tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
 
 
 def _get_executable(

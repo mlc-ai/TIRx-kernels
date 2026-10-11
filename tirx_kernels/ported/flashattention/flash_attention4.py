@@ -1901,7 +1901,6 @@ def _profile_iket_workload(args: argparse.Namespace, *, backend_config=None) -> 
         tvm.IRModule({"main": func}),
         target=cuda_target(backend_config=backend_config),
         tir_pipeline="tirx",
-        backend_config=backend_config,
     )
 
     q, k, v, _ = prepare_data(

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
+import importlib
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from tirx_kernels import runner
-from tvm.backend.config import merge_backend_configs
+from tvm.backend.config import copy_backend_config, merge_backend_configs
 
 
 def test_explicit_config_defaults_and_forwarding(monkeypatch):
@@ -48,7 +49,40 @@ def test_explicit_config_defaults_and_forwarding(monkeypatch):
     monkeypatch.setattr(runner.tvm, "compile", lambda *a, **kw: calls.append(kw))
     monkeypatch.setattr(runner.tvm, "IRModule", lambda value: value)
     runner.compile_kernel(object(), backend_config=config)
-    assert calls[0]["backend_config"] == config
+    assert copy_backend_config(calls[0]["target"].attrs["backend_config"]) == config
+
+
+@pytest.mark.parametrize("precision,register_level", [("fp4", 10), ("fp8", 6)])
+@pytest.mark.parametrize("explicit_options", [False, True])
+def test_mqa_compile_target_preserves_tuning(
+    monkeypatch, precision, register_level, explicit_options
+):
+    module = importlib.import_module(f"tirx_kernels.ported.deepgemm.mqa_logits_{precision}")
+    monkeypatch.setattr(module, "get_kernel", lambda **kwargs: object())
+    monkeypatch.setattr(runner.tvm, "IRModule", lambda value: value)
+    monkeypatch.setattr(runner.tvm, "compile", lambda mod, *, target, tir_pipeline: target)
+    config = {"cuda": {"arch": "sm_100a"}}
+    if explicit_options:
+        config["cuda"].update(nvcc=[], nvrtc=["--ftz=true"], ptxas=[])
+    target = module._compile_tirx_mqa_for_config.__wrapped__(
+        seq_len=128,
+        seq_len_kv=128,
+        num_heads=64,
+        head_dim=128,
+        logits_dtype="float32",
+        compressed_logits=False,
+        disable_cp=True,
+        num_sms=1,
+        logits_stride_override=None,
+        backend_config=config,
+    )
+    compiled_config = copy_backend_config(target.attrs["backend_config"])["cuda"]
+    if explicit_options:
+        assert compiled_config == config["cuda"]
+    else:
+        assert compiled_config["nvcc"] == ["--use_fast_math", "--ftz=false"]
+        assert compiled_config["nvrtc"] == ["--use_fast_math", "--ftz=false"]
+        assert f"--register-usage-level={register_level}" in compiled_config["ptxas"]
 
 
 def test_cpu_prepare_requires_explicit_arch():

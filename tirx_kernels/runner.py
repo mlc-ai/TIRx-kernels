@@ -408,6 +408,7 @@ def cuda_target(*, backend_config=None):
     active = tvm.target.Target.current()
     attrs = dict(active.export()) if active is not None else {"kind": "cuda"}
     attrs["arch"] = config["cuda"]["arch"]
+    attrs["backend_config"] = merge_backend_configs(attrs.get("backend_config"), config)
     return tvm.target.Target(attrs)
 
 
@@ -684,8 +685,11 @@ def cuda_initialization_guard(*, require_uninitialized: bool = False):
 
 def compile_kernel(func, *, backend_config: dict[str, Any] | None = None):
     """Compile a TIRx function with explicit CUDA compilation settings."""
-    config = resolve_backend_config(backend_config)
-    return tvm.compile(tvm.IRModule({"main": func}), tir_pipeline="tirx", backend_config=config)
+    return tvm.compile(
+        tvm.IRModule({"main": func}),
+        target=cuda_target(backend_config=backend_config),
+        tir_pipeline="tirx",
+    )
 
 
 def run_kernel_test(

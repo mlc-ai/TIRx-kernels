@@ -61,7 +61,7 @@ import torch
 
 import tirx_kernels.tirx_lite as txl
 import tvm
-from tirx_kernels.runner import backend_config_key, resolve_backend_config
+from tirx_kernels.runner import backend_config_key, cuda_target, resolve_backend_config
 from tvm.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
 
 BK = 128
@@ -2468,7 +2468,7 @@ def _executable(G, M, TOPK, E, HID, INTER, cs, *, backend_config=None):
     if (cache_config, key) not in _COMPILED:
         _COMPILED[(cache_config, key)] = build_kernel(
             G, M, TOPK, E, HID, INTER, cs, backend_config=backend_config
-        ).compile(backend_config=backend_config)
+        ).compile(target=cuda_target(backend_config=backend_config))
     return _COMPILED[(cache_config, key)]
 
 
@@ -2495,7 +2495,7 @@ def _precompile(M, topk, E, HID, INTER, sms, *, backend_config=None):
         if (cache_config, key) not in _COMPILED:
             _COMPILED[(cache_config, key)] = build_wide_kernel(
                 G, 1, topk, int(E), int(HID), INTER, backend_config=backend_config
-            ).compile(backend_config=backend_config)
+            ).compile(target=cuda_target(backend_config=backend_config))
         return _COMPILED[(cache_config, key)]
     (cs,) = choose_splits(int(M))
     return _executable(G, int(M), topk, int(E), int(HID), INTER, cs, backend_config=backend_config)
@@ -2520,7 +2520,7 @@ def setup(data, M, *, backend_config=None):
         if (cache_config, key) not in _COMPILED:
             _COMPILED[(cache_config, key)] = build_wide_kernel(
                 G, 1, topk, int(E), int(HID), INTER, backend_config=backend_config
-            ).compile(backend_config=backend_config)
+            ).compile(target=cuda_target(backend_config=backend_config))
         return make_wide_runner(_COMPILED[(cache_config, key)], data, M)
     (cs,) = choose_splits(int(M))
     executable = _executable(

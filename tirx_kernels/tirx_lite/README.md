@@ -142,23 +142,26 @@ selected = txl.Select(choose_a, a_desc + a_off(kp), b_desc + b_off(kp))
 
 ## CUDA compiler settings
 
-Pass the same nested `backend_config` mapping to the factory and compile entry.
+Pass the nested `backend_config` mapping to the factory and place it in the compile Target.
 `txl.cuda.BackendConfig` is a `TypedDict` helper returning an ordinary dictionary:
 
 ```python
+import tvm
+
 config = {"cuda": txl.cuda.BackendConfig(
     arch="sm_100a", compiler="nvrtc",
     nvrtc=["--use_fast_math", "--ftz=false"],
 )}
 kernel = make_kernel(..., backend_config=config)
-executable = kernel.compile(backend_config=config)
+target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a", "backend_config": config})
+executable = kernel.compile(target=target)
 ```
 
 A factory that chooses Python code by architecture resolves its architecture
 before tracing and records it on `txl.device_entry(..., backend_config=config)`.
 Factories can use `runner.resolve_backend_config` to pin that architecture while
-leaving unspecified compiler defaults inheritable. Entry keys override compile
-settings, which override Target/tag settings and backend defaults. Each toolchain
+leaving unspecified compiler defaults inheritable. Entry keys override Target/tag
+settings, which override backend defaults. Each toolchain
 argument list replaces the inherited list, and `[]` clears it.
 
 Registered `get_kernel`, `run_test`, and `prepare_bench` functions receive

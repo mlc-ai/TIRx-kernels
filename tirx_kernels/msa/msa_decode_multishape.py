@@ -2557,9 +2557,7 @@ def _compile(cfg, builder, family, *, backend_config=None):
         kernel = builder(cfg, backend_config=backend_config)
         target = cuda_target(backend_config=backend_config)
         with target:
-            hit = tvm.compile(
-                kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
-            )
+            hit = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
         _EXEC_CACHE[(cache_config, key)] = hit
     return hit
 
@@ -5637,9 +5635,7 @@ def setup_q16_twotile(data, B, seqlen_q, *, backend_config=None):
         kernel = make_kernel_q16_twotile(B, T, hq, hkv, topk, int(num_sms))
         target = cuda_target(backend_config=backend_config)
         with target:
-            ex = tvm.compile(
-                kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
-            )
+            ex = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
         _EXEC_CACHE[(cache_config, key)] = ex
 
     scale_log2 = float(data["softmax_scale"]) * LOG2E

@@ -988,12 +988,7 @@ def _compile_tirx_tf32_hc_for_config(
         backend_config=backend_config,
     )
     with target:
-        return tvm.compile(
-            tvm.IRModule({"main": kernel}),
-            target=target,
-            tir_pipeline="tirx",
-            backend_config=backend_config,
-        )
+        return tvm.compile(tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx")
 
 
 _compile_tirx_tf32_hc_for_config = cache_backend_config(_compile_tirx_tf32_hc_for_config)

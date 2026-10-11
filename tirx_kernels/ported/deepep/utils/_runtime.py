@@ -25,6 +25,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 import tvm
+from tirx_kernels.runner import cuda_target
 from tvm.tirx.bench import DistributedBenchContext
 
 _PROCESS_GROUP_TIMEOUT = timedelta(seconds=60)
@@ -147,9 +148,8 @@ def compile_kernels(kernels: dict[str, Any], tmpdir: str, *, backend_config=None
         library_path = Path(tmpdir) / f"{name}.so"
         executable = tvm.compile(
             tvm.IRModule({"main": func}),
-            target="cuda",
+            target=cuda_target(backend_config=backend_config),
             tir_pipeline="tirx",
-            backend_config=backend_config,
         )
         executable.export_library(str(library_path))
         library_paths[name] = str(library_path)

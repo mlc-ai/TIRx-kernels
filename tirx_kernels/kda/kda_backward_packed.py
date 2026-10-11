@@ -12330,7 +12330,7 @@ def _compile(kind, *key_args, backend_config=None):
         )
         with target:
             _KERNEL_CACHE[(cache_config, key)] = tvm.compile(
-                kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
+                kernel.mod, target=target, tir_pipeline="tirx"
             )
     return _KERNEL_CACHE[(cache_config, key)]
 

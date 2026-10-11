@@ -1977,7 +1977,7 @@ def _get_kernel(
         target = cuda_target(backend_config=backend_config)
         with target:
             _KERNELS[(cache_config, key)] = tvm.compile(
-                kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
+                kernel.mod, target=target, tir_pipeline="tirx"
             )
     return _KERNELS[(cache_config, key)]
 
@@ -3807,18 +3807,12 @@ def _compile(H, hpc, *, backend_config=None):
         k1 = make_front(H, backend_config=backend_config)
         with cuda_target(backend_config=backend_config):
             exe1 = tvm.compile(
-                k1.mod,
-                target=cuda_target(backend_config=backend_config),
-                tir_pipeline="tirx",
-                backend_config=backend_config,
+                k1.mod, target=cuda_target(backend_config=backend_config), tir_pipeline="tirx"
             )
         k2 = make_chain(H, hpc, backend_config=backend_config)
         with cuda_target(backend_config=backend_config):
             exe2 = tvm.compile(
-                k2.mod,
-                target=cuda_target(backend_config=backend_config),
-                tir_pipeline="tirx",
-                backend_config=backend_config,
+                k2.mod, target=cuda_target(backend_config=backend_config), tir_pipeline="tirx"
             )
         exes = (exe1, exe2)
         _COMPILED[(cache_config, (H, hpc))] = exes

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import tirx_kernels.tirx_lite as txl
 import tvm
-from tirx_kernels.runner import bench, resolve_backend_config
+from tirx_kernels.runner import bench, cuda_target, resolve_backend_config
 
 
 class WarpRole(IntEnum):
@@ -988,7 +988,7 @@ class _Runner:
     def __init__(self, M, N, K, *, backend_config=None):
         self.shape = M, N, K
         self.lib = make_kernel(M, N, K, backend_config=backend_config).compile(
-            backend_config=backend_config
+            target=cuda_target(backend_config=backend_config)
         )
         self._maps = None
         self._map_key = None

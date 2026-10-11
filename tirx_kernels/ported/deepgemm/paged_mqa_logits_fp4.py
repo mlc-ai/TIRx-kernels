@@ -1522,9 +1522,7 @@ def _compile_tirx_paged_mqa_for_config(
     try:
         with target:
             mod = tvm.IRModule({"main": kernel})
-            return tvm.compile(
-                mod, target=target, tir_pipeline="tirx", backend_config=backend_config
-            )
+            return tvm.compile(mod, target=target, tir_pipeline="tirx")
     finally:
         if previous_postproc is not None:
             tvm.register_global_func("tvm_callback_cuda_postproc", previous_postproc, override=True)

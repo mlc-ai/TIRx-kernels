@@ -1107,7 +1107,6 @@ def _compile_spec_cached(spec: GemmSpec, *, backend_config=None):
         tvm.IRModule({"main": func}),
         target=cuda_target(backend_config=backend_config),
         tir_pipeline="tirx",
-        backend_config=backend_config,
     )
 
 

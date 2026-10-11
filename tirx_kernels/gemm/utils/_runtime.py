@@ -480,10 +480,7 @@ def _run_distributed_modules(
         for index, (name, ir_module) in enumerate(ir_modules.items()):
             library_path = Path(tmpdir) / f"kernel-{index}.so"
             executable = tvm.compile(
-                ir_module,
-                target=cuda_target(backend_config=backend_config),
-                tir_pipeline="tirx",
-                backend_config=backend_config,
+                ir_module, target=cuda_target(backend_config=backend_config), tir_pipeline="tirx"
             )
             executable.export_library(str(library_path))
             library_paths[name] = str(library_path)
@@ -519,10 +516,7 @@ def prepare_distributed_bench(
     library_path = Path(temporary_directory.name) / "kernel.so"
     try:
         executable = tvm.compile(
-            ir_module,
-            target=cuda_target(backend_config=backend_config),
-            tir_pipeline="tirx",
-            backend_config=backend_config,
+            ir_module, target=cuda_target(backend_config=backend_config), tir_pipeline="tirx"
         )
         executable.export_library(str(library_path))
     except BaseException:

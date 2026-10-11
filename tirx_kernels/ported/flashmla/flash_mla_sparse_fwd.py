@@ -290,7 +290,6 @@ def _profile_iket_workload(args: argparse.Namespace, *, backend_config=None) -> 
             tvm.IRModule({"main": get_kernel(**config, backend_config=backend_config)}),
             target=target,
             tir_pipeline="tirx",
-            backend_config=backend_config,
         )
         case = prepare_data(**config)
         launches.append((executable, _iket_launch_args(case)))

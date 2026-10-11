@@ -15,7 +15,7 @@ from typing import Any
 
 import tirx_kernels.tirx_lite as txl
 import tvm
-from tirx_kernels.runner import cache_backend_config, resolve_backend_config
+from tirx_kernels.runner import cache_backend_config, cuda_target, resolve_backend_config
 
 KERNEL_META = {
     "name": "fastcu_nvfp4_gemm_gb300",
@@ -1270,7 +1270,9 @@ class _Runner:
                 }
             },
         )
-        self.lib = make_kernel(backend_config=backend_config).compile(backend_config=backend_config)
+        self.lib = make_kernel(backend_config=backend_config).compile(
+            target=cuda_target(backend_config=backend_config)
+        )
         self._maps = None
         self._map_key = None
 

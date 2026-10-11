@@ -21,7 +21,7 @@ import torch
 
 import tirx_kernels.tirx_lite as txl
 import tvm
-from tirx_kernels.runner import cache_backend_config, resolve_backend_config
+from tirx_kernels.runner import cache_backend_config, cuda_target, resolve_backend_config
 from tvm.backend.cuda.cpp.descriptors import encode_smem_descriptor_base_uint64
 
 HEAD_DIM = 128
@@ -1422,7 +1422,7 @@ def _compile_pipeline(
     B: int, H: int, S: int, D: int, causal: bool, attention_scale: float, *, backend_config=None
 ):
     preprocess = build_preprocess(B, S, H, D, backend_config=backend_config).compile(
-        backend_config=backend_config
+        target=cuda_target(backend_config=backend_config)
     )
     core_config = backend_config
     if resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a" and S >= 8192:
@@ -1440,10 +1440,10 @@ def _compile_pipeline(
         )
     core = build_kernel(
         B, H, S, D, causal=causal, attention_scale=attention_scale, backend_config=core_config
-    ).compile(backend_config=core_config)
+    ).compile(target=cuda_target(backend_config=core_config))
     cast = build_cast_f32_to_f16(
         B, S, H, D, attention_scale, backend_config=backend_config
-    ).compile(backend_config=backend_config)
+    ).compile(target=cuda_target(backend_config=backend_config))
     return preprocess, core, cast
 
 

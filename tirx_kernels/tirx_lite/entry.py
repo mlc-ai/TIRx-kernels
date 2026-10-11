@@ -328,21 +328,15 @@ class Kernel:
     def mod(self):
         return tvm.IRModule({"main": self.func})
 
-    def compile(self, target=None, *, backend_config=None):
-        """Compile with build defaults overridden by the device entry settings."""
-        if target is None and (backend_config is None or backend_config == {}):
-            backend_config = {"cuda": {}}
-        return tvm.compile(
-            self.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
-        )
+    def compile(self, target=None):
+        """Compile with Target defaults overridden by the device entry settings."""
+        if target is None:
+            target = tvm.target.Target.current() or "cuda"
+        return tvm.compile(self.mod, target=target, tir_pipeline="tirx")
 
-    def source(self, target=None, *, backend_config=None):
+    def source(self, target=None):
         """Return the CUDA source generated for the supplied compile settings."""
-        return (
-            self.compile(target, backend_config=backend_config)
-            .mod.imports[0]
-            .inspect_source("cuda")
-        )
+        return self.compile(target).mod.imports[0].inspect_source("cuda")
 
     def __repr__(self):
         return f"<txl.kernel {self.name} warps={self.warps}>"
@@ -526,8 +520,8 @@ def kernel(*, allowed_func_calls: tuple[str, ...] = (), check_ir: bool = True, *
 
     if obsolete:
         raise TypeError(
-            f"Unsupported txl.kernel options {tuple(obsolete)}; pass BackendConfig to "
-            "Kernel.compile() or device_entry(backend_config=...)"
+            f"Unsupported txl.kernel options {tuple(obsolete)}; set BackendConfig on "
+            "the compile Target or device_entry(backend_config=...)"
         )
 
     def decorator(fn):
