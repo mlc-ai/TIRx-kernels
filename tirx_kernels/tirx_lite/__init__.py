@@ -379,7 +379,7 @@ def alloc_tensor(
             'tirx-lite does not support scope="tmem" buffers; use raw tcgen05 column '
             "operands and txl.cuda.get_tmem_addr(...)"
         )
-    return _I.alloc_tensor(
+    tensor_type = _I.Tensor(
         shape,
         dtype,
         data=data,
@@ -387,8 +387,8 @@ def alloc_tensor(
         byte_offset=byte_offset,
         scope=scope,
         align=align,
-        annotations=annotations,
     )
+    return _I.bind(_I.alloc_tensor(ty_args=[tensor_type], annotations=annotations))
 
 
 def decl_tensor(
@@ -400,7 +400,7 @@ def decl_tensor(
             'tirx-lite does not support scope="tmem" buffers; use raw tcgen05 column '
             "operands and txl.cuda.get_tmem_addr(...)"
         )
-    return _I.decl_tensor(
+    tensor_type = _I.Tensor(
         shape,
         dtype,
         data=data,
@@ -409,6 +409,8 @@ def decl_tensor(
         scope=scope,
         align=align,
     )
+    pointer = _I.ptr(dtype, storage_scope=scope) if data is None else data
+    return _I.bind(_I.decl_tensor(pointer, ty_args=[tensor_type]))
 
 
 def alloc_local(shape, dtype="float32", *, align=-1, annotations=None):
