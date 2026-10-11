@@ -116,7 +116,7 @@ def tmem_row(n):
     return n << 16
 
 
-def make_kernel(HQ: int, HV: int):
+def make_kernel(HQ: int, HV: int, *, backend_config=None):
     """Trace the kernel for one (HQ, HV) specialization. HQ/HV are baked."""
     SUBHEADS = HV // HQ  # value sub-heads per q head
     RANK = 3 if HQ == HV else 4  # V/O tensormap rank
@@ -130,14 +130,7 @@ def make_kernel(HQ: int, HV: int):
     )
     TMA_S2G_O = f"cp.async.bulk.tensor.{RANK}d.global.shared::cta.tile.bulk_group.L2::cache_hint"
 
-    @txl.kernel(
-        warps=12,
-        arch="sm_100a",
-        min_blocks_per_sm=1,
-        # orig:L1376 — the launch extent IS min(total_work, num_sms); the
-        # kernel is persistent and grid-strides by exactly this.
-        grid=lambda p: txl.min(p["num_sequences"] * HV, p["num_sms"]),
-    )
+    @txl.kernel()
     def gdn_prefill(
         q: txl.gptr[txl.f16],
         k: txl.gptr[txl.f16],
@@ -158,6 +151,12 @@ def make_kernel(HQ: int, HV: int):
         num_sms: txl.i32,
         scale: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=txl.min(num_sequences * HV, num_sms), block=12 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         total_work = num_sequences * HV
         grid_x = txl.min(total_work, num_sms)
 
@@ -725,7 +724,9 @@ def make_kernel(HQ: int, HV: int):
                         # them under the same guard.        orig:L1560-1576
                         with txl.If(row0 >= col), txl.Then():
                             for j in range(2):
-                                txl.ptx.ld.shared.f32(clog[j], txl.address_of(s_cumsumlog[g2[j], col]))
+                                txl.ptx.ld.shared.f32(
+                                    clog[j], txl.address_of(s_cumsumlog[g2[j], col])
+                                )
                             for j in range(2):
                                 txl.ptx.ex2.approx.ftz.f32(transfer[j][i], rlog[j] - clog[j])
                     for j in range(2):
@@ -846,12 +847,16 @@ def make_kernel(HQ: int, HV: int):
             def cg1_acc_ld(fr, col):  # orig:L793-803
                 addr = tmem_at(tmem, col, rowbits1)
                 txl.ptx[TC_LD_256](*(fr[i] for i in range(32)), addr)
-                txl.ptx[TC_LD_256](*(fr[32 + i] for i in range(32)), addr + txl.uint32(tmem_row(16)))
+                txl.ptx[TC_LD_256](
+                    *(fr[32 + i] for i in range(32)), addr + txl.uint32(tmem_row(16))
+                )
 
             def cg1_acc_st(fr, col):  # orig:L805-815
                 addr = tmem_at(tmem, col, rowbits1)
                 txl.ptx[TC_ST_256](addr, *(fr[i] for i in range(32)))
-                txl.ptx[TC_ST_256](addr + txl.uint32(tmem_row(16)), *(fr[32 + i] for i in range(32)))
+                txl.ptx[TC_ST_256](
+                    addr + txl.uint32(tmem_row(16)), *(fr[32 + i] for i in range(32))
+                )
 
             def cg1_f16_st_half(col, words, half):  # orig:L817-824
                 addr = tmem_at(tmem, col, rowbits1) + txl.uint32(tmem_row(16 * half))
@@ -883,9 +888,9 @@ def make_kernel(HQ: int, HV: int):
 
             def state_gidx(batch, head):  # orig:L894-897
                 t = txl.Cast("int64", tid1 & 127)
-                return (txl.Cast("int64", batch) * txl.int64(HV) + txl.Cast("int64", head)) * txl.int64(
-                    D_HEAD * D_HEAD
-                ) + t * txl.int64(D_HEAD)
+                return (
+                    txl.Cast("int64", batch) * txl.int64(HV) + txl.Cast("int64", head)
+                ) * txl.int64(D_HEAD * D_HEAD) + t * txl.int64(D_HEAD)
 
             def load_initial_state(batch, head):  # orig:L888-912
                 # acquire the kv ring (empty-wait), fill S, software-arrive the
@@ -1018,7 +1023,9 @@ def make_kernel(HQ: int, HV: int):
                                 # the packed subtraction, so express that.
                                 txl.ptx.sub.rn.f32x2(dd, f2(ll, ll), f2(cl2[0], cl2[1]))
                                 txl.ptx.ex2.approx.ftz.f32(decay_f[2 * g], txl.cuda.float2_x(dd))
-                                txl.ptx.ex2.approx.ftz.f32(decay_f[2 * g + 1], txl.cuda.float2_y(dd))
+                                txl.ptx.ex2.approx.ftz.f32(
+                                    decay_f[2 * g + 1], txl.cuda.float2_y(dd)
+                                )
                             p_gate.empty.arrive(st_g1.stage)  # release gate
                             st_g1.advance()
 
@@ -1505,7 +1512,9 @@ def make_kernel(HQ: int, HV: int):
                         # cp.async completion as valid beta loads.
                         for i in range(2):
                             txl.ptx[CP_ASYNC](
-                                bdst[i], bsrc[i], 4,
+                                bdst[i],
+                                bsrc[i],
+                                4,
                                 txl.Select(valid[i] != 0, txl.uint32(4), txl.uint32(0)),
                             )
                     with txl.Else():
@@ -1524,7 +1533,9 @@ def make_kernel(HQ: int, HV: int):
                             if RANK == 4
                             else (txl.int32(d), txl.Cast("int32", off), head)
                         )
-                        txl.ptx[TMA_S2G_O](d_o, *coords, s_o[st_oc.stage].ptr_to(d, 0), txl.uint64(0))
+                        txl.ptx[TMA_S2G_O](
+                            d_o, *coords, s_o[st_oc.stage].ptr_to(d, 0), txl.uint64(0)
+                        )
                     txl.ptx[BULK_COMMIT]()
                     # wait only until the bulk ops have finished READING their
                     # source, which is all the O epilogue needs.
@@ -1841,20 +1852,25 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     return case
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     cfg = _cfg(**kwargs)
-    return make_kernel(cfg.hq, cfg.hv).func
+    return make_kernel(cfg.hq, cfg.hv, backend_config=backend_config).func
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for GDN prefill SM100")
     capability = torch.cuda.get_device_capability()
@@ -1864,7 +1880,9 @@ def run_test(**kwargs: Any) -> None:
     from tirx_kernels.runner import compile_kernel
 
     case = prepare_data(**kwargs)
-    executable = compile_kernel(get_kernel(**kwargs))
+    executable = compile_kernel(
+        get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+    )
     executable(*_tirx_args(case))
     torch.cuda.synchronize()
 
@@ -1893,6 +1911,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1940,11 +1959,16 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    backend_config=None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

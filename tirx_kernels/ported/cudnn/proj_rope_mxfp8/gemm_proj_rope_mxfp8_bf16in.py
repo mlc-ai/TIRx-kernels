@@ -10,9 +10,8 @@ Upstream source:
 (``gemm_proj_rope_mxfp8_kernel`` and ``gemm_proj_rope_mxfp8_host``).
 """
 
-from functools import cache
-
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import cache_backend_config
 
 _TILE_M = 128
 _HEAD_DIM = 192
@@ -188,15 +187,15 @@ def _validate_config(tokens, k_dim, num_heads, w_out_in):
         raise TypeError("w_out_in must be bool")
 
 
-@cache
-def _make_kernel(tokens, k_dim, num_heads, w_out_in):
+@cache_backend_config
+def _make_kernel(tokens, k_dim, num_heads, w_out_in, *, backend_config=None):
     _validate_config(tokens, k_dim, num_heads, w_out_in)
     num_clusters = min((tokens // _TILE_M) * num_heads, _MAX_ACTIVE_CLUSTERS)
     total_work = (tokens // _TILE_M) * num_heads
     m_tiles = tokens // _TILE_M
     b_desc_base = 0x4000404000010000 if w_out_in else 0x4000404002000000
 
-    def host_prelude(params):
+    def prepare_host(params):
         x = params["x"]
         w = params["w"]
         a_map = txl.stack_alloca("tensormap", 1)
@@ -260,8 +259,25 @@ def _make_kernel(tokens, k_dim, num_heads, w_out_in):
             )
         return a_map, b_map
 
-    def kernel(x, w, cos, sin, out_fp8_row, out_scales_row, out_fp8_col, out_scales_col, *, host):
+    def kernel(x, w, cos, sin, out_fp8_row, out_scales_row, out_fp8_col, out_scales_col):
         # TIRX_PORT_START: gemm_proj_rope_mxfp8_kernel
+        host = prepare_host(
+            {
+                "x": x,
+                "w": w,
+                "cos": cos,
+                "sin": sin,
+                "out_fp8_row": out_fp8_row,
+                "out_scales_row": out_scales_row,
+                "out_fp8_col": out_fp8_col,
+                "out_scales_col": out_scales_col,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(block=14 * 32, grid=(1, 1, num_clusters)),
+            backend_config=backend_config,
+        )
+
         del x, w
         a_map, b_map = host
         _block_x, _block_y, cluster_work_id = txl.cta_id()
@@ -700,13 +716,11 @@ def _make_kernel(tokens, k_dim, num_heads, w_out_in):
         "out_fp8_col": txl.gptr[txl.u8, (tokens * num_heads * _HEAD_DIM,)],
         "out_scales_col": txl.gptr[txl.u8, ((tokens // _BLOCK) * num_heads * _HEAD_DIM,)],
     }
-    return txl.kernel(
-        warps=14, arch="sm_100a", grid=[1, 1, num_clusters], host_prelude=host_prelude
-    )(kernel)
+    return txl.kernel()(kernel)
 
 
-def get_kernel(tokens, k_dim, num_heads, w_out_in):
-    return _make_kernel(tokens, k_dim, num_heads, w_out_in).func
+def get_kernel(tokens, k_dim, num_heads, w_out_in, *, backend_config=None):
+    return _make_kernel(tokens, k_dim, num_heads, w_out_in, backend_config=backend_config).func
 
 
 def prepare_data(tokens, k_dim, num_heads, w_out_in):
@@ -847,7 +861,7 @@ def _validate_outputs(data):
     return {"row_match": row_match, "col_match": col_match}
 
 
-def run_test(**config):
+def run_test(*, backend_config=None, **config):
     """Compare the pure-K port with the pinned cuDNN Frontend implementation."""
     import torch
 
@@ -855,7 +869,13 @@ def run_test(**config):
 
     kernel_config = _without_label(config)
     data = prepare_data(**kernel_config)
-    tirx_launch = _tirx_launch(compile_kernel(get_kernel(**kernel_config)), data)
+    tirx_launch = _tirx_launch(
+        compile_kernel(
+            get_kernel(**kernel_config, backend_config=backend_config),
+            backend_config=backend_config,
+        ),
+        data,
+    )
     source_launch = _compile_reference(data, kernel_config)
     tirx_launch()
     source_launch()
@@ -863,16 +883,32 @@ def run_test(**config):
     return _validate_outputs(data)
 
 
-def prepare_bench(**config):
+def prepare_bench(*, backend_config=None, **config):
     """Compile TIRx before entering the benchmark's GPU child."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     kernel_config = _without_label(config)
-    state = {"config": kernel_config, "executable": compile_kernel(get_kernel(**kernel_config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": kernel_config,
+        "executable": compile_kernel(
+            get_kernel(**kernel_config, backend_config=backend_config),
+            backend_config=backend_config,
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    backend_config=None,
+    **kwargs,
+):
     """Validate once, then time closures containing exactly one kernel launch."""
     from tirx_kernels.runner import bench, defer_gpu_interrupts, external_references_enabled
 
@@ -924,8 +960,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, backend_config=None, **config
+):
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

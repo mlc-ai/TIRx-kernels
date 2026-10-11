@@ -31,7 +31,6 @@ from .spec import (
     get_deepgemm_launch_config,
     get_deepgemm_symm_buffer_layout,
     get_deepgemm_workspace_layout,
-    get_tirx_launch_param_tags,
 )
 
 __all__ = ["get_kernel"]
@@ -370,6 +369,7 @@ def get_kernel(
     fast_math: int = 1,
     collect_stats: bool = False,
     emit_nvl_barrier_timeout_printf: bool = True,
+    backend_config=None,
 ):
     # ---- compile-time constants (all Python ints; nothing below is emitted) ----
     runtime_config = MegaMoeConfig(
@@ -873,12 +873,7 @@ def get_kernel(
         raise ValueError("Top-k must fit in a single warp")
 
     # ---- the kernel body ----
-    @txl.kernel(
-        warps=kernel_config.num_total_warps,
-        arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=kernel_config.num_sms,
-    )
+    @txl.kernel()
     def mega_moe(
         y: txl.gptr[txl.bf16],
         cumulative_local_expert_recv_stats: txl.gptr[txl.i32],
@@ -980,6 +975,16 @@ def get_kernel(
         num_tokens: txl.i32,
         rank_idx: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=kernel_config.num_sms,
+                block=kernel_config.num_total_warps * 32,
+                cluster=(kernel_config.num_ctas_per_cluster,),
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         symm_rank_offsets = (
             symm_rank_offset_0,
             symm_rank_offset_1,
@@ -1453,7 +1458,7 @@ def get_kernel(
         # recombining it folds straight back to that id.  Re-emitting either
         # per use costs nothing.
         sym_buffer_base = ptr_to_u64(symm_buffer.ptr_to([0]))
-        cta_idx_in_cluster = txl.cta_id_in_cluster([kernel_config.num_ctas_per_cluster])
+        cta_idx_in_cluster = txl.cuda.cluster_cta_id("x")
         sm_idx = txl.cta_id()
         wg_id = txl.warp_id() // 4
         warp_id = txl.warp_id() % 4
@@ -4422,4 +4427,4 @@ def get_kernel(
         with epilogue_role:
             epilogue(txl.warp_id_in_role(), txl.tid_in_role())
 
-    return mega_moe.func.with_attr("tirx.kernel_launch_params", get_tirx_launch_param_tags())
+    return mega_moe.func

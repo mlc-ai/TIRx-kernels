@@ -5,7 +5,6 @@
 
 import ctypes
 from dataclasses import asdict, dataclass
-from functools import cache
 from typing import Any
 from unittest import SkipTest
 
@@ -13,6 +12,7 @@ import torch
 
 import tirx_kernels.tirx_lite as txl
 import tvm
+from tirx_kernels.runner import cache_backend_config
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
@@ -332,7 +332,9 @@ class TF32HCBenchCase:
     tensor_maps: dict[str, Any]
 
 
-def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms: int):
+def _make_kernel(
+    *, m: int, n: int, k: int, num_splits: int, seed: int, num_sms: int, backend_config=None
+):
     """Trace the canonical K-owned device body for one specialization."""
     config = _make_config(m=m, n=n, k=k, num_splits=num_splits, seed=seed, num_sms=num_sms)
 
@@ -403,12 +405,7 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
     def cuda_grid_dependency_synchronize():
         txl.ptx.griddepcontrol.wait()
 
-    @txl.kernel(
-        warps=num_warps,
-        arch="sm_100a",
-        min_blocks_per_sm=1,  # orig:L511 -- pinned by the original, not a default
-        grid=config.grid_blocks,  # orig:L601
-    )
+    @txl.kernel()
     def sm100_tf32_hc_prenorm_gemm(
         shape_m: txl.u32,
         # A/B/D are never dereferenced by the device code -- every access goes
@@ -422,6 +419,16 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
         b_map: txl.TensorMap,
         d_map: txl.TensorMap,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=config.grid_blocks,
+                block=num_warps * 32,
+                programmatic_stream_serialization=True,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         warp_idx = txl.warp_id()
         lane_idx = txl.lane_id()
 
@@ -553,7 +560,9 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                                 txl.ptr_byte_offset(
                                     smem_b_mma[0].ptr_to(0, 0),
                                     stage_idx[0] * txl.uint32(block_n * block_k * 4)
-                                    + txl.cast(b_atom * (block_n * block_swizzled_bk * 4), "uint32"),
+                                    + txl.cast(
+                                        b_atom * (block_n * block_swizzled_bk * 4), "uint32"
+                                    ),
                                     "float32",
                                 ),
                                 txl.address_of(b_map),
@@ -581,10 +590,16 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                     cast_pipe.full.wait(cast_stage_idx[0], txl.cast(mma_cast_state.phase, "uint32"))
                     # TMEM A columns and the swizzled B matrix descriptor match
                     # the former tcgen05 tile dispatch exactly.
-                    a_col = local("int32", txl.cast(cast_stage_idx[0] * txl.uint32(block_k), "int32"))
+                    a_col = local(
+                        "int32", txl.cast(cast_stage_idx[0] * txl.uint32(block_k), "int32")
+                    )
                     desc_b = txl.local_scalar("uint64")
                     txl.cuda.tcgen05.encode_matrix_descriptor(
-                        txl.address_of(desc_b), smem_b_mma[0].ptr_to(0, 0), ldo=256, sdo=64, swizzle=3
+                        txl.address_of(desc_b),
+                        smem_b_mma[0].ptr_to(0, 0),
+                        ldo=256,
+                        sdo=64,
+                        swizzle=3,
                     )
                     with txl.unroll(block_k // umma_k) as ki:
                         with txl.If(txl.cuda.elect_sync()), txl.Then():
@@ -610,7 +625,9 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                                 # unconditionally. The original's Python
                                 # conditional expression is what the TVMScript
                                 # parser rewrites into exactly this select.
-                                txl.ptx.pred(txl.if_then_else(ki == 0, s != txl.uint32(0), txl.bool(True))),
+                                txl.ptx.pred(
+                                    txl.if_then_else(ki == 0, s != txl.uint32(0), txl.bool(True))
+                                ),
                             )
                     with txl.If(txl.cuda.elect_sync()), txl.Then():
                         cast_pipe.empty.arrive(cast_stage_idx[0])
@@ -750,7 +767,9 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                                         "uint32",
                                     )
                                     + stage_idx[0] * txl.uint32(block_k)
-                                    + txl.cast(lane_idx % txl.int32(8) * txl.int32(block_k), "uint32")
+                                    + txl.cast(
+                                        lane_idx % txl.int32(8) * txl.int32(block_k), "uint32"
+                                    )
                                     // txl.uint32(block_k)
                                 )
                                 & txl.uint32(7)
@@ -767,7 +786,9 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                         a_bf16_words[reg_base[0] + 2],
                         a_bf16_words[reg_base[0] + 4],
                         a_bf16_words[reg_base[0] + 6],
-                        txl.ptr_byte_offset(smem_a_mma[0].ptr_to(0, 0), smem_off[0] * 2, "bfloat16"),
+                        txl.ptr_byte_offset(
+                            smem_a_mma[0].ptr_to(0, 0), smem_off[0] * 2, "bfloat16"
+                        ),
                     )
                 cast_pipe.empty.wait(cast_stage_idx[0], txl.cast(cast_tmem_state.phase, "uint32"))
 
@@ -859,15 +880,6 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
     # orig:L981-989 -- @txl.kernel has no attrs= parameter, so the launch-param
     # attribute is attached to the PrimFunc afterwards (entry.py documents
     # ``func`` as a plain attribute and ``Kernel.mod`` reads it).
-    sm100_tf32_hc_prenorm_gemm.func = sm100_tf32_hc_prenorm_gemm.func.with_attr(
-        "tirx.kernel_launch_params",
-        [
-            "blockIdx.x",
-            "threadIdx.x",
-            "tirx.use_programtic_dependent_launch",
-            "tirx.use_dyn_shared_memory",
-        ],
-    )
     return sm100_tf32_hc_prenorm_gemm
 
 
@@ -955,32 +967,45 @@ def _build_tirx_tensor_maps(data: dict[str, Any]) -> tuple[Any, Any, Any]:
     return a_map, b_map, d_map
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     config = _make_config(**kwargs)
-    return _make_kernel(**asdict(config)).func
+    return _make_kernel(**asdict(config), backend_config=backend_config).func
 
 
 def _compile_tirx_tf32_hc_for_config(
-    *, m: int, n: int, k: int, num_splits: int, seed: int, num_sms: int
+    *, m: int, n: int, k: int, num_splits: int, seed: int, num_sms: int, backend_config=None
 ) -> Any:
     from tirx_kernels.runner import cuda_target
 
-    target = cuda_target()
-    kernel = get_kernel(m=m, n=n, k=k, num_splits=num_splits, seed=seed, num_sms=num_sms)
+    target = cuda_target(backend_config=backend_config)
+    kernel = get_kernel(
+        m=m,
+        n=n,
+        k=k,
+        num_splits=num_splits,
+        seed=seed,
+        num_sms=num_sms,
+        backend_config=backend_config,
+    )
     with target:
-        return tvm.compile(tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx")
+        return tvm.compile(
+            tvm.IRModule({"main": kernel}),
+            target=target,
+            tir_pipeline="tirx",
+            backend_config=backend_config,
+        )
 
 
-_compile_tirx_tf32_hc_for_config = cache(_compile_tirx_tf32_hc_for_config)
+_compile_tirx_tf32_hc_for_config = cache_backend_config(_compile_tirx_tf32_hc_for_config)
 
 
 def _compile_tirx_tf32_hc_key(config: TF32HCPrenormGemmConfig) -> tuple[tuple[str, Any], ...]:
     return tuple(asdict(config).items())
 
 
-def _compile_tirx_tf32_hc(config: TF32HCPrenormGemmConfig) -> Any:
+def _compile_tirx_tf32_hc(config: TF32HCPrenormGemmConfig, *, backend_config=None) -> Any:
     compile_kwargs = asdict(config)
-    return _compile_tirx_tf32_hc_for_config(**compile_kwargs)
+    return _compile_tirx_tf32_hc_for_config(**compile_kwargs, backend_config=backend_config)
 
 
 def _run_tirx_with_tensor_maps(
@@ -998,9 +1023,13 @@ def _run_tirx_with_tensor_maps(
     return data["d_tirx"], data["sqr_tirx"]
 
 
-def _launch_tirx_hc(data: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
+def _launch_tirx_hc(
+    data: dict[str, Any], *, backend_config=None
+) -> tuple[torch.Tensor, torch.Tensor]:
     return _run_tirx_with_tensor_maps(
-        data, _compile_tirx_tf32_hc(data["config"]), _build_tirx_tensor_maps(data)
+        data,
+        _compile_tirx_tf32_hc(data["config"], backend_config=backend_config),
+        _build_tirx_tensor_maps(data),
     )
 
 
@@ -1057,14 +1086,14 @@ def _assert_correct_case(
     return diff
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     data = prepare_data(**kwargs)
     deepgemm_d, deepgemm_sqr = _run_deepgemm_hc(data)
     torch.cuda.synchronize()
     # Library-anchored: the torch ref is a yardstick, not the arbiter --
     # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
     deepgemm_diff = _assert_correct(data, deepgemm_d, deepgemm_sqr, name="DeepGEMM")
-    tirx_d, tirx_sqr = _launch_tirx_hc(data)
+    tirx_d, tirx_sqr = _launch_tirx_hc(data, backend_config=backend_config)
     torch.cuda.synchronize()
     tirx_diff = _assert_correct(data, tirx_d, tirx_sqr, name="TIRx")
     if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
@@ -1113,7 +1142,7 @@ def _bench_deepgemm_case(case: TF32HCBenchCase) -> tuple[torch.Tensor, torch.Ten
     return case.d_deepgemm, case.sqr_deepgemm
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Compile the hardware-profile specialization before GPU assignment."""
     from tirx_kernels.runner import hardware_num_sms, prepared_gpu_benchmark
 
@@ -1121,11 +1150,13 @@ def prepare_bench(**kwargs: Any):
     runtime_config = TF32HCPrenormGemmConfig(
         **{**asdict(config), "num_sms": hardware_num_sms(config.num_sms)}
     )
-    executable = _compile_tirx_tf32_hc(runtime_config)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+    executable = _compile_tirx_tf32_hc(runtime_config, backend_config=backend_config)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(kwargs), "executable": executable}, backend_config=backend_config
+    )
 
 
-def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
+def run_gpu(prepared, *, backend_config=None, **kwargs: Any) -> dict[str, Any]:
     from tirx_kernels.runner import bench
 
     kwargs = {**prepared["config"], **kwargs}
@@ -1167,13 +1198,13 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     return result
 
 
-def run_bench(**kwargs: Any) -> dict[str, Any]:
+def run_bench(*, backend_config=None, **kwargs: Any) -> dict[str, Any]:
     protocol = {
         name: kwargs.pop(name)
         for name in ("warmup", "repeat", "timer", "rounds", "cooldown_s")
         if name in kwargs
     }
-    return prepare_bench(**kwargs).run_gpu(**protocol)
+    return prepare_bench(**kwargs, backend_config=backend_config).run_gpu(**protocol)
 
 
 __all__ = [

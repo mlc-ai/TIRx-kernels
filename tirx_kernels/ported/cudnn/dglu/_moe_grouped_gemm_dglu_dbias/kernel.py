@@ -31,9 +31,8 @@ atom each CTA stages only its half of the N operand, so a B stage is
 ``(tile_n / atom_thr) * k_tile * 2`` bytes.
 """
 
-from functools import cache
-
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import cache_backend_config
 
 from . import spec
 
@@ -376,11 +375,11 @@ def _entry_point(names, body):
     """
     arguments = ", ".join(names)
     namespace = {"_body": body}
-    exec(f"def kernel({arguments}, *, host):\n    _body(({arguments},), host)\n", namespace)
+    exec(f"def kernel({arguments}):\n    _body(({arguments},))\n", namespace)
     return namespace["kernel"]
 
 
-@cache
+@cache_backend_config
 def _make_kernel(
     group_m_list,
     N,
@@ -396,6 +395,8 @@ def _make_kernel(
     vectorized_f32,
     with_dbias,
     linear_offset,
+    *,
+    backend_config=None,
 ):
     """Build the launch sequence for one static specialization.
 
@@ -517,7 +518,7 @@ def _make_kernel(
     ab_empty_arrivals = max(1, cluster_n + (cluster_m // atom_thr) - 1)
 
     # TensorMaps the launch passes as grid constants, in the order
-    # ``host_prelude`` returns them. Discrete weights read the B descriptor out
+    # ``prepare_host`` returns them. Discrete weights read the B descriptor out
     # of the workspace instead, so they contribute no grid constant.
     map_names = ["a", "c", "d_row"]
     if weight_mode == "dense":
@@ -570,7 +571,7 @@ def _make_kernel(
         )
         encode_map(descriptors["b"], "bfloat16", 3, b_data, *b_fields, *ab_tail)
 
-    def host_prelude(params):
+    def prepare_host(params):
         descriptors = {name: txl.stack_alloca("tensormap", 1) for name in map_names}
         encode = encode_map
 
@@ -632,15 +633,24 @@ def _make_kernel(
             encode_weight_maps(descriptors, params["b"].data, L)
         return tuple(descriptors[name] for name in map_names)
 
-    def body(operands, host):
+    def body(operands):
+        host = prepare_host(dict(zip(annotations, operands, strict=True)))
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=tuple(derived["grid"]),
+                block=256,
+                cluster=(cluster_m, cluster_n),
+                preferred_cluster=(cluster_m, cluster_n),
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
         named = dict(zip(annotations, operands))
         maps = dict(zip(map_names, host))
 
         # ---- coordinates -------------------------------------------------
         block_x, block_y, cluster_work_id = txl.cta_id()
-        cluster_x, cluster_y = txl.cta_id_in_cluster(
-            [cluster_m, cluster_n], preferred=[cluster_m, cluster_n]
-        )
+        cluster_x, cluster_y = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
         cluster_rank = _warp_uniform(cluster_x + cluster_m * cluster_y)
         del block_y
         warp = _warp_uniform(txl.warp_id())
@@ -2103,7 +2113,17 @@ def _make_kernel(
                     payload[3],
                 )
 
-        def helper(operands, host):
+        def helper(operands):
+            host = (
+                helper_prelude(dict(zip(("b", "workspace"), operands, strict=True)))
+                if weight_mode == "discrete"
+                else ()
+            )
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(block=32, grid=list(derived["helper_grid"])),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+                backend_config=backend_config,
+            )
             b, workspace = operands
             expert = txl.cta_id()[0]
             if weight_mode == "discrete":
@@ -2128,41 +2148,23 @@ def _make_kernel(
         # and `padded_offsets` (int32) for dense ones, so the first parameter
         # changes dtype with the mode.
         pointer_dtype = "int64" if weight_mode == "discrete" else "int32"
-        if weight_mode == "discrete":
-            helper_body = _entry_point(["b", "workspace"], helper)
-        else:
-            # Only the discrete branch has a host prelude, and an entry may not
-            # take the keyword-only `host` parameter without one.
-            def helper_body(b, workspace):
-                helper((b, workspace), ())
+        helper_body = _entry_point(["b", "workspace"], helper)
 
         helper_body.__annotations__ = {
             "b": txl.gptr[pointer_dtype, (L,)],
             "workspace": txl.gptr[txl.u8, (max(1, derived["workspace_bytes"]),)],
         }
-        return txl.kernel(
-            warps=1,
-            arch="sm_100a",
-            min_blocks_per_sm=1,
-            grid=list(derived["helper_grid"]),
-            host_prelude=helper_prelude if weight_mode == "discrete" else None,
-        )(helper_body)
+        return txl.kernel()(helper_body)
 
     kernel = _entry_point(list(annotations), body)
     kernel.__annotations__ = dict(annotations)
-    main = txl.kernel(
-        warps=8,
-        arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=list(derived["grid"]),
-        host_prelude=host_prelude,
-    )(kernel)
+    main = txl.kernel()(kernel)
     if derived["needs_helper"]:
         return [build_helper().func, main.func]
     return [main.func]
 
 
-def get_kernel(**config):
+def get_kernel(*, backend_config=None, **config):
     config = {key: value for key, value in config.items() if key != "label"}
     return _make_kernel(
         group_m_list=tuple(config["group_m_list"]),
@@ -2179,4 +2181,5 @@ def get_kernel(**config):
         vectorized_f32=config["vectorized_f32"],
         with_dbias=config["with_dbias"],
         linear_offset=config["linear_offset"],
+        backend_config=backend_config,
     )

@@ -728,7 +728,10 @@ def _dequant_kv(src, dst, bar_tma, bar_ready, bar_id, count_raw, group_tidx, bat
                             txl.ptx.shr.u32(mant[0], mant[0], txl.uint32(4))
                             txl.ptx.or_.b32(acc[0], acc[0], mant[0])
                             txl.ptx.fma.rn.bf16x2(
-                                out_words[w * 2 + half], acc[0], txl.uint32(0x7B807B80), txl.uint32(0)
+                                out_words[w * 2 + half],
+                                acc[0],
+                                txl.uint32(0x7B807B80),
+                                txl.uint32(0),
                             )
                     for half in range(2):
                         txl.ptx.st.shared.v4.b32(
@@ -757,14 +760,17 @@ def _pack_p_words(words, regs, j, pv_dtype):
         with txl.unroll(8) as w:
             lo = txl.alloc_local((1,), "uint16")
             hi = txl.alloc_local((1,), "uint16")
-            txl.ptx.cvt.rn.satfinite.e4m3x2.f32(lo[0], regs[j * 32 + w * 4 + 1], regs[j * 32 + w * 4])
+            txl.ptx.cvt.rn.satfinite.e4m3x2.f32(
+                lo[0], regs[j * 32 + w * 4 + 1], regs[j * 32 + w * 4]
+            )
             txl.ptx.cvt.rn.satfinite.e4m3x2.f32(
                 hi[0], regs[j * 32 + w * 4 + 3], regs[j * 32 + w * 4 + 2]
             )
             txl.assign(
                 words[j * 8 + w],
                 txl.bitwise_or(
-                    txl.cast(lo[0], "uint32"), txl.shift_left(txl.cast(hi[0], "uint32"), txl.uint32(16))
+                    txl.cast(lo[0], "uint32"),
+                    txl.shift_left(txl.cast(hi[0], "uint32"), txl.uint32(16)),
                 ),
             )
     else:
@@ -876,7 +882,8 @@ def _store_o_partial(buf, elem_offset, vals, partial_dtype):
             txl.assign(
                 words[w],
                 txl.bitwise_or(
-                    txl.cast(lo[0], "uint32"), txl.shift_left(txl.cast(hi[0], "uint32"), txl.uint32(16))
+                    txl.cast(lo[0], "uint32"),
+                    txl.shift_left(txl.cast(hi[0], "uint32"), txl.uint32(16)),
                 ),
             )
         txl.ptx.st.global_.cs.v4.b32(
@@ -939,10 +946,10 @@ def _mbar_expect_tx(bar, stage, tx_bytes):
     from thread 0 (:911-918) and are arrived on later by the load warp, so this
     has to stay separate from the arrive -- the barrier's arrival count is 1.
     """
-    txl.ptx.mbarrier.expect_tx.relaxed.cta.shared__cta.b64(bar.ptr_to([stage]), txl.uint32(tx_bytes))
+    txl.ptx.mbarrier.expect_tx.relaxed.cta.shared__cta.b64(
+        bar.ptr_to([stage]), txl.uint32(tx_bytes)
+    )
 
-
-LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
 
 # The four in-scope dtype combinations, named by the storage dtypes plus the
 # MMA operand dtypes they resolve to at :318-364. `qk`/`pv` narrower than the
@@ -993,7 +1000,7 @@ def _torch_dtype(name: str):
 # ---------------------------------------------------------------------------
 # Target entry.
 # ---------------------------------------------------------------------------
-def _make_kernel(**config):
+def _make_kernel(*, backend_config=None, **config):
     """Trace one native tirx-lite specialization and its exact launch ABI."""
     qheadperkv = int(config["qhead_per_kv"])
     causal = bool(config.get("causal", True))
@@ -1037,7 +1044,7 @@ def _make_kernel(**config):
     q_load_tile = HEAD_DIM if q_bytes == 1 else K_TILE
     q_tokens_per_group = M_BLOCK // qheadperkv
 
-    def host_prelude(params):
+    def prepare_host(params):
         k = params["k"]
         v = params["v"]
         q_flat = params["q_flat"]
@@ -1582,7 +1589,9 @@ def _make_kernel(**config):
                     txl.ptx.mbarrier.init.shared.b64(
                         bar_p_last_full.ptr_to([stage]), txl.uint32(SOFTMAX_THREADS)
                     )
-                    txl.ptx.mbarrier.init.shared.b64(bar_p_last_empty.ptr_to([stage]), txl.uint32(1))
+                    txl.ptx.mbarrier.init.shared.b64(
+                        bar_p_last_empty.ptr_to([stage]), txl.uint32(1)
+                    )
                 with txl.unroll(O_STAGE) as stage:
                     txl.ptx.mbarrier.init.shared.b64(bar_o_full.ptr_to([stage]), txl.uint32(1))
                     txl.ptx.mbarrier.init.shared.b64(
@@ -2130,7 +2139,9 @@ def _make_kernel(**config):
             with txl.If(group_tidx < q_tokens_per_group), txl.Then():
                 word = ld_shared_i32(s_qidx_meta, qidx_meta_slot + group_tidx)
                 st_shared_i32(
-                    s_q_idx, slot * q_tokens_per_group + group_tidx, txl.bitwise_and(word, Q_IDX_MASK)
+                    s_q_idx,
+                    slot * q_tokens_per_group + group_tidx,
+                    txl.bitwise_and(word, Q_IDX_MASK),
                 )
                 st_shared_i32(
                     s_split_idx,
@@ -2250,7 +2261,9 @@ def _make_kernel(**config):
                 split_l = ld_shared_i32(s_split_idx, slot * q_tokens_per_group + tok_l)
                 h_abs = head_kv_idx[0] * qheadperkv + h_local
                 lse_flat = (
-                    txl.cast(split_l, "int64") * txl.cast(total_q, "int64") * txl.cast(head_q, "int64")
+                    txl.cast(split_l, "int64")
+                    * txl.cast(total_q, "int64")
+                    * txl.cast(head_q, "int64")
                     + txl.cast(q_batch_off + q_idx_l, "int64") * txl.cast(head_q, "int64")
                     + txl.cast(h_abs, "int64")
                 )
@@ -2393,7 +2406,10 @@ def _make_kernel(**config):
                                 imm = txl.local_scalar(
                                     "int32", init=txl.int32((1 << i) if i < 31 else -(1 << 31))
                                 )
-                                with txl.If(txl.bitwise_and(signed_bits, imm) == txl.int32(0)), txl.Then():
+                                with (
+                                    txl.If(txl.bitwise_and(signed_bits, imm) == txl.int32(0)),
+                                    txl.Then(),
+                                ):
                                     txl.assign(s_regs[chunk * MASK_R2P_CHUNK + i], NEG_INF)
 
                     # One KV block per Q group, so this is always the first and
@@ -2442,7 +2458,9 @@ def _make_kernel(**config):
                     # packed conversion into the P operand dtype (:2307-2312).
                     # 128 P values pack into 64 words as bf16, 32 as fp8; the
                     # store repetition follows (:2429-2439).
-                    p_words = txl.alloc_local((N_BLOCK * _DTYPE_BYTES[pv_dtype] * 8 // 32,), "uint32")
+                    p_words = txl.alloc_local(
+                        (N_BLOCK * _DTYPE_BYTES[pv_dtype] * 8 // 32,), "uint32"
+                    )
                     # Preserve the parser kernel's trace-time expansion.  The
                     # zero-frequency specialization is also decided while tracing,
                     # so the modulo-by-zero arm remains unspellable.
@@ -2528,7 +2546,10 @@ def _make_kernel(**config):
                 txl.ptx.setmaxnreg.inc.sync.aligned.u32(txl.uint32(num_regs_softmax))
                 softmax_warpgroup(0)
 
-        with txl.If(txl.And(warp_idx >= SOFTMAX1_WARP_BASE, warp_idx < Q_LOAD_WARP_BASE)), txl.Then():
+        with (
+            txl.If(txl.And(warp_idx >= SOFTMAX1_WARP_BASE, warp_idx < Q_LOAD_WARP_BASE)),
+            txl.Then(),
+        ):
             with txl.If(cta_valid_work != 0), txl.Then():
                 txl.ptx.setmaxnreg.inc.sync.aligned.u32(txl.uint32(num_regs_softmax))
                 softmax_warpgroup(1)
@@ -2578,8 +2599,15 @@ def _make_kernel(**config):
     )
     names = tuple(name for name, _ in parameters)
 
-    def entry(*args, host):
-        trace(dict(zip(names, args, strict=True)), host)
+    def entry(*args):
+        values = dict(zip(names, args, strict=True))
+        host = prepare_host(values)
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(block=TOTAL_WARPS * 32, grid=values["work_capacity"]),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+        trace(values, host)
 
     entry.__name__ = KERNEL_META["name"]
     entry.__signature__ = inspect.Signature(
@@ -2589,24 +2617,17 @@ def _make_kernel(**config):
                     name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=annotation
                 )
                 for name, annotation in parameters
-            ],
-            inspect.Parameter("host", inspect.Parameter.KEYWORD_ONLY),
+            ]
         ]
     )
-    kernel = txl.kernel(
-        warps=TOTAL_WARPS,
-        arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid="work_capacity",
-        host_prelude=host_prelude,
-    )(entry)
-    return kernel.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+    kernel = txl.kernel()(entry)
+    return kernel.func
 
 
-def get_kernel(**config):
+def get_kernel(*, backend_config=None, **config):
     """Return the native tirx-lite specialization for one compile key."""
     config.pop("label", None)
-    return _make_kernel(**config)
+    return _make_kernel(**config, backend_config=backend_config)
 
 
 # ---------------------------------------------------------------------------
@@ -3462,7 +3483,7 @@ def assert_partials_match(
         )
 
 
-def run_test(**config):
+def run_test(*, backend_config=None, **config):
     """Compile, launch, and validate one config against MSA's own kernel."""
     import unittest
 
@@ -3483,25 +3504,32 @@ def run_test(**config):
 
     expected = make_outputs(data)
     try:
-        compiled_sparse_atten_fwd(reference_case(data, expected))()
+        compiled_sparse_atten_fwd(reference_case(data, expected), backend_config=backend_config)()
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
     torch.cuda.synchronize()
 
-    executable = compile_kernel(get_kernel(**config))
+    executable = compile_kernel(
+        get_kernel(**config, backend_config=backend_config), backend_config=backend_config
+    )
     outputs = make_outputs(data)
     executable(*tirx_args(data, outputs))
     torch.cuda.synchronize()
     assert_partials_match(data, outputs, expected)
 
 
-def prepare_bench(**config):
+def prepare_bench(*, backend_config=None, **config):
     """Compile the TIRx specialization without initializing CUDA."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     config.pop("label", None)
-    state = {"config": dict(config), "executable": compile_kernel(get_kernel(**config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(config),
+        "executable": compile_kernel(
+            get_kernel(**config, backend_config=backend_config), backend_config=backend_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 # ---------------------------------------------------------------------------
@@ -3512,7 +3540,17 @@ def prepare_bench(**config):
 # partial slots it owns, so the hundredth launch does exactly the work the
 # first one did.
 # ---------------------------------------------------------------------------
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **config,
+):
     """Kernel-only comparison against MSA's compiled forward launch."""
     from tirx_kernels.runner import bench
 
@@ -3530,7 +3568,9 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     def build_reference():
         from tirx_kernels.ported.msa.utils._msa_bench import compiled_sparse_atten_fwd
 
-        launch = compiled_sparse_atten_fwd(reference_case(data, make_outputs(data)))
+        launch = compiled_sparse_atten_fwd(
+            reference_case(data, make_outputs(data)), backend_config=backend_config
+        )
         launch()  # pay the CuTeDSL compile and first-launch cost outside timing
         return launch
 
@@ -3545,8 +3585,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, backend_config=None, **config
+):
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

@@ -88,6 +88,7 @@ class PreparedDistributedBench:
         timer: str | None = None,
         rounds: int = 1,
         cooldown_s: float = 1.0,
+        backend_config=None,
     ) -> dict[str, Any]:
         if timer not in (None, self.required_timer):
             raise ValueError(f"distributed benchmark supports only timer={self.required_timer!r}")
@@ -411,6 +412,7 @@ def run_distributed(
     worker: Callable[[DistributedRuntime, Any, str, dict[str, Any]], dict[str, Any]],
     mode: str,
     worker_kwargs: dict[str, Any],
+    backend_config=None,
 ) -> dict[str, Any]:
     """Compile once in the parent, then execute one rank-local worker per GPU."""
 
@@ -421,6 +423,7 @@ def run_distributed(
         mode=mode,
         worker_kwargs=worker_kwargs,
         worker_receives_mapping=False,
+        backend_config=backend_config,
     )
 
 
@@ -431,6 +434,7 @@ def run_distributed_modules(
     worker: Callable[[DistributedRuntime, Mapping[str, Any], str, dict[str, Any]], dict[str, Any]],
     mode: str,
     worker_kwargs: dict[str, Any],
+    backend_config=None,
 ) -> dict[str, Any]:
     """Compile named modules and load them together in each rank worker."""
 
@@ -441,6 +445,7 @@ def run_distributed_modules(
         mode=mode,
         worker_kwargs=worker_kwargs,
         worker_receives_mapping=True,
+        backend_config=backend_config,
     )
 
 
@@ -452,6 +457,7 @@ def _run_distributed_modules(
     mode: str,
     worker_kwargs: dict[str, Any],
     worker_receives_mapping: bool,
+    backend_config=None,
 ) -> dict[str, Any]:
     """Shared synchronous path for one or more named modules."""
     from tirx_kernels.runner import cuda_target, physical_cuda_uuids
@@ -473,7 +479,12 @@ def _run_distributed_modules(
         library_paths = {}
         for index, (name, ir_module) in enumerate(ir_modules.items()):
             library_path = Path(tmpdir) / f"kernel-{index}.so"
-            executable = tvm.compile(ir_module, target=cuda_target(), tir_pipeline="tirx")
+            executable = tvm.compile(
+                ir_module,
+                target=cuda_target(backend_config=backend_config),
+                tir_pipeline="tirx",
+                backend_config=backend_config,
+            )
             executable.export_library(str(library_path))
             library_paths[name] = str(library_path)
         return _run_distributed_libraries(
@@ -495,6 +506,7 @@ def prepare_distributed_bench(
     worker: Callable[[DistributedRuntime, Any, str, dict[str, Any]], dict[str, Any]],
     worker_kwargs: dict[str, Any],
     required_timer: str,
+    backend_config=None,
 ) -> PreparedDistributedBench:
     """Compile/export before assignment and retain the artifact in this process."""
     from tirx_kernels.runner import cuda_target
@@ -506,7 +518,12 @@ def prepare_distributed_bench(
     temporary_directory = tempfile.TemporaryDirectory(prefix="tirx-gemm-comm-prepared-")
     library_path = Path(temporary_directory.name) / "kernel.so"
     try:
-        executable = tvm.compile(ir_module, target=cuda_target(), tir_pipeline="tirx")
+        executable = tvm.compile(
+            ir_module,
+            target=cuda_target(backend_config=backend_config),
+            tir_pipeline="tirx",
+            backend_config=backend_config,
+        )
         executable.export_library(str(library_path))
     except BaseException:
         temporary_directory.cleanup()

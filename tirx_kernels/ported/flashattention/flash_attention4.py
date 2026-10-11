@@ -26,7 +26,7 @@ import torch
 import tirx_kernels.tirx_lite as txl
 import tvm
 import tvm.testing
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, PREPARE_NUM_SMS_ENV, bench, cuda_target
+from tirx_kernels.runner import PREPARE_NUM_SMS_ENV, bench, cuda_target, resolve_backend_config
 from tvm.tirx.cuda import iket
 from tvm.tirx.cuda.iket import IketProfiler
 
@@ -105,12 +105,14 @@ def make_kernel(
     is_causal=False,
     tmem_pipe_depth=TMEM_PIPE_DEPTH,
     smem_pipe_depth_kv=SMEM_PIPE_DEPTH_KV,
+    *,
+    backend_config=None,
 ):
     """Trace the kernel for one specialization. Every ``txl.meta_var`` of the
     original is a plain Python constant here — the host language is the macro
     system (design doc §1)."""
     TMEM_DEPTH = tmem_pipe_depth
-    IS_THOR = os.environ.get(PREPARE_CUDA_ARCH_ENV, "sm_100a") == "sm_110a"
+    IS_THOR = resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a"
     USE_2CTA = IS_THOR and not is_causal
     cta_group = 2 if USE_2CTA else 1
     # A 2-CTA MMA distributes each operand's K dimension across the pair. Each
@@ -197,7 +199,7 @@ def make_kernel(
         n_idx = m_idx_min + SEQ_LEN_KV - SEQ_LEN_Q
         return txl.max(0, n_idx // BLK_N)
 
-    @txl.kernel(warps=16, arch="sm_100a", min_blocks_per_sm=1, grid=cta_count)
+    @txl.kernel()
     def flash_attention4(
         Q_tensor_map: txl.TensorMap,
         Q_tensor_map_1: txl.TensorMap,
@@ -208,7 +210,18 @@ def make_kernel(
         O_tensor_map: txl.TensorMap,
     ):
         # ---- CTA coordinates — orig:L625-628 ---------------------------------
-        cta_rank = txl.cta_id_in_cluster([2], preferred=[2]) if USE_2CTA else txl.int32(0)
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=cta_count,
+                block=16 * 32,
+                cluster=(2,) if USE_2CTA else None,
+                preferred_cluster=[2] if USE_2CTA else None,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=resolve_backend_config(backend_config),
+        )
+
+        cta_rank = txl.cuda.cluster_cta_id("x") if USE_2CTA else txl.int32(0)
         cluster_id = txl.cta_id() // cta_group
         # Materialize the warp-uniform ids once; TIRx expressions are trees and
         # rebuilding these at every use expands address and mask arithmetic.
@@ -1428,11 +1441,12 @@ def build_tensor_maps(
     num_kv_heads,
     head_dim,
     is_causal=False,
+    backend_config=None,
 ):
     """The seven maps, in the order ``make_kernel``'s parameters declare them."""
     gqa = num_qo_heads // num_kv_heads
     seq_q_per_tile = BLK_M // gqa
-    use_2cta = os.environ.get(PREPARE_CUDA_ARCH_ENV, "sm_100a") == "sm_110a" and not is_causal
+    use_2cta = resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a" and not is_causal
     cta_group = 2 if use_2cta else 1
 
     def q_map(t):
@@ -1492,9 +1506,6 @@ def _select_reg_level(
     batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, head_dim, is_causal
 ):
     """Select the measured non-spilling ptxas regime for this K body."""
-    override = os.environ.get("FA4_REG_LEVEL", "")
-    if override:
-        return override
     if is_causal and num_qo_heads == num_kv_heads:
         return "2"
     if is_causal:  # GQA-packed causal
@@ -1503,12 +1514,42 @@ def _select_reg_level(
 
 
 def get_flash_attention4_kernel(
-    batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, head_dim, is_causal=False
+    batch_size,
+    seq_len_q,
+    seq_len_kv,
+    num_qo_heads,
+    num_kv_heads,
+    head_dim,
+    is_causal=False,
+    *,
+    backend_config=None,
 ):
-    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = _select_reg_level(
-        batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, head_dim, is_causal
+    backend_config = resolve_backend_config(
+        backend_config,
+        defaults={
+            "cuda": {
+                "ptxas": [
+                    "-v",
+                    "--warn-on-local-memory-usage",
+                    "--register-usage-level="
+                    + str(
+                        int(
+                            _select_reg_level(
+                                batch_size,
+                                seq_len_q,
+                                seq_len_kv,
+                                num_qo_heads,
+                                num_kv_heads,
+                                head_dim,
+                                is_causal,
+                            )
+                        )
+                    ),
+                ]
+            }
+        },
     )
-    prepare_arch = os.environ.get(PREPARE_CUDA_ARCH_ENV, "sm_100a")
+    prepare_arch = resolve_backend_config(backend_config)["cuda"]["arch"]
     deep_o = is_causal and seq_len_q <= 1024 and prepare_arch != "sm_110a"
     return make_kernel(
         batch_size,
@@ -1520,6 +1561,7 @@ def get_flash_attention4_kernel(
         is_causal=is_causal,
         tmem_pipe_depth=3 if deep_o else TMEM_PIPE_DEPTH,
         smem_pipe_depth_kv=2 if deep_o else SMEM_PIPE_DEPTH_KV,
+        backend_config=backend_config,
     ).func
 
 
@@ -1565,10 +1607,25 @@ CONFIGS = [
 
 
 def get_kernel(
-    batch_size, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causal=False, **kwargs
+    batch_size,
+    seq_len,
+    num_qo_heads,
+    num_kv_heads,
+    head_dim,
+    is_causal=False,
+    *,
+    backend_config=None,
+    **kwargs,
 ):
     return get_flash_attention4_kernel(
-        batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causal=is_causal
+        batch_size,
+        seq_len,
+        seq_len,
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        is_causal=is_causal,
+        backend_config=backend_config,
     )
 
 
@@ -1586,6 +1643,7 @@ def _build_launch(
     num_kv_heads,
     head_dim,
     is_causal=False,
+    backend_config=None,
 ):
     tensor_maps = build_tensor_maps(
         q,
@@ -1599,6 +1657,7 @@ def _build_launch(
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
         is_causal=is_causal,
+        backend_config=backend_config,
     )
     argv = tuple(desc.ptr for desc in tensor_maps)
 
@@ -1609,15 +1668,30 @@ def _build_launch(
     return launch
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(batch_size, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causal=False, **kwargs):
+def run_test(
+    batch_size,
+    seq_len,
+    num_qo_heads,
+    num_kv_heads,
+    head_dim,
+    is_causal=False,
+    *,
+    backend_config=None,
+    **kwargs,
+):
     """Compile, run, and verify FlashAttention-4."""
     from tirx_kernels.runner import compile_kernel
 
@@ -1628,8 +1702,16 @@ def run_test(batch_size, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causa
     )
     executable = compile_kernel(
         get_flash_attention4_kernel(
-            batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causal=is_causal
-        )
+            batch_size,
+            seq_len,
+            seq_len,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            is_causal=is_causal,
+            backend_config=backend_config,
+        ),
+        backend_config=backend_config,
     )
     launch = _build_launch(
         executable,
@@ -1644,6 +1726,7 @@ def run_test(batch_size, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causa
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
         is_causal=is_causal,
+        backend_config=backend_config,
     )
     launch()
     torch.cuda.synchronize()
@@ -1669,6 +1752,7 @@ def run_gpu(
     timer=None,  # None inherits the global default (proton); the CuTeDSL flashattn
     # reference cannot be CUDA-graph-captured, so proton (not cudagraph_proton) is what
     # gives an honest ratio here (verified 0.994 vs event's unstable 0.97-1.38).
+    backend_config=None,
     **kwargs,
 ):
     """Benchmark flash attention 4."""
@@ -1706,6 +1790,7 @@ def run_gpu(
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
         is_causal=is_causal,
+        backend_config=backend_config,
     )
     funcs = {"tir": launch}
 
@@ -1752,6 +1837,8 @@ def run_bench(
     timer=None,  # None inherits the global default (proton); the CuTeDSL flashattn
     # reference cannot be CUDA-graph-captured, so proton (not cudagraph_proton) is what
     # gives an honest ratio here (verified 0.994 vs event's unstable 0.97-1.38).
+    *,
+    backend_config=None,
     **kwargs,
 ):
     config = dict(kwargs)
@@ -1764,6 +1851,7 @@ def run_bench(
         head_dim=head_dim,
         is_causal=is_causal,
         **config,
+        backend_config=backend_config,
     )
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
@@ -1795,7 +1883,7 @@ def _parse_iket_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _profile_iket_workload(args: argparse.Namespace) -> None:
+def _profile_iket_workload(args: argparse.Namespace, *, backend_config=None) -> None:
     if args.repeat <= 0:
         raise ValueError("--repeat must be positive")
 
@@ -1807,9 +1895,13 @@ def _profile_iket_workload(args: argparse.Namespace) -> None:
         args.num_kv_heads,
         args.head_dim,
         is_causal=args.causal,
+        backend_config=backend_config,
     )
     executable = IketProfiler().compile(
-        tvm.IRModule({"main": func}), target=cuda_target(), tir_pipeline="tirx"
+        tvm.IRModule({"main": func}),
+        target=cuda_target(backend_config=backend_config),
+        tir_pipeline="tirx",
+        backend_config=backend_config,
     )
 
     q, k, v, _ = prepare_data(
@@ -1840,6 +1932,7 @@ def _profile_iket_workload(args: argparse.Namespace) -> None:
         num_kv_heads=args.num_kv_heads,
         head_dim=args.head_dim,
         is_causal=args.causal,
+        backend_config=backend_config,
     )
     for _ in range(args.repeat):
         launch()

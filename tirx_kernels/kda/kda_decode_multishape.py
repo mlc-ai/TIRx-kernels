@@ -52,7 +52,10 @@ from unittest import SkipTest
 
 import torch
 
-def _make_base():
+from tirx_kernels.runner import backend_config_key, cuda_target, resolve_backend_config
+
+
+def _make_base(*, backend_config=None):
     """KDA recurrent decode, family "colreg-persist" (v4, warp-autonomous phases): persistent register-resident recurrence.
 
     Unit = (sequence n, value head hv, column slice of CPT rows). A persistent CTA (4 warps)
@@ -82,9 +85,9 @@ def _make_base():
     """
 
     import torch
-    import tvm
 
     import tirx_kernels.tirx_lite as txl
+    import tvm
 
     D = 128
     LOG2E = 1.4426950408889634
@@ -98,22 +101,30 @@ def _make_base():
     MAXH = 6
     IDX_PRE = 8
 
-
     def _shfl_bfly(val_f32, xor):
         out = txl.local_scalar("uint32")
-        txl.ptx.shfl_sync.bfly.b32(out, txl.reinterpret("uint32", val_f32), txl.uint32(xor), txl.uint32(31), txl.uint32(FULL))
+        txl.ptx.shfl_sync.bfly.b32(
+            out,
+            txl.reinterpret("uint32", val_f32),
+            txl.uint32(xor),
+            txl.uint32(31),
+            txl.uint32(FULL),
+        )
         return txl.reinterpret("float32", out)
-
 
     def _shfl_idx(val_f32, src_lane):
         out = txl.local_scalar("uint32")
-        txl.ptx.shfl_sync.idx.b32(out, txl.reinterpret("uint32", val_f32), txl.cast(src_lane, "uint32"), txl.uint32(31), txl.uint32(FULL))
+        txl.ptx.shfl_sync.idx.b32(
+            out,
+            txl.reinterpret("uint32", val_f32),
+            txl.cast(src_lane, "uint32"),
+            txl.uint32(31),
+            txl.uint32(FULL),
+        )
         return txl.reinterpret("float32", out)
-
 
     def _f2(a, b):
         return txl.cuda.make_float2(a, b)
-
 
     def _rng(name):
         """IKET range token (stripped by the production pipeline)."""
@@ -121,12 +132,28 @@ def _make_base():
         txl.assign(token[0], txl.cuda.iket.range_start(name))
         return token
 
-
     def _rng_end(token):
         txl.cuda.iket.range_end(token[0])
 
-
-    def build_kernel(*, T, H, HV, gate_lb, cpt, num_units, num_main, per_sm, copy_est=0, allreduce=None, bar_arrive=False, warp_auto=True, vec_split=True, nw=4, l2pf=False):
+    def build_kernel(
+        *,
+        T,
+        H,
+        HV,
+        gate_lb,
+        cpt,
+        num_units,
+        num_main,
+        per_sm,
+        copy_est=0,
+        allreduce=None,
+        bar_arrive=False,
+        warp_auto=True,
+        vec_split=True,
+        nw=4,
+        l2pf=False,
+        backend_config=None,
+    ):
         assert D % cpt == 0 and cpt % (4 * nw) == 0, "each warp needs a multiple of 4 rows"
         G = HV // H
         NT = 32 * nw
@@ -155,11 +182,10 @@ def _make_base():
             hole_base0 = num_units % num_main
         hole_cnt0 = num_main - hole_base0
 
-
         if hole_cnt0 == 0 or copy_est > hole_cnt0 * max(MAXH, T + 1):
             hole_base0, hole_cnt0 = 0, num_main
 
-        @txl.kernel(warps=nw, arch="sm_100a", grid=num_ctas, min_blocks_per_sm=per_sm)
+        @txl.kernel()
         def kda_decode_persist(
             q: txl.gptr[txl.bf16],
             k: txl.gptr[txl.bf16],
@@ -178,6 +204,12 @@ def _make_base():
             num_slots: txl.i32,
             num_seqs: txl.i32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
+                backend_config=backend_config,
+            )
+
             cta = txl.cta_id()
             tid = txl.thread_id()
             warp = txl.warp_id()
@@ -195,7 +227,6 @@ def _make_base():
             bar_vec.init(nw if vec_split else 1)
             txl.ptx.fence.proxy.async_.shared__cta()
             txl.cuda.cta_sync()
-
 
             def main_role():
                 ks = lane & 7
@@ -223,15 +254,29 @@ def _make_base():
                     nwi = nw if vec_split else 1
                     for w in range(nwi):
                         toks = [t for t in range(T) if t % nwi == w]
-                        nbytes = len(toks) * RAW_TOK_B + ((GATE_B if gate_lb else 0) if w == 0 else 0)
+                        nbytes = len(toks) * RAW_TOK_B + (
+                            (GATE_B if gate_lb else 0) if w == 0 else 0
+                        )
                         with txl.If(warp == w), txl.Then():
-                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_vec.ptr_to([0]), txl.uint32(nbytes))
+                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                bar_vec.ptr_to([0]), txl.uint32(nbytes)
+                            )
                             for t in toks:
                                 _issue_vec_token(n, hv, h, t)
                             if gate_lb and w == 0:
                                 gb = T * (RAW_TOK_B // 2)
-                                txl.ptx[_BULK_G2S](raw.ptr_to([gb]), dt_bias.ptr_to([h * D]), txl.uint32(512), bar_vec.ptr_to([0]))
-                                txl.ptx[_BULK_G2S](raw.ptr_to([gb + 256]), a_log.ptr_to([h - (h % 4)]), txl.uint32(16), bar_vec.ptr_to([0]))
+                                txl.ptx[_BULK_G2S](
+                                    raw.ptr_to([gb]),
+                                    dt_bias.ptr_to([h * D]),
+                                    txl.uint32(512),
+                                    bar_vec.ptr_to([0]),
+                                )
+                                txl.ptx[_BULK_G2S](
+                                    raw.ptr_to([gb + 256]),
+                                    a_log.ptr_to([h - (h % 4)]),
+                                    txl.uint32(16),
+                                    bar_vec.ptr_to([0]),
+                                )
 
                 def _issue_vec_token(n, hv, h, t):
                     if True:
@@ -239,12 +284,37 @@ def _make_base():
                         qk_off = (txl.cast(tok, "int64") * H + h) * D
                         vg_off = (txl.cast(tok, "int64") * HV + hv) * D
                         rb = t * (RAW_TOK_B // 2)
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb]), q.ptr_to([qk_off]), txl.uint32(256), bar_vec.ptr_to([0]))
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 128]), k.ptr_to([qk_off]), txl.uint32(256), bar_vec.ptr_to([0]))
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 256]), g.ptr_to([vg_off]), txl.uint32(256), bar_vec.ptr_to([0]))
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 384]), v.ptr_to([vg_off]), txl.uint32(256), bar_vec.ptr_to([0]))
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb]),
+                            q.ptr_to([qk_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([0]),
+                        )
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 128]),
+                            k.ptr_to([qk_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([0]),
+                        )
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 256]),
+                            g.ptr_to([vg_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([0]),
+                        )
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 384]),
+                            v.ptr_to([vg_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([0]),
+                        )
                         bidx = txl.cast(tok, "int64") * HV + hv
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 512]), beta.ptr_to([bidx - (bidx % 8)]), txl.uint32(16), bar_vec.ptr_to([0]))
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 512]),
+                            beta.ptr_to([bidx - (bidx % 8)]),
+                            txl.uint32(16),
+                            bar_vec.ptr_to([0]),
+                        )
 
                 def tile_load(tile, slot, hv, part):
                     """Thread 0: TMA load of cpt rows of (slot, hv) from initial_state into `tile` (no expect_tx)."""
@@ -257,7 +327,6 @@ def _make_base():
                             bar_state.ptr_to([0]),
                         )
 
-
                 hole_base = hole_base0
                 hole_cnt = hole_cnt0
 
@@ -268,7 +337,9 @@ def _make_base():
                 def issue_state(uu, slot0):
                     """Thread 0: TMA load of the unit's state rows into tile A."""
                     _, part, hv, n, _ = unit_coords(uu)
-                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.uint32(tile_bytes))
+                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                        bar_state.ptr_to([0]), txl.uint32(tile_bytes)
+                    )
                     src0 = (txl.cast(slot0, "int64") * HV + hv) * (D * D) + part * cpt * D
                     for pc in range(n_pieces):
                         txl.ptx[_BULK_G2S](
@@ -302,8 +373,9 @@ def _make_base():
                         return
                     _, part, hv, n, _ = unit_coords(uu)
                     src0 = (txl.cast(slot0, "int64") * HV + hv) * (D * D) + part * cpt * D
-                    txl.ptx["cp.async.bulk.prefetch.L2.global"](state_in.ptr_to([src0]), txl.uint32(tile_bytes))
-
+                    txl.ptx["cp.async.bulk.prefetch.L2.global"](
+                        state_in.ptr_to([src0]), txl.uint32(tile_bytes)
+                    )
 
                 if spec:
                     total_idx = num_seqs * T
@@ -313,12 +385,13 @@ def _make_base():
                         with txl.If(i * NT + tid < total_idx), txl.Then():
                             txl.ptx.ld.global_.s32(idx_pre[i], ssm_idx.ptr_to([i * NT + tid]))
 
-
-                with txl.If((lane == 0) & (cta < num_units) & (vec_split or (warp == 0))), txl.Then():
+                with (
+                    txl.If((lane == 0) & (cta < num_units) & (vec_split or (warp == 0))),
+                    txl.Then(),
+                ):
                     issue_vec(cta)
                 with txl.If((tid == 0) & (cta < num_units)), txl.Then():
                     if spec:
-
                         n0 = unit_coords(cta)[3]
                         a0 = txl.local_scalar("int32")
                         txl.ptx.ld.global_.s32(a0, num_accepted.ptr_to([n0]))
@@ -344,13 +417,17 @@ def _make_base():
                     with txl.serial(0, (nz + NT - 1) // NT, unroll=False) as i:
                         pz = i * NT + tid
                         with txl.If(pz < nz), txl.Then():
-                            txl.ptx.st.shared.b32(tiles.ptr_to([tile_elems + 2 * pz]), txl.uint32(0))
+                            txl.ptx.st.shared.b32(
+                                tiles.ptr_to([tile_elems + 2 * pz]), txl.uint32(0)
+                            )
                     txl.cuda.cta_sync()
                     total = num_seqs * T
                     for i in range(IDX_PRE):
                         rel = idx_pre[i] - cb
                         with txl.If((i * NT + tid < total) & (rel >= 0) & (rel < pmax)), txl.Then():
-                            txl.ptx.st.shared.b32(tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1))
+                            txl.ptx.st.shared.b32(
+                                tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1)
+                            )
                     with txl.serial(IDX_PRE, (total + NT - 1) // NT, unroll=False) as i:
                         e = i * NT + tid
                         with txl.If(e < total), txl.Then():
@@ -358,7 +435,9 @@ def _make_base():
                             txl.ptx.ld.global_.s32(sidx, ssm_idx.ptr_to([e]))
                             rel = sidx - cb
                             with txl.If((rel >= 0) & (rel < pmax)), txl.Then():
-                                txl.ptx.st.shared.b32(tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1))
+                                txl.ptx.st.shared.b32(
+                                    tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1)
+                                )
                     txl.cuda.cta_sync()
 
                 def scan_untouched(cb, cnt, want_rank, dst_idx):
@@ -372,10 +451,14 @@ def _make_base():
                         with txl.If(valid), txl.Then():
                             txl.ptx.ld.shared.b32(flag, tiles.ptr_to([tile_elems + 2 * pl]))
                         untouched = flag == txl.uint32(0)
-                        upred = txl.local_scalar("uint32", init=txl.if_then_else(untouched, txl.uint32(1), txl.uint32(0)))
+                        upred = txl.local_scalar(
+                            "uint32", init=txl.if_then_else(untouched, txl.uint32(1), txl.uint32(0))
+                        )
                         mask = txl.local_scalar("uint32")
                         txl.ptx.vote_sync.ballot.b32(mask, txl.ptx.pred(upred), txl.uint32(FULL))
-                        below = txl.bitwise_and(mask, (txl.uint32(1) << txl.cast(lane, "uint32")) - txl.uint32(1))
+                        below = txl.bitwise_and(
+                            mask, (txl.uint32(1) << txl.cast(lane, "uint32")) - txl.uint32(1)
+                        )
                         rank = cnt + txl.cast(txl.popcount(below), "int32")
                         with txl.If(untouched), txl.Then():
                             slot = cb + pl
@@ -384,16 +467,23 @@ def _make_base():
                                 hi = lo + DCU
                                 me = cta - hole_base
 
-                                c0 = txl.local_scalar("int32", init=lo + ((me - lo) % hole_cnt + hole_cnt) % hole_cnt)
+                                c0 = txl.local_scalar(
+                                    "int32", init=lo + ((me - lo) % hole_cnt + hole_cnt) % hole_cnt
+                                )
                                 with txl.If(me >= 0), txl.Then():
                                     with txl.While(c0 < hi):
                                         kk = (c0 - me) // hole_cnt
                                         with txl.If(kk < MAXC), txl.Then():
-                                            txl.ptx.st.shared.b32(cpslots.ptr_to([kk]), txl.reinterpret("uint32", slot))
+                                            txl.ptx.st.shared.b32(
+                                                cpslots.ptr_to([kk]),
+                                                txl.reinterpret("uint32", slot),
+                                            )
                                         txl.assign(c0, c0 + hole_cnt)
                             else:
                                 with txl.If((want_rank >= 0) & (rank == want_rank)), txl.Then():
-                                    txl.ptx.st.shared.b32(cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot))
+                                    txl.ptx.st.shared.b32(
+                                        cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot)
+                                    )
                         txl.assign(cnt, cnt + txl.cast(txl.popcount(mask), "int32"))
 
                 ncopy_me = txl.local_scalar("int32", init=txl.int32(0))
@@ -409,13 +499,22 @@ def _make_base():
                             scan_untouched(cb, cnt, None, 0)
                         txl.cuda.cta_sync()
                     with txl.If(tid == 0), txl.Then():
-                        txl.ptx.st.shared.b32(cpslots.ptr_to([MAXC]), txl.reinterpret("uint32", cnt))
+                        txl.ptx.st.shared.b32(
+                            cpslots.ptr_to([MAXC]), txl.reinterpret("uint32", cnt)
+                        )
                     txl.cuda.cta_sync()
                     ucnt = txl.local_scalar("int32")
                     txl.ptx.ld.shared.b32(ucnt, cpslots.ptr_to([MAXC]))
                     total_copy = ucnt * DCU
                     me0 = cta - hole_base
-                    txl.assign(ncopy_me, txl.if_then_else((me0 >= 0) & (total_copy > me0), (total_copy - me0 + hole_cnt - 1) // hole_cnt, txl.int32(0)))
+                    txl.assign(
+                        ncopy_me,
+                        txl.if_then_else(
+                            (me0 >= 0) & (total_copy > me0),
+                            (total_copy - me0 + hole_cnt - 1) // hole_cnt,
+                            txl.int32(0),
+                        ),
+                    )
 
                 def preprocess(t, hv, h):
                     """Warp-level: normalize q/k, decay, per-token scalars of token t from `raw`."""
@@ -436,8 +535,16 @@ def _make_base():
                     vf = txl.alloc_local((4,), "float32")
                     for src, dst in ((qw, qf), (kw, kf), (gw, gf), (vw, vf)):
                         for p2 in range(2):
-                            txl.assign(dst[2 * p2], txl.cuda.uint_as_float(txl.shift_left(src[p2], txl.uint32(16))))
-                            txl.assign(dst[2 * p2 + 1], txl.cuda.uint_as_float(txl.bitwise_and(src[p2], txl.uint32(0xFFFF0000))))
+                            txl.assign(
+                                dst[2 * p2],
+                                txl.cuda.uint_as_float(txl.shift_left(src[p2], txl.uint32(16))),
+                            )
+                            txl.assign(
+                                dst[2 * p2 + 1],
+                                txl.cuda.uint_as_float(
+                                    txl.bitwise_and(src[p2], txl.uint32(0xFFFF0000))
+                                ),
+                            )
 
                     sq = txl.local_scalar("float32", init=txl.float32(0.0))
                     sk = txl.local_scalar("float32", init=txl.float32(0.0))
@@ -469,10 +576,14 @@ def _make_base():
                         ea = txl.local_scalar("float32")
                         alog = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(alog, raw.ptr_to([gb + 256 + (h % 4) * 2]))
-                        txl.ptx["mul.f32"](tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E))
+                        txl.ptx["mul.f32"](
+                            tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E)
+                        )
                         txl.ptx["ex2.approx.ftz.f32"](ea, tmp)
                         bias = txl.alloc_local((4,), "uint32", align=16)
-                        txl.ptx.ld.shared.v4.b32(bias[0], bias[1], bias[2], bias[3], raw.ptr_to([gb + lane * 8]))
+                        txl.ptx.ld.shared.v4.b32(
+                            bias[0], bias[1], bias[2], bias[3], raw.ptr_to([gb + lane * 8])
+                        )
                         for e in range(4):
                             x = txl.local_scalar("float32")
                             txl.ptx["add.f32"](x, gf[e], txl.reinterpret("float32", bias[e]))
@@ -491,22 +602,38 @@ def _make_base():
                     for pp in range(2):
                         pair = lane * 2 + pp
                         ent = t * FST + pair * 8 + (pair >> 3) * 4
-                        txl.ptx.st.shared.v2.b32(ftab.ptr_to([ent + 2]), txl.reinterpret("uint32", gf[2 * pp]), txl.reinterpret("uint32", gf[2 * pp + 1]))
+                        txl.ptx.st.shared.v2.b32(
+                            ftab.ptr_to([ent + 2]),
+                            txl.reinterpret("uint32", gf[2 * pp]),
+                            txl.reinterpret("uint32", gf[2 * pp + 1]),
+                        )
                         txl.ptx.st.shared.v4.b32(
                             ftab.ptr_to([ent + 4]),
-                            txl.reinterpret("uint32", kf[2 * pp]), txl.reinterpret("uint32", kf[2 * pp + 1]),
-                            txl.reinterpret("uint32", qf[2 * pp]), txl.reinterpret("uint32", qf[2 * pp + 1]),
+                            txl.reinterpret("uint32", kf[2 * pp]),
+                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                            txl.reinterpret("uint32", qf[2 * pp]),
+                            txl.reinterpret("uint32", qf[2 * pp + 1]),
                         )
-                        txl.ptx.st.shared.v2.b32(ftab.ptr_to([ent + FST]), txl.reinterpret("uint32", kf[2 * pp]), txl.reinterpret("uint32", kf[2 * pp + 1]))
+                        txl.ptx.st.shared.v2.b32(
+                            ftab.ptr_to([ent + FST]),
+                            txl.reinterpret("uint32", kf[2 * pp]),
+                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                        )
                     txl.ptx.st.shared.v4.b32(
                         vtab.ptr_to([t * D + lane * 4]),
-                        txl.reinterpret("uint32", vf[0]), txl.reinterpret("uint32", vf[1]),
-                        txl.reinterpret("uint32", vf[2]), txl.reinterpret("uint32", vf[3]),
+                        txl.reinterpret("uint32", vf[0]),
+                        txl.reinterpret("uint32", vf[1]),
+                        txl.reinterpret("uint32", vf[2]),
+                        txl.reinterpret("uint32", vf[3]),
                     )
                     with txl.If(lane == 0), txl.Then():
                         bf = txl.local_scalar("float32")
                         txl.ptx.cvt.f32.bf16(bf, txl.cast(bbits, "uint16"))
-                        txl.ptx.st.shared.v2.b32(svec.ptr_to([2 * t]), txl.reinterpret("uint32", bf), txl.reinterpret("uint32", cpart))
+                        txl.ptx.st.shared.v2.b32(
+                            svec.ptr_to([2 * t]),
+                            txl.reinterpret("uint32", bf),
+                            txl.reinterpret("uint32", cpart),
+                        )
 
                 S = txl.alloc_local((J * 8,), "uint64", align=8)
                 d1 = txl.alloc_local((J,), "uint64", align=8)
@@ -551,7 +678,9 @@ def _make_base():
                             txl.ptx["fma.rn.f32"](o, c_t, ub[j], vals[J + j])
                             ob = txl.local_scalar("uint16")
                             txl.ptx.cvt.rn.bf16.f32(ob, o)
-                            txl.ptx.st.global_.b16(output.ptr_to([out_base + col]), ob, pred=txl.EQ(ks, 0))
+                            txl.ptx.st.global_.b16(
+                                output.ptr_to([out_base + col]), ob, pred=txl.EQ(ks, 0)
+                            )
                         return
                     for s in (4, 2, 1):
                         if len(vals) > 1:
@@ -559,8 +688,12 @@ def _make_base():
                             b = ((ks // s) & 1) != 0
                             nxt = []
                             for i in range(half):
-                                send = txl.local_scalar("float32", init=txl.if_then_else(b, vals[i], vals[i + half]))
-                                keep = txl.local_scalar("float32", init=txl.if_then_else(b, vals[i + half], vals[i]))
+                                send = txl.local_scalar(
+                                    "float32", init=txl.if_then_else(b, vals[i], vals[i + half])
+                                )
+                                keep = txl.local_scalar(
+                                    "float32", init=txl.if_then_else(b, vals[i + half], vals[i])
+                                )
                                 r = txl.local_scalar("float32")
                                 txl.ptx["add.f32"](r, keep, _shfl_bfly(send, s))
                                 nxt.append(r)
@@ -588,9 +721,10 @@ def _make_base():
                         txl.ptx["fma.rn.f32"](o, c_t, uloc[i], dd2)
                         ob = txl.local_scalar("uint16")
                         txl.ptx.cvt.rn.bf16.f32(ob, o)
-                        txl.ptx.st.global_.b16(output.ptr_to([out_base + col]), ob, pred=txl.LT(ks, 4))
+                        txl.ptx.st.global_.b16(
+                            output.ptr_to([out_base + col]), ob, pred=txl.LT(ks, 4)
+                        )
                     for j in range(J):
-
                         src = (lane & 0x18) | ((j * 8) // M)
                         txl.assign(ub[j], _shfl_idx(uloc[j % R], src))
 
@@ -611,7 +745,9 @@ def _make_base():
                             i = c * 4 + ii
                             if with_dots:
                                 txl.ptx.ld.shared.v2.b64(kp2[ii], a2[ii], vec_ptr(phase, i))
-                                txl.ptx.ld.shared.v2.b64(k2[ii], q2[ii], txl.ptx.addr(vec_ptr(phase, i), 16))
+                                txl.ptx.ld.shared.v2.b64(
+                                    k2[ii], q2[ii], txl.ptx.addr(vec_ptr(phase, i), 16)
+                                )
                             else:
                                 txl.ptx.ld.shared.b64(kp2[ii], vec_ptr(phase, i))
                         for j in range(J):
@@ -619,7 +755,10 @@ def _make_base():
                             for ii in range(4):
                                 i = c * 4 + ii
                                 txl.ptx.fma.rn.f32x2(S[j * 8 + i], kp2[ii], u2[j], S[j * 8 + i])
-                                txl.assign(packed[ii], txl.cuda.float22bfloat162_rn_from_float2(S[j * 8 + i]))
+                                txl.assign(
+                                    packed[ii],
+                                    txl.cuda.float22bfloat162_rn_from_float2(S[j * 8 + i]),
+                                )
                                 if with_dots:
                                     txl.ptx.mul.rn.f32x2(S[j * 8 + i], a2[ii], S[j * 8 + i])
                                     txl.ptx.fma.rn.f32x2(d1[j], k2[ii], S[j * 8 + i], d1[j])
@@ -628,7 +767,10 @@ def _make_base():
                             cs = txl.bitwise_xor(txl.int32(c), ks >> 2)
                             txl.ptx.st.shared.v4.b32(
                                 tiles.ptr_to([tile * tile_elems + row * D + ks * 16 + cs * 8]),
-                                packed[0], packed[1], packed[2], packed[3],
+                                packed[0],
+                                packed[1],
+                                packed[2],
+                                packed[3],
                             )
                     txl.ptx.fence.proxy.async_.shared__cta()
 
@@ -675,7 +817,6 @@ def _make_base():
                     cur_slot = txl.local_scalar("int32")
                     nxt_slot = txl.local_scalar("int32")
 
-
                     txl.cuda.iket.mark("unit-start")
                     tk = _rng("wait-vec")
                     bar_vec.wait(0, vcount & 1)
@@ -709,7 +850,6 @@ def _make_base():
                     with txl.If((lane == 0) & has_next & (vec_split or (warp == 0))), txl.Then():
                         issue_vec(u + num_main)
 
-
                     tk = _rng("wait-state")
                     bar_state.wait(0, scount & 1)
                     txl.assign(scount, scount + txl.int32(1))
@@ -720,13 +860,23 @@ def _make_base():
                         for c in range(2):
                             wds = txl.alloc_local((4,), "uint32", align=16)
                             cs = txl.bitwise_xor(txl.int32(c), ks >> 2)
-                            txl.ptx.ld.shared.v4.b32(wds[0], wds[1], wds[2], wds[3], tiles.ptr_to([row * D + ks * 16 + cs * 8]))
+                            txl.ptx.ld.shared.v4.b32(
+                                wds[0],
+                                wds[1],
+                                wds[2],
+                                wds[3],
+                                tiles.ptr_to([row * D + ks * 16 + cs * 8]),
+                            )
                             for i in range(4):
                                 txl.assign(
                                     S[j * 8 + c * 4 + i],
                                     _f2(
-                                        txl.cuda.uint_as_float(txl.shift_left(wds[i], txl.uint32(16))),
-                                        txl.cuda.uint_as_float(txl.bitwise_and(wds[i], txl.uint32(0xFFFF0000))),
+                                        txl.cuda.uint_as_float(
+                                            txl.shift_left(wds[i], txl.uint32(16))
+                                        ),
+                                        txl.cuda.uint_as_float(
+                                            txl.bitwise_and(wds[i], txl.uint32(0xFFFF0000))
+                                        ),
                                     ),
                                 )
 
@@ -746,20 +896,24 @@ def _make_base():
                                 else:
                                     issue_state(u + num_main, unit_coords(u + num_main)[3])
                                     with txl.If(u + 2 * num_main < num_units), txl.Then():
-                                        prefetch_l2(u + 2 * num_main, unit_coords(u + 2 * num_main)[3])
+                                        prefetch_l2(
+                                            u + 2 * num_main, unit_coords(u + 2 * num_main)[3]
+                                        )
                             if spec:
                                 with txl.Else():
-
-
                                     with txl.If(ncopy_me > 0), txl.Then():
-                                        nb0 = txl.min(txl.int32(3), txl.min(ncopy_me, txl.int32(MAXC)))
-                                        txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.cast(nb0, "uint32") * txl.uint32(tile_bytes))
+                                        nb0 = txl.min(
+                                            txl.int32(3), txl.min(ncopy_me, txl.int32(MAXC))
+                                        )
+                                        txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                            bar_state.ptr_to([0]),
+                                            txl.cast(nb0, "uint32") * txl.uint32(tile_bytes),
+                                        )
                                         hv_c, part_c = copy_coords(0)
                                         slot_c = txl.local_scalar("int32")
                                         txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([0]))
                                         tile_load(0, slot_c, hv_c, part_c)
                                         txl.assign(copy_armed, txl.int32(1))
-
 
                     tk = _rng("phase0")
                     for j in range(J):
@@ -777,7 +931,6 @@ def _make_base():
                             txl.ptx.fma.rn.f32x2(d2[j], q2, S[j * 8 + i], d2[j])
                     reduce_and_finish(0, hv, n, row0)
                     _rng_end(tk)
-
 
                     issuer = lane == 0 if warp_auto else tid == 0
 
@@ -836,10 +989,8 @@ def _make_base():
                         issue_store(tile, nxt_slot)
                     txl.assign(ck, ck + txl.int32(1))
 
-
                     txl.cuda.cta_sync()
                     _rng_end(tk)
-
 
                 if spec:
                     with txl.If(ncopy_me > 0), txl.Then():
@@ -853,11 +1004,13 @@ def _make_base():
                             nb = txl.min(txl.int32(3), nfast - k0)
                             with txl.If(tid == 0), txl.Then():
                                 pre = (kb == 0) & (copy_armed == 1)
-                                with txl.If(pre == False), txl.Then():
-                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.cast(nb, "uint32") * txl.uint32(tile_bytes))
+                                with txl.If(pre == False), txl.Then():  # noqa: E712 - comparison builds an IR expression
+                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                        bar_state.ptr_to([0]),
+                                        txl.cast(nb, "uint32") * txl.uint32(tile_bytes),
+                                    )
                                 for i in range(3):
-
-                                    with txl.If((i < nb) & ((i > 0) | (pre == False))), txl.Then():
+                                    with txl.If((i < nb) & ((i > 0) | (pre == False))), txl.Then():  # noqa: E712 - comparison builds an IR expression
                                         hv_c, part_c = copy_coords(k0 + i)
                                         slot_c = txl.local_scalar("int32")
                                         txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([k0 + i]))
@@ -881,7 +1034,9 @@ def _make_base():
                             with txl.serial(MAXC, ncopy_me, unroll=False) as kc:
                                 rank = (kc * hole_cnt + (cta - hole_base)) // DCU
                                 cnt3 = txl.local_scalar("int32", init=txl.int32(0))
-                                with txl.serial(0, (num_slots + pmax - 1) // pmax, unroll=False) as chunk:
+                                with txl.serial(
+                                    0, (num_slots + pmax - 1) // pmax, unroll=False
+                                ) as chunk:
                                     cb = chunk * pmax
                                     build_flags(cb)
                                     with txl.If(warp == 0), txl.Then():
@@ -891,7 +1046,9 @@ def _make_base():
                                     hv_c, part_c = copy_coords(kc)
                                     slot_c = txl.local_scalar("int32")
                                     txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([MAXC + 1]))
-                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.uint32(tile_bytes))
+                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                        bar_state.ptr_to([0]), txl.uint32(tile_bytes)
+                                    )
                                     tile_load(0, slot_c, hv_c, part_c)
                                 bar_state.wait(0, scount & 1)
                                 txl.assign(scount, scount + txl.int32(1))
@@ -911,22 +1068,24 @@ def _make_base():
 
         return kda_decode_persist
 
-
     OVERRIDE = {}
     _COMPILED = {}
 
-
     def _pick_cpt(N, T, HV):
-
-
         heads = N * HV
         if heads <= 16:
             return 32
         return 64
 
-
     def _ctas_per_sm(cpt, T, gate_lb, nw=4):
-        smem = 3 * cpt * D * 2 + T * RAW_TOK_B + (GATE_B if gate_lb else 0) + (T + 1) * FST * 4 + T * D * 4 + 256
+        smem = (
+            3 * cpt * D * 2
+            + T * RAW_TOK_B
+            + (GATE_B if gate_lb else 0)
+            + (T + 1) * FST * 4
+            + T * D * 4
+            + 256
+        )
         by_smem = (220 * 1024) // smem
         if nw == 4:
             by_regs = {16: 6, 32: 5, 64: 3, 128: 2}[cpt]
@@ -936,22 +1095,28 @@ def _make_base():
             by_regs = {32: 3, 64: 2, 128: 1}[cpt]
         return max(1, min(by_smem, by_regs))
 
-
-    def _compile(**kw):
+    def _compile(*, backend_config=None, **kw):
+        backend_config = resolve_backend_config(backend_config)
+        cache_config = backend_config_key(backend_config)
         key = tuple(sorted(kw.items()))
-        exe = _COMPILED.get(key)
+        exe = _COMPILED.get((cache_config, key))
         if exe is None:
-            kernel = build_kernel(**kw)
-            target = kernel.target()
+            kernel = build_kernel(**kw, backend_config=backend_config)
+            target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
-            _COMPILED[key] = exe
+                exe = tvm.compile(
+                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
+                )
+            _COMPILED[(cache_config, key)] = exe
         return exe
 
-
-    def setup(data, N, T):
+    def setup(data, N, T, *, backend_config=None):
         q, k, v, g, beta = data["q"], data["k"], data["v"], data["g"], data["beta"]
-        initial_state, final_state, output = data["initial_state"], data["final_state"], data["output"]
+        initial_state, final_state, output = (
+            data["initial_state"],
+            data["final_state"],
+            data["output"],
+        )
         H, HV = q.shape[-2], v.shape[-2]
         P = initial_state.shape[0]
         device = q.device
@@ -966,7 +1131,11 @@ def _make_base():
         copy_est = max(P - N * T, 0) * HV * split if spec else 0
         num_main = min(num_units + copy_est, per_sm * sms)
         per_sm = min(per_sm, max(1, -(-num_main // sms)))
-        extra = {k: bool(OVERRIDE[k]) for k in ("allreduce", "bar_arrive", "warp_auto", "vec_split") if k in OVERRIDE}
+        extra = {
+            k: bool(OVERRIDE[k])
+            for k in ("allreduce", "bar_arrive", "warp_auto", "vec_split")
+            if k in OVERRIDE
+        }
         if "warp_auto" not in extra:
             extra["warp_auto"] = (num_units + copy_est) <= 6 * num_main
         if "vec_split" not in extra:
@@ -977,10 +1146,20 @@ def _make_base():
         if "l2pf" in OVERRIDE:
             extra["l2pf"] = bool(OVERRIDE["l2pf"])
         else:
-
-
             extra["l2pf"] = T == 2 and num_units >= 8 * num_main
-        exe = _compile(T=T, H=H, HV=HV, gate_lb=gate_lb, cpt=cpt, num_units=num_units, num_main=num_main, per_sm=per_sm, copy_est=copy_est, **extra)
+        exe = _compile(
+            T=T,
+            H=H,
+            HV=HV,
+            gate_lb=gate_lb,
+            cpt=cpt,
+            num_units=num_units,
+            num_main=num_main,
+            per_sm=per_sm,
+            copy_est=copy_est,
+            **extra,
+            backend_config=backend_config,
+        )
 
         dummy_f32 = torch.zeros(4, dtype=torch.float32, device=device)
         dummy_i32 = torch.zeros(1, dtype=torch.int32, device=device)
@@ -991,9 +1170,22 @@ def _make_base():
         lower_bound = float(data["lower_bound"]) if data["lower_bound"] is not None else 0.0
         scale = float(data["scale"])
         args = (
-            q.view(-1), k.view(-1), v.view(-1), g.view(-1), beta.view(-1),
-            a_log, dt_bias, initial_state.view(-1), final_state.view(-1), output.view(-1),
-            ssm, acc, scale, lower_bound, int(P), int(N),
+            q.view(-1),
+            k.view(-1),
+            v.view(-1),
+            g.view(-1),
+            beta.view(-1),
+            a_log,
+            dt_bias,
+            initial_state.view(-1),
+            final_state.view(-1),
+            output.view(-1),
+            ssm,
+            acc,
+            scale,
+            lower_bound,
+            int(P),
+            int(N),
         )
         keep = (q, k, v, g, beta, a_log, dt_bias, initial_state, final_state, output, ssm, acc)
 
@@ -1004,12 +1196,15 @@ def _make_base():
         run()
         torch.cuda.synchronize(device)
         return run
+
     return setup
+
 
 _BASE_SETUP = _make_base()
 del _make_base
 
-def _make_defer():
+
+def _make_defer(*, backend_config=None):
     """KDA recurrent decode, family "colreg-persist" (v10: safe deferred checkpoint hand-off): persistent register-resident recurrence.
 
     Unit = (sequence n, value head hv, column slice of CPT rows). A persistent CTA (4 warps)
@@ -1045,9 +1240,9 @@ def _make_defer():
     """
 
     import torch
-    import tvm
 
     import tirx_kernels.tirx_lite as txl
+    import tvm
 
     D = 128
     LOG2E = 1.4426950408889634
@@ -1062,22 +1257,30 @@ def _make_defer():
     IDX_PRE = 8
     FLAG_WORDS = 128
 
-
     def _shfl_bfly(val_f32, xor):
         out = txl.local_scalar("uint32")
-        txl.ptx.shfl_sync.bfly.b32(out, txl.reinterpret("uint32", val_f32), txl.uint32(xor), txl.uint32(31), txl.uint32(FULL))
+        txl.ptx.shfl_sync.bfly.b32(
+            out,
+            txl.reinterpret("uint32", val_f32),
+            txl.uint32(xor),
+            txl.uint32(31),
+            txl.uint32(FULL),
+        )
         return txl.reinterpret("float32", out)
-
 
     def _shfl_idx(val_f32, src_lane):
         out = txl.local_scalar("uint32")
-        txl.ptx.shfl_sync.idx.b32(out, txl.reinterpret("uint32", val_f32), txl.cast(src_lane, "uint32"), txl.uint32(31), txl.uint32(FULL))
+        txl.ptx.shfl_sync.idx.b32(
+            out,
+            txl.reinterpret("uint32", val_f32),
+            txl.cast(src_lane, "uint32"),
+            txl.uint32(31),
+            txl.uint32(FULL),
+        )
         return txl.reinterpret("float32", out)
-
 
     def _f2(a, b):
         return txl.cuda.make_float2(a, b)
-
 
     def _rng(name):
         """IKET range token (stripped by the production pipeline)."""
@@ -1085,21 +1288,44 @@ def _make_defer():
         txl.assign(token[0], txl.cuda.iket.range_start(name))
         return token
 
-
     def _rng_end(token):
         txl.cuda.iket.range_end(token[0])
-
 
     def _ntiles(T):
         """Tiles: A = input state, B/C = checkpoint staging (also the copy batch buffers)."""
         return 3
 
-
     def _smem_bytes(T, cpt, gate_lb, ntiles):
-        return ntiles * cpt * D * 2 + T * RAW_TOK_B + (GATE_B if gate_lb else 0) + (T + 1) * FST * 4 + T * D * 4 + FLAG_WORDS * 4 + 512
+        return (
+            ntiles * cpt * D * 2
+            + T * RAW_TOK_B
+            + (GATE_B if gate_lb else 0)
+            + (T + 1) * FST * 4
+            + T * D * 4
+            + FLAG_WORDS * 4
+            + 512
+        )
 
-
-    def build_kernel(*, T, H, HV, gate_lb, cpt, num_units, num_main, per_sm, copy_est=0, allreduce=None, vec_split=True, nw=4, ntiles=None, warp_auto=True, bar_arrive=False, l2pf=False):
+    def build_kernel(
+        *,
+        T,
+        H,
+        HV,
+        gate_lb,
+        cpt,
+        num_units,
+        num_main,
+        per_sm,
+        copy_est=0,
+        allreduce=None,
+        vec_split=True,
+        nw=4,
+        ntiles=None,
+        warp_auto=True,
+        bar_arrive=False,
+        l2pf=False,
+        backend_config=None,
+    ):
         assert D % cpt == 0 and cpt % (4 * nw) == 0, "each warp needs a multiple of 4 rows"
         del bar_arrive
         G = HV // H
@@ -1135,7 +1361,7 @@ def _make_defer():
         if hole_cnt0 == 0 or copy_est > hole_cnt0 * max(MAXH, T + 1):
             hole_base0, hole_cnt0 = 0, num_main
 
-        @txl.kernel(warps=nw, arch="sm_100a", grid=num_ctas, min_blocks_per_sm=per_sm)
+        @txl.kernel()
         def kda_decode_persist(
             q: txl.gptr[txl.bf16],
             k: txl.gptr[txl.bf16],
@@ -1154,6 +1380,12 @@ def _make_defer():
             num_slots: txl.i32,
             num_seqs: txl.i32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
+                backend_config=backend_config,
+            )
+
             cta = txl.cta_id()
             tid = txl.thread_id()
             warp = txl.warp_id()
@@ -1172,7 +1404,6 @@ def _make_defer():
             bar_vec.init(nw if vec_split else 1)
             txl.ptx.fence.proxy.async_.shared__cta()
             txl.cuda.cta_sync()
-
 
             def main_role():
                 ks = lane & 7
@@ -1200,27 +1431,63 @@ def _make_defer():
                     nwi = nw if vec_split else 1
                     for w in range(nwi):
                         toks = [t for t in range(T) if t % nwi == w]
-                        nbytes = len(toks) * RAW_TOK_B + ((GATE_B if gate_lb else 0) if w == 0 else 0)
+                        nbytes = len(toks) * RAW_TOK_B + (
+                            (GATE_B if gate_lb else 0) if w == 0 else 0
+                        )
                         with txl.If(warp == w), txl.Then():
-                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_vec.ptr_to([0]), txl.uint32(nbytes))
+                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                bar_vec.ptr_to([0]), txl.uint32(nbytes)
+                            )
                             for t in toks:
                                 _issue_vec_token(n, hv, h, t)
                             if gate_lb and w == 0:
                                 gb = T * (RAW_TOK_B // 2)
-                                txl.ptx[_BULK_G2S](raw.ptr_to([gb]), dt_bias.ptr_to([h * D]), txl.uint32(512), bar_vec.ptr_to([0]))
-                                txl.ptx[_BULK_G2S](raw.ptr_to([gb + 256]), a_log.ptr_to([h - (h % 4)]), txl.uint32(16), bar_vec.ptr_to([0]))
+                                txl.ptx[_BULK_G2S](
+                                    raw.ptr_to([gb]),
+                                    dt_bias.ptr_to([h * D]),
+                                    txl.uint32(512),
+                                    bar_vec.ptr_to([0]),
+                                )
+                                txl.ptx[_BULK_G2S](
+                                    raw.ptr_to([gb + 256]),
+                                    a_log.ptr_to([h - (h % 4)]),
+                                    txl.uint32(16),
+                                    bar_vec.ptr_to([0]),
+                                )
 
                 def _issue_vec_token(n, hv, h, t):
                     tok = n * T + t
                     qk_off = (txl.cast(tok, "int64") * H + h) * D
                     vg_off = (txl.cast(tok, "int64") * HV + hv) * D
                     rb = t * (RAW_TOK_B // 2)
-                    txl.ptx[_BULK_G2S](raw.ptr_to([rb]), q.ptr_to([qk_off]), txl.uint32(256), bar_vec.ptr_to([0]))
-                    txl.ptx[_BULK_G2S](raw.ptr_to([rb + 128]), k.ptr_to([qk_off]), txl.uint32(256), bar_vec.ptr_to([0]))
-                    txl.ptx[_BULK_G2S](raw.ptr_to([rb + 256]), g.ptr_to([vg_off]), txl.uint32(256), bar_vec.ptr_to([0]))
-                    txl.ptx[_BULK_G2S](raw.ptr_to([rb + 384]), v.ptr_to([vg_off]), txl.uint32(256), bar_vec.ptr_to([0]))
+                    txl.ptx[_BULK_G2S](
+                        raw.ptr_to([rb]), q.ptr_to([qk_off]), txl.uint32(256), bar_vec.ptr_to([0])
+                    )
+                    txl.ptx[_BULK_G2S](
+                        raw.ptr_to([rb + 128]),
+                        k.ptr_to([qk_off]),
+                        txl.uint32(256),
+                        bar_vec.ptr_to([0]),
+                    )
+                    txl.ptx[_BULK_G2S](
+                        raw.ptr_to([rb + 256]),
+                        g.ptr_to([vg_off]),
+                        txl.uint32(256),
+                        bar_vec.ptr_to([0]),
+                    )
+                    txl.ptx[_BULK_G2S](
+                        raw.ptr_to([rb + 384]),
+                        v.ptr_to([vg_off]),
+                        txl.uint32(256),
+                        bar_vec.ptr_to([0]),
+                    )
                     bidx = txl.cast(tok, "int64") * HV + hv
-                    txl.ptx[_BULK_G2S](raw.ptr_to([rb + 512]), beta.ptr_to([bidx - (bidx % 8)]), txl.uint32(16), bar_vec.ptr_to([0]))
+                    txl.ptx[_BULK_G2S](
+                        raw.ptr_to([rb + 512]),
+                        beta.ptr_to([bidx - (bidx % 8)]),
+                        txl.uint32(16),
+                        bar_vec.ptr_to([0]),
+                    )
 
                 def tile_load(tile, slot, hv, part):
                     """Thread 0: TMA load of cpt rows of (slot, hv) from initial_state into `tile` (no expect_tx)."""
@@ -1244,7 +1511,6 @@ def _make_defer():
                         )
                     txl.ptx.cp.async_.bulk.commit_group()
 
-
                 hole_base = hole_base0
                 hole_cnt = hole_cnt0
 
@@ -1255,7 +1521,9 @@ def _make_defer():
                 def issue_state(uu, slot0):
                     """Thread 0: arm bar_state and TMA-load the unit's state rows into tile A."""
                     _, part, hv, n, _ = unit_coords(uu)
-                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.uint32(tile_bytes))
+                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                        bar_state.ptr_to([0]), txl.uint32(tile_bytes)
+                    )
                     tile_load(0, slot0, hv, part)
 
                 def start_slot(uu, acc_val):
@@ -1282,8 +1550,9 @@ def _make_defer():
                         return
                     _, part, hv, n, _ = unit_coords(uu)
                     src0 = (txl.cast(slot0, "int64") * HV + hv) * (D * D) + part * cpt * D
-                    txl.ptx["cp.async.bulk.prefetch.L2.global"](state_in.ptr_to([src0]), txl.uint32(tile_bytes))
-
+                    txl.ptx["cp.async.bulk.prefetch.L2.global"](
+                        state_in.ptr_to([src0]), txl.uint32(tile_bytes)
+                    )
 
                 def build_flags(cb):
                     """All threads: bitset of the touched slots [cb, cb + pmax) in `flags` (rescanning fallback:
@@ -1299,7 +1568,10 @@ def _make_defer():
                             txl.ptx.ld.global_.s32(sidx, ssm_idx.ptr_to([e]))
                             rel = sidx - cb
                             with txl.If((rel >= 0) & (rel < pmax)), txl.Then():
-                                txl.ptx.red.shared.or_.b32(flags.ptr_to([rel >> 5]), txl.uint32(1) << txl.cast(rel & 31, "uint32"))
+                                txl.ptx.red.shared.or_.b32(
+                                    flags.ptr_to([rel >> 5]),
+                                    txl.uint32(1) << txl.cast(rel & 31, "uint32"),
+                                )
                     txl.cuda.cta_sync()
 
                 def scan_untouched(cb, cnt, want_rank, dst_idx):
@@ -1311,10 +1583,18 @@ def _make_defer():
                         word = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(word, flags.ptr_to([b]))
                         nvalid = txl.min(txl.int32(32), pend - b * 32)
-                        vmask = txl.if_then_else(nvalid >= 32, txl.uint32(FULL), (txl.uint32(1) << txl.cast(nvalid, "uint32")) - txl.uint32(1))
+                        vmask = txl.if_then_else(
+                            nvalid >= 32,
+                            txl.uint32(FULL),
+                            (txl.uint32(1) << txl.cast(nvalid, "uint32")) - txl.uint32(1),
+                        )
                         mask = txl.bitwise_and(txl.bitwise_not(word), vmask)
-                        untouched = txl.bitwise_and(mask >> txl.cast(lane, "uint32"), txl.uint32(1)) != txl.uint32(0)
-                        below = txl.bitwise_and(mask, (txl.uint32(1) << txl.cast(lane, "uint32")) - txl.uint32(1))
+                        untouched = txl.bitwise_and(
+                            mask >> txl.cast(lane, "uint32"), txl.uint32(1)
+                        ) != txl.uint32(0)
+                        below = txl.bitwise_and(
+                            mask, (txl.uint32(1) << txl.cast(lane, "uint32")) - txl.uint32(1)
+                        )
                         rank = cnt + txl.cast(txl.popcount(below), "int32")
                         with txl.If(untouched), txl.Then():
                             slot = cb + b * 32 + lane
@@ -1323,23 +1603,27 @@ def _make_defer():
                                 hi = lo + DCU
                                 me = cta - hole_base
 
-                                c0 = txl.local_scalar("int32", init=lo + ((me - lo) % hole_cnt + hole_cnt) % hole_cnt)
+                                c0 = txl.local_scalar(
+                                    "int32", init=lo + ((me - lo) % hole_cnt + hole_cnt) % hole_cnt
+                                )
                                 with txl.If(me >= 0), txl.Then():
                                     with txl.While(c0 < hi):
                                         kk = (c0 - me) // hole_cnt
                                         with txl.If(kk < MAXC), txl.Then():
-                                            txl.ptx.st.shared.b32(cpslots.ptr_to([kk]), txl.reinterpret("uint32", slot))
+                                            txl.ptx.st.shared.b32(
+                                                cpslots.ptr_to([kk]),
+                                                txl.reinterpret("uint32", slot),
+                                            )
                                         txl.assign(c0, c0 + hole_cnt)
                             else:
                                 with txl.If((want_rank >= 0) & (rank == want_rank)), txl.Then():
-                                    txl.ptx.st.shared.b32(cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot))
+                                    txl.ptx.st.shared.b32(
+                                        cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot)
+                                    )
                         txl.assign(cnt, cnt + txl.cast(txl.popcount(mask), "int32"))
 
                 ncopy_me = txl.local_scalar("int32", init=txl.int32(0))
                 copy_armed = txl.local_scalar("int32", init=txl.int32(0))
-
-
-
 
                 if spec:
                     total_idx = num_seqs * T
@@ -1357,7 +1641,10 @@ def _make_defer():
                         txl.ptx.ld.global_.s32(a0, num_accepted.ptr_to([n0]))
                         for t in range(T):
                             txl.ptx.ld.global_.s32(cands[t], ssm_idx.ptr_to([n0 * T + t]))
-                with txl.If((lane == 0) & (cta < num_units) & (vec_split or (warp == 0))), txl.Then():
+                with (
+                    txl.If((lane == 0) & (cta < num_units) & (vec_split or (warp == 0))),
+                    txl.Then(),
+                ):
                     issue_vec(cta)
 
                 def issue_first_state():
@@ -1375,8 +1662,6 @@ def _make_defer():
                     else:
                         issue_state(cta, unit_coords(cta)[3])
 
-
-
                 if spec:
                     with txl.If(tid < MAXC + 4), txl.Then():
                         txl.ptx.st.shared.b32(cpslots.ptr_to([tid]), txl.uint32(0))
@@ -1391,8 +1676,14 @@ def _make_defer():
                         total = num_seqs * T
                         for i in range(IDX_PRE):
                             rel = idx_pre[i] - cb
-                            with txl.If((i * NT + tid < total) & (rel >= 0) & (rel < pmax)), txl.Then():
-                                txl.ptx.red.shared.or_.b32(flags.ptr_to([rel >> 5]), txl.uint32(1) << txl.cast(rel & 31, "uint32"))
+                            with (
+                                txl.If((i * NT + tid < total) & (rel >= 0) & (rel < pmax)),
+                                txl.Then(),
+                            ):
+                                txl.ptx.red.shared.or_.b32(
+                                    flags.ptr_to([rel >> 5]),
+                                    txl.uint32(1) << txl.cast(rel & 31, "uint32"),
+                                )
                         with txl.serial(IDX_PRE, (total + NT - 1) // NT, unroll=False) as i:
                             e = i * NT + tid
                             with txl.If(e < total), txl.Then():
@@ -1400,19 +1691,31 @@ def _make_defer():
                                 txl.ptx.ld.global_.s32(sidx, ssm_idx.ptr_to([e]))
                                 rel = sidx - cb
                                 with txl.If((rel >= 0) & (rel < pmax)), txl.Then():
-                                    txl.ptx.red.shared.or_.b32(flags.ptr_to([rel >> 5]), txl.uint32(1) << txl.cast(rel & 31, "uint32"))
+                                    txl.ptx.red.shared.or_.b32(
+                                        flags.ptr_to([rel >> 5]),
+                                        txl.uint32(1) << txl.cast(rel & 31, "uint32"),
+                                    )
                         txl.cuda.cta_sync()
                         with txl.If(warp == 0), txl.Then():
                             scan_untouched(cb, cnt, None, 0)
                         txl.cuda.cta_sync()
                     with txl.If(tid == 0), txl.Then():
-                        txl.ptx.st.shared.b32(cpslots.ptr_to([MAXC]), txl.reinterpret("uint32", cnt))
+                        txl.ptx.st.shared.b32(
+                            cpslots.ptr_to([MAXC]), txl.reinterpret("uint32", cnt)
+                        )
                     txl.cuda.cta_sync()
                     ucnt = txl.local_scalar("int32")
                     txl.ptx.ld.shared.b32(ucnt, cpslots.ptr_to([MAXC]))
                     total_copy = ucnt * DCU
                     me0 = cta - hole_base
-                    txl.assign(ncopy_me, txl.if_then_else((me0 >= 0) & (total_copy > me0), (total_copy - me0 + hole_cnt - 1) // hole_cnt, txl.int32(0)))
+                    txl.assign(
+                        ncopy_me,
+                        txl.if_then_else(
+                            (me0 >= 0) & (total_copy > me0),
+                            (total_copy - me0 + hole_cnt - 1) // hole_cnt,
+                            txl.int32(0),
+                        ),
+                    )
                 else:
                     with txl.If((tid == 0) & (cta < num_units)), txl.Then():
                         issue_first_state()
@@ -1436,8 +1739,16 @@ def _make_defer():
                     vf = txl.alloc_local((4,), "float32")
                     for src, dst in ((qw, qf), (kw, kf), (gw, gf), (vw, vf)):
                         for p2 in range(2):
-                            txl.assign(dst[2 * p2], txl.cuda.uint_as_float(txl.shift_left(src[p2], txl.uint32(16))))
-                            txl.assign(dst[2 * p2 + 1], txl.cuda.uint_as_float(txl.bitwise_and(src[p2], txl.uint32(0xFFFF0000))))
+                            txl.assign(
+                                dst[2 * p2],
+                                txl.cuda.uint_as_float(txl.shift_left(src[p2], txl.uint32(16))),
+                            )
+                            txl.assign(
+                                dst[2 * p2 + 1],
+                                txl.cuda.uint_as_float(
+                                    txl.bitwise_and(src[p2], txl.uint32(0xFFFF0000))
+                                ),
+                            )
 
                     sq = txl.local_scalar("float32", init=txl.float32(0.0))
                     sk = txl.local_scalar("float32", init=txl.float32(0.0))
@@ -1469,10 +1780,14 @@ def _make_defer():
                         ea = txl.local_scalar("float32")
                         alog = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(alog, raw.ptr_to([gb + 256 + (h % 4) * 2]))
-                        txl.ptx["mul.f32"](tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E))
+                        txl.ptx["mul.f32"](
+                            tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E)
+                        )
                         txl.ptx["ex2.approx.ftz.f32"](ea, tmp)
                         bias = txl.alloc_local((4,), "uint32", align=16)
-                        txl.ptx.ld.shared.v4.b32(bias[0], bias[1], bias[2], bias[3], raw.ptr_to([gb + lane * 8]))
+                        txl.ptx.ld.shared.v4.b32(
+                            bias[0], bias[1], bias[2], bias[3], raw.ptr_to([gb + lane * 8])
+                        )
                         for e in range(4):
                             x = txl.local_scalar("float32")
                             txl.ptx["add.f32"](x, gf[e], txl.reinterpret("float32", bias[e]))
@@ -1491,23 +1806,38 @@ def _make_defer():
                     for pp in range(2):
                         pair = lane * 2 + pp
                         ent = t * FST + pair * 8 + (pair >> 3) * 4
-                        txl.ptx.st.shared.v2.b32(ftab.ptr_to([ent + 2]), txl.reinterpret("uint32", gf[2 * pp]), txl.reinterpret("uint32", gf[2 * pp + 1]))
+                        txl.ptx.st.shared.v2.b32(
+                            ftab.ptr_to([ent + 2]),
+                            txl.reinterpret("uint32", gf[2 * pp]),
+                            txl.reinterpret("uint32", gf[2 * pp + 1]),
+                        )
                         txl.ptx.st.shared.v4.b32(
                             ftab.ptr_to([ent + 4]),
-                            txl.reinterpret("uint32", kf[2 * pp]), txl.reinterpret("uint32", kf[2 * pp + 1]),
-                            txl.reinterpret("uint32", qf[2 * pp]), txl.reinterpret("uint32", qf[2 * pp + 1]),
+                            txl.reinterpret("uint32", kf[2 * pp]),
+                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                            txl.reinterpret("uint32", qf[2 * pp]),
+                            txl.reinterpret("uint32", qf[2 * pp + 1]),
                         )
-                        txl.ptx.st.shared.v2.b32(ftab.ptr_to([ent + FST]), txl.reinterpret("uint32", kf[2 * pp]), txl.reinterpret("uint32", kf[2 * pp + 1]))
+                        txl.ptx.st.shared.v2.b32(
+                            ftab.ptr_to([ent + FST]),
+                            txl.reinterpret("uint32", kf[2 * pp]),
+                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                        )
                     txl.ptx.st.shared.v4.b32(
                         vtab.ptr_to([t * D + lane * 4]),
-                        txl.reinterpret("uint32", vf[0]), txl.reinterpret("uint32", vf[1]),
-                        txl.reinterpret("uint32", vf[2]), txl.reinterpret("uint32", vf[3]),
+                        txl.reinterpret("uint32", vf[0]),
+                        txl.reinterpret("uint32", vf[1]),
+                        txl.reinterpret("uint32", vf[2]),
+                        txl.reinterpret("uint32", vf[3]),
                     )
                     with txl.If(lane == 0), txl.Then():
                         bf = txl.local_scalar("float32")
                         txl.ptx.cvt.f32.bf16(bf, txl.cast(bbits, "uint16"))
-                        txl.ptx.st.shared.v2.b32(svec.ptr_to([2 * t]), txl.reinterpret("uint32", bf), txl.reinterpret("uint32", cpart))
-
+                        txl.ptx.st.shared.v2.b32(
+                            svec.ptr_to([2 * t]),
+                            txl.reinterpret("uint32", bf),
+                            txl.reinterpret("uint32", cpart),
+                        )
 
                 S = txl.alloc_local((J * 8,), "uint64", align=8)
                 d1 = txl.alloc_local((J,), "uint64", align=8)
@@ -1526,13 +1856,23 @@ def _make_defer():
                         for c in range(2):
                             wds = txl.alloc_local((4,), "uint32", align=16)
                             cs = txl.bitwise_xor(txl.int32(c), ks >> 2)
-                            txl.ptx.ld.shared.v4.b32(wds[0], wds[1], wds[2], wds[3], tiles.ptr_to([row * D + ks * 16 + cs * 8]))
+                            txl.ptx.ld.shared.v4.b32(
+                                wds[0],
+                                wds[1],
+                                wds[2],
+                                wds[3],
+                                tiles.ptr_to([row * D + ks * 16 + cs * 8]),
+                            )
                             for i in range(4):
                                 txl.assign(
                                     S[j * 8 + c * 4 + i],
                                     _f2(
-                                        txl.cuda.uint_as_float(txl.shift_left(wds[i], txl.uint32(16))),
-                                        txl.cuda.uint_as_float(txl.bitwise_and(wds[i], txl.uint32(0xFFFF0000))),
+                                        txl.cuda.uint_as_float(
+                                            txl.shift_left(wds[i], txl.uint32(16))
+                                        ),
+                                        txl.cuda.uint_as_float(
+                                            txl.bitwise_and(wds[i], txl.uint32(0xFFFF0000))
+                                        ),
                                     ),
                                 )
 
@@ -1585,7 +1925,9 @@ def _make_defer():
                             txl.ptx["fma.rn.f32"](o, c_t, uj, vals[J + j])
                             ob = txl.local_scalar("uint16")
                             txl.ptx.cvt.rn.bf16.f32(ob, o)
-                            txl.ptx.st.global_.b16(output.ptr_to([out_base + col]), ob, pred=txl.EQ(ks, 0))
+                            txl.ptx.st.global_.b16(
+                                output.ptr_to([out_base + col]), ob, pred=txl.EQ(ks, 0)
+                            )
                         return
                     for s in (4, 2, 1):
                         if len(vals) > 1:
@@ -1593,8 +1935,12 @@ def _make_defer():
                             b = ((ks // s) & 1) != 0
                             nxt = []
                             for i in range(half):
-                                send = txl.local_scalar("float32", init=txl.if_then_else(b, vals[i], vals[i + half]))
-                                keep = txl.local_scalar("float32", init=txl.if_then_else(b, vals[i + half], vals[i]))
+                                send = txl.local_scalar(
+                                    "float32", init=txl.if_then_else(b, vals[i], vals[i + half])
+                                )
+                                keep = txl.local_scalar(
+                                    "float32", init=txl.if_then_else(b, vals[i + half], vals[i])
+                                )
                                 r = txl.local_scalar("float32")
                                 txl.ptx["add.f32"](r, keep, _shfl_bfly(send, s))
                                 nxt.append(r)
@@ -1620,9 +1966,10 @@ def _make_defer():
                         txl.ptx["fma.rn.f32"](o, c_t, uloc[i], dd2)
                         ob = txl.local_scalar("uint16")
                         txl.ptx.cvt.rn.bf16.f32(ob, o)
-                        txl.ptx.st.global_.b16(output.ptr_to([out_base + col]), ob, pred=txl.LT(ks, 4))
+                        txl.ptx.st.global_.b16(
+                            output.ptr_to([out_base + col]), ob, pred=txl.LT(ks, 4)
+                        )
                     for j in range(J):
-
                         src = (lane & 0x18) | ((j * 8) // M)
                         uj = txl.local_scalar("float32", init=_shfl_idx(uloc[j % R], src))
                         txl.assign(u2[j], _f2(uj, uj))
@@ -1644,7 +1991,9 @@ def _make_defer():
                             i = c * 4 + ii
                             if with_dots:
                                 txl.ptx.ld.shared.v2.b64(kp2[ii], a2[ii], vec_ptr(phase, i))
-                                txl.ptx.ld.shared.v2.b64(k2[ii], q2[ii], txl.ptx.addr(vec_ptr(phase, i), 16))
+                                txl.ptx.ld.shared.v2.b64(
+                                    k2[ii], q2[ii], txl.ptx.addr(vec_ptr(phase, i), 16)
+                                )
                             else:
                                 txl.ptx.ld.shared.b64(kp2[ii], vec_ptr(phase, i))
                         for j in range(J):
@@ -1652,7 +2001,10 @@ def _make_defer():
                             for ii in range(4):
                                 i = c * 4 + ii
                                 txl.ptx.fma.rn.f32x2(S[j * 8 + i], kp2[ii], u2[j], S[j * 8 + i])
-                                txl.assign(packed[ii], txl.cuda.float22bfloat162_rn_from_float2(S[j * 8 + i]))
+                                txl.assign(
+                                    packed[ii],
+                                    txl.cuda.float22bfloat162_rn_from_float2(S[j * 8 + i]),
+                                )
                                 if with_dots:
                                     txl.ptx.mul.rn.f32x2(S[j * 8 + i], a2[ii], S[j * 8 + i])
                                     txl.ptx.fma.rn.f32x2(d1[j], k2[ii], S[j * 8 + i], d1[j])
@@ -1661,7 +2013,10 @@ def _make_defer():
                             cs = txl.bitwise_xor(txl.int32(c), ks >> 2)
                             txl.ptx.st.shared.v4.b32(
                                 tiles.ptr_to([tile * tile_elems + row * D + ks * 16 + cs * 8]),
-                                packed[0], packed[1], packed[2], packed[3],
+                                packed[0],
+                                packed[1],
+                                packed[2],
+                                packed[3],
                             )
 
                 def store_warp_rows(tile, dst_slot, hv, row0):
@@ -1680,13 +2035,14 @@ def _make_defer():
                     whole and fetch its first tile now, so the copies overlap the unit's remaining phases."""
                     with txl.If(ncopy_me > 0), txl.Then():
                         nb0 = txl.min(txl.int32(ntiles), txl.min(ncopy_me, txl.int32(MAXC)))
-                        txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.cast(nb0, "uint32") * txl.uint32(tile_bytes))
+                        txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                            bar_state.ptr_to([0]), txl.cast(nb0, "uint32") * txl.uint32(tile_bytes)
+                        )
                         hv_c, part_c = copy_coords(0)
                         slot_c = txl.local_scalar("int32")
                         txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([0]))
                         tile_load(0, slot_c, hv_c, part_c)
                         txl.assign(copy_armed, txl.int32(1))
-
 
                 with txl.serial(0, nmain_me, unroll=False) as sm:
                     u = cta + sm * num_main
@@ -1694,7 +2050,6 @@ def _make_defer():
                     row0 = part * cpt
                     has_next = u + num_main < num_units
                     nxt_slot = txl.local_scalar("int32")
-
 
                     txl.cuda.iket.mark("unit-start")
                     tk = _rng("wait-vec")
@@ -1726,7 +2081,6 @@ def _make_defer():
                     with txl.If((lane == 0) & has_next & (vec_split or (warp == 0))), txl.Then():
                         issue_vec(u + num_main)
 
-
                     tk = _rng("wait-state")
                     bar_state.wait(0, scount & 1)
                     txl.assign(scount, scount + txl.int32(1))
@@ -1750,11 +2104,12 @@ def _make_defer():
                                 else:
                                     issue_state(u + num_main, unit_coords(u + num_main)[3])
                                     with txl.If(u + 2 * num_main < num_units), txl.Then():
-                                        prefetch_l2(u + 2 * num_main, unit_coords(u + 2 * num_main)[3])
+                                        prefetch_l2(
+                                            u + 2 * num_main, unit_coords(u + 2 * num_main)[3]
+                                        )
                             if spec:
                                 with txl.Else():
                                     early_copy_arm()
-
 
                     tk = _rng("phase0")
                     phase0_dots()
@@ -1788,7 +2143,6 @@ def _make_defer():
                                 txl.ptx.cp.async_.bulk.wait_group.read(1)
                         if wait_free:
                             group_sync()
-
 
                     if T > 1:
                         with txl.serial(1, T, unroll=False) as ph:
@@ -1827,15 +2181,10 @@ def _make_defer():
                     txl.assign(ck, ck + txl.int32(1))
                     _rng_end(tk)
 
-
                     txl.cuda.cta_sync()
-
 
                 if spec:
                     with txl.If(ncopy_me > 0), txl.Then():
-
-
-
                         with txl.If(lane == 0), txl.Then():
                             txl.ptx.cp.async_.bulk.wait_group.read(0)
                         txl.cuda.cta_sync()
@@ -1849,11 +2198,13 @@ def _make_defer():
                             nb = txl.min(txl.int32(ntiles), nfast - k0)
                             with txl.If(tid == 0), txl.Then():
                                 pre = (kb == 0) & (copy_armed == 1)
-                                with txl.If(pre == False), txl.Then():
-                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.cast(nb, "uint32") * txl.uint32(tile_bytes))
+                                with txl.If(pre == False), txl.Then():  # noqa: E712 - comparison builds an IR expression
+                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                        bar_state.ptr_to([0]),
+                                        txl.cast(nb, "uint32") * txl.uint32(tile_bytes),
+                                    )
                                 for i in range(ntiles):
-
-                                    with txl.If((i < nb) & ((i > 0) | (pre == False))), txl.Then():
+                                    with txl.If((i < nb) & ((i > 0) | (pre == False))), txl.Then():  # noqa: E712 - comparison builds an IR expression
                                         hv_c, part_c = copy_coords(k0 + i)
                                         slot_c = txl.local_scalar("int32")
                                         txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([k0 + i]))
@@ -1877,7 +2228,9 @@ def _make_defer():
                             with txl.serial(MAXC, ncopy_me, unroll=False) as kc:
                                 rank = (kc * hole_cnt + (cta - hole_base)) // DCU
                                 cnt3 = txl.local_scalar("int32", init=txl.int32(0))
-                                with txl.serial(0, (num_slots + pmax - 1) // pmax, unroll=False) as chunk:
+                                with txl.serial(
+                                    0, (num_slots + pmax - 1) // pmax, unroll=False
+                                ) as chunk:
                                     cb = chunk * pmax
                                     build_flags(cb)
                                     with txl.If(warp == 0), txl.Then():
@@ -1887,7 +2240,9 @@ def _make_defer():
                                     hv_c, part_c = copy_coords(kc)
                                     slot_c = txl.local_scalar("int32")
                                     txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([MAXC + 1]))
-                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.uint32(tile_bytes))
+                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                        bar_state.ptr_to([0]), txl.uint32(tile_bytes)
+                                    )
                                     tile_load(0, slot_c, hv_c, part_c)
                                 bar_state.wait(0, scount & 1)
                                 txl.assign(scount, scount + txl.int32(1))
@@ -1907,19 +2262,14 @@ def _make_defer():
 
         return kda_decode_persist
 
-
     OVERRIDE = {}
     _COMPILED = {}
 
-
     def _pick_cpt(N, T, HV):
-
-
         heads = N * HV
         if heads <= 16:
             return 32
         return 64
-
 
     def _ctas_per_sm(cpt, T, gate_lb, nw=4):
         by_smem = (227 * 1024) // (_smem_bytes(T, cpt, gate_lb, _ntiles(T)) + 1024)
@@ -1931,22 +2281,28 @@ def _make_defer():
             by_regs = {32: 3, 64: 2, 128: 1}[cpt]
         return max(1, min(by_smem, by_regs))
 
-
-    def _compile(**kw):
+    def _compile(*, backend_config=None, **kw):
+        backend_config = resolve_backend_config(backend_config)
+        cache_config = backend_config_key(backend_config)
         key = tuple(sorted(kw.items()))
-        exe = _COMPILED.get(key)
+        exe = _COMPILED.get((cache_config, key))
         if exe is None:
-            kernel = build_kernel(**kw)
-            target = kernel.target()
+            kernel = build_kernel(**kw, backend_config=backend_config)
+            target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
-            _COMPILED[key] = exe
+                exe = tvm.compile(
+                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
+                )
+            _COMPILED[(cache_config, key)] = exe
         return exe
 
-
-    def setup(data, N, T):
+    def setup(data, N, T, *, backend_config=None):
         q, k, v, g, beta = data["q"], data["k"], data["v"], data["g"], data["beta"]
-        initial_state, final_state, output = data["initial_state"], data["final_state"], data["output"]
+        initial_state, final_state, output = (
+            data["initial_state"],
+            data["final_state"],
+            data["output"],
+        )
         H, HV = q.shape[-2], v.shape[-2]
         P = initial_state.shape[0]
         device = q.device
@@ -1961,7 +2317,9 @@ def _make_defer():
         copy_est = max(P - N * T, 0) * HV * split if spec else 0
         num_main = min(num_units + copy_est, per_sm * sms)
         per_sm = min(per_sm, max(1, -(-num_main // sms)))
-        extra = {k: bool(OVERRIDE[k]) for k in ("allreduce", "vec_split", "warp_auto") if k in OVERRIDE}
+        extra = {
+            k: bool(OVERRIDE[k]) for k in ("allreduce", "vec_split", "warp_auto") if k in OVERRIDE
+        }
         if "warp_auto" not in extra:
             extra["warp_auto"] = (num_units + copy_est) <= 6 * num_main
         if "vec_split" not in extra:
@@ -1974,10 +2332,20 @@ def _make_defer():
         if "l2pf" in OVERRIDE:
             extra["l2pf"] = bool(OVERRIDE["l2pf"])
         else:
-
-
             extra["l2pf"] = T == 2 and num_units >= 8 * num_main
-        exe = _compile(T=T, H=H, HV=HV, gate_lb=gate_lb, cpt=cpt, num_units=num_units, num_main=num_main, per_sm=per_sm, copy_est=copy_est, **extra)
+        exe = _compile(
+            T=T,
+            H=H,
+            HV=HV,
+            gate_lb=gate_lb,
+            cpt=cpt,
+            num_units=num_units,
+            num_main=num_main,
+            per_sm=per_sm,
+            copy_est=copy_est,
+            **extra,
+            backend_config=backend_config,
+        )
 
         dummy_f32 = torch.zeros(4, dtype=torch.float32, device=device)
         dummy_i32 = torch.zeros(1, dtype=torch.int32, device=device)
@@ -1988,9 +2356,22 @@ def _make_defer():
         lower_bound = float(data["lower_bound"]) if data["lower_bound"] is not None else 0.0
         scale = float(data["scale"])
         args = (
-            q.view(-1), k.view(-1), v.view(-1), g.view(-1), beta.view(-1),
-            a_log, dt_bias, initial_state.view(-1), final_state.view(-1), output.view(-1),
-            ssm, acc, scale, lower_bound, int(P), int(N),
+            q.view(-1),
+            k.view(-1),
+            v.view(-1),
+            g.view(-1),
+            beta.view(-1),
+            a_log,
+            dt_bias,
+            initial_state.view(-1),
+            final_state.view(-1),
+            output.view(-1),
+            ssm,
+            acc,
+            scale,
+            lower_bound,
+            int(P),
+            int(N),
         )
         keep = (q, k, v, g, beta, a_log, dt_bias, initial_state, final_state, output, ssm, acc)
 
@@ -2001,10 +2382,11 @@ def _make_defer():
         run()
         torch.cuda.synchronize(device)
         return run
+
     return setup
 
 
-def _make_dyn():
+def _make_dyn(*, backend_config=None):
     """KDA recurrent decode, family "colreg-persist" (v4, warp-autonomous phases): persistent register-resident recurrence.
 
     Unit = (sequence n, value head hv, column slice of CPT rows). A persistent CTA (4 warps)
@@ -2034,9 +2416,9 @@ def _make_dyn():
     """
 
     import torch
-    import tvm
 
     import tirx_kernels.tirx_lite as txl
+    import tvm
 
     D = 128
     LOG2E = 1.4426950408889634
@@ -2051,22 +2433,30 @@ def _make_dyn():
     MAXH = 6
     IDX_PRE = 8
 
-
     def _shfl_bfly(val_f32, xor):
         out = txl.local_scalar("uint32")
-        txl.ptx.shfl_sync.bfly.b32(out, txl.reinterpret("uint32", val_f32), txl.uint32(xor), txl.uint32(31), txl.uint32(FULL))
+        txl.ptx.shfl_sync.bfly.b32(
+            out,
+            txl.reinterpret("uint32", val_f32),
+            txl.uint32(xor),
+            txl.uint32(31),
+            txl.uint32(FULL),
+        )
         return txl.reinterpret("float32", out)
-
 
     def _shfl_idx(val_f32, src_lane):
         out = txl.local_scalar("uint32")
-        txl.ptx.shfl_sync.idx.b32(out, txl.reinterpret("uint32", val_f32), txl.cast(src_lane, "uint32"), txl.uint32(31), txl.uint32(FULL))
+        txl.ptx.shfl_sync.idx.b32(
+            out,
+            txl.reinterpret("uint32", val_f32),
+            txl.cast(src_lane, "uint32"),
+            txl.uint32(31),
+            txl.uint32(FULL),
+        )
         return txl.reinterpret("float32", out)
-
 
     def _f2(a, b):
         return txl.cuda.make_float2(a, b)
-
 
     def _rng(name):
         """IKET range token (stripped by the production pipeline)."""
@@ -2074,12 +2464,28 @@ def _make_dyn():
         txl.assign(token[0], txl.cuda.iket.range_start(name))
         return token
 
-
     def _rng_end(token):
         txl.cuda.iket.range_end(token[0])
 
-
-    def build_kernel(*, T, H, HV, gate_lb, cpt, num_units, num_main, per_sm, copy_est=0, allreduce=None, bar_arrive=False, warp_auto=True, vec_split=True, nw=4, l2pf=False):
+    def build_kernel(
+        *,
+        T,
+        H,
+        HV,
+        gate_lb,
+        cpt,
+        num_units,
+        num_main,
+        per_sm,
+        copy_est=0,
+        allreduce=None,
+        bar_arrive=False,
+        warp_auto=True,
+        vec_split=True,
+        nw=4,
+        l2pf=False,
+        backend_config=None,
+    ):
         l2pf = False
         static_tickets = bool(OVERRIDE.get("static_tickets", False))
         assert D % cpt == 0 and cpt % (4 * nw) == 0, "each warp needs a multiple of 4 rows"
@@ -2110,11 +2516,10 @@ def _make_dyn():
             hole_base0 = num_units % num_main
         hole_cnt0 = num_main - hole_base0
 
-
         if hole_cnt0 == 0 or copy_est > hole_cnt0 * max(MAXH, T + 1):
             hole_base0, hole_cnt0 = 0, num_main
 
-        @txl.kernel(warps=nw, arch="sm_100a", grid=num_ctas, min_blocks_per_sm=per_sm)
+        @txl.kernel()
         def kda_decode_persist(
             q: txl.gptr[txl.bf16],
             k: txl.gptr[txl.bf16],
@@ -2134,6 +2539,12 @@ def _make_dyn():
             num_slots: txl.i32,
             num_seqs: txl.i32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
+                backend_config=backend_config,
+            )
+
             cta = txl.cta_id()
             tid = txl.thread_id()
             warp = txl.warp_id()
@@ -2152,7 +2563,6 @@ def _make_dyn():
             bar_vec.init(nw if vec_split else 1)
             txl.ptx.fence.proxy.async_.shared__cta()
             txl.cuda.cta_sync()
-
 
             def main_role():
                 ks = lane & 7
@@ -2180,15 +2590,29 @@ def _make_dyn():
                     nwi = nw if vec_split else 1
                     for w in range(nwi):
                         toks = [t for t in range(T) if t % nwi == w]
-                        nbytes = len(toks) * RAW_TOK_B + ((GATE_B if gate_lb else 0) if w == 0 else 0)
+                        nbytes = len(toks) * RAW_TOK_B + (
+                            (GATE_B if gate_lb else 0) if w == 0 else 0
+                        )
                         with txl.If(warp == w), txl.Then():
-                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_vec.ptr_to([0]), txl.uint32(nbytes))
+                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                bar_vec.ptr_to([0]), txl.uint32(nbytes)
+                            )
                             for t in toks:
                                 _issue_vec_token(n, hv, h, t)
                             if gate_lb and w == 0:
                                 gb = T * (RAW_TOK_B // 2)
-                                txl.ptx[_BULK_G2S](raw.ptr_to([gb]), dt_bias.ptr_to([h * D]), txl.uint32(512), bar_vec.ptr_to([0]))
-                                txl.ptx[_BULK_G2S](raw.ptr_to([gb + 256]), a_log.ptr_to([h - (h % 4)]), txl.uint32(16), bar_vec.ptr_to([0]))
+                                txl.ptx[_BULK_G2S](
+                                    raw.ptr_to([gb]),
+                                    dt_bias.ptr_to([h * D]),
+                                    txl.uint32(512),
+                                    bar_vec.ptr_to([0]),
+                                )
+                                txl.ptx[_BULK_G2S](
+                                    raw.ptr_to([gb + 256]),
+                                    a_log.ptr_to([h - (h % 4)]),
+                                    txl.uint32(16),
+                                    bar_vec.ptr_to([0]),
+                                )
 
                 def _issue_vec_token(n, hv, h, t):
                     if True:
@@ -2196,12 +2620,37 @@ def _make_dyn():
                         qk_off = (txl.cast(tok, "int64") * H + h) * D
                         vg_off = (txl.cast(tok, "int64") * HV + hv) * D
                         rb = t * (RAW_TOK_B // 2)
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb]), q.ptr_to([qk_off]), txl.uint32(256), bar_vec.ptr_to([0]))
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 128]), k.ptr_to([qk_off]), txl.uint32(256), bar_vec.ptr_to([0]))
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 256]), g.ptr_to([vg_off]), txl.uint32(256), bar_vec.ptr_to([0]))
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 384]), v.ptr_to([vg_off]), txl.uint32(256), bar_vec.ptr_to([0]))
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb]),
+                            q.ptr_to([qk_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([0]),
+                        )
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 128]),
+                            k.ptr_to([qk_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([0]),
+                        )
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 256]),
+                            g.ptr_to([vg_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([0]),
+                        )
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 384]),
+                            v.ptr_to([vg_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([0]),
+                        )
                         bidx = txl.cast(tok, "int64") * HV + hv
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 512]), beta.ptr_to([bidx - (bidx % 8)]), txl.uint32(16), bar_vec.ptr_to([0]))
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 512]),
+                            beta.ptr_to([bidx - (bidx % 8)]),
+                            txl.uint32(16),
+                            bar_vec.ptr_to([0]),
+                        )
 
                 def tile_load(tile, slot, hv, part):
                     """Thread 0: TMA load of cpt rows of (slot, hv) from initial_state into `tile` (no expect_tx)."""
@@ -2214,7 +2663,6 @@ def _make_dyn():
                             bar_state.ptr_to([0]),
                         )
 
-
                 def copy_item(cid):
                     """Copy item id (0-based over total_copy) -> (untouched-slot rank, hv, part)."""
                     return cid // DCU, (cid % DCU) // split, cid % split
@@ -2222,7 +2670,9 @@ def _make_dyn():
                 def issue_state(uu, slot0):
                     """Thread 0: TMA load of the unit's state rows into tile A."""
                     _, part, hv, n, _ = unit_coords(uu)
-                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.uint32(tile_bytes))
+                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                        bar_state.ptr_to([0]), txl.uint32(tile_bytes)
+                    )
                     src0 = (txl.cast(slot0, "int64") * HV + hv) * (D * D) + part * cpt * D
                     for pc in range(n_pieces):
                         txl.ptx[_BULK_G2S](
@@ -2249,14 +2699,15 @@ def _make_dyn():
                     _, _, _, n, _ = unit_coords(uu)
                     txl.ptx.ld.global_.s32(acc_next2, num_accepted.ptr_to([n]))
 
-
                 def prefetch_copy(cid):
                     """Thread 0: TMA load of copy item cid's tile into tile A (only for cached ranks)."""
                     rank_c, hv_c, part_c = copy_item(cid)
                     with txl.If(rank_c < MAXR), txl.Then():
                         slot_c = txl.local_scalar("int32")
                         txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([rank_c]))
-                        txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.uint32(tile_bytes))
+                        txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                            bar_state.ptr_to([0]), txl.uint32(tile_bytes)
+                        )
                         tile_load(0, slot_c, hv_c, part_c)
 
                 # ---- dynamic tickets: two items ahead of the (static) first item ------------------------------
@@ -2278,7 +2729,10 @@ def _make_dyn():
                         with txl.If(i * NT + tid < total_idx), txl.Then():
                             txl.ptx.ld.global_.s32(idx_pre[i], ssm_idx.ptr_to([i * NT + tid]))
 
-                with txl.If((lane == 0) & (cta < num_units) & (vec_split or (warp == 0))), txl.Then():
+                with (
+                    txl.If((lane == 0) & (cta < num_units) & (vec_split or (warp == 0))),
+                    txl.Then(),
+                ):
                     issue_vec(cta)
                 with txl.If((tid == 0) & (cta < num_units)), txl.Then():
                     if spec:
@@ -2302,13 +2756,17 @@ def _make_dyn():
                     with txl.serial(0, (nz + NT - 1) // NT, unroll=False) as i:
                         pz = i * NT + tid
                         with txl.If(pz < nz), txl.Then():
-                            txl.ptx.st.shared.b32(tiles.ptr_to([tile_elems + 2 * pz]), txl.uint32(0))
+                            txl.ptx.st.shared.b32(
+                                tiles.ptr_to([tile_elems + 2 * pz]), txl.uint32(0)
+                            )
                     txl.cuda.cta_sync()
                     total = num_seqs * T
                     for i in range(IDX_PRE):
                         rel = idx_pre[i] - cb
                         with txl.If((i * NT + tid < total) & (rel >= 0) & (rel < pmax)), txl.Then():
-                            txl.ptx.st.shared.b32(tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1))
+                            txl.ptx.st.shared.b32(
+                                tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1)
+                            )
                     with txl.serial(IDX_PRE, (total + NT - 1) // NT, unroll=False) as i:
                         e = i * NT + tid
                         with txl.If(e < total), txl.Then():
@@ -2316,7 +2774,9 @@ def _make_dyn():
                             txl.ptx.ld.global_.s32(sidx, ssm_idx.ptr_to([e]))
                             rel = sidx - cb
                             with txl.If((rel >= 0) & (rel < pmax)), txl.Then():
-                                txl.ptx.st.shared.b32(tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1))
+                                txl.ptx.st.shared.b32(
+                                    tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1)
+                                )
                     txl.cuda.cta_sync()
 
                 def scan_untouched(cb, cnt, want_rank, dst_idx):
@@ -2330,19 +2790,27 @@ def _make_dyn():
                         with txl.If(valid), txl.Then():
                             txl.ptx.ld.shared.b32(flag, tiles.ptr_to([tile_elems + 2 * pl]))
                         untouched = flag == txl.uint32(0)
-                        upred = txl.local_scalar("uint32", init=txl.if_then_else(untouched, txl.uint32(1), txl.uint32(0)))
+                        upred = txl.local_scalar(
+                            "uint32", init=txl.if_then_else(untouched, txl.uint32(1), txl.uint32(0))
+                        )
                         mask = txl.local_scalar("uint32")
                         txl.ptx.vote_sync.ballot.b32(mask, txl.ptx.pred(upred), txl.uint32(FULL))
-                        below = txl.bitwise_and(mask, (txl.uint32(1) << txl.cast(lane, "uint32")) - txl.uint32(1))
+                        below = txl.bitwise_and(
+                            mask, (txl.uint32(1) << txl.cast(lane, "uint32")) - txl.uint32(1)
+                        )
                         rank = cnt + txl.cast(txl.popcount(below), "int32")
                         with txl.If(untouched), txl.Then():
                             slot = cb + pl
                             if want_rank is None:
                                 with txl.If(rank < MAXR), txl.Then():
-                                    txl.ptx.st.shared.b32(cpslots.ptr_to([rank]), txl.reinterpret("uint32", slot))
+                                    txl.ptx.st.shared.b32(
+                                        cpslots.ptr_to([rank]), txl.reinterpret("uint32", slot)
+                                    )
                             else:
                                 with txl.If((want_rank >= 0) & (rank == want_rank)), txl.Then():
-                                    txl.ptx.st.shared.b32(cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot))
+                                    txl.ptx.st.shared.b32(
+                                        cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot)
+                                    )
                         txl.assign(cnt, cnt + txl.cast(txl.popcount(mask), "int32"))
 
                 total_copy = txl.local_scalar("int32", init=txl.int32(0))
@@ -2355,7 +2823,9 @@ def _make_dyn():
                             scan_untouched(cb, cnt, None, 0)
                         txl.cuda.cta_sync()
                     with txl.If(tid == 0), txl.Then():
-                        txl.ptx.st.shared.b32(cpslots.ptr_to([MAXR + 1]), txl.reinterpret("uint32", cnt))
+                        txl.ptx.st.shared.b32(
+                            cpslots.ptr_to([MAXR + 1]), txl.reinterpret("uint32", cnt)
+                        )
                         txl.ptx.st.shared.b32(mailbox.ptr_to([0]), txl.reinterpret("uint32", tk1))
                         txl.ptx.st.shared.b32(mailbox.ptr_to([1]), txl.reinterpret("uint32", tk2))
                     txl.cuda.cta_sync()
@@ -2401,8 +2871,16 @@ def _make_dyn():
                     vf = txl.alloc_local((4,), "float32")
                     for src, dst in ((qw, qf), (kw, kf), (gw, gf), (vw, vf)):
                         for p2 in range(2):
-                            txl.assign(dst[2 * p2], txl.cuda.uint_as_float(txl.shift_left(src[p2], txl.uint32(16))))
-                            txl.assign(dst[2 * p2 + 1], txl.cuda.uint_as_float(txl.bitwise_and(src[p2], txl.uint32(0xFFFF0000))))
+                            txl.assign(
+                                dst[2 * p2],
+                                txl.cuda.uint_as_float(txl.shift_left(src[p2], txl.uint32(16))),
+                            )
+                            txl.assign(
+                                dst[2 * p2 + 1],
+                                txl.cuda.uint_as_float(
+                                    txl.bitwise_and(src[p2], txl.uint32(0xFFFF0000))
+                                ),
+                            )
 
                     sq = txl.local_scalar("float32", init=txl.float32(0.0))
                     sk = txl.local_scalar("float32", init=txl.float32(0.0))
@@ -2434,10 +2912,14 @@ def _make_dyn():
                         ea = txl.local_scalar("float32")
                         alog = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(alog, raw.ptr_to([gb + 256 + (h % 4) * 2]))
-                        txl.ptx["mul.f32"](tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E))
+                        txl.ptx["mul.f32"](
+                            tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E)
+                        )
                         txl.ptx["ex2.approx.ftz.f32"](ea, tmp)
                         bias = txl.alloc_local((4,), "uint32", align=16)
-                        txl.ptx.ld.shared.v4.b32(bias[0], bias[1], bias[2], bias[3], raw.ptr_to([gb + lane * 8]))
+                        txl.ptx.ld.shared.v4.b32(
+                            bias[0], bias[1], bias[2], bias[3], raw.ptr_to([gb + lane * 8])
+                        )
                         for e in range(4):
                             x = txl.local_scalar("float32")
                             txl.ptx["add.f32"](x, gf[e], txl.reinterpret("float32", bias[e]))
@@ -2456,22 +2938,38 @@ def _make_dyn():
                     for pp in range(2):
                         pair = lane * 2 + pp
                         ent = t * FST + pair * 8 + (pair >> 3) * 4
-                        txl.ptx.st.shared.v2.b32(ftab.ptr_to([ent + 2]), txl.reinterpret("uint32", gf[2 * pp]), txl.reinterpret("uint32", gf[2 * pp + 1]))
+                        txl.ptx.st.shared.v2.b32(
+                            ftab.ptr_to([ent + 2]),
+                            txl.reinterpret("uint32", gf[2 * pp]),
+                            txl.reinterpret("uint32", gf[2 * pp + 1]),
+                        )
                         txl.ptx.st.shared.v4.b32(
                             ftab.ptr_to([ent + 4]),
-                            txl.reinterpret("uint32", kf[2 * pp]), txl.reinterpret("uint32", kf[2 * pp + 1]),
-                            txl.reinterpret("uint32", qf[2 * pp]), txl.reinterpret("uint32", qf[2 * pp + 1]),
+                            txl.reinterpret("uint32", kf[2 * pp]),
+                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                            txl.reinterpret("uint32", qf[2 * pp]),
+                            txl.reinterpret("uint32", qf[2 * pp + 1]),
                         )
-                        txl.ptx.st.shared.v2.b32(ftab.ptr_to([ent + FST]), txl.reinterpret("uint32", kf[2 * pp]), txl.reinterpret("uint32", kf[2 * pp + 1]))
+                        txl.ptx.st.shared.v2.b32(
+                            ftab.ptr_to([ent + FST]),
+                            txl.reinterpret("uint32", kf[2 * pp]),
+                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                        )
                     txl.ptx.st.shared.v4.b32(
                         vtab.ptr_to([t * D + lane * 4]),
-                        txl.reinterpret("uint32", vf[0]), txl.reinterpret("uint32", vf[1]),
-                        txl.reinterpret("uint32", vf[2]), txl.reinterpret("uint32", vf[3]),
+                        txl.reinterpret("uint32", vf[0]),
+                        txl.reinterpret("uint32", vf[1]),
+                        txl.reinterpret("uint32", vf[2]),
+                        txl.reinterpret("uint32", vf[3]),
                     )
                     with txl.If(lane == 0), txl.Then():
                         bf = txl.local_scalar("float32")
                         txl.ptx.cvt.f32.bf16(bf, txl.cast(bbits, "uint16"))
-                        txl.ptx.st.shared.v2.b32(svec.ptr_to([2 * t]), txl.reinterpret("uint32", bf), txl.reinterpret("uint32", cpart))
+                        txl.ptx.st.shared.v2.b32(
+                            svec.ptr_to([2 * t]),
+                            txl.reinterpret("uint32", bf),
+                            txl.reinterpret("uint32", cpart),
+                        )
 
                 S = txl.alloc_local((J * 8,), "uint64", align=8)
                 d1 = txl.alloc_local((J,), "uint64", align=8)
@@ -2516,7 +3014,9 @@ def _make_dyn():
                             txl.ptx["fma.rn.f32"](o, c_t, ub[j], vals[J + j])
                             ob = txl.local_scalar("uint16")
                             txl.ptx.cvt.rn.bf16.f32(ob, o)
-                            txl.ptx.st.global_.b16(output.ptr_to([out_base + col]), ob, pred=txl.EQ(ks, 0))
+                            txl.ptx.st.global_.b16(
+                                output.ptr_to([out_base + col]), ob, pred=txl.EQ(ks, 0)
+                            )
                         return
                     for s in (4, 2, 1):
                         if len(vals) > 1:
@@ -2524,8 +3024,12 @@ def _make_dyn():
                             b = ((ks // s) & 1) != 0
                             nxt = []
                             for i in range(half):
-                                send = txl.local_scalar("float32", init=txl.if_then_else(b, vals[i], vals[i + half]))
-                                keep = txl.local_scalar("float32", init=txl.if_then_else(b, vals[i + half], vals[i]))
+                                send = txl.local_scalar(
+                                    "float32", init=txl.if_then_else(b, vals[i], vals[i + half])
+                                )
+                                keep = txl.local_scalar(
+                                    "float32", init=txl.if_then_else(b, vals[i + half], vals[i])
+                                )
                                 r = txl.local_scalar("float32")
                                 txl.ptx["add.f32"](r, keep, _shfl_bfly(send, s))
                                 nxt.append(r)
@@ -2553,9 +3057,10 @@ def _make_dyn():
                         txl.ptx["fma.rn.f32"](o, c_t, uloc[i], dd2)
                         ob = txl.local_scalar("uint16")
                         txl.ptx.cvt.rn.bf16.f32(ob, o)
-                        txl.ptx.st.global_.b16(output.ptr_to([out_base + col]), ob, pred=txl.LT(ks, 4))
+                        txl.ptx.st.global_.b16(
+                            output.ptr_to([out_base + col]), ob, pred=txl.LT(ks, 4)
+                        )
                     for j in range(J):
-
                         src = (lane & 0x18) | ((j * 8) // M)
                         txl.assign(ub[j], _shfl_idx(uloc[j % R], src))
 
@@ -2576,7 +3081,9 @@ def _make_dyn():
                             i = c * 4 + ii
                             if with_dots:
                                 txl.ptx.ld.shared.v2.b64(kp2[ii], a2[ii], vec_ptr(phase, i))
-                                txl.ptx.ld.shared.v2.b64(k2[ii], q2[ii], txl.ptx.addr(vec_ptr(phase, i), 16))
+                                txl.ptx.ld.shared.v2.b64(
+                                    k2[ii], q2[ii], txl.ptx.addr(vec_ptr(phase, i), 16)
+                                )
                             else:
                                 txl.ptx.ld.shared.b64(kp2[ii], vec_ptr(phase, i))
                         for j in range(J):
@@ -2584,7 +3091,10 @@ def _make_dyn():
                             for ii in range(4):
                                 i = c * 4 + ii
                                 txl.ptx.fma.rn.f32x2(S[j * 8 + i], kp2[ii], u2[j], S[j * 8 + i])
-                                txl.assign(packed[ii], txl.cuda.float22bfloat162_rn_from_float2(S[j * 8 + i]))
+                                txl.assign(
+                                    packed[ii],
+                                    txl.cuda.float22bfloat162_rn_from_float2(S[j * 8 + i]),
+                                )
                                 if with_dots:
                                     txl.ptx.mul.rn.f32x2(S[j * 8 + i], a2[ii], S[j * 8 + i])
                                     txl.ptx.fma.rn.f32x2(d1[j], k2[ii], S[j * 8 + i], d1[j])
@@ -2593,7 +3103,10 @@ def _make_dyn():
                             cs = txl.bitwise_xor(txl.int32(c), ks >> 2)
                             txl.ptx.st.shared.v4.b32(
                                 tiles.ptr_to([tile * tile_elems + row * D + ks * 16 + cs * 8]),
-                                packed[0], packed[1], packed[2], packed[3],
+                                packed[0],
+                                packed[1],
+                                packed[2],
+                                packed[3],
                             )
                     txl.ptx.fence.proxy.async_.shared__cta()
 
@@ -2645,10 +3158,11 @@ def _make_dyn():
                                 txl.assign(tk3, nxt2)
                             else:
                                 with txl.If(tid == 0), txl.Then():
-                                    txl.ptx.atom.global_.add.s32(tk3, sched.ptr_to([0]), txl.int32(1))
+                                    txl.ptx.atom.global_.add.s32(
+                                        tk3, sched.ptr_to([0]), txl.int32(1)
+                                    )
                             cur_slot = txl.local_scalar("int32")
                             nxt_slot = txl.local_scalar("int32")
-
 
                             txl.cuda.iket.mark("unit-start")
                             tk = _rng("wait-vec")
@@ -2680,9 +3194,11 @@ def _make_dyn():
                                 if spec:
                                     with txl.If(nxt2 < num_units), txl.Then():
                                         load_acc2(nxt2)
-                            with txl.If((lane == 0) & has_next & (vec_split or (warp == 0))), txl.Then():
+                            with (
+                                txl.If((lane == 0) & has_next & (vec_split or (warp == 0))),
+                                txl.Then(),
+                            ):
                                 issue_vec(nxt)
-
 
                             tk = _rng("wait-state")
                             bar_state.wait(0, scount & 1)
@@ -2694,13 +3210,23 @@ def _make_dyn():
                                 for c in range(2):
                                     wds = txl.alloc_local((4,), "uint32", align=16)
                                     cs = txl.bitwise_xor(txl.int32(c), ks >> 2)
-                                    txl.ptx.ld.shared.v4.b32(wds[0], wds[1], wds[2], wds[3], tiles.ptr_to([row * D + ks * 16 + cs * 8]))
+                                    txl.ptx.ld.shared.v4.b32(
+                                        wds[0],
+                                        wds[1],
+                                        wds[2],
+                                        wds[3],
+                                        tiles.ptr_to([row * D + ks * 16 + cs * 8]),
+                                    )
                                     for i in range(4):
                                         txl.assign(
                                             S[j * 8 + c * 4 + i],
                                             _f2(
-                                                txl.cuda.uint_as_float(txl.shift_left(wds[i], txl.uint32(16))),
-                                                txl.cuda.uint_as_float(txl.bitwise_and(wds[i], txl.uint32(0xFFFF0000))),
+                                                txl.cuda.uint_as_float(
+                                                    txl.shift_left(wds[i], txl.uint32(16))
+                                                ),
+                                                txl.cuda.uint_as_float(
+                                                    txl.bitwise_and(wds[i], txl.uint32(0xFFFF0000))
+                                                ),
                                             ),
                                         )
 
@@ -2719,7 +3245,6 @@ def _make_dyn():
                                             with txl.If(has_copy_next), txl.Then():
                                                 prefetch_copy(nxt - num_units)
 
-
                             tk = _rng("phase0")
                             for j in range(J):
                                 txl.assign(d1[j], zero2)
@@ -2736,7 +3261,6 @@ def _make_dyn():
                                     txl.ptx.fma.rn.f32x2(d2[j], q2, S[j * 8 + i], d2[j])
                             reduce_and_finish(0, hv, n, row0)
                             _rng_end(tk)
-
 
                             issuer = lane == 0 if warp_auto else tid == 0
 
@@ -2774,7 +3298,9 @@ def _make_dyn():
                                     with txl.If(issuer), txl.Then():
                                         txl.assign(cur_slot, nxt_slot)
                                         if spec:
-                                            txl.ptx.ld.global_.s32(nxt_slot, ssm_idx.ptr_to([n * T + ph]))
+                                            txl.ptx.ld.global_.s32(
+                                                nxt_slot, ssm_idx.ptr_to([n * T + ph])
+                                            )
                                         issue_store(tile, cur_slot)
                                     txl.assign(ck, ck + txl.int32(1))
                                     _rng_end(tk)
@@ -2795,10 +3321,11 @@ def _make_dyn():
                                 issue_store(tile, nxt_slot)
                             txl.assign(ck, ck + txl.int32(1))
                             with txl.If(tid == 0), txl.Then():
-                                txl.ptx.st.shared.b32(mailbox.ptr_to([2]), txl.reinterpret("uint32", tk3))
+                                txl.ptx.st.shared.b32(
+                                    mailbox.ptr_to([2]), txl.reinterpret("uint32", tk3)
+                                )
                             txl.cuda.cta_sync()
                             _rng_end(tk)
-
 
                         if spec:
                             with txl.Else():
@@ -2809,11 +3336,15 @@ def _make_dyn():
                                     txl.assign(tk3, nxt2)
                                 else:
                                     with txl.If(tid == 0), txl.Then():
-                                        txl.ptx.atom.global_.add.s32(tk3, sched.ptr_to([0]), txl.int32(1))
+                                        txl.ptx.atom.global_.add.s32(
+                                            tk3, sched.ptr_to([0]), txl.int32(1)
+                                        )
                                 tk = _rng("copy-batch")
                                 with txl.If(rank_c >= MAXR), txl.Then():
                                     cnt3 = txl.local_scalar("int32", init=txl.int32(0))
-                                    with txl.serial(0, (num_slots + pmax - 1) // pmax, unroll=False) as chunk:
+                                    with txl.serial(
+                                        0, (num_slots + pmax - 1) // pmax, unroll=False
+                                    ) as chunk:
                                         cb = chunk * pmax
                                         build_flags(cb)
                                         with txl.If(warp == 0), txl.Then():
@@ -2822,19 +3353,25 @@ def _make_dyn():
                                     with txl.If(tid == 0), txl.Then():
                                         slot_c = txl.local_scalar("int32")
                                         txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([MAXR]))
-                                        txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.uint32(tile_bytes))
+                                        txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                            bar_state.ptr_to([0]), txl.uint32(tile_bytes)
+                                        )
                                         tile_load(0, slot_c, hv_c, part_c)
                                 bar_state.wait(0, scount & 1)
                                 txl.assign(scount, scount + txl.int32(1))
                                 txl.cuda.cta_sync()
                                 with txl.If(tid == 0), txl.Then():
                                     slot_c = txl.local_scalar("int32")
-                                    txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([txl.min(rank_c, txl.int32(MAXR))]))
+                                    txl.ptx.ld.shared.b32(
+                                        slot_c, cpslots.ptr_to([txl.min(rank_c, txl.int32(MAXR))])
+                                    )
                                     store_checkpoint(0, slot_c, hv_c, part_c * cpt)
                                     txl.ptx.cp.async_.bulk.wait_group.read(0)
                                     with txl.If(nxt < total_items), txl.Then():
                                         prefetch_copy(nxt - num_units)
-                                    txl.ptx.st.shared.b32(mailbox.ptr_to([2]), txl.reinterpret("uint32", tk3))
+                                    txl.ptx.st.shared.b32(
+                                        mailbox.ptr_to([2]), txl.reinterpret("uint32", tk3)
+                                    )
                                 txl.cuda.cta_sync()
                                 _rng_end(tk)
                     txl.assign(cur, nxt)
@@ -2859,22 +3396,24 @@ def _make_dyn():
 
         return kda_decode_persist
 
-
     OVERRIDE = {}
     _COMPILED = {}
 
-
     def _pick_cpt(N, T, HV):
-
-
         heads = N * HV
         if heads <= 16:
             return 32
         return 64
 
-
     def _ctas_per_sm(cpt, T, gate_lb, nw=4):
-        smem = 3 * cpt * D * 2 + T * RAW_TOK_B + (GATE_B if gate_lb else 0) + (T + 1) * FST * 4 + T * D * 4 + 256
+        smem = (
+            3 * cpt * D * 2
+            + T * RAW_TOK_B
+            + (GATE_B if gate_lb else 0)
+            + (T + 1) * FST * 4
+            + T * D * 4
+            + 256
+        )
         by_smem = (220 * 1024) // smem
         if nw == 4:
             by_regs = {16: 6, 32: 5, 64: 3, 128: 2}[cpt]
@@ -2884,22 +3423,28 @@ def _make_dyn():
             by_regs = {32: 3, 64: 2, 128: 1}[cpt]
         return max(1, min(by_smem, by_regs))
 
-
-    def _compile(**kw):
+    def _compile(*, backend_config=None, **kw):
+        backend_config = resolve_backend_config(backend_config)
+        cache_config = backend_config_key(backend_config)
         key = tuple(sorted(kw.items()))
-        exe = _COMPILED.get(key)
+        exe = _COMPILED.get((cache_config, key))
         if exe is None:
-            kernel = build_kernel(**kw)
-            target = kernel.target()
+            kernel = build_kernel(**kw, backend_config=backend_config)
+            target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
-            _COMPILED[key] = exe
+                exe = tvm.compile(
+                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
+                )
+            _COMPILED[(cache_config, key)] = exe
         return exe
 
-
-    def setup(data, N, T):
+    def setup(data, N, T, *, backend_config=None):
         q, k, v, g, beta = data["q"], data["k"], data["v"], data["g"], data["beta"]
-        initial_state, final_state, output = data["initial_state"], data["final_state"], data["output"]
+        initial_state, final_state, output = (
+            data["initial_state"],
+            data["final_state"],
+            data["output"],
+        )
         H, HV = q.shape[-2], v.shape[-2]
         P = initial_state.shape[0]
         device = q.device
@@ -2914,7 +3459,11 @@ def _make_dyn():
         copy_est = max(P - N * T, 0) * HV * split if spec else 0
         num_main = min(num_units + copy_est, per_sm * sms)
         per_sm = min(per_sm, max(1, -(-num_main // sms)))
-        extra = {k: bool(OVERRIDE[k]) for k in ("allreduce", "bar_arrive", "warp_auto", "vec_split") if k in OVERRIDE}
+        extra = {
+            k: bool(OVERRIDE[k])
+            for k in ("allreduce", "bar_arrive", "warp_auto", "vec_split")
+            if k in OVERRIDE
+        }
         if "warp_auto" not in extra:
             extra["warp_auto"] = (num_units + copy_est) <= 6 * num_main
         if "vec_split" not in extra:
@@ -2923,7 +3472,19 @@ def _make_dyn():
             )
         extra["nw"] = nw
         extra["l2pf"] = False
-        exe = _compile(T=T, H=H, HV=HV, gate_lb=gate_lb, cpt=cpt, num_units=num_units, num_main=num_main, per_sm=per_sm, copy_est=copy_est, **extra)
+        exe = _compile(
+            T=T,
+            H=H,
+            HV=HV,
+            gate_lb=gate_lb,
+            cpt=cpt,
+            num_units=num_units,
+            num_main=num_main,
+            per_sm=per_sm,
+            copy_est=copy_est,
+            **extra,
+            backend_config=backend_config,
+        )
 
         dummy_f32 = torch.zeros(4, dtype=torch.float32, device=device)
         dummy_i32 = torch.zeros(1, dtype=torch.int32, device=device)
@@ -2935,11 +3496,39 @@ def _make_dyn():
         lower_bound = float(data["lower_bound"]) if data["lower_bound"] is not None else 0.0
         scale = float(data["scale"])
         args = (
-            q.view(-1), k.view(-1), v.view(-1), g.view(-1), beta.view(-1),
-            a_log, dt_bias, initial_state.view(-1), final_state.view(-1), output.view(-1),
-            ssm, acc, sched, scale, lower_bound, int(P), int(N),
+            q.view(-1),
+            k.view(-1),
+            v.view(-1),
+            g.view(-1),
+            beta.view(-1),
+            a_log,
+            dt_bias,
+            initial_state.view(-1),
+            final_state.view(-1),
+            output.view(-1),
+            ssm,
+            acc,
+            sched,
+            scale,
+            lower_bound,
+            int(P),
+            int(N),
         )
-        keep = (q, k, v, g, beta, a_log, dt_bias, initial_state, final_state, output, ssm, acc, sched)
+        keep = (
+            q,
+            k,
+            v,
+            g,
+            beta,
+            a_log,
+            dt_bias,
+            initial_state,
+            final_state,
+            output,
+            ssm,
+            acc,
+            sched,
+        )
 
         def run():
             exe(*args)
@@ -2948,9 +3537,8 @@ def _make_dyn():
         run()
         torch.cuda.synchronize(device)
         return run
+
     return setup
-
-
 
 
 _DEFER_SETUP = _make_defer()
@@ -2963,6 +3551,7 @@ DYN_RULE = {4: 8.0, 2: 16.0}
 
 def _items_per_cta(data, N, T):
     import torch
+
     HV = data["v"].shape[-2]
     P = data["initial_state"].shape[0]
     cpt = 32 if N * HV <= 16 else 64
@@ -2974,10 +3563,10 @@ def _items_per_cta(data, N, T):
     return (units + copies) / max(1, num_main)
 
 
-def _incumbent_setup(data, N, T):
+def _incumbent_setup(data, N, T, *, backend_config=None):
     if T in DYN_RULE and _items_per_cta(data, N, T) >= DYN_RULE[T]:
-        return _DYN_SETUP(data, N, T)
-    return (_DEFER_SETUP if T == 6 else _BASE_SETUP)(data, N, T)
+        return _DYN_SETUP(data, N, T, backend_config=backend_config)
+    return (_DEFER_SETUP if T == 6 else _BASE_SETUP)(data, N, T, backend_config=backend_config)
 
 
 """KDA recurrent decode, family colreg-persist (split-tail candidate): the v4c persistent column-register
@@ -2986,7 +3575,8 @@ vector tables, half the rows and registers), so no CTA carries a whole extra uni
 CTAs without a half unit.  Half units reuse the phase code through a geometry factory (J rows per lane group).
 """
 
-def _make_split():
+
+def _make_split(*, backend_config=None):
     """KDA recurrent decode, family "colreg-persist" (v4, warp-autonomous phases): persistent register-resident recurrence.
 
     Unit = (sequence n, value head hv, column slice of CPT rows). A persistent CTA (4 warps)
@@ -3016,9 +3606,9 @@ def _make_split():
     """
 
     import torch
-    import tvm
 
     import tirx_kernels.tirx_lite as txl
+    import tvm
 
     D = 128
     LOG2E = 1.4426950408889634
@@ -3032,22 +3622,30 @@ def _make_split():
     MAXH = 6
     IDX_PRE = 8
 
-
     def _shfl_bfly(val_f32, xor):
         out = txl.local_scalar("uint32")
-        txl.ptx.shfl_sync.bfly.b32(out, txl.reinterpret("uint32", val_f32), txl.uint32(xor), txl.uint32(31), txl.uint32(FULL))
+        txl.ptx.shfl_sync.bfly.b32(
+            out,
+            txl.reinterpret("uint32", val_f32),
+            txl.uint32(xor),
+            txl.uint32(31),
+            txl.uint32(FULL),
+        )
         return txl.reinterpret("float32", out)
-
 
     def _shfl_idx(val_f32, src_lane):
         out = txl.local_scalar("uint32")
-        txl.ptx.shfl_sync.idx.b32(out, txl.reinterpret("uint32", val_f32), txl.cast(src_lane, "uint32"), txl.uint32(31), txl.uint32(FULL))
+        txl.ptx.shfl_sync.idx.b32(
+            out,
+            txl.reinterpret("uint32", val_f32),
+            txl.cast(src_lane, "uint32"),
+            txl.uint32(31),
+            txl.uint32(FULL),
+        )
         return txl.reinterpret("float32", out)
-
 
     def _f2(a, b):
         return txl.cuda.make_float2(a, b)
-
 
     def _rng(name):
         """IKET range token (stripped by the production pipeline)."""
@@ -3055,12 +3653,28 @@ def _make_split():
         txl.assign(token[0], txl.cuda.iket.range_start(name))
         return token
 
-
     def _rng_end(token):
         txl.cuda.iket.range_end(token[0])
 
-
-    def build_kernel(*, T, H, HV, gate_lb, cpt, num_units, num_main, per_sm, copy_est=0, allreduce=None, bar_arrive=False, warp_auto=True, vec_split=True, nw=4, l2pf=False):
+    def build_kernel(
+        *,
+        T,
+        H,
+        HV,
+        gate_lb,
+        cpt,
+        num_units,
+        num_main,
+        per_sm,
+        copy_est=0,
+        allreduce=None,
+        bar_arrive=False,
+        warp_auto=True,
+        vec_split=True,
+        nw=4,
+        l2pf=False,
+        backend_config=None,
+    ):
         assert D % cpt == 0 and cpt % (4 * nw) == 0, "each warp needs a multiple of 4 rows"
         G = HV // H
         NT = 32 * nw
@@ -3097,11 +3711,10 @@ def _make_split():
         hole_base0 = NHALF % num_main
         hole_cnt0 = num_main - hole_base0
 
-
         if hole_cnt0 == 0 or copy_est > hole_cnt0 * max(MAXH, T + 1):
             hole_base0, hole_cnt0 = 0, num_main
 
-        @txl.kernel(warps=nw, arch="sm_100a", grid=num_ctas, min_blocks_per_sm=per_sm)
+        @txl.kernel()
         def kda_decode_persist(
             q: txl.gptr[txl.bf16],
             k: txl.gptr[txl.bf16],
@@ -3120,6 +3733,12 @@ def _make_split():
             num_slots: txl.i32,
             num_seqs: txl.i32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
+                backend_config=backend_config,
+            )
+
             cta = txl.cta_id()
             tid = txl.thread_id()
             warp = txl.warp_id()
@@ -3138,11 +3757,12 @@ def _make_split():
             txl.ptx.fence.proxy.async_.shared__cta()
             txl.cuda.cta_sync()
 
-
             def main_role():
                 ks = lane & 7
                 cw = lane >> 3
-                nhalf_me = txl.max((txl.int32(NHALF) - cta + num_main - 1) // num_main, txl.int32(0))
+                nhalf_me = txl.max(
+                    (txl.int32(NHALF) - cta + num_main - 1) // num_main, txl.int32(0)
+                )
                 ck = txl.local_scalar("int32", init=txl.int32(0))
                 scount = txl.local_scalar("int32", init=txl.int32(0))
                 vcount = txl.local_scalar("int32", init=txl.int32(0))
@@ -3165,15 +3785,29 @@ def _make_split():
                     nwi = nw if vec_split else 1
                     for w in range(nwi):
                         toks = [t for t in range(T) if t % nwi == w]
-                        nbytes = len(toks) * RAW_TOK_B + ((GATE_B if gate_lb else 0) if w == 0 else 0)
+                        nbytes = len(toks) * RAW_TOK_B + (
+                            (GATE_B if gate_lb else 0) if w == 0 else 0
+                        )
                         with txl.If(warp == w), txl.Then():
-                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_vec.ptr_to([0]), txl.uint32(nbytes))
+                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                bar_vec.ptr_to([0]), txl.uint32(nbytes)
+                            )
                             for t in toks:
                                 _issue_vec_token(n, hv, h, t)
                             if gate_lb and w == 0:
                                 gb = T * (RAW_TOK_B // 2)
-                                txl.ptx[_BULK_G2S](raw.ptr_to([gb]), dt_bias.ptr_to([h * D]), txl.uint32(512), bar_vec.ptr_to([0]))
-                                txl.ptx[_BULK_G2S](raw.ptr_to([gb + 256]), a_log.ptr_to([h - (h % 4)]), txl.uint32(16), bar_vec.ptr_to([0]))
+                                txl.ptx[_BULK_G2S](
+                                    raw.ptr_to([gb]),
+                                    dt_bias.ptr_to([h * D]),
+                                    txl.uint32(512),
+                                    bar_vec.ptr_to([0]),
+                                )
+                                txl.ptx[_BULK_G2S](
+                                    raw.ptr_to([gb + 256]),
+                                    a_log.ptr_to([h - (h % 4)]),
+                                    txl.uint32(16),
+                                    bar_vec.ptr_to([0]),
+                                )
 
                 def _issue_vec_token(n, hv, h, t):
                     if True:
@@ -3181,12 +3815,37 @@ def _make_split():
                         qk_off = (txl.cast(tok, "int64") * H + h) * D
                         vg_off = (txl.cast(tok, "int64") * HV + hv) * D
                         rb = t * (RAW_TOK_B // 2)
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb]), q.ptr_to([qk_off]), txl.uint32(256), bar_vec.ptr_to([0]))
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 128]), k.ptr_to([qk_off]), txl.uint32(256), bar_vec.ptr_to([0]))
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 256]), g.ptr_to([vg_off]), txl.uint32(256), bar_vec.ptr_to([0]))
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 384]), v.ptr_to([vg_off]), txl.uint32(256), bar_vec.ptr_to([0]))
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb]),
+                            q.ptr_to([qk_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([0]),
+                        )
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 128]),
+                            k.ptr_to([qk_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([0]),
+                        )
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 256]),
+                            g.ptr_to([vg_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([0]),
+                        )
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 384]),
+                            v.ptr_to([vg_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([0]),
+                        )
                         bidx = txl.cast(tok, "int64") * HV + hv
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 512]), beta.ptr_to([bidx - (bidx % 8)]), txl.uint32(16), bar_vec.ptr_to([0]))
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 512]),
+                            beta.ptr_to([bidx - (bidx % 8)]),
+                            txl.uint32(16),
+                            bar_vec.ptr_to([0]),
+                        )
 
                 def tile_load(tile, slot, hv, part):
                     """Thread 0: TMA load of cpt rows of (slot, hv) from initial_state into `tile` (no expect_tx)."""
@@ -3199,7 +3858,6 @@ def _make_split():
                             bar_state.ptr_to([0]),
                         )
 
-
                 hole_base = hole_base0
                 hole_cnt = hole_cnt0
 
@@ -3210,7 +3868,9 @@ def _make_split():
                 def issue_state(uu, slot0):
                     """Thread 0: TMA load of the unit's state rows into tile A."""
                     _, part, hv, n, _ = unit_coords(uu)
-                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.uint32(tile_bytes))
+                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                        bar_state.ptr_to([0]), txl.uint32(tile_bytes)
+                    )
                     src0 = (txl.cast(slot0, "int64") * HV + hv) * (D * D) + part * cpt * D
                     for pc in range(n_pieces):
                         txl.ptx[_BULK_G2S](
@@ -3229,9 +3889,16 @@ def _make_split():
                 def issue_state_half(hq_id, slot0):
                     """Thread 0: TMA load of half-unit hq_id's HALF_ROWS rows into the front of tile A."""
                     _, part, hv, n, _, row0h = half_coords(hq_id)
-                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.uint32(HALF_BYTES))
+                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                        bar_state.ptr_to([0]), txl.uint32(HALF_BYTES)
+                    )
                     src0 = (txl.cast(slot0, "int64") * HV + hv) * (D * D) + row0h * D
-                    txl.ptx[_BULK_G2S](tiles.ptr_to([0]), state_in.ptr_to([src0]), txl.uint32(HALF_BYTES), bar_state.ptr_to([0]))
+                    txl.ptx[_BULK_G2S](
+                        tiles.ptr_to([0]),
+                        state_in.ptr_to([src0]),
+                        txl.uint32(HALF_BYTES),
+                        bar_state.ptr_to([0]),
+                    )
 
                 def start_slot(uu, acc_val):
                     _, _, _, n, _ = unit_coords(uu)
@@ -3257,8 +3924,9 @@ def _make_split():
                         return
                     _, part, hv, n, _ = unit_coords(uu)
                     src0 = (txl.cast(slot0, "int64") * HV + hv) * (D * D) + part * cpt * D
-                    txl.ptx["cp.async.bulk.prefetch.L2.global"](state_in.ptr_to([src0]), txl.uint32(tile_bytes))
-
+                    txl.ptx["cp.async.bulk.prefetch.L2.global"](
+                        state_in.ptr_to([src0]), txl.uint32(tile_bytes)
+                    )
 
                 if spec:
                     total_idx = num_seqs * T
@@ -3268,14 +3936,14 @@ def _make_split():
                         with txl.If(i * NT + tid < total_idx), txl.Then():
                             txl.ptx.ld.global_.s32(idx_pre[i], ssm_idx.ptr_to([i * NT + tid]))
 
-
-                first_head = txl.local_scalar("int32", init=cta if k_full > 0 else (F_units + cta // 2))
+                first_head = txl.local_scalar(
+                    "int32", init=cta if k_full > 0 else (F_units + cta // 2)
+                )
                 first_is_item = (cta < num_units) if k_full > 0 else (cta < NHALF)
                 with txl.If((lane == 0) & first_is_item & (vec_split or (warp == 0))), txl.Then():
                     issue_vec(first_head)
                 with txl.If((tid == 0) & first_is_item), txl.Then():
                     if spec:
-
                         n0 = unit_coords(first_head)[3]
                         a0 = txl.local_scalar("int32")
                         txl.ptx.ld.global_.s32(a0, num_accepted.ptr_to([n0]))
@@ -3310,13 +3978,17 @@ def _make_split():
                     with txl.serial(0, (nz + NT - 1) // NT, unroll=False) as i:
                         pz = i * NT + tid
                         with txl.If(pz < nz), txl.Then():
-                            txl.ptx.st.shared.b32(tiles.ptr_to([tile_elems + 2 * pz]), txl.uint32(0))
+                            txl.ptx.st.shared.b32(
+                                tiles.ptr_to([tile_elems + 2 * pz]), txl.uint32(0)
+                            )
                     txl.cuda.cta_sync()
                     total = num_seqs * T
                     for i in range(IDX_PRE):
                         rel = idx_pre[i] - cb
                         with txl.If((i * NT + tid < total) & (rel >= 0) & (rel < pmax)), txl.Then():
-                            txl.ptx.st.shared.b32(tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1))
+                            txl.ptx.st.shared.b32(
+                                tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1)
+                            )
                     with txl.serial(IDX_PRE, (total + NT - 1) // NT, unroll=False) as i:
                         e = i * NT + tid
                         with txl.If(e < total), txl.Then():
@@ -3324,7 +3996,9 @@ def _make_split():
                             txl.ptx.ld.global_.s32(sidx, ssm_idx.ptr_to([e]))
                             rel = sidx - cb
                             with txl.If((rel >= 0) & (rel < pmax)), txl.Then():
-                                txl.ptx.st.shared.b32(tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1))
+                                txl.ptx.st.shared.b32(
+                                    tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1)
+                                )
                     txl.cuda.cta_sync()
 
                 def scan_untouched(cb, cnt, want_rank, dst_idx):
@@ -3338,10 +4012,14 @@ def _make_split():
                         with txl.If(valid), txl.Then():
                             txl.ptx.ld.shared.b32(flag, tiles.ptr_to([tile_elems + 2 * pl]))
                         untouched = flag == txl.uint32(0)
-                        upred = txl.local_scalar("uint32", init=txl.if_then_else(untouched, txl.uint32(1), txl.uint32(0)))
+                        upred = txl.local_scalar(
+                            "uint32", init=txl.if_then_else(untouched, txl.uint32(1), txl.uint32(0))
+                        )
                         mask = txl.local_scalar("uint32")
                         txl.ptx.vote_sync.ballot.b32(mask, txl.ptx.pred(upred), txl.uint32(FULL))
-                        below = txl.bitwise_and(mask, (txl.uint32(1) << txl.cast(lane, "uint32")) - txl.uint32(1))
+                        below = txl.bitwise_and(
+                            mask, (txl.uint32(1) << txl.cast(lane, "uint32")) - txl.uint32(1)
+                        )
                         rank = cnt + txl.cast(txl.popcount(below), "int32")
                         with txl.If(untouched), txl.Then():
                             slot = cb + pl
@@ -3350,16 +4028,23 @@ def _make_split():
                                 hi = lo + DCU
                                 me = cta - hole_base
 
-                                c0 = txl.local_scalar("int32", init=lo + ((me - lo) % hole_cnt + hole_cnt) % hole_cnt)
+                                c0 = txl.local_scalar(
+                                    "int32", init=lo + ((me - lo) % hole_cnt + hole_cnt) % hole_cnt
+                                )
                                 with txl.If(me >= 0), txl.Then():
                                     with txl.While(c0 < hi):
                                         kk = (c0 - me) // hole_cnt
                                         with txl.If(kk < MAXC), txl.Then():
-                                            txl.ptx.st.shared.b32(cpslots.ptr_to([kk]), txl.reinterpret("uint32", slot))
+                                            txl.ptx.st.shared.b32(
+                                                cpslots.ptr_to([kk]),
+                                                txl.reinterpret("uint32", slot),
+                                            )
                                         txl.assign(c0, c0 + hole_cnt)
                             else:
                                 with txl.If((want_rank >= 0) & (rank == want_rank)), txl.Then():
-                                    txl.ptx.st.shared.b32(cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot))
+                                    txl.ptx.st.shared.b32(
+                                        cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot)
+                                    )
                         txl.assign(cnt, cnt + txl.cast(txl.popcount(mask), "int32"))
 
                 ncopy_me = txl.local_scalar("int32", init=txl.int32(0))
@@ -3375,14 +4060,23 @@ def _make_split():
                             scan_untouched(cb, cnt, None, 0)
                         txl.cuda.cta_sync()
                     with txl.If(tid == 0), txl.Then():
-                        txl.ptx.st.shared.b32(cpslots.ptr_to([MAXC]), txl.reinterpret("uint32", cnt))
+                        txl.ptx.st.shared.b32(
+                            cpslots.ptr_to([MAXC]), txl.reinterpret("uint32", cnt)
+                        )
                     txl.cuda.cta_sync()
                     txl.ptx.fence.proxy.async_.shared__cta()
                     ucnt = txl.local_scalar("int32")
                     txl.ptx.ld.shared.b32(ucnt, cpslots.ptr_to([MAXC]))
                     total_copy = ucnt * DCU
                     me0 = cta - hole_base
-                    txl.assign(ncopy_me, txl.if_then_else((me0 >= 0) & (total_copy > me0), (total_copy - me0 + hole_cnt - 1) // hole_cnt, txl.int32(0)))
+                    txl.assign(
+                        ncopy_me,
+                        txl.if_then_else(
+                            (me0 >= 0) & (total_copy > me0),
+                            (total_copy - me0 + hole_cnt - 1) // hole_cnt,
+                            txl.int32(0),
+                        ),
+                    )
 
                 def preprocess(t, hv, h):
                     """Warp-level: normalize q/k, decay, per-token scalars of token t from `raw`."""
@@ -3403,8 +4097,16 @@ def _make_split():
                     vf = txl.alloc_local((4,), "float32")
                     for src, dst in ((qw, qf), (kw, kf), (gw, gf), (vw, vf)):
                         for p2 in range(2):
-                            txl.assign(dst[2 * p2], txl.cuda.uint_as_float(txl.shift_left(src[p2], txl.uint32(16))))
-                            txl.assign(dst[2 * p2 + 1], txl.cuda.uint_as_float(txl.bitwise_and(src[p2], txl.uint32(0xFFFF0000))))
+                            txl.assign(
+                                dst[2 * p2],
+                                txl.cuda.uint_as_float(txl.shift_left(src[p2], txl.uint32(16))),
+                            )
+                            txl.assign(
+                                dst[2 * p2 + 1],
+                                txl.cuda.uint_as_float(
+                                    txl.bitwise_and(src[p2], txl.uint32(0xFFFF0000))
+                                ),
+                            )
 
                     sq = txl.local_scalar("float32", init=txl.float32(0.0))
                     sk = txl.local_scalar("float32", init=txl.float32(0.0))
@@ -3436,10 +4138,14 @@ def _make_split():
                         ea = txl.local_scalar("float32")
                         alog = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(alog, raw.ptr_to([gb + 256 + (h % 4) * 2]))
-                        txl.ptx["mul.f32"](tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E))
+                        txl.ptx["mul.f32"](
+                            tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E)
+                        )
                         txl.ptx["ex2.approx.ftz.f32"](ea, tmp)
                         bias = txl.alloc_local((4,), "uint32", align=16)
-                        txl.ptx.ld.shared.v4.b32(bias[0], bias[1], bias[2], bias[3], raw.ptr_to([gb + lane * 8]))
+                        txl.ptx.ld.shared.v4.b32(
+                            bias[0], bias[1], bias[2], bias[3], raw.ptr_to([gb + lane * 8])
+                        )
                         for e in range(4):
                             x = txl.local_scalar("float32")
                             txl.ptx["add.f32"](x, gf[e], txl.reinterpret("float32", bias[e]))
@@ -3458,22 +4164,38 @@ def _make_split():
                     for pp in range(2):
                         pair = lane * 2 + pp
                         ent = t * FST + pair * 8 + (pair >> 3) * 4
-                        txl.ptx.st.shared.v2.b32(ftab.ptr_to([ent + 2]), txl.reinterpret("uint32", gf[2 * pp]), txl.reinterpret("uint32", gf[2 * pp + 1]))
+                        txl.ptx.st.shared.v2.b32(
+                            ftab.ptr_to([ent + 2]),
+                            txl.reinterpret("uint32", gf[2 * pp]),
+                            txl.reinterpret("uint32", gf[2 * pp + 1]),
+                        )
                         txl.ptx.st.shared.v4.b32(
                             ftab.ptr_to([ent + 4]),
-                            txl.reinterpret("uint32", kf[2 * pp]), txl.reinterpret("uint32", kf[2 * pp + 1]),
-                            txl.reinterpret("uint32", qf[2 * pp]), txl.reinterpret("uint32", qf[2 * pp + 1]),
+                            txl.reinterpret("uint32", kf[2 * pp]),
+                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                            txl.reinterpret("uint32", qf[2 * pp]),
+                            txl.reinterpret("uint32", qf[2 * pp + 1]),
                         )
-                        txl.ptx.st.shared.v2.b32(ftab.ptr_to([ent + FST]), txl.reinterpret("uint32", kf[2 * pp]), txl.reinterpret("uint32", kf[2 * pp + 1]))
+                        txl.ptx.st.shared.v2.b32(
+                            ftab.ptr_to([ent + FST]),
+                            txl.reinterpret("uint32", kf[2 * pp]),
+                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                        )
                     txl.ptx.st.shared.v4.b32(
                         vtab.ptr_to([t * D + lane * 4]),
-                        txl.reinterpret("uint32", vf[0]), txl.reinterpret("uint32", vf[1]),
-                        txl.reinterpret("uint32", vf[2]), txl.reinterpret("uint32", vf[3]),
+                        txl.reinterpret("uint32", vf[0]),
+                        txl.reinterpret("uint32", vf[1]),
+                        txl.reinterpret("uint32", vf[2]),
+                        txl.reinterpret("uint32", vf[3]),
                     )
                     with txl.If(lane == 0), txl.Then():
                         bf = txl.local_scalar("float32")
                         txl.ptx.cvt.f32.bf16(bf, txl.cast(bbits, "uint16"))
-                        txl.ptx.st.shared.v2.b32(svec.ptr_to([2 * t]), txl.reinterpret("uint32", bf), txl.reinterpret("uint32", cpart))
+                        txl.ptx.st.shared.v2.b32(
+                            svec.ptr_to([2 * t]),
+                            txl.reinterpret("uint32", bf),
+                            txl.reinterpret("uint32", cpart),
+                        )
 
                 S = txl.alloc_local((J * 8,), "uint64", align=8)
                 d1 = txl.alloc_local((J,), "uint64", align=8)
@@ -3485,6 +4207,7 @@ def _make_split():
                     """Phase code for one unit geometry (J rows per lane group)."""
                     n_pieces_u = (ubytes + load_piece - 1) // load_piece
                     piece_u = min(load_piece, ubytes)
+
                     def vec_ptr(phase, i):
                         cs = txl.bitwise_xor(txl.int32(i // 4), ks >> 2)
                         pair = ks * 8 + cs * 4 + (i % 4)
@@ -3499,11 +4222,15 @@ def _make_split():
                         vals = []
                         for j in range(J):
                             r = txl.local_scalar("float32")
-                            txl.ptx["add.f32"](r, txl.cuda.float2_x(d1[j]), txl.cuda.float2_y(d1[j]))
+                            txl.ptx["add.f32"](
+                                r, txl.cuda.float2_x(d1[j]), txl.cuda.float2_y(d1[j])
+                            )
                             vals.append(r)
                         for j in range(J):
                             r = txl.local_scalar("float32")
-                            txl.ptx["add.f32"](r, txl.cuda.float2_x(d2[j]), txl.cuda.float2_y(d2[j]))
+                            txl.ptx["add.f32"](
+                                r, txl.cuda.float2_x(d2[j]), txl.cuda.float2_y(d2[j])
+                            )
                             vals.append(r)
                         if allreduce:
                             for s in (1, 2, 4):
@@ -3522,7 +4249,9 @@ def _make_split():
                                 txl.ptx["fma.rn.f32"](o, c_t, ub[j], vals[J + j])
                                 ob = txl.local_scalar("uint16")
                                 txl.ptx.cvt.rn.bf16.f32(ob, o)
-                                txl.ptx.st.global_.b16(output.ptr_to([out_base + col]), ob, pred=txl.EQ(ks, 0))
+                                txl.ptx.st.global_.b16(
+                                    output.ptr_to([out_base + col]), ob, pred=txl.EQ(ks, 0)
+                                )
                             return
                         for s in (4, 2, 1):
                             if len(vals) > 1:
@@ -3530,8 +4259,12 @@ def _make_split():
                                 b = ((ks // s) & 1) != 0
                                 nxt = []
                                 for i in range(half):
-                                    send = txl.local_scalar("float32", init=txl.if_then_else(b, vals[i], vals[i + half]))
-                                    keep = txl.local_scalar("float32", init=txl.if_then_else(b, vals[i + half], vals[i]))
+                                    send = txl.local_scalar(
+                                        "float32", init=txl.if_then_else(b, vals[i], vals[i + half])
+                                    )
+                                    keep = txl.local_scalar(
+                                        "float32", init=txl.if_then_else(b, vals[i + half], vals[i])
+                                    )
                                     r = txl.local_scalar("float32")
                                     txl.ptx["add.f32"](r, keep, _shfl_bfly(send, s))
                                     nxt.append(r)
@@ -3559,9 +4292,10 @@ def _make_split():
                             txl.ptx["fma.rn.f32"](o, c_t, uloc[i], dd2)
                             ob = txl.local_scalar("uint16")
                             txl.ptx.cvt.rn.bf16.f32(ob, o)
-                            txl.ptx.st.global_.b16(output.ptr_to([out_base + col]), ob, pred=txl.LT(ks, 4))
+                            txl.ptx.st.global_.b16(
+                                output.ptr_to([out_base + col]), ob, pred=txl.LT(ks, 4)
+                            )
                         for j in range(J):
-
                             src = (lane & 0x18) | ((j * 8) // M)
                             txl.assign(ub[j], _shfl_idx(uloc[j % R], src))
 
@@ -3582,7 +4316,9 @@ def _make_split():
                                 i = c * 4 + ii
                                 if with_dots:
                                     txl.ptx.ld.shared.v2.b64(kp2[ii], a2[ii], vec_ptr(phase, i))
-                                    txl.ptx.ld.shared.v2.b64(k2[ii], q2[ii], txl.ptx.addr(vec_ptr(phase, i), 16))
+                                    txl.ptx.ld.shared.v2.b64(
+                                        k2[ii], q2[ii], txl.ptx.addr(vec_ptr(phase, i), 16)
+                                    )
                                 else:
                                     txl.ptx.ld.shared.b64(kp2[ii], vec_ptr(phase, i))
                             for j in range(J):
@@ -3590,7 +4326,10 @@ def _make_split():
                                 for ii in range(4):
                                     i = c * 4 + ii
                                     txl.ptx.fma.rn.f32x2(S[j * 8 + i], kp2[ii], u2[j], S[j * 8 + i])
-                                    txl.assign(packed[ii], txl.cuda.float22bfloat162_rn_from_float2(S[j * 8 + i]))
+                                    txl.assign(
+                                        packed[ii],
+                                        txl.cuda.float22bfloat162_rn_from_float2(S[j * 8 + i]),
+                                    )
                                     if with_dots:
                                         txl.ptx.mul.rn.f32x2(S[j * 8 + i], a2[ii], S[j * 8 + i])
                                         txl.ptx.fma.rn.f32x2(d1[j], k2[ii], S[j * 8 + i], d1[j])
@@ -3599,7 +4338,10 @@ def _make_split():
                                 cs = txl.bitwise_xor(txl.int32(c), ks >> 2)
                                 txl.ptx.st.shared.v4.b32(
                                     tiles.ptr_to([tile * tile_elems + row * D + ks * 16 + cs * 8]),
-                                    packed[0], packed[1], packed[2], packed[3],
+                                    packed[0],
+                                    packed[1],
+                                    packed[2],
+                                    packed[3],
                                 )
                         txl.ptx.fence.proxy.async_.shared__cta()
 
@@ -3638,20 +4380,29 @@ def _make_split():
                         )
                         txl.ptx.cp.async_.bulk.commit_group()
 
-
                     def ld_state():
                         for j in range(J):
                             row = warp * rows_per_warp + j * 4 + cw
                             for c in range(2):
                                 wds = txl.alloc_local((4,), "uint32", align=16)
                                 cs = txl.bitwise_xor(txl.int32(c), ks >> 2)
-                                txl.ptx.ld.shared.v4.b32(wds[0], wds[1], wds[2], wds[3], tiles.ptr_to([row * D + ks * 16 + cs * 8]))
+                                txl.ptx.ld.shared.v4.b32(
+                                    wds[0],
+                                    wds[1],
+                                    wds[2],
+                                    wds[3],
+                                    tiles.ptr_to([row * D + ks * 16 + cs * 8]),
+                                )
                                 for i in range(4):
                                     txl.assign(
                                         S[j * 8 + c * 4 + i],
                                         _f2(
-                                            txl.cuda.uint_as_float(txl.shift_left(wds[i], txl.uint32(16))),
-                                            txl.cuda.uint_as_float(txl.bitwise_and(wds[i], txl.uint32(0xFFFF0000))),
+                                            txl.cuda.uint_as_float(
+                                                txl.shift_left(wds[i], txl.uint32(16))
+                                            ),
+                                            txl.cuda.uint_as_float(
+                                                txl.bitwise_and(wds[i], txl.uint32(0xFFFF0000))
+                                            ),
                                         ),
                                     )
 
@@ -3670,18 +4421,42 @@ def _make_split():
                                 txl.ptx.fma.rn.f32x2(d1[j], k2, S[j * 8 + i], d1[j])
                                 txl.ptx.fma.rn.f32x2(d2[j], q2, S[j * 8 + i], d2[j])
 
-                    return dict(update_pass=update_pass, reduce_and_finish=reduce_and_finish, store_checkpoint=store_checkpoint,
-                                store_warp_rows=store_warp_rows, ld_state=ld_state, phase0_dots=phase0_dots)
+                    return dict(
+                        update_pass=update_pass,
+                        reduce_and_finish=reduce_and_finish,
+                        store_checkpoint=store_checkpoint,
+                        store_warp_rows=store_warp_rows,
+                        ld_state=ld_state,
+                        phase0_dots=phase0_dots,
+                    )
 
                 GF = make_unit_fns(J, rows_per_warp, M, R, allreduce, tile_bytes)
                 GH = make_unit_fns(JH, RPW_H, MH, RH, JH <= 2, HALF_BYTES)
                 store_checkpoint = GF["store_checkpoint"]
 
-                def run_unit(G, uu, row0, hv, n, h, is_half, nxt_kind, nxt_full_id, nxt_half_q, nxt2_kind, nxt2_full_id, nxt2_half_q):
+                def run_unit(
+                    G,
+                    uu,
+                    row0,
+                    hv,
+                    n,
+                    h,
+                    is_half,
+                    nxt_kind,
+                    nxt_full_id,
+                    nxt_half_q,
+                    nxt2_kind,
+                    nxt2_full_id,
+                    nxt2_half_q,
+                ):
                     """One unit (full or half).  nxt_kind/nxt2_kind: 0 none, 1 full unit, 2 half unit (runtime ints)."""
                     has_next = nxt_kind != 0
-                    nxt_head = txl.if_then_else(nxt_kind == 2, F_units + nxt_half_q // 2, nxt_full_id)
-                    nxt2_head = txl.if_then_else(nxt2_kind == 2, F_units + nxt2_half_q // 2, nxt2_full_id)
+                    nxt_head = txl.if_then_else(
+                        nxt_kind == 2, F_units + nxt_half_q // 2, nxt_full_id
+                    )
+                    nxt2_head = txl.if_then_else(
+                        nxt2_kind == 2, F_units + nxt2_half_q // 2, nxt2_full_id
+                    )
                     cur_slot = txl.local_scalar("int32")
                     nxt_slot = txl.local_scalar("int32")
                     txl.cuda.iket.mark("unit-start")
@@ -3740,8 +4515,13 @@ def _make_split():
                             if spec:
                                 with txl.Else():
                                     with txl.If(ncopy_me > 0), txl.Then():
-                                        nb0 = txl.min(txl.int32(3), txl.min(ncopy_me, txl.int32(MAXC)))
-                                        txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.cast(nb0, "uint32") * txl.uint32(tile_bytes))
+                                        nb0 = txl.min(
+                                            txl.int32(3), txl.min(ncopy_me, txl.int32(MAXC))
+                                        )
+                                        txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                            bar_state.ptr_to([0]),
+                                            txl.cast(nb0, "uint32") * txl.uint32(tile_bytes),
+                                        )
                                         hv_c, part_c = copy_coords(0)
                                         slot_c = txl.local_scalar("int32")
                                         txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([0]))
@@ -3827,24 +4607,66 @@ def _make_split():
 
                 def kind_after_full(sm_next):
                     """Item kind at full-round index sm_next (>= 0): 1 full, 2 half (first half of this CTA), 0 none."""
-                    return txl.if_then_else(sm_next < k_full, txl.int32(1), txl.if_then_else((sm_next == k_full) & (nhalf_me > 0), txl.int32(2), txl.int32(0)))
+                    return txl.if_then_else(
+                        sm_next < k_full,
+                        txl.int32(1),
+                        txl.if_then_else(
+                            (sm_next == k_full) & (nhalf_me > 0), txl.int32(2), txl.int32(0)
+                        ),
+                    )
 
                 with txl.serial(0, k_full, unroll=False) as sm:
                     u = cta + sm * num_main
                     head, part, hv, n, h = unit_coords(u)
                     row0 = part * cpt
                     nk1 = kind_after_full(sm + 1)
-                    nk2 = txl.if_then_else(sm + 2 < k_full, txl.int32(1),
-                                         txl.if_then_else((sm + 2 == k_full) & (nhalf_me > 0), txl.int32(2),
-                                                        txl.if_then_else((sm + 1 == k_full) & (nhalf_me > 1), txl.int32(2), txl.int32(0))))
+                    nk2 = txl.if_then_else(
+                        sm + 2 < k_full,
+                        txl.int32(1),
+                        txl.if_then_else(
+                            (sm + 2 == k_full) & (nhalf_me > 0),
+                            txl.int32(2),
+                            txl.if_then_else(
+                                (sm + 1 == k_full) & (nhalf_me > 1), txl.int32(2), txl.int32(0)
+                            ),
+                        ),
+                    )
                     nh2 = txl.if_then_else(sm + 2 == k_full, cta, cta + num_main)
-                    run_unit(GF, u, row0, hv, n, h, False, nk1, u + num_main, cta, nk2, u + 2 * num_main, nh2)
+                    run_unit(
+                        GF,
+                        u,
+                        row0,
+                        hv,
+                        n,
+                        h,
+                        False,
+                        nk1,
+                        u + num_main,
+                        cta,
+                        nk2,
+                        u + 2 * num_main,
+                        nh2,
+                    )
                 with txl.serial(0, nhalf_me, unroll=False) as hq:
                     half_id = cta + hq * num_main
                     uu, part, hv, n, h, row0h = half_coords(half_id)
                     nk1 = txl.if_then_else(hq + 1 < nhalf_me, txl.int32(2), txl.int32(0))
                     nk2 = txl.if_then_else(hq + 2 < nhalf_me, txl.int32(2), txl.int32(0))
-                    run_unit(GH, uu, row0h, hv, n, h, True, nk1, txl.int32(0), half_id + num_main, nk2, txl.int32(0), half_id + 2 * num_main)
+                    run_unit(
+                        GH,
+                        uu,
+                        row0h,
+                        hv,
+                        n,
+                        h,
+                        True,
+                        nk1,
+                        txl.int32(0),
+                        half_id + num_main,
+                        nk2,
+                        txl.int32(0),
+                        half_id + 2 * num_main,
+                    )
 
                 if spec:
                     with txl.If(ncopy_me > 0), txl.Then():
@@ -3858,11 +4680,13 @@ def _make_split():
                             nb = txl.min(txl.int32(3), nfast - k0)
                             with txl.If(tid == 0), txl.Then():
                                 pre = (kb == 0) & (copy_armed == 1)
-                                with txl.If(pre == False), txl.Then():
-                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.cast(nb, "uint32") * txl.uint32(tile_bytes))
+                                with txl.If(pre == False), txl.Then():  # noqa: E712 - comparison builds an IR expression
+                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                        bar_state.ptr_to([0]),
+                                        txl.cast(nb, "uint32") * txl.uint32(tile_bytes),
+                                    )
                                 for i in range(3):
-
-                                    with txl.If((i < nb) & ((i > 0) | (pre == False))), txl.Then():
+                                    with txl.If((i < nb) & ((i > 0) | (pre == False))), txl.Then():  # noqa: E712 - comparison builds an IR expression
                                         hv_c, part_c = copy_coords(k0 + i)
                                         slot_c = txl.local_scalar("int32")
                                         txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([k0 + i]))
@@ -3886,7 +4710,9 @@ def _make_split():
                             with txl.serial(MAXC, ncopy_me, unroll=False) as kc:
                                 rank = (kc * hole_cnt + (cta - hole_base)) // DCU
                                 cnt3 = txl.local_scalar("int32", init=txl.int32(0))
-                                with txl.serial(0, (num_slots + pmax - 1) // pmax, unroll=False) as chunk:
+                                with txl.serial(
+                                    0, (num_slots + pmax - 1) // pmax, unroll=False
+                                ) as chunk:
                                     cb = chunk * pmax
                                     build_flags(cb)
                                     with txl.If(warp == 0), txl.Then():
@@ -3896,7 +4722,9 @@ def _make_split():
                                     hv_c, part_c = copy_coords(kc)
                                     slot_c = txl.local_scalar("int32")
                                     txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([MAXC + 1]))
-                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.uint32(tile_bytes))
+                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                        bar_state.ptr_to([0]), txl.uint32(tile_bytes)
+                                    )
                                     tile_load(0, slot_c, hv_c, part_c)
                                 bar_state.wait(0, scount & 1)
                                 txl.assign(scount, scount + txl.int32(1))
@@ -3916,22 +4744,24 @@ def _make_split():
 
         return kda_decode_persist
 
-
     OVERRIDE = {}
     _COMPILED = {}
 
-
     def _pick_cpt(N, T, HV):
-
-
         heads = N * HV
         if heads <= 16:
             return 32
         return 64
 
-
     def _ctas_per_sm(cpt, T, gate_lb, nw=4):
-        smem = 3 * cpt * D * 2 + T * RAW_TOK_B + (GATE_B if gate_lb else 0) + (T + 1) * FST * 4 + T * D * 4 + 256
+        smem = (
+            3 * cpt * D * 2
+            + T * RAW_TOK_B
+            + (GATE_B if gate_lb else 0)
+            + (T + 1) * FST * 4
+            + T * D * 4
+            + 256
+        )
         by_smem = (220 * 1024) // smem
         if nw == 4:
             by_regs = {16: 6, 32: 5, 64: 3, 128: 2}[cpt]
@@ -3941,22 +4771,28 @@ def _make_split():
             by_regs = {32: 3, 64: 2, 128: 1}[cpt]
         return max(1, min(by_smem, by_regs))
 
-
-    def _compile(**kw):
+    def _compile(*, backend_config=None, **kw):
+        backend_config = resolve_backend_config(backend_config)
+        cache_config = backend_config_key(backend_config)
         key = tuple(sorted(kw.items()))
-        exe = _COMPILED.get(key)
+        exe = _COMPILED.get((cache_config, key))
         if exe is None:
-            kernel = build_kernel(**kw)
-            target = kernel.target()
+            kernel = build_kernel(**kw, backend_config=backend_config)
+            target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
-            _COMPILED[key] = exe
+                exe = tvm.compile(
+                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
+                )
+            _COMPILED[(cache_config, key)] = exe
         return exe
 
-
-    def setup(data, N, T):
+    def setup(data, N, T, *, backend_config=None):
         q, k, v, g, beta = data["q"], data["k"], data["v"], data["g"], data["beta"]
-        initial_state, final_state, output = data["initial_state"], data["final_state"], data["output"]
+        initial_state, final_state, output = (
+            data["initial_state"],
+            data["final_state"],
+            data["output"],
+        )
         H, HV = q.shape[-2], v.shape[-2]
         P = initial_state.shape[0]
         device = q.device
@@ -3971,7 +4807,11 @@ def _make_split():
         copy_est = max(P - N * T, 0) * HV * split if spec else 0
         num_main = min(num_units + copy_est, per_sm * sms)
         per_sm = min(per_sm, max(1, -(-num_main // sms)))
-        extra = {k: bool(OVERRIDE[k]) for k in ("allreduce", "bar_arrive", "warp_auto", "vec_split") if k in OVERRIDE}
+        extra = {
+            k: bool(OVERRIDE[k])
+            for k in ("allreduce", "bar_arrive", "warp_auto", "vec_split")
+            if k in OVERRIDE
+        }
         if "warp_auto" not in extra:
             extra["warp_auto"] = (num_units + copy_est) <= 6 * num_main
         if "vec_split" not in extra:
@@ -3980,7 +4820,19 @@ def _make_split():
             )
         extra["nw"] = nw
         extra["l2pf"] = False
-        exe = _compile(T=T, H=H, HV=HV, gate_lb=gate_lb, cpt=cpt, num_units=num_units, num_main=num_main, per_sm=per_sm, copy_est=copy_est, **extra)
+        exe = _compile(
+            T=T,
+            H=H,
+            HV=HV,
+            gate_lb=gate_lb,
+            cpt=cpt,
+            num_units=num_units,
+            num_main=num_main,
+            per_sm=per_sm,
+            copy_est=copy_est,
+            **extra,
+            backend_config=backend_config,
+        )
 
         dummy_f32 = torch.zeros(4, dtype=torch.float32, device=device)
         dummy_i32 = torch.zeros(1, dtype=torch.int32, device=device)
@@ -3991,9 +4843,22 @@ def _make_split():
         lower_bound = float(data["lower_bound"]) if data["lower_bound"] is not None else 0.0
         scale = float(data["scale"])
         args = (
-            q.view(-1), k.view(-1), v.view(-1), g.view(-1), beta.view(-1),
-            a_log, dt_bias, initial_state.view(-1), final_state.view(-1), output.view(-1),
-            ssm, acc, scale, lower_bound, int(P), int(N),
+            q.view(-1),
+            k.view(-1),
+            v.view(-1),
+            g.view(-1),
+            beta.view(-1),
+            a_log,
+            dt_bias,
+            initial_state.view(-1),
+            final_state.view(-1),
+            output.view(-1),
+            ssm,
+            acc,
+            scale,
+            lower_bound,
+            int(P),
+            int(N),
         )
         keep = (q, k, v, g, beta, a_log, dt_bias, initial_state, final_state, output, ssm, acc)
 
@@ -4004,15 +4869,15 @@ def _make_split():
         run()
         torch.cuda.synchronize(device)
         return run
-    return setup
 
+    return setup
 
 
 _SPLIT_SETUP = _make_split()
 
 
-def _split_public_setup(data, N, T):
-    return _SPLIT_SETUP(data, N, T)
+def _split_public_setup(data, N, T, *, backend_config=None):
+    return _SPLIT_SETUP(data, N, T, backend_config=backend_config)
 
 
 # Same-input paired measurements select only rows where the half-unit route
@@ -4021,13 +4886,13 @@ def _split_public_setup(data, N, T):
 SPLIT_ROWS = frozenset({(3, 2), (3, 4), (4, 32), (5, 32), (6, 8)})
 
 
-def _frontier_setup(data, N, T):
+def _frontier_setup(data, N, T, *, backend_config=None):
     if (T, N) in SPLIT_ROWS:
-        return _SPLIT_SETUP(data, N, T)
-    return _incumbent_setup(data, N, T)
+        return _SPLIT_SETUP(data, N, T, backend_config=backend_config)
+    return _incumbent_setup(data, N, T, backend_config=backend_config)
 
 
-def _make_clc():
+def _make_clc(*, backend_config=None):
     """KDA recurrent decode, family "colreg-persist" (v4, warp-autonomous phases): persistent register-resident recurrence.
 
     Unit = (sequence n, value head hv, column slice of CPT rows). A persistent CTA (4 warps)
@@ -4057,16 +4922,18 @@ def _make_clc():
     """
 
     import torch
-    import tvm
 
     import tirx_kernels.tirx_lite as txl
+    import tvm
 
     D = 128
     LOG2E = 1.4426950408889634
     FULL = 0xFFFFFFFF
     _BULK_G2S = "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes"
     _BULK_S2G = "cp.async.bulk.global.shared::cta.bulk_group"
-    _TRY_CANCEL = "clusterlaunchcontrol.try_cancel.async.shared::cta.mbarrier::complete_tx::bytes.b128"
+    _TRY_CANCEL = (
+        "clusterlaunchcontrol.try_cancel.async.shared::cta.mbarrier::complete_tx::bytes.b128"
+    )
     CLC_SENTINEL = 0xFFFFFFFF
     FST = 64 * 8 + 8 * 4
     RAW_TOK_B = 4 * 256 + 16
@@ -4075,22 +4942,30 @@ def _make_clc():
     MAXH = 6
     IDX_PRE = 8
 
-
     def _shfl_bfly(val_f32, xor):
         out = txl.local_scalar("uint32")
-        txl.ptx.shfl_sync.bfly.b32(out, txl.reinterpret("uint32", val_f32), txl.uint32(xor), txl.uint32(31), txl.uint32(FULL))
+        txl.ptx.shfl_sync.bfly.b32(
+            out,
+            txl.reinterpret("uint32", val_f32),
+            txl.uint32(xor),
+            txl.uint32(31),
+            txl.uint32(FULL),
+        )
         return txl.reinterpret("float32", out)
-
 
     def _shfl_idx(val_f32, src_lane):
         out = txl.local_scalar("uint32")
-        txl.ptx.shfl_sync.idx.b32(out, txl.reinterpret("uint32", val_f32), txl.cast(src_lane, "uint32"), txl.uint32(31), txl.uint32(FULL))
+        txl.ptx.shfl_sync.idx.b32(
+            out,
+            txl.reinterpret("uint32", val_f32),
+            txl.cast(src_lane, "uint32"),
+            txl.uint32(31),
+            txl.uint32(FULL),
+        )
         return txl.reinterpret("float32", out)
-
 
     def _f2(a, b):
         return txl.cuda.make_float2(a, b)
-
 
     def _rng(name):
         """IKET range token (stripped by the production pipeline)."""
@@ -4098,12 +4973,28 @@ def _make_clc():
         txl.assign(token[0], txl.cuda.iket.range_start(name))
         return token
 
-
     def _rng_end(token):
         txl.cuda.iket.range_end(token[0])
 
-
-    def build_kernel(*, T, H, HV, gate_lb, cpt, num_units, num_main, per_sm, copy_est=0, allreduce=None, bar_arrive=False, warp_auto=True, vec_split=True, nw=4, l2pf=False):
+    def build_kernel(
+        *,
+        T,
+        H,
+        HV,
+        gate_lb,
+        cpt,
+        num_units,
+        num_main,
+        per_sm,
+        copy_est=0,
+        allreduce=None,
+        bar_arrive=False,
+        warp_auto=True,
+        vec_split=True,
+        nw=4,
+        l2pf=False,
+        backend_config=None,
+    ):
         assert D % cpt == 0 and cpt % (4 * nw) == 0, "each warp needs a multiple of 4 rows"
         G = HV // H
         NT = 32 * nw
@@ -4133,11 +5024,10 @@ def _make_clc():
             hole_base0 = num_units % num_main
         hole_cnt0 = num_main - hole_base0
 
-
         if hole_cnt0 == 0 or copy_est > hole_cnt0 * max(MAXH, T + 1):
             hole_base0, hole_cnt0 = 0, num_main
 
-        @txl.kernel(warps=nw, arch="sm_100a", grid=num_ctas, min_blocks_per_sm=per_sm)
+        @txl.kernel()
         def kda_decode_persist(
             q: txl.gptr[txl.bf16],
             k: txl.gptr[txl.bf16],
@@ -4156,6 +5046,12 @@ def _make_clc():
             num_slots: txl.i32,
             num_seqs: txl.i32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(grid=num_ctas, block=nw * 32),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=per_sm),
+                backend_config=backend_config,
+            )
+
             cta = txl.cta_id()
             tid = txl.thread_id()
             warp = txl.warp_id()
@@ -4177,7 +5073,6 @@ def _make_clc():
             bar_clc.init(1)
             txl.ptx.fence.proxy.async_.shared__cta()
             txl.cuda.cta_sync()
-
 
             def main_role():
                 ks = lane & 7
@@ -4206,15 +5101,29 @@ def _make_clc():
                     nwi = nw if vec_split else 1
                     for w in range(nwi):
                         toks = [t for t in range(T) if t % nwi == w]
-                        nbytes = len(toks) * RAW_TOK_B + ((GATE_B if gate_lb else 0) if w == 0 else 0)
+                        nbytes = len(toks) * RAW_TOK_B + (
+                            (GATE_B if gate_lb else 0) if w == 0 else 0
+                        )
                         with txl.If(warp == w), txl.Then():
-                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_vec.ptr_to([stage]), txl.uint32(nbytes))
+                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                bar_vec.ptr_to([stage]), txl.uint32(nbytes)
+                            )
                             for t in toks:
                                 _issue_vec_token(n, hv, h, t, stage)
                             if gate_lb and w == 0:
                                 gb = stage * raw_elems + T * (RAW_TOK_B // 2)
-                                txl.ptx[_BULK_G2S](raw.ptr_to([gb]), dt_bias.ptr_to([h * D]), txl.uint32(512), bar_vec.ptr_to([stage]))
-                                txl.ptx[_BULK_G2S](raw.ptr_to([gb + 256]), a_log.ptr_to([h - (h % 4)]), txl.uint32(16), bar_vec.ptr_to([stage]))
+                                txl.ptx[_BULK_G2S](
+                                    raw.ptr_to([gb]),
+                                    dt_bias.ptr_to([h * D]),
+                                    txl.uint32(512),
+                                    bar_vec.ptr_to([stage]),
+                                )
+                                txl.ptx[_BULK_G2S](
+                                    raw.ptr_to([gb + 256]),
+                                    a_log.ptr_to([h - (h % 4)]),
+                                    txl.uint32(16),
+                                    bar_vec.ptr_to([stage]),
+                                )
 
                 def _issue_vec_token(n, hv, h, t, stage):
                     if True:
@@ -4222,12 +5131,37 @@ def _make_clc():
                         qk_off = (txl.cast(tok, "int64") * H + h) * D
                         vg_off = (txl.cast(tok, "int64") * HV + hv) * D
                         rb = stage * raw_elems + t * (RAW_TOK_B // 2)
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb]), q.ptr_to([qk_off]), txl.uint32(256), bar_vec.ptr_to([stage]))
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 128]), k.ptr_to([qk_off]), txl.uint32(256), bar_vec.ptr_to([stage]))
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 256]), g.ptr_to([vg_off]), txl.uint32(256), bar_vec.ptr_to([stage]))
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 384]), v.ptr_to([vg_off]), txl.uint32(256), bar_vec.ptr_to([stage]))
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb]),
+                            q.ptr_to([qk_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([stage]),
+                        )
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 128]),
+                            k.ptr_to([qk_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([stage]),
+                        )
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 256]),
+                            g.ptr_to([vg_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([stage]),
+                        )
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 384]),
+                            v.ptr_to([vg_off]),
+                            txl.uint32(256),
+                            bar_vec.ptr_to([stage]),
+                        )
                         bidx = txl.cast(tok, "int64") * HV + hv
-                        txl.ptx[_BULK_G2S](raw.ptr_to([rb + 512]), beta.ptr_to([bidx - (bidx % 8)]), txl.uint32(16), bar_vec.ptr_to([stage]))
+                        txl.ptx[_BULK_G2S](
+                            raw.ptr_to([rb + 512]),
+                            beta.ptr_to([bidx - (bidx % 8)]),
+                            txl.uint32(16),
+                            bar_vec.ptr_to([stage]),
+                        )
 
                 def tile_load(tile, slot, hv, part):
                     """Thread 0: TMA load of cpt rows of (slot, hv) from initial_state into `tile` (no expect_tx)."""
@@ -4240,7 +5174,6 @@ def _make_clc():
                             bar_state.ptr_to([0]),
                         )
 
-
                 hole_base = hole_base0
                 hole_cnt = hole_cnt0
 
@@ -4251,7 +5184,9 @@ def _make_clc():
                 def issue_state(uu, slot0, state_stage):
                     """Thread 0: TMA load of the unit's state rows into tile A."""
                     _, part, hv, n, _ = unit_coords(uu)
-                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([state_stage]), txl.uint32(tile_bytes))
+                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                        bar_state.ptr_to([state_stage]), txl.uint32(tile_bytes)
+                    )
                     src0 = (txl.cast(slot0, "int64") * HV + hv) * (D * D) + part * cpt * D
                     for pc in range(n_pieces):
                         txl.ptx[_BULK_G2S](
@@ -4285,8 +5220,9 @@ def _make_clc():
                         return
                     _, part, hv, n, _ = unit_coords(uu)
                     src0 = (txl.cast(slot0, "int64") * HV + hv) * (D * D) + part * cpt * D
-                    txl.ptx["cp.async.bulk.prefetch.L2.global"](state_in.ptr_to([src0]), txl.uint32(tile_bytes))
-
+                    txl.ptx["cp.async.bulk.prefetch.L2.global"](
+                        state_in.ptr_to([src0]), txl.uint32(tile_bytes)
+                    )
 
                 if spec:
                     total_idx = num_seqs * T
@@ -4296,12 +5232,13 @@ def _make_clc():
                         with txl.If(i * NT + tid < total_idx), txl.Then():
                             txl.ptx.ld.global_.s32(idx_pre[i], ssm_idx.ptr_to([i * NT + tid]))
 
-
-                with txl.If((lane == 0) & (cta < num_units) & (vec_split or (warp == 0))), txl.Then():
+                with (
+                    txl.If((lane == 0) & (cta < num_units) & (vec_split or (warp == 0))),
+                    txl.Then(),
+                ):
                     issue_vec(cta, 0)
                 with txl.If((tid == 0) & (cta < num_units)), txl.Then():
                     if spec:
-
                         n0 = unit_coords(cta)[3]
                         a0 = txl.local_scalar("int32")
                         txl.ptx.ld.global_.s32(a0, num_accepted.ptr_to([n0]))
@@ -4321,7 +5258,9 @@ def _make_clc():
                     else:
                         issue_state(cta, unit_coords(cta)[3], 0)
                     txl.ptx.fence.proxy.async_.shared__cta()
-                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_clc.ptr_to([0]), txl.uint32(16))
+                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                        bar_clc.ptr_to([0]), txl.uint32(16)
+                    )
                     txl.ptx[_TRY_CANCEL](txl.address_of(clc_handle[0]), bar_clc.ptr_to([0]))
 
                 def build_flags(cb):
@@ -4330,13 +5269,17 @@ def _make_clc():
                     with txl.serial(0, (nz + NT - 1) // NT, unroll=False) as i:
                         pz = i * NT + tid
                         with txl.If(pz < nz), txl.Then():
-                            txl.ptx.st.shared.b32(tiles.ptr_to([tile_elems + 2 * pz]), txl.uint32(0))
+                            txl.ptx.st.shared.b32(
+                                tiles.ptr_to([tile_elems + 2 * pz]), txl.uint32(0)
+                            )
                     txl.cuda.cta_sync()
                     total = num_seqs * T
                     for i in range(IDX_PRE):
                         rel = idx_pre[i] - cb
                         with txl.If((i * NT + tid < total) & (rel >= 0) & (rel < pmax)), txl.Then():
-                            txl.ptx.st.shared.b32(tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1))
+                            txl.ptx.st.shared.b32(
+                                tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1)
+                            )
                     with txl.serial(IDX_PRE, (total + NT - 1) // NT, unroll=False) as i:
                         e = i * NT + tid
                         with txl.If(e < total), txl.Then():
@@ -4344,7 +5287,9 @@ def _make_clc():
                             txl.ptx.ld.global_.s32(sidx, ssm_idx.ptr_to([e]))
                             rel = sidx - cb
                             with txl.If((rel >= 0) & (rel < pmax)), txl.Then():
-                                txl.ptx.st.shared.b32(tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1))
+                                txl.ptx.st.shared.b32(
+                                    tiles.ptr_to([tile_elems + 2 * rel]), txl.uint32(1)
+                                )
                     txl.cuda.cta_sync()
 
                 def scan_untouched(cb, cnt, want_rank, dst_idx):
@@ -4358,10 +5303,14 @@ def _make_clc():
                         with txl.If(valid), txl.Then():
                             txl.ptx.ld.shared.b32(flag, tiles.ptr_to([tile_elems + 2 * pl]))
                         untouched = flag == txl.uint32(0)
-                        upred = txl.local_scalar("uint32", init=txl.if_then_else(untouched, txl.uint32(1), txl.uint32(0)))
+                        upred = txl.local_scalar(
+                            "uint32", init=txl.if_then_else(untouched, txl.uint32(1), txl.uint32(0))
+                        )
                         mask = txl.local_scalar("uint32")
                         txl.ptx.vote_sync.ballot.b32(mask, txl.ptx.pred(upred), txl.uint32(FULL))
-                        below = txl.bitwise_and(mask, (txl.uint32(1) << txl.cast(lane, "uint32")) - txl.uint32(1))
+                        below = txl.bitwise_and(
+                            mask, (txl.uint32(1) << txl.cast(lane, "uint32")) - txl.uint32(1)
+                        )
                         rank = cnt + txl.cast(txl.popcount(below), "int32")
                         with txl.If(untouched), txl.Then():
                             slot = cb + pl
@@ -4370,16 +5319,23 @@ def _make_clc():
                                 hi = lo + DCU
                                 me = cta - hole_base
 
-                                c0 = txl.local_scalar("int32", init=lo + ((me - lo) % hole_cnt + hole_cnt) % hole_cnt)
+                                c0 = txl.local_scalar(
+                                    "int32", init=lo + ((me - lo) % hole_cnt + hole_cnt) % hole_cnt
+                                )
                                 with txl.If(me >= 0), txl.Then():
                                     with txl.While(c0 < hi):
                                         kk = (c0 - me) // hole_cnt
                                         with txl.If(kk < MAXC), txl.Then():
-                                            txl.ptx.st.shared.b32(cpslots.ptr_to([kk]), txl.reinterpret("uint32", slot))
+                                            txl.ptx.st.shared.b32(
+                                                cpslots.ptr_to([kk]),
+                                                txl.reinterpret("uint32", slot),
+                                            )
                                         txl.assign(c0, c0 + hole_cnt)
                             else:
                                 with txl.If((want_rank >= 0) & (rank == want_rank)), txl.Then():
-                                    txl.ptx.st.shared.b32(cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot))
+                                    txl.ptx.st.shared.b32(
+                                        cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot)
+                                    )
                         txl.assign(cnt, cnt + txl.cast(txl.popcount(mask), "int32"))
 
                 ncopy_me = txl.local_scalar("int32", init=txl.int32(0))
@@ -4395,13 +5351,22 @@ def _make_clc():
                             scan_untouched(cb, cnt, None, 0)
                         txl.cuda.cta_sync()
                     with txl.If(tid == 0), txl.Then():
-                        txl.ptx.st.shared.b32(cpslots.ptr_to([MAXC]), txl.reinterpret("uint32", cnt))
+                        txl.ptx.st.shared.b32(
+                            cpslots.ptr_to([MAXC]), txl.reinterpret("uint32", cnt)
+                        )
                     txl.cuda.cta_sync()
                     ucnt = txl.local_scalar("int32")
                     txl.ptx.ld.shared.b32(ucnt, cpslots.ptr_to([MAXC]))
                     total_copy = ucnt * DCU
                     me0 = cta - hole_base
-                    txl.assign(ncopy_me, txl.if_then_else((me0 >= 0) & (total_copy > me0), (total_copy - me0 + hole_cnt - 1) // hole_cnt, txl.int32(0)))
+                    txl.assign(
+                        ncopy_me,
+                        txl.if_then_else(
+                            (me0 >= 0) & (total_copy > me0),
+                            (total_copy - me0 + hole_cnt - 1) // hole_cnt,
+                            txl.int32(0),
+                        ),
+                    )
 
                 def preprocess(t, hv, h, stage):
                     """Warp-level: normalize q/k, decay, per-token scalars of token t from `raw`."""
@@ -4422,8 +5387,16 @@ def _make_clc():
                     vf = txl.alloc_local((4,), "float32")
                     for src, dst in ((qw, qf), (kw, kf), (gw, gf), (vw, vf)):
                         for p2 in range(2):
-                            txl.assign(dst[2 * p2], txl.cuda.uint_as_float(txl.shift_left(src[p2], txl.uint32(16))))
-                            txl.assign(dst[2 * p2 + 1], txl.cuda.uint_as_float(txl.bitwise_and(src[p2], txl.uint32(0xFFFF0000))))
+                            txl.assign(
+                                dst[2 * p2],
+                                txl.cuda.uint_as_float(txl.shift_left(src[p2], txl.uint32(16))),
+                            )
+                            txl.assign(
+                                dst[2 * p2 + 1],
+                                txl.cuda.uint_as_float(
+                                    txl.bitwise_and(src[p2], txl.uint32(0xFFFF0000))
+                                ),
+                            )
 
                     sq = txl.local_scalar("float32", init=txl.float32(0.0))
                     sk = txl.local_scalar("float32", init=txl.float32(0.0))
@@ -4455,10 +5428,14 @@ def _make_clc():
                         ea = txl.local_scalar("float32")
                         alog = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(alog, raw.ptr_to([gb + 256 + (h % 4) * 2]))
-                        txl.ptx["mul.f32"](tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E))
+                        txl.ptx["mul.f32"](
+                            tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E)
+                        )
                         txl.ptx["ex2.approx.ftz.f32"](ea, tmp)
                         bias = txl.alloc_local((4,), "uint32", align=16)
-                        txl.ptx.ld.shared.v4.b32(bias[0], bias[1], bias[2], bias[3], raw.ptr_to([gb + lane * 8]))
+                        txl.ptx.ld.shared.v4.b32(
+                            bias[0], bias[1], bias[2], bias[3], raw.ptr_to([gb + lane * 8])
+                        )
                         for e in range(4):
                             x = txl.local_scalar("float32")
                             txl.ptx["add.f32"](x, gf[e], txl.reinterpret("float32", bias[e]))
@@ -4477,22 +5454,38 @@ def _make_clc():
                     for pp in range(2):
                         pair = lane * 2 + pp
                         ent = t * FST + pair * 8 + (pair >> 3) * 4
-                        txl.ptx.st.shared.v2.b32(ftab.ptr_to([ent + 2]), txl.reinterpret("uint32", gf[2 * pp]), txl.reinterpret("uint32", gf[2 * pp + 1]))
+                        txl.ptx.st.shared.v2.b32(
+                            ftab.ptr_to([ent + 2]),
+                            txl.reinterpret("uint32", gf[2 * pp]),
+                            txl.reinterpret("uint32", gf[2 * pp + 1]),
+                        )
                         txl.ptx.st.shared.v4.b32(
                             ftab.ptr_to([ent + 4]),
-                            txl.reinterpret("uint32", kf[2 * pp]), txl.reinterpret("uint32", kf[2 * pp + 1]),
-                            txl.reinterpret("uint32", qf[2 * pp]), txl.reinterpret("uint32", qf[2 * pp + 1]),
+                            txl.reinterpret("uint32", kf[2 * pp]),
+                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                            txl.reinterpret("uint32", qf[2 * pp]),
+                            txl.reinterpret("uint32", qf[2 * pp + 1]),
                         )
-                        txl.ptx.st.shared.v2.b32(ftab.ptr_to([ent + FST]), txl.reinterpret("uint32", kf[2 * pp]), txl.reinterpret("uint32", kf[2 * pp + 1]))
+                        txl.ptx.st.shared.v2.b32(
+                            ftab.ptr_to([ent + FST]),
+                            txl.reinterpret("uint32", kf[2 * pp]),
+                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                        )
                     txl.ptx.st.shared.v4.b32(
                         vtab.ptr_to([t * D + lane * 4]),
-                        txl.reinterpret("uint32", vf[0]), txl.reinterpret("uint32", vf[1]),
-                        txl.reinterpret("uint32", vf[2]), txl.reinterpret("uint32", vf[3]),
+                        txl.reinterpret("uint32", vf[0]),
+                        txl.reinterpret("uint32", vf[1]),
+                        txl.reinterpret("uint32", vf[2]),
+                        txl.reinterpret("uint32", vf[3]),
                     )
                     with txl.If(lane == 0), txl.Then():
                         bf = txl.local_scalar("float32")
                         txl.ptx.cvt.f32.bf16(bf, txl.cast(bbits, "uint16"))
-                        txl.ptx.st.shared.v2.b32(svec.ptr_to([2 * t]), txl.reinterpret("uint32", bf), txl.reinterpret("uint32", cpart))
+                        txl.ptx.st.shared.v2.b32(
+                            svec.ptr_to([2 * t]),
+                            txl.reinterpret("uint32", bf),
+                            txl.reinterpret("uint32", cpart),
+                        )
 
                 S = txl.alloc_local((J * 8,), "uint64", align=8)
                 d1 = txl.alloc_local((J,), "uint64", align=8)
@@ -4537,7 +5530,9 @@ def _make_clc():
                             txl.ptx["fma.rn.f32"](o, c_t, ub[j], vals[J + j])
                             ob = txl.local_scalar("uint16")
                             txl.ptx.cvt.rn.bf16.f32(ob, o)
-                            txl.ptx.st.global_.b16(output.ptr_to([out_base + col]), ob, pred=txl.EQ(ks, 0))
+                            txl.ptx.st.global_.b16(
+                                output.ptr_to([out_base + col]), ob, pred=txl.EQ(ks, 0)
+                            )
                         return
                     for s in (4, 2, 1):
                         if len(vals) > 1:
@@ -4545,8 +5540,12 @@ def _make_clc():
                             b = ((ks // s) & 1) != 0
                             nxt = []
                             for i in range(half):
-                                send = txl.local_scalar("float32", init=txl.if_then_else(b, vals[i], vals[i + half]))
-                                keep = txl.local_scalar("float32", init=txl.if_then_else(b, vals[i + half], vals[i]))
+                                send = txl.local_scalar(
+                                    "float32", init=txl.if_then_else(b, vals[i], vals[i + half])
+                                )
+                                keep = txl.local_scalar(
+                                    "float32", init=txl.if_then_else(b, vals[i + half], vals[i])
+                                )
                                 r = txl.local_scalar("float32")
                                 txl.ptx["add.f32"](r, keep, _shfl_bfly(send, s))
                                 nxt.append(r)
@@ -4574,9 +5573,10 @@ def _make_clc():
                         txl.ptx["fma.rn.f32"](o, c_t, uloc[i], dd2)
                         ob = txl.local_scalar("uint16")
                         txl.ptx.cvt.rn.bf16.f32(ob, o)
-                        txl.ptx.st.global_.b16(output.ptr_to([out_base + col]), ob, pred=txl.LT(ks, 4))
+                        txl.ptx.st.global_.b16(
+                            output.ptr_to([out_base + col]), ob, pred=txl.LT(ks, 4)
+                        )
                     for j in range(J):
-
                         src = (lane & 0x18) | ((j * 8) // M)
                         txl.assign(ub[j], _shfl_idx(uloc[j % R], src))
 
@@ -4597,7 +5597,9 @@ def _make_clc():
                             i = c * 4 + ii
                             if with_dots:
                                 txl.ptx.ld.shared.v2.b64(kp2[ii], a2[ii], vec_ptr(phase, i))
-                                txl.ptx.ld.shared.v2.b64(k2[ii], q2[ii], txl.ptx.addr(vec_ptr(phase, i), 16))
+                                txl.ptx.ld.shared.v2.b64(
+                                    k2[ii], q2[ii], txl.ptx.addr(vec_ptr(phase, i), 16)
+                                )
                             else:
                                 txl.ptx.ld.shared.b64(kp2[ii], vec_ptr(phase, i))
                         for j in range(J):
@@ -4605,7 +5607,10 @@ def _make_clc():
                             for ii in range(4):
                                 i = c * 4 + ii
                                 txl.ptx.fma.rn.f32x2(S[j * 8 + i], kp2[ii], u2[j], S[j * 8 + i])
-                                txl.assign(packed[ii], txl.cuda.float22bfloat162_rn_from_float2(S[j * 8 + i]))
+                                txl.assign(
+                                    packed[ii],
+                                    txl.cuda.float22bfloat162_rn_from_float2(S[j * 8 + i]),
+                                )
                                 if with_dots:
                                     txl.ptx.mul.rn.f32x2(S[j * 8 + i], a2[ii], S[j * 8 + i])
                                     txl.ptx.fma.rn.f32x2(d1[j], k2[ii], S[j * 8 + i], d1[j])
@@ -4614,7 +5619,10 @@ def _make_clc():
                             cs = txl.bitwise_xor(txl.int32(c), ks >> 2)
                             txl.ptx.st.shared.v4.b32(
                                 tiles.ptr_to([tile * tile_elems + row * D + ks * 16 + cs * 8]),
-                                packed[0], packed[1], packed[2], packed[3],
+                                packed[0],
+                                packed[1],
+                                packed[2],
+                                packed[3],
                             )
                     txl.ptx.fence.proxy.async_.shared__cta()
 
@@ -4660,7 +5668,6 @@ def _make_clc():
                     cur_slot = txl.local_scalar("int32")
                     nxt_slot = txl.local_scalar("int32")
 
-
                     txl.cuda.iket.mark("unit-start")
                     tk = _rng("wait-vec")
                     vec_stage = txl.local_scalar("int32", init=vcount & 1)
@@ -4693,7 +5700,6 @@ def _make_clc():
                     txl.cuda.cta_sync()
                     _rng_end(tk)
 
-
                     tk = _rng("wait-state")
                     state_stage = txl.local_scalar("int32", init=scount % 3)
                     bar_state.wait(state_stage, (scount // 3) & 1)
@@ -4716,7 +5722,9 @@ def _make_clc():
                                 unit_coords(txl.reinterpret("int32", cancelled))[3],
                                 next_state_stage,
                             )
-                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_clc.ptr_to([0]), txl.uint32(16))
+                            txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                bar_clc.ptr_to([0]), txl.uint32(16)
+                            )
                             txl.ptx[_TRY_CANCEL](txl.address_of(clc_handle[0]), bar_clc.ptr_to([0]))
                     tk = _rng("ld-state")
                     for j in range(J):
@@ -4724,13 +5732,25 @@ def _make_clc():
                         for c in range(2):
                             wds = txl.alloc_local((4,), "uint32", align=16)
                             cs = txl.bitwise_xor(txl.int32(c), ks >> 2)
-                            txl.ptx.ld.shared.v4.b32(wds[0], wds[1], wds[2], wds[3], tiles.ptr_to([state_stage * tile_elems + row * D + ks * 16 + cs * 8]))
+                            txl.ptx.ld.shared.v4.b32(
+                                wds[0],
+                                wds[1],
+                                wds[2],
+                                wds[3],
+                                tiles.ptr_to(
+                                    [state_stage * tile_elems + row * D + ks * 16 + cs * 8]
+                                ),
+                            )
                             for i in range(4):
                                 txl.assign(
                                     S[j * 8 + c * 4 + i],
                                     _f2(
-                                        txl.cuda.uint_as_float(txl.shift_left(wds[i], txl.uint32(16))),
-                                        txl.cuda.uint_as_float(txl.bitwise_and(wds[i], txl.uint32(0xFFFF0000))),
+                                        txl.cuda.uint_as_float(
+                                            txl.shift_left(wds[i], txl.uint32(16))
+                                        ),
+                                        txl.cuda.uint_as_float(
+                                            txl.bitwise_and(wds[i], txl.uint32(0xFFFF0000))
+                                        ),
                                     ),
                                 )
 
@@ -4751,7 +5771,6 @@ def _make_clc():
                             txl.ptx.fma.rn.f32x2(d2[j], q2, S[j * 8 + i], d2[j])
                     reduce_and_finish(0, hv, n, row0)
                     _rng_end(tk)
-
 
                     issuer = lane == 0 if warp_auto else tid == 0
 
@@ -4806,7 +5825,6 @@ def _make_clc():
                     with txl.If(issuer), txl.Then():
                         issue_store(tile, nxt_slot)
 
-
                     txl.cuda.cta_sync()
                     _rng_end(tk)
                     next_bits = txl.local_scalar("uint32")
@@ -4826,11 +5844,13 @@ def _make_clc():
                             nb = txl.min(txl.int32(3), nfast - k0)
                             with txl.If(tid == 0), txl.Then():
                                 pre = (kb == 0) & (copy_armed == 1)
-                                with txl.If(pre == False), txl.Then():
-                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.cast(nb, "uint32") * txl.uint32(tile_bytes))
+                                with txl.If(pre == False), txl.Then():  # noqa: E712 - comparison builds an IR expression
+                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                        bar_state.ptr_to([0]),
+                                        txl.cast(nb, "uint32") * txl.uint32(tile_bytes),
+                                    )
                                 for i in range(3):
-
-                                    with txl.If((i < nb) & ((i > 0) | (pre == False))), txl.Then():
+                                    with txl.If((i < nb) & ((i > 0) | (pre == False))), txl.Then():  # noqa: E712 - comparison builds an IR expression
                                         hv_c, part_c = copy_coords(k0 + i)
                                         slot_c = txl.local_scalar("int32")
                                         txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([k0 + i]))
@@ -4854,7 +5874,9 @@ def _make_clc():
                             with txl.serial(MAXC, ncopy_me, unroll=False) as kc:
                                 rank = (kc * hole_cnt + (cta - hole_base)) // DCU
                                 cnt3 = txl.local_scalar("int32", init=txl.int32(0))
-                                with txl.serial(0, (num_slots + pmax - 1) // pmax, unroll=False) as chunk:
+                                with txl.serial(
+                                    0, (num_slots + pmax - 1) // pmax, unroll=False
+                                ) as chunk:
                                     cb = chunk * pmax
                                     build_flags(cb)
                                     with txl.If(warp == 0), txl.Then():
@@ -4864,7 +5886,9 @@ def _make_clc():
                                     hv_c, part_c = copy_coords(kc)
                                     slot_c = txl.local_scalar("int32")
                                     txl.ptx.ld.shared.b32(slot_c, cpslots.ptr_to([MAXC + 1]))
-                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(bar_state.ptr_to([0]), txl.uint32(tile_bytes))
+                                    txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                        bar_state.ptr_to([0]), txl.uint32(tile_bytes)
+                                    )
                                     tile_load(0, slot_c, hv_c, part_c)
                                 bar_state.wait(0, scount & 1)
                                 txl.assign(scount, scount + txl.int32(1))
@@ -4884,22 +5908,24 @@ def _make_clc():
 
         return kda_decode_persist
 
-
     OVERRIDE = {"vec_split": False}
     _COMPILED = {}
 
-
     def _pick_cpt(N, T, HV):
-
-
         heads = N * HV
         if heads <= 16:
             return 32
         return 64
 
-
     def _ctas_per_sm(cpt, T, gate_lb, nw=4):
-        smem = 3 * cpt * D * 2 + T * RAW_TOK_B + (GATE_B if gate_lb else 0) + (T + 1) * FST * 4 + T * D * 4 + 256
+        smem = (
+            3 * cpt * D * 2
+            + T * RAW_TOK_B
+            + (GATE_B if gate_lb else 0)
+            + (T + 1) * FST * 4
+            + T * D * 4
+            + 256
+        )
         by_smem = (220 * 1024) // smem
         if nw == 4:
             by_regs = {16: 6, 32: 5, 64: 3, 128: 2}[cpt]
@@ -4909,22 +5935,28 @@ def _make_clc():
             by_regs = {32: 3, 64: 2, 128: 1}[cpt]
         return max(1, min(by_smem, by_regs))
 
-
-    def _compile(**kw):
+    def _compile(*, backend_config=None, **kw):
+        backend_config = resolve_backend_config(backend_config)
+        cache_config = backend_config_key(backend_config)
         key = tuple(sorted(kw.items()))
-        exe = _COMPILED.get(key)
+        exe = _COMPILED.get((cache_config, key))
         if exe is None:
-            kernel = build_kernel(**kw)
-            target = kernel.target()
+            kernel = build_kernel(**kw, backend_config=backend_config)
+            target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
-            _COMPILED[key] = exe
+                exe = tvm.compile(
+                    kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
+                )
+            _COMPILED[(cache_config, key)] = exe
         return exe
 
-
-    def setup(data, N, T):
+    def setup(data, N, T, *, backend_config=None):
         q, k, v, g, beta = data["q"], data["k"], data["v"], data["g"], data["beta"]
-        initial_state, final_state, output = data["initial_state"], data["final_state"], data["output"]
+        initial_state, final_state, output = (
+            data["initial_state"],
+            data["final_state"],
+            data["output"],
+        )
         H, HV = q.shape[-2], v.shape[-2]
         P = initial_state.shape[0]
         device = q.device
@@ -4939,7 +5971,11 @@ def _make_clc():
         copy_est = max(P - N * T, 0) * HV * split if spec else 0
         num_main = min(num_units + copy_est, per_sm * sms)
         per_sm = min(per_sm, max(1, -(-num_main // sms)))
-        extra = {k: bool(OVERRIDE[k]) for k in ("allreduce", "bar_arrive", "warp_auto", "vec_split") if k in OVERRIDE}
+        extra = {
+            k: bool(OVERRIDE[k])
+            for k in ("allreduce", "bar_arrive", "warp_auto", "vec_split")
+            if k in OVERRIDE
+        }
         if "warp_auto" not in extra:
             extra["warp_auto"] = (num_units + copy_est) <= 6 * num_main
         if "vec_split" not in extra:
@@ -4950,10 +5986,20 @@ def _make_clc():
         if "l2pf" in OVERRIDE:
             extra["l2pf"] = bool(OVERRIDE["l2pf"])
         else:
-
-
             extra["l2pf"] = T == 2 and num_units >= 8 * num_main
-        exe = _compile(T=T, H=H, HV=HV, gate_lb=gate_lb, cpt=cpt, num_units=num_units, num_main=num_main, per_sm=per_sm, copy_est=copy_est, **extra)
+        exe = _compile(
+            T=T,
+            H=H,
+            HV=HV,
+            gate_lb=gate_lb,
+            cpt=cpt,
+            num_units=num_units,
+            num_main=num_main,
+            per_sm=per_sm,
+            copy_est=copy_est,
+            **extra,
+            backend_config=backend_config,
+        )
 
         dummy_f32 = torch.zeros(4, dtype=torch.float32, device=device)
         dummy_i32 = torch.zeros(1, dtype=torch.int32, device=device)
@@ -4964,9 +6010,22 @@ def _make_clc():
         lower_bound = float(data["lower_bound"]) if data["lower_bound"] is not None else 0.0
         scale = float(data["scale"])
         args = (
-            q.view(-1), k.view(-1), v.view(-1), g.view(-1), beta.view(-1),
-            a_log, dt_bias, initial_state.view(-1), final_state.view(-1), output.view(-1),
-            ssm, acc, scale, lower_bound, int(P), int(N),
+            q.view(-1),
+            k.view(-1),
+            v.view(-1),
+            g.view(-1),
+            beta.view(-1),
+            a_log,
+            dt_bias,
+            initial_state.view(-1),
+            final_state.view(-1),
+            output.view(-1),
+            ssm,
+            acc,
+            scale,
+            lower_bound,
+            int(P),
+            int(N),
         )
         keep = (q, k, v, g, beta, a_log, dt_bias, initial_state, final_state, output, ssm, acc)
 
@@ -4977,19 +6036,19 @@ def _make_clc():
         run()
         torch.cuda.synchronize(device)
         return run
-    return setup
 
+    return setup
 
 
 _CLC_SETUP = _make_clc()
 del _make_clc
 
 
-def _candidate_setup(data, N, T):
+def _candidate_setup(data, N, T, *, backend_config=None):
     """The candidate's own dispatch entry (its optimization-harness ``setup``)."""
     if T == 1 and N in (8, 32, 64, 128):
-        return _CLC_SETUP(data, N, T)
-    return _frontier_setup(data, N, T)
+        return _CLC_SETUP(data, N, T, backend_config=backend_config)
+    return _frontier_setup(data, N, T, backend_config=backend_config)
 
 
 # ---------------------------------------------------------------------------
@@ -5074,7 +6133,7 @@ def _assert_supported_arch() -> None:
         )
 
 
-def get_kernel(**config: Any):
+def get_kernel(*, backend_config=None, **config: Any):
     """Return the traced tirx-lite PrimFunc this config dispatches to.
 
     The runtime path builds and compiles through the candidate's own ``setup``,
@@ -5141,9 +6200,7 @@ def prepare_data(**config: Any) -> dict[str, Any]:
         cu_seqlens = ssm_state_indices = num_accepted_tokens = num_spec_tokens = None
         num_state_slots = num_seqs
     else:
-        cu_seqlens = torch.arange(
-            0, total_tokens + 1, num_tokens, dtype=torch.int32, device=device
-        )
+        cu_seqlens = torch.arange(0, total_tokens + 1, num_tokens, dtype=torch.int32, device=device)
         ssm_state_indices = torch.arange(
             1, total_tokens + 1, dtype=torch.int32, device=device
         ).reshape(num_seqs, num_tokens)
@@ -5175,12 +6232,12 @@ def prepare_data(**config: Any) -> dict[str, Any]:
     }
 
 
-def _launch_state(case: dict[str, Any]):
+def _launch_state(case: dict[str, Any], *, backend_config=None):
     """Bind the launch through the candidate's own shape dispatch."""
     q, cu_seqlens = case["q"], case["cu_seqlens"]
     num_seqs = q.shape[0] if cu_seqlens is None else cu_seqlens.numel() - 1
     tokens = q.shape[0] * q.shape[1] // num_seqs
-    return _candidate_setup(case, int(num_seqs), int(tokens))
+    return _candidate_setup(case, int(num_seqs), int(tokens), backend_config=backend_config)
 
 
 # ---------------------------------------------------------------------------
@@ -5266,16 +6323,15 @@ def check_correctness(outputs: dict[str, Any], **config: Any) -> None:
     )
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     """Run one config through the dispatch and gate it against the oracle."""
     _assert_supported_arch()
     case = prepare_data(**config)
-    run = _launch_state(case)
+    run = _launch_state(case, backend_config=backend_config)
     run()
     torch.cuda.synchronize()
     check_correctness(
-        {"case": case, "output": case["output"], "final_state": case["final_state"]},
-        **config,
+        {"case": case, "output": case["output"], "final_state": case["final_state"]}, **config
     )
 
 
@@ -5293,20 +6349,47 @@ def _recurrent_kda_builder(case: dict[str, Any]):
     from flashinfer.kda_decode import recurrent_kda
 
     args = (
-        case["q"], case["k"], case["v"], case["g"], case["beta"],
-        case["A_log"], case["dt_bias"], float(case["scale"]),
-        case["initial_state"].clone(), case["cu_seqlens"],
-        case["ssm_state_indices"], case["num_spec_tokens"],
-        case["num_accepted_tokens"], case["lower_bound"],
+        case["q"],
+        case["k"],
+        case["v"],
+        case["g"],
+        case["beta"],
+        case["A_log"],
+        case["dt_bias"],
+        float(case["scale"]),
+        case["initial_state"].clone(),
+        case["cu_seqlens"],
+        case["ssm_state_indices"],
+        case["num_spec_tokens"],
+        case["num_accepted_tokens"],
+        case["lower_bound"],
         torch.empty_like(case["v"]),
     )
 
     def launch():
-        (q, k, v, g, beta, A_log, dt_bias, scale, state, cu_seqlens,
-         ssm_state_indices, num_spec_tokens, num_accepted_tokens,
-         lower_bound, output) = args
+        (
+            q,
+            k,
+            v,
+            g,
+            beta,
+            A_log,
+            dt_bias,
+            scale,
+            state,
+            cu_seqlens,
+            ssm_state_indices,
+            num_spec_tokens,
+            num_accepted_tokens,
+            lower_bound,
+            output,
+        ) = args
         out, _ = recurrent_kda(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             A_log=A_log,
             dt_bias=dt_bias,
             scale=scale,
@@ -5333,13 +6416,15 @@ def _recurrent_kda_builder(case: dict[str, Any]):
 # ---------------------------------------------------------------------------
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Build the row and bind its launch, so nothing compiles in the GPU stage."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     case = prepare_data(**config)
-    run = _launch_state(case)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(config), "case": case, "run": run})
+    run = _launch_state(case, backend_config=backend_config)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(config), "case": case, "run": run}, backend_config=backend_config
+    )
 
 
 def run_gpu(
@@ -5348,6 +6433,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     _assert_supported_arch()
@@ -5378,11 +6464,12 @@ def run_bench(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    backend_config=None,
     **config: Any,
 ) -> dict[str, Any]:
     values = dict(config)
     protocol = {name: values.pop(name) for name in ("rounds", "cooldown_s") if name in values}
-    prepared = prepare_bench(**values)
+    prepared = prepare_bench(**values, backend_config=backend_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

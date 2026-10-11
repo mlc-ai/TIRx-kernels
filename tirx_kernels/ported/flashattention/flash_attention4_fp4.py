@@ -32,6 +32,7 @@ import os
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import resolve_backend_config
 
 # ---------------------------------------------------------------------------------------------
 # Static specialization (orig: FlashAttentionForwardSm100.__init__ / _setup_attributes)
@@ -277,7 +278,17 @@ def _l2_swizzle(seq_len_kv, head_dim, head_dim_v, element_size):
     return 1 << math.floor(math.log2(L2_SIZE // size_one_head))
 
 
-def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, num_sms):
+def make_kernel(
+    spec: Spec,
+    batch_size,
+    seq_len_q,
+    seq_len_kv,
+    num_qo_heads,
+    num_kv_heads,
+    num_sms,
+    *,
+    backend_config=None,
+):
     """Trace the kernel for one specialization."""
     import inspect
 
@@ -379,7 +390,9 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
         S_full.init(1)
         O_full = txl.TCGen05Bar(smem, 2)
         O_full.init(1)
-        softmax_corr = txl.Pipeline(smem, 2, full="mbar", empty="mbar", init_full=128, init_empty=128)
+        softmax_corr = txl.Pipeline(
+            smem, 2, full="mbar", empty="mbar", init_full=128, init_empty=128
+        )
         corr_epi = txl.Pipeline(smem, 2, full="mbar", empty="mbar", init_full=128, init_empty=32)
         tmem_dealloc = txl.MBarrier(smem, 1)
         tmem_dealloc.init(384)
@@ -1052,7 +1065,8 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
                 else:
                     txl.assign(new_max, reduce_max(s, 0, BLK_N, init=None if first else row_max))
                 safe = txl.local_scalar(
-                    "float32", init=txl.Select(new_max != txl.float32(NEG_INF), new_max, txl.float32(0.0))
+                    "float32",
+                    init=txl.Select(new_max != txl.float32(NEG_INF), new_max, txl.float32(0.0)),
                 )
                 acc_scale = txl.local_scalar("float32")
                 if not first:
@@ -1114,7 +1128,9 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
                             txl.ptx.ex2.approx.ftz.f32(s[g * gsize + i], s[g * gsize + i])
                         txl.ptx.ex2.approx.ftz.f32(sf[g], b)
                         gs = reduce_sum(s, g * gsize, gsize)
-                        txl.ptx.fma.rn.f32(row_acc, sf[g], gs, txl.float32(0.0) if g == 0 else row_acc)
+                        txl.ptx.fma.rn.f32(
+                            row_acc, sf[g], gs, txl.float32(0.0) if g == 0 else row_acc
+                        )
                         if pv_format == "nvfp4":
                             for w in range(gsize // 8):
                                 pack_e2m1x8(p_words[g * (gsize // 8) + w], s, g * gsize + 8 * w)
@@ -1297,7 +1313,8 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
                                 + txl.Cast(
                                     "int32",
                                     txl.bitwise_xor(
-                                        txl.Cast("uint32", (c % 64) // 8), txl.Cast("uint32", row % 8)
+                                        txl.Cast("uint32", (c % 64) // 8),
+                                        txl.Cast("uint32", row % 8),
                                     ),
                                 )
                                 * 16
@@ -1320,6 +1337,12 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
             tmem_dealloc.arrive(0)
 
     def entry(*args):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(block=NUM_WARPS * 32, grid=grid),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         values = dict(zip(names, args, strict=True))
         body(
             values["tmap_q"],
@@ -1339,7 +1362,7 @@ def make_kernel(spec: Spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num
             for n, a in params
         ]
     )
-    return txl.kernel(warps=NUM_WARPS, arch="sm_103a", min_blocks_per_sm=1, grid=grid)(entry)
+    return txl.kernel()(entry)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1481,9 +1504,6 @@ _REG_LEVEL_TABLE: dict = {("nvfp4", "nvfp4", False, True): "3"}
 
 
 def _select_reg_level(qk_format, pv_format, is_causal, single_wave):
-    override = os.environ.get("FA4FP4_REG_LEVEL", "")
-    if override:
-        return override
     return _REG_LEVEL_TABLE.get((qk_format, pv_format, is_causal, single_wave), "10")
 
 
@@ -1504,6 +1524,8 @@ def get_kernel(
     num_kv_heads,
     head_dim,
     is_causal=False,
+    *,
+    backend_config=None,
     **kwargs,
 ):
     from tirx_kernels.runner import hardware_num_sms
@@ -1512,11 +1534,32 @@ def get_kernel(
     spec = Spec(qk_format, pv_format, head_dim, is_causal, num_qo_heads, num_kv_heads)
     num_sms = hardware_num_sms()
     num_tiles = batch_size * num_qo_heads * ceildiv(seq_len_q, Q_STAGE * BLK_M)
-    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = _select_reg_level(
-        qk_format, pv_format, is_causal, num_tiles <= num_sms
+    backend_config = resolve_backend_config(
+        backend_config,
+        defaults={
+            "cuda": {
+                "ptxas": [
+                    "-v",
+                    "--warn-on-local-memory-usage",
+                    "--register-usage-level="
+                    + str(
+                        int(
+                            _select_reg_level(qk_format, pv_format, is_causal, num_tiles <= num_sms)
+                        )
+                    ),
+                ]
+            }
+        },
     )
     return make_kernel(
-        spec, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, num_sms
+        spec,
+        batch_size,
+        seq_len_q,
+        seq_len_kv,
+        num_qo_heads,
+        num_kv_heads,
+        num_sms,
+        backend_config=backend_config,
     ).func
 
 
@@ -1995,6 +2038,8 @@ def run_test(
     num_kv_heads,
     head_dim,
     is_causal=False,
+    *,
+    backend_config=None,
     **kwargs,
 ):
     """Compile, run, and verify against the upstream kernel on identical quantized bytes."""
@@ -2018,7 +2063,9 @@ def run_test(
         is_causal=is_causal,
     )
     data = prepare_data(**{k: v for k, v in config.items() if k != "is_causal"})
-    executable = compile_kernel(get_kernel(**config))
+    executable = compile_kernel(
+        get_kernel(**config, backend_config=backend_config), backend_config=backend_config
+    )
     launch = build_tirx_launch(executable, data, config)
     launch()
     torch.cuda.synchronize()
@@ -2075,16 +2122,18 @@ def run_test(
 # ---------------------------------------------------------------------------------------------
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU (CUDA stays uninitialized)."""
     from tirx_kernels.runner import compile_kernel, hardware_num_sms, prepared_gpu_benchmark
 
     state = {
         "config": dict(kwargs),
         "num_sms": hardware_num_sms(),
-        "executable": compile_kernel(get_kernel(**kwargs)),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+        ),
     }
-    return prepared_gpu_benchmark(run_gpu, state)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -2093,6 +2142,7 @@ def run_gpu(
     warmup=None,
     repeat=None,
     timer=None,  # None inherits proton: the CuTeDSL reference cannot be CUDA-graph captured.
+    backend_config=None,
     **kwargs,
 ):
     import torch
@@ -2116,7 +2166,9 @@ def run_gpu(
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, **kwargs):
+def run_bench(*, warmup=None, repeat=None, timer=None, backend_config=None, **kwargs):
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    return prepare_bench(**config).run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, **protocol
+    )

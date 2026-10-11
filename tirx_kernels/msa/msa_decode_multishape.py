@@ -53,6 +53,7 @@ import torch
 
 import tirx_kernels.tirx_lite as txl
 import tvm
+from tirx_kernels.runner import backend_config_key, cuda_target, resolve_backend_config
 
 HEAD_DIM = 128
 BLK = 128
@@ -124,7 +125,7 @@ def ceildiv(a, b):
     return -(-a // b)
 
 
-def make_kernel_kv(cfg):
+def make_kernel_kv(cfg, *, backend_config=None):
     TQ = cfg["T"]
     T = cfg["TI"]
     NCH = TQ // T
@@ -186,7 +187,7 @@ def make_kernel_kv(cfg):
     VLOAD_WARP = 4 * NSWG + 4
     SOFT_THREADS = 128 * NSWG
 
-    @txl.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=MIN_BLOCKS, grid=NUM_CTAS)
+    @txl.kernel()
     def msa_decode_kvmajor(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -202,6 +203,12 @@ def make_kernel_kv(cfg):
         part_ctr: txl.gptr[txl.i32],
         scale_log2: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=MIN_BLOCKS),
+            backend_config=backend_config,
+        )
+
         warp = txl.warp_id()
         lane = txl.lane_id()
         tid = txl.thread_id()
@@ -1434,7 +1441,7 @@ def make_kernel_kv(cfg):
     return msa_decode_kvmajor
 
 
-def make_kernel_qm(cfg):
+def make_kernel_qm(cfg, *, backend_config=None):
     TQ = cfg["T"]
     T = cfg["TI"]
     NCH = TQ // T
@@ -1488,7 +1495,7 @@ def make_kernel_qm(cfg):
     LOG2G = G.bit_length() - 1
     assert (1 << LOG2G) == G
 
-    @txl.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=1, grid=NUM_CTAS)
+    @txl.kernel()
     def msa_decode_qmajor(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -1504,6 +1511,12 @@ def make_kernel_qm(cfg):
         part_ctr: txl.gptr[txl.i32],
         scale_log2: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         warp = txl.warp_id()
         lane = txl.lane_id()
         tid = txl.thread_id()
@@ -2535,15 +2548,19 @@ def _encode(tensor, dtype_name, dims, strides, box, l2_promotion=2):
 _EXEC_CACHE = {}
 
 
-def _compile(cfg, builder, family):
+def _compile(cfg, builder, family, *, backend_config=None):
+    backend_config = resolve_backend_config(backend_config)
+    cache_config = backend_config_key(backend_config)
     key = (family, *tuple(sorted(cfg.items())))
-    hit = _EXEC_CACHE.get(key)
+    hit = _EXEC_CACHE.get((cache_config, key))
     if hit is None:
-        kernel = builder(cfg)
-        target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+        kernel = builder(cfg, backend_config=backend_config)
+        target = cuda_target(backend_config=backend_config)
         with target:
-            hit = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
-        _EXEC_CACHE[key] = hit
+            hit = tvm.compile(
+                kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
+            )
+        _EXEC_CACHE[(cache_config, key)] = hit
     return hit
 
 
@@ -2679,7 +2696,7 @@ def plan_config_qm(q, k, q2k, page_table, B, T, num_sms):
     )
 
 
-def setup_kv(data, B, seqlen_q):
+def setup_kv(data, B, seqlen_q, *, backend_config=None):
     q = data["q"]
     k = data["k"]
     v = data["v"]
@@ -2696,7 +2713,7 @@ def setup_kv(data, B, seqlen_q):
     device = q.device
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
     cfg = plan_config_kv(q, k, q2k, page_table, B, T, num_sms)
-    ex = _compile(cfg, make_kernel_kv, "kv")
+    ex = _compile(cfg, make_kernel_kv, "kv", backend_config=backend_config)
 
     HKV = cfg["HKV"]
     G = cfg["G"]
@@ -2801,7 +2818,7 @@ def setup_kv(data, B, seqlen_q):
     return run
 
 
-def setup_qm(data, B, seqlen_q):
+def setup_qm(data, B, seqlen_q, *, backend_config=None):
     q = data["q"]
     k = data["k"]
     v = data["v"]
@@ -2818,7 +2835,7 @@ def setup_qm(data, B, seqlen_q):
     device = q.device
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
     cfg = plan_config_qm(q, k, q2k, page_table, B, T, num_sms)
-    ex = _compile(cfg, make_kernel_qm, "qm")
+    ex = _compile(cfg, make_kernel_qm, "qm", backend_config=backend_config)
 
     HKV = cfg["HKV"]
     G = cfg["G"]
@@ -2928,7 +2945,7 @@ def setup(data, B, seqlen_q):
     return setup_kv(data, B, seqlen_q)
 
 
-def make_kernel_qm64(cfg):
+def make_kernel_qm64(cfg, *, backend_config=None):
     TQ = cfg["T"]
     T = cfg["TI"]
     NCH = TQ // T
@@ -2994,7 +3011,7 @@ def make_kernel_qm64(cfg):
     LOG2G = G.bit_length() - 1
     assert (1 << LOG2G) == G
 
-    @txl.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=2, grid=NUM_CTAS)
+    @txl.kernel()
     def msa_decode_qmajor(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -3010,6 +3027,12 @@ def make_kernel_qm64(cfg):
         part_ctr: txl.gptr[txl.i32],
         scale_log2: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
+            backend_config=backend_config,
+        )
+
         warp = txl.warp_id()
         lane = txl.lane_id()
         tid = txl.thread_id()
@@ -4212,7 +4235,7 @@ def plan_config_qm64(q, k, q2k, page_table, B, T, num_sms):
     )
 
 
-def setup_qm64(data, B, seqlen_q):
+def setup_qm64(data, B, seqlen_q, *, backend_config=None):
     q = data["q"]
     k = data["k"]
     v = data["v"]
@@ -4229,7 +4252,7 @@ def setup_qm64(data, B, seqlen_q):
     device = q.device
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
     cfg = plan_config_qm64(q, k, q2k, page_table, B, T, num_sms)
-    ex = _compile(cfg, make_kernel_qm64, "qm64")
+    ex = _compile(cfg, make_kernel_qm64, "qm64", backend_config=backend_config)
 
     HKV = cfg["HKV"]
     G = cfg["G"]
@@ -4337,7 +4360,7 @@ def _use_qm64(data, B, T):
     )
 
 
-def _build_q16_twotile_factory():
+def _build_q16_twotile_factory(*, backend_config=None):
     HEAD_DIM = 128
     BLK_N = 128
     BLK_M = 128
@@ -4400,7 +4423,7 @@ def _build_q16_twotile_factory():
         Q_TILE_BYTES = BLK_M * HEAD_DIM * F16_BYTES
         KV_TILE_BYTES = BLK_N * HEAD_DIM * F16_BYTES
 
-        @txl.kernel(warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=NUM_CTAS)
+        @txl.kernel()
         def msa_decode_qmajor_union(
             q_map: txl.TensorMap,
             k_map: txl.TensorMap,
@@ -4414,6 +4437,12 @@ def _build_q16_twotile_factory():
             mrg_ctl: txl.gptr[txl.i32],
             scale_log2: txl.f32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(grid=NUM_CTAS, block=12 * 32),
+                kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+                backend_config=backend_config,
+            )
+
             warp_cta = txl.warp_id()
             wg_id = warp_cta >> 2
             warp_id = warp_cta & 3
@@ -5563,7 +5592,9 @@ def _build_q16_twotile_factory():
 make_kernel_q16_twotile = _build_q16_twotile_factory()
 
 
-def setup_q16_twotile(data, B, seqlen_q):
+def setup_q16_twotile(data, B, seqlen_q, *, backend_config=None):
+    backend_config = resolve_backend_config(backend_config)
+    cache_config = backend_config_key(backend_config)
     q = data["q"]
     k = data["k"]
     v = data["v"]
@@ -5589,14 +5620,27 @@ def setup_q16_twotile(data, B, seqlen_q):
     device = q.device
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
     key = ("q16_twotile", B, T, hq, hkv, topk, int(num_sms))
-    ex = _EXEC_CACHE.get(key)
+    ex = _EXEC_CACHE.get((cache_config, key))
     if ex is None:
-        os.environ.setdefault("TVM_CUDA_PTXAS_REG_LEVEL", "6")
+        backend_config = resolve_backend_config(
+            backend_config,
+            defaults={
+                "cuda": {
+                    "ptxas": [
+                        "-v",
+                        "--warn-on-local-memory-usage",
+                        "--register-usage-level=" + str(6),
+                    ]
+                }
+            },
+        )
         kernel = make_kernel_q16_twotile(B, T, hq, hkv, topk, int(num_sms))
-        target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+        target = cuda_target(backend_config=backend_config)
         with target:
-            ex = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
-        _EXEC_CACHE[key] = ex
+            ex = tvm.compile(
+                kernel.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
+            )
+        _EXEC_CACHE[(cache_config, key)] = ex
 
     scale_log2 = float(data["softmax_scale"]) * LOG2E
     q_map = _encode(
@@ -5697,7 +5741,7 @@ Q1D_NOFENCE = os.environ.get("Q1D_NOFENCE", "0") == "1"
 Q1D_NOPREFETCH = os.environ.get("Q1D_NOPREFETCH", "0") == "1"
 
 
-def make_kernel_q1d(cfg):
+def make_kernel_q1d(cfg, *, backend_config=None):
     G = cfg["G"]
     HKV = cfg["HKV"]
     TOPK = cfg["TOPK"]
@@ -5754,7 +5798,7 @@ def make_kernel_q1d(cfg):
     PV_WARP = 7
     SOFT_THREADS = 128
 
-    @txl.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=MIN_BLOCKS, grid=NUM_CTAS)
+    @txl.kernel()
     def msa_decode_q1d(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -5767,6 +5811,12 @@ def make_kernel_q1d(cfg):
         sched: txl.gptr[txl.i32],
         scale_log2: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=MIN_BLOCKS),
+            backend_config=backend_config,
+        )
+
         warp = txl.warp_id()
         lane = txl.lane_id()
         tid = txl.thread_id()
@@ -7039,7 +7089,7 @@ def plan_config_q1d(q, k, q2k, page_table, B, T, num_sms):
     )
 
 
-def setup_q1d(data, B, seqlen_q):
+def setup_q1d(data, B, seqlen_q, *, backend_config=None):
     q = data["q"]
     k = data["k"]
     v = data["v"]
@@ -7056,7 +7106,7 @@ def setup_q1d(data, B, seqlen_q):
     device = q.device
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
     cfg = plan_config_q1d(q, k, q2k, page_table, B, T, num_sms)
-    ex = _compile(cfg, make_kernel_q1d, "q1d")
+    ex = _compile(cfg, make_kernel_q1d, "q1d", backend_config=backend_config)
 
     HKV = cfg["HKV"]
     G = cfg["G"]
@@ -7161,7 +7211,7 @@ def setup(data, B, seqlen_q):
     return _setup_prev(data, B, seqlen_q)
 
 
-def make_kernel_q4d(cfg):
+def make_kernel_q4d(cfg, *, backend_config=None):
     T = cfg["T"]
     G = cfg["G"]
     HKV = cfg["HKV"]
@@ -7218,7 +7268,7 @@ def make_kernel_q4d(cfg):
     BAR_TMEM = 1
     BAR_WG = 2
 
-    @txl.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=1, grid=NUM_CTAS)
+    @txl.kernel()
     def msa_decode_q4d(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -7230,6 +7280,12 @@ def make_kernel_q4d(cfg):
         sched: txl.gptr[txl.i32],
         scale_log2: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=NUM_CTAS, block=NWARPS * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         warp = txl.warp_id()
         lane = txl.lane_id()
         tid = txl.thread_id()
@@ -8345,7 +8401,7 @@ def plan_config_q4d(q, k, q2k, page_table, B, T, num_sms):
     )
 
 
-def setup_q4d(data, B, seqlen_q):
+def setup_q4d(data, B, seqlen_q, *, backend_config=None):
     q = data["q"]
     k = data["k"]
     v = data["v"]
@@ -8362,7 +8418,7 @@ def setup_q4d(data, B, seqlen_q):
     device = q.device
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
     cfg = plan_config_q4d(q, k, q2k, page_table, B, T, num_sms)
-    ex = _compile(cfg, make_kernel_q4d, "q4d")
+    ex = _compile(cfg, make_kernel_q4d, "q4d", backend_config=backend_config)
 
     HKV = cfg["HKV"]
     G = cfg["G"]
@@ -8440,10 +8496,10 @@ def _use_q4d(data, B, T):
 _setup_prev_q4d = setup
 
 
-def setup(data, B, seqlen_q):
+def setup(data, B, seqlen_q, *, backend_config=None):
     T = int(seqlen_q)
     if _use_q4d(data, B, T):
-        return setup_q4d(data, B, T)
+        return setup_q4d(data, B, T, backend_config=backend_config)
     return _setup_prev_q4d(data, B, seqlen_q)
 
 
@@ -8461,7 +8517,7 @@ Q4R_CORR_REGS = int(os.environ.get("Q4R_CORR_REGS", "88"))
 Q4R_PROD_REGS = int(os.environ.get("Q4R_PROD_REGS", "40"))
 
 
-def make_kernel_q4r(cfg):
+def make_kernel_q4r(cfg, *, backend_config=None):
     T = cfg["T"]
     G = cfg["G"]
     HKV = cfg["HKV"]
@@ -8493,7 +8549,7 @@ def make_kernel_q4r(cfg):
     LOAD_WARP = 9
     NWARPS = 12
 
-    @txl.kernel(warps=NWARPS, arch="sm_100a", min_blocks_per_sm=Q4R_MIN_BLOCKS, grid=NUM_ITEMS)
+    @txl.kernel()
     def msa_decode_q4r(
         q_map: txl.TensorMap,
         k_map: txl.TensorMap,
@@ -8503,6 +8559,12 @@ def make_kernel_q4r(cfg):
         lens: txl.gptr[txl.i32],
         scale_log2: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=NUM_ITEMS, block=NWARPS * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=Q4R_MIN_BLOCKS),
+            backend_config=backend_config,
+        )
+
         warp = txl.warp_id()
         lane = txl.lane_id()
 
@@ -8994,7 +9056,7 @@ def make_kernel_q4r(cfg):
     return msa_decode_q4r
 
 
-def setup_q4r(data, B, seqlen_q):
+def setup_q4r(data, B, seqlen_q, *, backend_config=None):
     q = data["q"]
     k = data["k"]
     v = data["v"]
@@ -9018,7 +9080,7 @@ def setup_q4r(data, B, seqlen_q):
         MAX_BLOCK_WORDS=max(1, ceildiv(max_blocks, 32)),
         NUM_ITEMS=B * HKV,
     )
-    ex = _compile(cfg, make_kernel_q4r, "q4r")
+    ex = _compile(cfg, make_kernel_q4r, "q4r", backend_config=backend_config)
     q_map = _encode(
         q,
         "bfloat16",
@@ -9066,11 +9128,11 @@ def _use_q4r(data, B, T):
 _setup_prev_q4r = setup
 
 
-def _candidate_setup(data, B, seqlen_q):
+def _candidate_setup(data, B, seqlen_q, *, backend_config=None):
     """The candidate's own dispatch entry (its optimization-harness ``setup``)."""
     T = int(seqlen_q)
     if _use_q4r(data, B, T):
-        return setup_q4r(data, B, T)
+        return setup_q4r(data, B, T, backend_config=backend_config)
     return _setup_prev_q4r(data, B, seqlen_q)
 
 
@@ -9384,7 +9446,7 @@ def _assert_supported_arch() -> None:
         )
 
 
-def get_kernel(**config: Any):
+def get_kernel(*, backend_config=None, **config: Any):
     """Return a traced tirx-lite PrimFunc for this config's dispatch target.
 
     The runtime path compiles through the candidate's own ``setup``, which
@@ -9394,7 +9456,14 @@ def get_kernel(**config: Any):
     """
     from tirx_kernels.runner import hardware_num_sms
 
-    os.environ.setdefault("TVM_CUDA_PTXAS_REG_LEVEL", "6")
+    backend_config = resolve_backend_config(
+        backend_config,
+        defaults={
+            "cuda": {
+                "ptxas": ["-v", "--warn-on-local-memory-usage", "--register-usage-level=" + str(6)]
+            }
+        },
+    )
     case = prepare_data(**config)
     cfg = plan_config_kv(
         case["q"],
@@ -9405,7 +9474,7 @@ def get_kernel(**config: Any):
         int(case["seqlen_q"]),
         hardware_num_sms(),
     )
-    return make_kernel_kv(cfg).func
+    return make_kernel_kv(cfg, backend_config=backend_config).func
 
 
 # ---------------------------------------------------------------------------
@@ -9534,11 +9603,18 @@ def prepare_data(**config: Any) -> dict[str, Any]:
     }
 
 
-def _launch_state(case: dict[str, Any]):
+def _launch_state(case: dict[str, Any], *, backend_config=None):
     """Bind the launch through the candidate's own shape dispatch."""
     batch_size = int(case["config"]["batch_size"])
-    os.environ.setdefault("TVM_CUDA_PTXAS_REG_LEVEL", "6")
-    return _candidate_setup(case, batch_size, int(case["seqlen_q"]))
+    backend_config = resolve_backend_config(
+        backend_config,
+        defaults={
+            "cuda": {
+                "ptxas": ["-v", "--warn-on-local-memory-usage", "--register-usage-level=" + str(6)]
+            }
+        },
+    )
+    return _candidate_setup(case, batch_size, int(case["seqlen_q"]), backend_config=backend_config)
 
 
 # ---------------------------------------------------------------------------
@@ -9635,11 +9711,11 @@ def check_correctness(outputs: dict[str, Any], **config: Any) -> None:
         )
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     """Run one config through the dispatch and gate it against the oracle."""
     _assert_supported_arch()
     case = prepare_data(**config)
-    run = _launch_state(case)
+    run = _launch_state(case, backend_config=backend_config)
     case["output"].fill_(float("nan"))
     run()
     torch.cuda.synchronize()
@@ -9836,7 +9912,7 @@ def _reference_builder(case: dict[str, Any]):
 # ---------------------------------------------------------------------------
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Build the row and bind its launch, so nothing compiles in the GPU stage.
 
     The shape dispatch reads the row's tensors, so this step allocates them and
@@ -9846,8 +9922,10 @@ def prepare_bench(**config: Any):
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     case = prepare_data(**config)
-    run = _launch_state(case)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(config), "case": case, "run": run})
+    run = _launch_state(case, backend_config=backend_config)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(config), "case": case, "run": run}, backend_config=backend_config
+    )
 
 
 def run_gpu(
@@ -9856,6 +9934,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     _assert_supported_arch()
@@ -9896,11 +9975,16 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **config: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    backend_config=None,
+    **config: Any,
 ) -> dict[str, Any]:
     values = dict(config)
     protocol = {name: values.pop(name) for name in ("rounds", "cooldown_s") if name in values}
-    prepared = prepare_bench(**values)
+    prepared = prepare_bench(**values, backend_config=backend_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

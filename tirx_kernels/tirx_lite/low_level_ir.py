@@ -18,7 +18,6 @@ _FORBIDDEN_SCOPE_ROOTS = ("global", "shared")
 _ADDRESS_OF_OP = "tirx.address_of"
 _FUNC_CALL_OP = "tirx.cuda.func_call"
 _SETMAXNREG_OP = "tirx.ptx.setmaxnreg"
-_MIN_BLOCKS_PER_SM_OP = "tirx.cuda.launch_bounds_min_blocks_per_sm"
 
 
 def _is_forbidden_scope(scope: str) -> bool:
@@ -30,14 +29,14 @@ def _node_name(node: Any) -> str:
 
 
 def _span_text(node: Any) -> str | None:
-    span = getattr(node, "span", None)
-    if span is None:
+    span = getattr(node, "loc", None)
+    if span is None or isinstance(span, tvm.ir.UnknownLoc):
         return None
 
     source_name = getattr(span, "source_name", None)
     source = getattr(source_name, "name", None)
-    line = getattr(span, "line", None)
-    column = getattr(span, "column", None)
+    line = getattr(span, "start_line", None)
+    column = getattr(span, "start_column", None)
     end_line = getattr(span, "end_line", None)
     end_column = getattr(span, "end_column", None)
     if source is not None and line is not None and column is not None:
@@ -128,8 +127,15 @@ class _LowLevelIRInspector:
                 (tvm.ir.TensorLoad, self._visit_load),
                 (tvm.ir.TensorStore, self._visit_store),
                 (tvm.ir.Call, self._visit_call),
+                (tvm.ir.RegionStmt, self._visit_region),
             ],
         )
+
+    def _visit_region(self, op, visitor):
+        kernel_attrs = op.attrs.get("cuda.kernel_attrs", {})
+        if kernel_attrs.get("min_blocks_per_sm", 0):
+            self.has_min_blocks_per_sm = True
+        visitor.default_visit(op)
 
     def _finding(
         self, node: Any, kind: str, scope: str | None = None, callee: str | None = None
@@ -163,8 +169,6 @@ class _LowLevelIRInspector:
         category = op.op.get_attr("TIRxOpCategory") if isinstance(op.op, tvm.ir.Op) else None
         if category in {"tile_primitive", "tile_composite"}:
             self.violations.append(self._finding(op, str(category), callee=op_name))
-        if op_name == _MIN_BLOCKS_PER_SM_OP:
-            self.has_min_blocks_per_sm = True
         if op_name == _SETMAXNREG_OP:
             self.setmaxnreg_calls.append(self._finding(op, "setmaxnreg_without_min_blocks_per_sm"))
         if op_name == _FUNC_CALL_OP:

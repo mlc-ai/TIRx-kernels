@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import inspect
 import linecache
-import os
 import sys
 import sysconfig
 import threading
@@ -20,7 +19,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import tvm
-from tvm.ir import SourceName, Span
+from tvm.ir import SourceLoc, SourceName
 from tvm.script.ir_builder import IRBuilder
 from tvm.tirx.script import ir_builder as I
 
@@ -131,7 +130,7 @@ _TLS = threading.local()
 # tirx-lite traces Python directly instead of going through the TVMScript parser.
 # Keep the parser's source-location contract by recording the active user line
 # while the body is being traced.  Frames in tirx-lite itself, TVM, and Python's
-# runtime are implementation details; allowing them to update the active span
+# runtime are implementation details; allowing them to update the active loc
 # would make diagnostics point into the DSL rather than to the kernel source.
 _TXL_SOURCE_ROOT = Path(__file__).resolve().parent
 _TVM_SOURCE_ROOT = Path(tvm.__file__).resolve().parent
@@ -140,7 +139,7 @@ _PYTHON_SITE_ROOTS = tuple(
     {Path(sysconfig.get_paths()[key]).resolve() for key in ("purelib", "platlib")}
 )
 _SOURCE_NAME_CACHE = {}
-_SOURCE_SPAN_CACHE = {}
+_SOURCE_LOC_CACHE = {}
 
 
 @cache
@@ -163,31 +162,31 @@ def _is_user_source(filename: str) -> bool:
     return True
 
 
-def _source_span(filename: str, line: int) -> Span | None:
-    """Return the one-line span for a Python frame, if it is author code."""
+def _source_loc(filename: str, line: int) -> SourceLoc | None:
+    """Return the one-line loc for a Python frame, if it is author code."""
     if not _is_user_source(filename):
         return None
     key = (filename, line)
-    span = _SOURCE_SPAN_CACHE.get(key)
-    if span is not None:
-        return span
+    loc = _SOURCE_LOC_CACHE.get(key)
+    if loc is not None:
+        return loc
     source_name = _SOURCE_NAME_CACHE.setdefault(filename, SourceName(filename))
     source_line = linecache.getline(filename, line)
     end_column = max(2, len(source_line.rstrip("\r\n")) + 1)
-    span = Span(source_name, line, line, 1, end_column)
-    _SOURCE_SPAN_CACHE[key] = span
-    return span
+    loc = SourceLoc(source_name, line, 1, line, end_column)
+    _SOURCE_LOC_CACHE[key] = loc
+    return loc
 
 
-def _callable_span(func) -> Span | None:
-    """Return the definition-line span used for generated entry scaffolding."""
+def _callable_loc(func) -> SourceLoc | None:
+    """Return the definition-line loc used for generated entry scaffolding."""
     code = getattr(func, "__code__", None)
     if code is None:
         return None
-    return _source_span(code.co_filename, code.co_firstlineno)
+    return _source_loc(code.co_filename, code.co_firstlineno)
 
 
-class _SourceSpanTracer:
+class _SourceLocationTracer:
     """Attach the current Python source line to statements emitted by tirx-lite."""
 
     def __init__(self, builder):
@@ -195,8 +194,8 @@ class _SourceSpanTracer:
         self.previous_trace = None
         self.active_context = None
         self.active_frame = None
-        self.active_span = None
-        self.frame_spans = {}
+        self.active_loc = None
+        self.frame_locs = {}
 
     def __enter__(self):
         self.previous_trace = sys.gettrace()
@@ -206,32 +205,32 @@ class _SourceSpanTracer:
     def __exit__(self, ptype, value, trace):  # pylint: disable=unused-argument
         sys.settrace(self.previous_trace)
         self._restore(None)
-        self.frame_spans.clear()
+        self.frame_locs.clear()
 
-    def _set_active(self, frame, span):
-        if self.active_frame is frame and self.active_span is span:
+    def _set_active(self, frame, loc):
+        if self.active_frame is frame and self.active_loc is loc:
             return
         if self.active_context is not None:
             self.active_context.__exit__(None, None, None)
-        self.active_context = self.builder.with_source_span(span)
+        self.active_context = self.builder.with_loc(loc)
         self.active_context.__enter__()
         self.active_frame = frame
-        self.active_span = span
+        self.active_loc = loc
 
     def _restore(self, frame):
-        """Restore the nearest caller's span after a nested user helper returns."""
+        """Restore the nearest caller's loc after a nested user helper returns."""
         if self.active_context is not None:
             self.active_context.__exit__(None, None, None)
             self.active_context = None
         self.active_frame = None
-        self.active_span = None
+        self.active_loc = None
         while frame is not None:
-            span = self.frame_spans.get(frame)
-            if span is not None:
-                self.active_context = self.builder.with_source_span(span)
+            loc = self.frame_locs.get(frame)
+            if loc is not None:
+                self.active_context = self.builder.with_loc(loc)
                 self.active_context.__enter__()
                 self.active_frame = frame
-                self.active_span = span
+                self.active_loc = loc
                 return
             frame = frame.f_back
 
@@ -242,13 +241,13 @@ class _SourceSpanTracer:
                 return self._trace
             return None
         if event == "line":
-            span = _source_span(frame.f_code.co_filename, frame.f_lineno)
-            if span is not None:
-                self.frame_spans[frame] = span
-                self._set_active(frame, span)
+            loc = _source_loc(frame.f_code.co_filename, frame.f_lineno)
+            if loc is not None:
+                self.frame_locs[frame] = loc
+                self._set_active(frame, loc)
             return self._trace
-        if event == "return" and frame in self.frame_spans:
-            self.frame_spans.pop(frame, None)
+        if event == "return" and frame in self.frame_locs:
+            self.frame_locs.pop(frame, None)
             if self.active_frame is frame:
                 self._restore(frame.f_back)
         return self._trace
@@ -259,7 +258,7 @@ def current(required: bool = True) -> Session | None:
     session = getattr(_TLS, "session", None)
     if session is None and required:
         raise RuntimeError(
-            "no tirx-lite kernel is being traced; this call is only valid inside a @txl.kernel body"
+            "this call requires an active txl.device_entry inside a @txl.kernel body"
         )
     return session
 
@@ -271,10 +270,9 @@ class Session:
     ``specialize`` object the body is allowed to create.
     """
 
-    def __init__(self, name, warps, arch, min_blocks_per_sm):
+    def __init__(self, name, warps, min_blocks_per_sm):
         self.name = name
         self.warps = warps
-        self.arch = arch
         self.min_blocks_per_sm = min_blocks_per_sm
         # None means the entry is UNPINNED: ptxas is free to choose, so there
         # is no promised occupancy to divide by. Keep the one-CTA model for
@@ -309,7 +307,7 @@ class Session:
         avoided the broadcast; that was measurably the wrong call.
 
         This costs nothing: the entry already declares the ``cta->warp`` scope
-        id (``I.warp_id([warps])``, emitted as ``warp_id_in_cta``) and that id
+        id (``I.cuda.warp_id()``, emitted as ``warp_id_in_cta``) and that id
         is *already* the broadcast. Reusing it is one fewer instruction than
         even the plain shift, which computed a second, redundant value.
         """
@@ -324,30 +322,30 @@ class Kernel:
         self.session = session
         self.name = session.name
         self.warps = session.warps
-        self.arch = session.arch
         self.entry_regs = session.entry_regs
 
     @property
     def mod(self):
         return tvm.IRModule({"main": self.func})
 
-    def target(self):
-        # The decorator records the author's native/default target. Prepared
-        # runs compile for the GPU that will execute the kernel, including
-        # callers using Kernel.compile() instead of runner.compile_kernel().
-        arch = os.environ.get("TIRX_PREPARE_CUDA_ARCH", self.arch)
-        return tvm.target.Target({"kind": "cuda", "arch": arch})
+    def compile(self, target=None, *, backend_config=None):
+        """Compile with build defaults overridden by the device entry settings."""
+        if target is None and (backend_config is None or backend_config == {}):
+            backend_config = {"cuda": {}}
+        return tvm.compile(
+            self.mod, target=target, tir_pipeline="tirx", backend_config=backend_config
+        )
 
-    def compile(self, target=None):
-        """Compile to a runnable module (``tir_pipeline="tirx"``)."""
-        return tvm.compile(self.mod, target=target or self.target(), tir_pipeline="tirx")
-
-    def source(self, target=None):
-        """The generated CUDA source."""
-        return self.compile(target).mod.imports[0].inspect_source()
+    def source(self, target=None, *, backend_config=None):
+        """Return the CUDA source generated for the supplied compile settings."""
+        return (
+            self.compile(target, backend_config=backend_config)
+            .mod.imports[0]
+            .inspect_source("cuda")
+        )
 
     def __repr__(self):
-        return f"<txl.kernel {self.name} warps={self.warps} arch={self.arch}>"
+        return f"<txl.kernel {self.name} warps={self.warps}>"
 
 
 def _scalar_param(name, ann):
@@ -417,195 +415,172 @@ def _declare_param(name, ann, scalar_params):
     )
 
 
-def _resolve_grid(grid, params):
-    if grid is None:
-        return params["num_sms"] if "num_sms" in params else 1
-    if isinstance(grid, list | tuple):
-        if not grid:
-            raise ValueError("grid must contain at least one CTA dimension")
-        dimensions = [_resolve_grid(dimension, params) for dimension in grid]
-        if any(isinstance(dimension, list) for dimension in dimensions):
-            raise ValueError("grid dimensions cannot be nested")
-        return dimensions
-    if isinstance(grid, str):
-        if grid not in params:
-            raise ValueError(f"grid={grid!r} does not name a kernel parameter")
-        return params[grid]
-    # TIR expressions implement ``__call__`` for function-call construction;
-    # they are values here, not grid callbacks.
-    if callable(grid) and not isinstance(grid, tvm.ir.Expr):
-        return _resolve_grid(grid(params), params)
-    return grid
+class _TraceContext:
+    """Function-wide tracing state; device state exists only inside its entry."""
+
+    def __init__(self, name, params, builder):
+        self.name = name
+        self.params = params
+        self.builder = builder
+        self.function_frame = builder.frames[-1]
+        self.entry = None
 
 
-def _resolve_grid_dimensions(grid, params):
-    """Resolve and validate the one-to-three CTA extents owned by txl."""
-    dimensions = _resolve_grid(grid, params)
-    if not isinstance(dimensions, list):
-        dimensions = [dimensions]
-    if len(dimensions) > 3:
-        raise ValueError(f"grid supports at most three CTA dimensions, got {len(dimensions)}")
-    for index, extent in enumerate(dimensions):
-        if isinstance(extent, bool):
-            raise TypeError(f"grid dimension {index} must be an integer extent, got {extent!r}")
-        if isinstance(extent, int):
-            if extent <= 0:
-                raise ValueError(f"grid dimension {index} must be positive, got {extent}")
-            continue
-        if not isinstance(extent, tvm.ir.Expr) or not isinstance(extent.ty, tvm.ir.PrimType):
-            raise TypeError(f"grid dimension {index} must be an integer extent, got {extent!r}")
-        dtype = tvm.DataType(str(extent.ty.dtype))
-        if not dtype.is_integer:
-            raise TypeError(
-                f"grid dimension {index} must have an integer dtype, got {extent.ty.dtype}"
+class _DeviceEntry:
+    """One native region, closed by a with block or by the kernel decorator."""
+
+    def __init__(self, context, launch, kernel_attrs, backend_config):
+        from tvm.backend.cuda.launch import KernelAttributes, LaunchConfig
+        from tvm.backend.cuda.launch._impl import _integer
+
+        if not isinstance(launch, LaunchConfig):
+            raise TypeError("device_entry launch must be a CUDA LaunchConfig")
+        if kernel_attrs is not None and not isinstance(kernel_attrs, KernelAttributes):
+            raise TypeError("kernel_attrs must be a CUDA KernelAttributes")
+        if context.entry is not None:
+            raise RuntimeError("a txl.kernel must declare exactly one device_entry")
+        if not context.builder.frames[-1].same_as(context.function_frame):
+            raise RuntimeError(
+                "device_entry must be at function scope, outside TIR branches and loops"
             )
-        if isinstance(extent, tvm.tirx.IntImm) and int(extent) <= 0:
-            raise ValueError(f"grid dimension {index} must be positive, got {int(extent)}")
-    return dimensions
+        if len(launch.block) != 1:
+            raise ValueError("tirx-lite requires a one-dimensional block")
+        nthreads = _integer(launch.block[0])
+        if nthreads is None or nthreads % 32 or not 32 <= nthreads <= 1024:
+            raise ValueError("tirx-lite block must be a static multiple of 32 between 32 and 1024")
+        min_blocks = kernel_attrs.min_blocks_per_sm if kernel_attrs is not None else None
+        self.session = Session(context.name, nthreads // 32, min_blocks)
+        self.session.params = context.params
+        self.session.launch = launch
+        self.session.kernel_attrs = kernel_attrs
+        self.frame = I.device_entry(
+            launch=launch, kernel_attrs=kernel_attrs, backend_config=backend_config
+        )
+        self.closed = False
+        self.managed = False
+        self.frame.__enter__()
+        context.entry = self
+        _TLS.session = self.session
+
+        def index(name, value):
+            return I.bind(value, var=tvm.ir.Var(name, value.ty))
+
+        cta_ids = [index("b" + axis, I.cuda.block_idx(axis)) for axis in "xyz"[: len(launch.grid)]]
+        if len(cta_ids) == 1:
+            self.session.cta_id = cta_ids[0]
+        else:
+            from tvm_ffi import convert
+
+            self.session.cta_id = convert(cta_ids)
+        self.session.warp_scope_id = index("warp_id", I.cuda.warp_id())
+        self.session.lane_id = index("lane_id", I.cuda.lane_id())
+        self.session.thread_id = index("thread_id", I.cuda.linear_thread_id())
+
+    def __enter__(self):
+        if self.closed or self.managed:
+            raise RuntimeError("device_entry cannot be entered more than once")
+        self.managed = True
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.closed:
+            return
+        try:
+            if exc_type is None:
+                if self.session.specialize is not None:
+                    self.session.specialize.finalize()
+                if self.session.pool is not None:
+                    self.session.pool.commit()
+            self.frame.__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.closed = True
+            _TLS.session = None
 
 
-def kernel(
-    warps: int,
-    arch: str = "sm_100a",
-    min_blocks_per_sm: int | None = None,
-    grid=None,
-    host_prelude=None,
-    allowed_func_calls: tuple[str, ...] = (),
-    check_ir: bool = True,
-):
-    """Declare a kernel entry.
+def device_entry(*, launch, kernel_attrs=None, backend_config=None):
+    """Start the kernel's device region with explicit CUDA launch configuration.
 
-    Parameters
-    ----------
-    warps : int
-        CTA width in warps. tirx-lite owns one flat ``blockDim.x = warps * 32``
-        thread axis; thread layout is not an entry option.
-    arch : str
-        CUDA arch for the default compile target.
-    min_blocks_per_sm : int, optional
-        Second ``__launch_bounds__`` operand. **Defaults to None, which omits
-        it**, emitting ``__launch_bounds__(nthreads)`` — the spelling in-tree
-        kernels use. The operand is a floor on occupancy, so pinning it also
-        pins the entry's register allocation *down*: on an rmsnorm kernel the
-        forced ``, 1`` cost 32 -> 54 registers (the kernel's measured
-        ``-Xptxas -v`` table; an earlier 53 here was a transcription slip), and
-        the ``None`` default matches the original at every configured size —
-        including one (hs=128, 34 regs) where a pin of ``8`` forced 32 vs the
-        original's 34. Pass an int when the kernel wants that
-        trade, and note that pinning is what makes the entry allocation — and
-        therefore the ``setmaxnreg`` direction a role must use — well defined:
-        a role declared with ``regs=`` requires it (see
-        :meth:`Specialize.role`).
+    A flat call covers the remainder of the traced function. A ``with`` block
+    closes the region explicitly and permits subsequent host statements. Host
+    preparation belongs before entry; launch operands can refer directly to
+    function parameters. Exactly one top-level entry is required per kernel.
 
-        A high value and warp roles pull against each other, and the pull is
-        sharp. The whole register file is a CTA's only at one block per SM;
-        promising *m* divides the resident warpgroup pool by *m*, then rounds
-        each warpgroup's per-thread share down to a multiple of 8 registers.
-        An 8-warp CTA at ``m=8`` has 8192 registers total — 32 a thread — so
-        its roles can afford, say, 40 and 24 but not 64 and 64, which
-        :meth:`Specialize.finalize` refuses. The per-thread entry usage is
-        separately capped at 255; that cap does not shrink the CTA pool or the
-        legal ``setmaxnreg(256)`` target. The rmsnorm-style
-        ``min_blocks_per_sm=8`` is advice for occupancy-bound kernels without
-        roles; a warp-specialized kernel usually wants 1.
-    grid : int | str | list | tuple | callable, optional
-        CTA extents: one constant or kernel-parameter name for ``blockIdx.x``,
-        or a sequence for ``blockIdx.x/y/z``. A callable over the bound
-        parameters may return either form. Defaults to the parameter named
-        ``num_sms`` when the kernel has one, else 1. Pass ``False`` to leave
-        the kernel-to-CTA scope to the body, which can then declare the
-        original kernel's dimensions directly with ``txl.cta_id(extents)``.
-        This is an ownership opt-out, not a second grid representation in txl.
-    host_prelude : callable, optional
-        Emit host-only setup in the same traced Function before its device
-        entry.  The callable receives the ABI parameter mapping and returns
-        the trace-time value passed to the decorated function's required
-        keyword-only ``host`` parameter.  This is for real host/device
-        contracts such as runtime TensorMap encoding; the returned values are
-        IR objects owned by this one function, not a second body to splice.
+    The block must be a static, one-dimensional multiple of 32, between 32 and
+    1024. Grid and cluster can be multidimensional. ``kernel_attrs`` supplies
+    compile-time CUDA attributes, including the occupancy contract used by
+    specialized warp roles.
     """
+    context = getattr(_TLS, "trace", None)
+    if context is None:
+        raise RuntimeError("device_entry is only valid inside a @txl.kernel body")
+    return _DeviceEntry(context, launch, kernel_attrs, backend_config)
+
+
+def kernel(*, allowed_func_calls: tuple[str, ...] = (), check_ir: bool = True, **obsolete):
+    """Trace a host function containing one explicit ``txl.device_entry``.
+
+    Annotations bind the host entry's ABI. The function prepares host values
+    and declares its launch configuration in the body, using those parameters
+    directly. Only values used by the device body become device parameters.
+    """
+
+    if obsolete:
+        raise TypeError(
+            f"Unsupported txl.kernel options {tuple(obsolete)}; pass BackendConfig to "
+            "Kernel.compile() or device_entry(backend_config=...)"
+        )
 
     def decorator(fn):
         sig = inspect.signature(fn)
-        host_param = sig.parameters.get("host")
-        if host_prelude is None:
-            if host_param is not None:
-                raise TypeError("keyword-only `host` requires host_prelude=")
-        elif host_param is None or host_param.kind is not inspect.Parameter.KEYWORD_ONLY:
-            raise TypeError("host_prelude= requires a keyword-only `host` parameter")
-        session = Session(fn.__name__, warps, arch, min_blocks_per_sm)
-        prev = getattr(_TLS, "session", None)
-        function_span = _callable_span(fn)
-        with IRBuilder() as ib:
-            with I.function_():
-                I.func_name_(fn.__name__)
-                # Keep the authored/default target on the Function itself.
-                # Consumers such as NumSim receive ``Kernel.func`` rather than
-                # the wrapper, so ``Kernel.arch`` alone loses an ISA fact that
-                # affects SM100 versus SM107 descriptor decoding.
-                I.func_attr({"global_symbol": fn.__name__, "tirx.cuda_arch": arch})
-                args = []
-                scalar_params = {
-                    pname: _scalar_param(pname, param.annotation)
-                    for pname, param in sig.parameters.items()
-                    if pname != "host" and isinstance(param.annotation, str)
-                }
-                for pname, param in sig.parameters.items():
-                    if pname == "host" and host_prelude is not None:
-                        continue
-                    if param.annotation is inspect.Parameter.empty:
-                        raise TypeError(f"kernel parameter {pname!r} needs an annotation")
-                    value = _declare_param(pname, param.annotation, scalar_params)
-                    session.params[pname] = value
-                    args.append(value)
-                host = host_prelude(session.params) if host_prelude is not None else None
-                with I.device_entry():
-                    # Omitted entirely when None: the codegen writes the second
-                    # __launch_bounds__ operand iff this attribute is present.
-                    if min_blocks_per_sm is not None:
-                        I.evaluate(I.cuda.launch_bounds_min_blocks_per_sm(min_blocks_per_sm))
-                    # txl binds the CTA scope only when requested. Otherwise the body
-                    # declares the original kernel's scope directly; the warp/thread
-                    # siblings below remain available to infer deferred ids used by
-                    # user closures.
-                    if grid is not False:
-                        session.cta_id = I.cta_id(_resolve_grid_dimensions(grid, session.params))
-                    # tirx-lite owns one flat CTA-local thread axis. A per-entry layout
-                    # switch would let kernels silently change the launch ABI (or
-                    # leave thread scope to a second builder owner), so it is not
-                    # part of the kernel DSL contract.
-                    session.warp_scope_id = I.warp_id([warps])
-                    session.lane_id = I.lane_id([32])
-                    session.thread_id = I.thread_id([session.nthreads])
-                    _TLS.session = session
-                    try:
-                        with _SourceSpanTracer(ib):
-                            if host_prelude is None:
-                                fn(*args)
-                            else:
-                                fn(*args, host=host)
-                        if session.specialize is not None:
-                            session.specialize.finalize()
-                        if session.pool is not None:
-                            session.pool.commit()
-                    finally:
-                        _TLS.session = prev
-        func = ib.get()
-        if function_span is not None:
-            # FunctionFrame intentionally constructs the function with an
-            # undefined span.  Preserve its generated body and attributes while
-            # giving the function itself the kernel declaration's location.
-            func = func.with_body(func.body, span=function_span)
+        params = {}
+        previous_trace = getattr(_TLS, "trace", None)
+        previous_session = getattr(_TLS, "session", None)
+        function_loc = _callable_loc(fn)
+        try:
+            _TLS.trace = None
+            _TLS.session = None
+            with IRBuilder() as ib:
+                with I.function_():
+                    I.func_name_(fn.__name__)
+                    I.func_attr({"global_symbol": fn.__name__})
+                    args, kwargs = [], {}
+                    scalar_params = {
+                        pname: _scalar_param(pname, param.annotation)
+                        for pname, param in sig.parameters.items()
+                        if isinstance(param.annotation, str)
+                    }
+                    for pname, param in sig.parameters.items():
+                        if param.annotation is inspect.Parameter.empty:
+                            raise TypeError(f"kernel parameter {pname!r} needs an annotation")
+                        value = _declare_param(pname, param.annotation, scalar_params)
+                        params[pname] = value
+                        if param.kind is inspect.Parameter.KEYWORD_ONLY:
+                            kwargs[pname] = value
+                        else:
+                            args.append(value)
+                    context = _TraceContext(fn.__name__, params, ib)
+                    _TLS.trace = context
+                    with _SourceLocationTracer(ib):
+                        try:
+                            fn(*args, **kwargs)
+                        except BaseException:
+                            if context.entry is not None:
+                                context.entry.__exit__(*sys.exc_info())
+                            raise
+                        if context.entry is None:
+                            raise RuntimeError("a txl.kernel must declare exactly one device_entry")
+                        context.entry.__exit__(None, None, None)
+                    session = context.entry.session
+            func = ib.get()
+        finally:
+            _TLS.trace = previous_trace
+            _TLS.session = previous_session
+        if function_loc is not None:
+            func = func.with_body(func.body, loc=function_loc)
         if session.specialize is not None:
-            # Adjacent role guards become an else-if chain. Done on the built
-            # body rather than with nested frames during the trace: a frame
-            # left open across sibling `with role:` blocks would swallow any
-            # CTA-scope code between them into the previous role's branch.
+            # Keep adjacent role guards mutually exclusive after tracing.
             func = session.specialize.chain_dispatch(func)
         if check_ir:
-            # Every tirx-lite build passes the low-level IR contract by default:
-            # direct global/shared buffer accesses and unlisted func_calls are
-            # trace-time errors, not something a later test run discovers.
             from .low_level_ir import check_low_level_ir
 
             check_low_level_ir(func, allowed_func_calls=allowed_func_calls)
@@ -614,22 +589,9 @@ def kernel(
     return decorator
 
 
-def cta_id(extents=None, preferred=None, dtype="int32"):
-    """CTA id owned by ``@txl.kernel``.
-
-    A one-dimensional grid returns its scalar scope id; a multidimensional
-    grid returns the corresponding TVM ``Array`` of scope ids. Passing
-    ``extents`` declares the scope directly for a ``grid=False`` kernel.
-    """
-    if extents is not None:
-        return I.cta_id(extents, preferred=preferred, dtype=dtype)
-    value = current().cta_id
-    if value is None:
-        raise RuntimeError(
-            "txl.cta_id() is unavailable because @txl.kernel set grid=False. "
-            "Declare it with txl.cta_id(extents) inside the kernel body."
-        )
-    return value
+def cta_id():
+    """Return the entry's CTA index, or its Array of indices for a multidimensional grid."""
+    return current().cta_id
 
 
 def thread_id():

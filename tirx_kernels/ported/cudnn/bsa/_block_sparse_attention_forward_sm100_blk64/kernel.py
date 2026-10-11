@@ -89,7 +89,7 @@ def _resolve_splits(value):
     return int(value)
 
 
-def make_forward_kernel(**config):
+def make_forward_kernel(*, backend_config=None, **config):
     batch = int(config["batch"])
     num_heads = int(config["num_q_heads"])
     if int(config["num_kv_heads"]) != num_heads:
@@ -107,7 +107,7 @@ def make_forward_kernel(**config):
     q_blocks = (seqlen_q + QUERY_TILE - 1) // QUERY_TILE
     grid = (q_blocks, num_heads if use_clc else num_heads * num_splits, batch)
 
-    @txl.kernel(warps=16, arch="sm_100a", min_blocks_per_sm=1, grid=grid)
+    @txl.kernel()
     def forward(
         q: txl.gptr[txl.bf16],
         k: txl.gptr[txl.bf16],
@@ -125,11 +125,27 @@ def make_forward_kernel(**config):
         # The warp-specialized TMA/TMEM producer in ``source_kernel.py`` is the
         # path this module actually launches; this loop is kept only as a
         # readable statement of the same contract.
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=grid, block=16 * 32, cluster=(q_blocks, num_heads, batch) if use_clc else None
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         if use_clc:
-            q_block, head, batch_idx = txl.cta_id_in_cluster([q_blocks, num_heads, batch])
+            q_block, head, batch_idx = (
+                txl.cuda.cluster_cta_id("x"),
+                txl.cuda.cluster_cta_id("y"),
+                txl.cuda.cluster_cta_id("z"),
+            )
             split = txl.int32(0)
         else:
-            q_block, head_split, batch_idx = txl.cta_id([q_blocks, num_heads * num_splits, batch])
+            q_block, head_split, batch_idx = (
+                txl.cuda.block_idx("x"),
+                txl.cuda.block_idx("y"),
+                txl.cuda.block_idx("z"),
+            )
             split = head_split // num_heads
             head = head_split - split * num_heads
 
@@ -225,7 +241,7 @@ def make_forward_kernel(**config):
     return forward
 
 
-def make_combine_kernel(**config):
+def make_combine_kernel(*, backend_config=None, **config):
     batch = int(config["batch"])
     num_heads = int(config["num_q_heads"])
     seqlen_q = int(config["seqlen_q"])
@@ -239,14 +255,24 @@ def make_combine_kernel(**config):
     smem_bytes = o_ring_offset + 4 * 16 * 64 * 4
     row_tiles = (seqlen_q * num_heads + 15) // 16
 
-    @txl.kernel(warps=4, arch="sm_100a", min_blocks_per_sm=1, grid=(row_tiles, 2, batch))
+    @txl.kernel()
     def combine(
         out_partial: txl.gptr[txl.f32],
         lse_partial: txl.gptr[txl.f32],
         out: txl.gptr[txl.bf16],
         lse: txl.gptr[txl.f32],
     ):
-        row_tile, dim_tile, batch_idx = txl.cta_id([row_tiles, 2, batch])
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=(row_tiles, 2, batch), block=4 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
+        row_tile, dim_tile, batch_idx = (
+            txl.cuda.block_idx("x"),
+            txl.cuda.block_idx("y"),
+            txl.cuda.block_idx("z"),
+        )
         tid = txl.thread_id()
         raw = txl.alloc_tensor((smem_bytes,), txl.u8, scope="shared.dyn", align=1024)
 
@@ -455,8 +481,8 @@ def make_combine_kernel(**config):
     return combine
 
 
-def get_kernel(**config):
-    forward = source_kernel.make_forward_kernel(**config).func
+def get_kernel(*, backend_config=None, **config):
+    forward = source_kernel.make_forward_kernel(**config, backend_config=backend_config).func
     if _resolve_splits(config["kv_splits"]) == 1:
         return [forward]
-    return [forward, make_combine_kernel(**config).func]
+    return [forward, make_combine_kernel(**config, backend_config=backend_config).func]

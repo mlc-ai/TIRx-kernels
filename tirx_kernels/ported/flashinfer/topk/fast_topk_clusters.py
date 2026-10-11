@@ -52,14 +52,13 @@ and ``num_clusters`` outside ``{1, 2, 4, 8}`` (the launcher degrades it to 1
 before the kernel sees it, ``:607-611``).
 """
 
-import os
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
 from tirx_kernels.ported.flashinfer.utils import topk_radix as R
 from tirx_kernels.ported.flashinfer.utils.filtered_topk_ops import st_global_bits
 from tirx_kernels.ported.flashinfer.utils.topk_harness import source_module, torch_dtype
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench, hardware_num_sms
+from tirx_kernels.runner import bench, hardware_num_sms, resolve_backend_config
 
 KERNEL_META = {
     "name": "fast_topk_clusters",
@@ -77,30 +76,6 @@ KERNEL_META = {
         {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
     ),
 }
-
-
-# `clusterCtaIdx.x` is requested only when the cluster is real; a one-CTA cluster
-# takes the plain form, as the sibling cluster kernels do.  The tag alone does not
-# produce a cluster launch -- the body must bind the scope.
-# The source writes `__cluster_dims__(NClusters, 1, 1)` unconditionally, so its
-# `NClusters == 1` entries still declare a one-CTA cluster: all 12 carry
-# `.reqnctapercluster 1, 1, 1` and still read `%cluster_ctarank`.
-#
-# TIRx cannot reproduce that. An extent-1 `cta_id_in_cluster` binding folds away
-# and the `clusterCtaIdx.x` tag then fails to resolve ("Cannot find thread var"),
-# so the tag must be gated on `nc > 1` -- which is what every cluster kernel in
-# this repo already does (`deepep/dispatch.py:192-196`,
-# `flashinfer/norm/rmsnorm.py:845-848`). The port therefore diverges from the
-# reference on exactly one launch attribute at `nc == 1`: no cluster dimension is
-# declared where the reference declares a trivial one. Nothing in the algorithm
-# depends on it -- at one CTA per cluster the peer sum and the epilogue range
-# claim are both compiled out, and rank is statically 0.
-def launch_tags(nc: int) -> list[str]:
-    tags = ["blockIdx.x"]
-    if nc > 1:
-        tags.append("clusterCtaIdx.x")
-    tags += ["threadIdx.x", "tirx.use_dyn_shared_memory"]
-    return tags
 
 
 # `__launch_bounds__(1024)` gives `.maxntid 1024` and nothing else: the export
@@ -163,11 +138,11 @@ def clusters_for(batch_size: int, seq_len: int) -> int:
     return 1
 
 
-def _tirx_clusters_for(batch_size: int, seq_len: int) -> int:
+def _tirx_clusters_for(batch_size: int, seq_len: int, *, backend_config=None) -> int:
     """Use row-level parallelism when it already supplies three Thor waves."""
     source_clusters = clusters_for(batch_size, seq_len)
     if (
-        os.environ.get(PREPARE_CUDA_ARCH_ENV, "sm_100a") == "sm_110a"
+        resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a"
         and source_clusters > 1
         and batch_size >= 3 * hardware_num_sms()
     ):
@@ -255,6 +230,8 @@ def get_kernel(
     mode: str = "plain",
     pattern: str = "unique",
     idx_dtype: str = "int32",
+    *,
+    backend_config=None,
     **kwargs: Any,
 ):
     """One PrimFunc per reachable specialization of `fast_topk_cuda_v4`.
@@ -266,7 +243,7 @@ def get_kernel(
     is32 = dtype == "float32"
     rounds = 4 if is32 else 2  # NRemainingRounds + 1 (:90)
     lshift_start = 8 * (4 if is32 else 2) - 8  # (:91)
-    nc = _tirx_clusters_for(batch, seq_len)
+    nc = _tirx_clusters_for(batch, seq_len, backend_config=backend_config)
     num_cached = num_cached_for_device(k)
     ovf_stride = seq_len // nc  # binding:47, from the row stride
     plain = mode == "plain"
@@ -391,7 +368,9 @@ def get_kernel(
         txl.tvm_storage_sync("shared")
         bin_ = txl.local_scalar("int32", init=txl.cast(R.ld_shared_u32(scal, THR), "int32"))
         with txl.If(bin_ < RADIX - 1), txl.Then():
-            txl.assign(k_rem, k_rem - txl.cast(R.ld_shared_u32(hist, 2 * RADIX + bin_ + 1), "int32"))
+            txl.assign(
+                k_rem, k_rem - txl.cast(R.ld_shared_u32(hist, 2 * RADIX + bin_ + 1), "int32")
+            )
 
     def _classify(
         hist,
@@ -417,9 +396,13 @@ def get_kernel(
         and the source keeps it in a register too.
         """
         if is32:
-            digit = txl.bitwise_and(txl.cast(txl.shift_right(bits, txl.uint32(shift)), "int32"), 0xFF)
+            digit = txl.bitwise_and(
+                txl.cast(txl.shift_right(bits, txl.uint32(shift)), "int32"), 0xFF
+            )
         else:
-            digit = txl.bitwise_and(txl.cast(txl.shift_right(bits, txl.uint16(shift)), "int32"), 0xFF)
+            digit = txl.bitwise_and(
+                txl.cast(txl.shift_right(bits, txl.uint16(shift)), "int32"), 0xFF
+            )
         d = txl.local_scalar("int32", init=digit)
         with txl.If(d > bin_):
             with txl.Then():
@@ -427,7 +410,9 @@ def get_kernel(
                 # commented out at :195-197; the writeback's `offs < TopK` is what
                 # bounds the global store. Reproduce, do not repair.
                 slot = R.atom_shared_add_u32(scal, FINAL, txl.uint32(1))
-                R.st_shared_u32(topk_inds, txl.cast(slot, "int32"), txl.reinterpret("uint32", index))
+                R.st_shared_u32(
+                    topk_inds, txl.cast(slot, "int32"), txl.reinterpret("uint32", index)
+                )
             with txl.Else():
                 with txl.If(d == bin_), txl.Then():
                     if not last:
@@ -444,7 +429,9 @@ def get_kernel(
                         with txl.If(slot < num_cached):
                             with txl.Then():
                                 R.st_shared_u32(
-                                    cidx, phase * num_cached + slot, txl.reinterpret("uint32", index)
+                                    cidx,
+                                    phase * num_cached + slot,
+                                    txl.reinterpret("uint32", index),
                                 )
                                 R.st_shared_u32(
                                     cbits, phase * num_cached + slot, txl.cast(bits, "uint32")
@@ -467,11 +454,13 @@ def get_kernel(
                         with txl.If(keep == 1), txl.Then():
                             if is32:
                                 nb = txl.bitwise_and(
-                                    txl.cast(txl.shift_right(bits, txl.uint32(shift - 8)), "int32"), 0xFF
+                                    txl.cast(txl.shift_right(bits, txl.uint32(shift - 8)), "int32"),
+                                    0xFF,
                                 )
                             else:
                                 nb = txl.bitwise_and(
-                                    txl.cast(txl.shift_right(bits, txl.uint16(shift - 8)), "int32"), 0xFF
+                                    txl.cast(txl.shift_right(bits, txl.uint16(shift - 8)), "int32"),
+                                    0xFF,
                                 )
                             R.atom_shared_add_u32(hist, (phase ^ 1) * RADIX + nb, txl.uint32(1))
                     else:
@@ -563,7 +552,9 @@ def get_kernel(
                 R.ld_shared_u32(cached_bits, (phase ^ 1) * num_cached + i),
                 txl.local_scalar(
                     "int32",
-                    init=txl.cast(R.ld_shared_u32(cached_idx, (phase ^ 1) * num_cached + i), "int32"),
+                    init=txl.cast(
+                        R.ld_shared_u32(cached_idx, (phase ^ 1) * num_cached + i), "int32"
+                    ),
                 ),
                 bin_t,
                 phase,
@@ -604,7 +595,7 @@ def get_kernel(
 
     def _emit(logits, out_idx, out_val, seq_lens_g, aux, ovf):
         cta = txl.cta_id()
-        rank = txl.cta_id_in_cluster([nc]) if nc > 1 else txl.int32(0)
+        rank = txl.cuda.cluster_cta_id("x") if nc > 1 else txl.int32(0)
         tid = txl.thread_id()
         row = cta // nc
         warp = tid >> 5
@@ -745,7 +736,9 @@ def get_kernel(
                 vbase = (rank * BLOCK_THREADS + tid) * 4
                 # Snapshotted: as a loop bound it is re-evaluated every trip.
                 vec_end = txl.local_scalar("int32", init=(row_len // 4) * 4)
-                with txl.serial(vbase, vec_end, step=BLOCK_THREADS * nc * 4, unroll=vec_unroll) as i:
+                with txl.serial(
+                    vbase, vec_end, step=BLOCK_THREADS * nc * 4, unroll=vec_unroll
+                ) as i:
                     w = _ld_vec4(logits, logit_base + i, is32)
                     with txl.unroll(4) as j:
                         if is32:
@@ -874,18 +867,25 @@ def get_kernel(
 
     if plain:
 
-        @txl.kernel(warps=BLOCK_THREADS // 32, arch="sm_100a", grid=grid)
+        @txl.kernel()
         def fast_topk_clusters_kernel(
             logits: txl.gptr[val_t, (batch * seq_len,)],
             indices: txl.gptr[idx_t, (batch * k,)],
             values: txl.gptr[val_t, (batch * k,)],
             overflow: txl.gptr[txl.i32, (batch * 4 * ovf_stride * nc,)],
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=grid, block=BLOCK_THREADS, cluster=nc if nc > 1 else None
+                ),
+                backend_config=resolve_backend_config(backend_config),
+            )
+
             _emit(logits, indices, values, None, None, overflow)
 
     else:
 
-        @txl.kernel(warps=BLOCK_THREADS // 32, arch="sm_100a", grid=grid)
+        @txl.kernel()
         def fast_topk_clusters_kernel(
             logits: txl.gptr[val_t, (batch * seq_len,)],
             indices: txl.gptr[idx_t, (batch * k,)],
@@ -893,9 +893,16 @@ def get_kernel(
             aux: txl.gptr[txl.i32, (batch * seq_len if pt else batch,)],
             overflow: txl.gptr[txl.i32, (batch * 4 * ovf_stride * nc,)],
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=grid, block=BLOCK_THREADS, cluster=nc if nc > 1 else None
+                ),
+                backend_config=resolve_backend_config(backend_config),
+            )
+
             _emit(logits, indices, None, seq_lens, aux, overflow)
 
-    return fast_topk_clusters_kernel.func.with_attr("tirx.launch_tags", launch_tags(nc))
+    return fast_topk_clusters_kernel.func
 
 
 # ---------------------------------------------------------------------------
@@ -1171,7 +1178,7 @@ def compare_outputs(data: dict[str, Any], mine: dict[str, Any], theirs: dict[str
             )
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     import unittest
 
     try:
@@ -1187,7 +1194,9 @@ def run_test(**config: Any) -> None:
     data = prepare_data(**cfg)
 
     mine = alloc_outputs(data)
-    ex = compile_kernel(get_kernel(**cfg))
+    ex = compile_kernel(
+        get_kernel(**cfg, backend_config=backend_config), backend_config=backend_config
+    )
     ex(*build_tirx_args(data, mine))
     torch.cuda.synchronize()
 
@@ -1198,7 +1207,7 @@ def run_test(**config: Any) -> None:
     compare_outputs(data, mine, theirs)
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU.
 
     The reference is NOT built here. `source_module()` JITs the FlashInfer module,
@@ -1211,11 +1220,28 @@ def prepare_bench(**kwargs: Any):
 
     cfg = _normalize_config(kwargs)
     return prepared_gpu_benchmark(
-        run_gpu, {"config": cfg, "executable": compile_kernel(get_kernel(**cfg))}
+        run_gpu,
+        {
+            "config": cfg,
+            "executable": compile_kernel(
+                get_kernel(**cfg, backend_config=backend_config), backend_config=backend_config
+            ),
+        },
+        backend_config=backend_config,
     )
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **kwargs,
+):
     """Kernel-only comparison against the source launch.
 
     Both implementations ALTERNATE over the same two working sets in opposite
@@ -1319,8 +1345,8 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(**config: Any):
-    prepared = prepare_bench(**config)
+def run_bench(*, backend_config=None, **config: Any):
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu()
 
 

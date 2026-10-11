@@ -48,6 +48,9 @@ def main():
         default=None,
         help="Run only configs requiring this many GPUs (world_size/num_processes, default 1)",
     )
+    from tvm.backend.config import add_backend_config_argument
+
+    add_backend_config_argument(parser)
     args = parser.parse_args()
     if args.num_gpus is not None and args.num_gpus < 1:
         parser.error("--num-gpus must be positive")
@@ -70,7 +73,7 @@ def main():
     for name, cfg in _selected_configs(all_kernels, label=args.config, num_gpus=args.num_gpus):
         label = cfg.get("label", "default")
         try:
-            run_kernel_test(name, cfg, registry=all_kernels)
+            run_kernel_test(name, cfg, registry=all_kernels, backend_config=args.backend_config)
             results.append({"kernel": name, "config": label, "status": "PASS"})
             passed += 1
             if not args.json:

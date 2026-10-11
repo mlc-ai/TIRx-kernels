@@ -210,12 +210,17 @@ def _store_state_row(
     STATE_VALUES_PER_THREAD,
     HAS_INTERMEDIATE_STATES,
     PHILOX_ROUNDS,
+    backend_config=None,
 ):
     if PHILOX_ROUNDS > 0:
         pair0 = txl.local_scalar("uint32")
         pair1 = txl.local_scalar("uint32")
-        _cvt_rs_f16x2_f32(pair0, values[wr, 1], values[wr, 0], random_words[0])
-        _cvt_rs_f16x2_f32(pair1, values[wr, 3], values[wr, 2], random_words[1])
+        _cvt_rs_f16x2_f32(
+            pair0, values[wr, 1], values[wr, 0], random_words[0], backend_config=backend_config
+        )
+        _cvt_rs_f16x2_f32(
+            pair1, values[wr, 3], values[wr, 2], random_words[1], backend_config=backend_config
+        )
         if HAS_INTERMEDIATE_STATES:
             txl.ptx.st.global_.v2.b32(intermediate_states.ptr_to([intermediate_base]), pair0, pair1)
             with txl.If(write_final != 0), txl.Then():
@@ -234,7 +239,9 @@ def _store_state_row(
                     hi = txl.local_scalar("uint64")
                     txl.ptx.mov.b64(lo, words[0], words[1])
                     txl.ptx.mov.b64(hi, words[2], words[3])
-                    txl.ptx.st.global_.v2.b64(intermediate_states.ptr_to([intermediate_base]), lo, hi)
+                    txl.ptx.st.global_.v2.b64(
+                        intermediate_states.ptr_to([intermediate_base]), lo, hi
+                    )
                     txl.ptx.st.global_.v2.b64(state.ptr_to([final_base]), lo, hi)
                 with txl.Else():
                     txl.ptx.st.global_.v4.b32(
@@ -262,7 +269,9 @@ def _store_state_row(
                     with txl.Then():
                         word = txl.local_scalar("uint32")
                         txl.ptx.mov.b32(word, bits[0], bits[1])
-                        txl.ptx.st.global_.b32(intermediate_states.ptr_to([intermediate_base]), word)
+                        txl.ptx.st.global_.b32(
+                            intermediate_states.ptr_to([intermediate_base]), word
+                        )
                         txl.ptx.st.global_.b32(state.ptr_to([final_base]), word)
                     with txl.Else():
                         txl.ptx.st.global_.v2.b16(
@@ -366,7 +375,7 @@ def _specialization(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     spec = _specialization(kwargs)
     NHEADS = spec["NHEADS"]
     DIM = spec["DIM"]
@@ -386,9 +395,7 @@ def get_kernel(**kwargs: Any):
     WEIGHT_DTYPE = spec["WEIGHT_DTYPE"]
     INDEX_DTYPE = spec["INDEX_DTYPE"]
 
-    @txl.kernel(
-        warps=16, arch="sm_100a", min_blocks_per_sm=2, grid=(spec["BATCH"], spec["NUM_HEAD_CHUNKS"])
-    )
+    @txl.kernel()
     def selective_state_update_mtp_vertical(
         tensor_state: txl.TensorMap,
         tensor_b: txl.TensorMap,
@@ -438,6 +445,14 @@ def get_kernel(**kwargs: Any):
         update_state: txl.i32,
         pad_slot_id: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(spec["BATCH"], spec["NUM_HEAD_CHUNKS"]), block=16 * 32
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
+            backend_config=backend_config,
+        )
+
         batch_i, head_chunk = txl.cta_id()
         head_base = head_chunk * 3
         if spec["HAS_STATE_INDICES"]:
@@ -526,7 +541,10 @@ def get_kernel(**kwargs: Any):
                     )
                     if HAS_DT_BIAS:
                         txl.ptx["add.ftz.f32"](dt_value, dt_value, bias_value)
-                    with txl.If(txl.And(dt_softplus != 0, dt_value <= txl.float32(20.0))), txl.Then():
+                    with (
+                        txl.If(txl.And(dt_softplus != 0, dt_value <= txl.float32(20.0))),
+                        txl.Then(),
+                    ):
                         mul_0 = txl.local_scalar("float32")
                         txl.ptx["mul.ftz.f32"](mul_0, dt_value, txl.float32(_LOG2_E))
                         exp_arg: txl.float32 = mul_0
@@ -540,11 +558,14 @@ def get_kernel(**kwargs: Any):
                         log_value: txl.float32 = log2_0
                         txl.ptx["mul.ftz.f32"](dt_value, log_value, txl.float32(_LN_2))
                     txl.ptx.st.shared.b32(
-                        s_dt.ptr_to([group * NTOKENS + dt_step]), txl.reinterpret("uint32", dt_value)
+                        s_dt.ptr_to([group * NTOKENS + dt_step]),
+                        txl.reinterpret("uint32", dt_value),
                     )
 
             _mbarrier_arrive_wait(bar_full_buf.ptr_to([group]))
-            lane_indicator: txl.float32 = txl.if_then_else(lane == 0, txl.float32(1.0), txl.float32(0.0))
+            lane_indicator: txl.float32 = txl.if_then_else(
+                lane == 0, txl.float32(1.0), txl.float32(0.0)
+            )
             seed_u64: txl.uint64 = txl.reinterpret("uint64", random_seed)
             seed_lo: txl.uint32 = txl.cast(seed_u64, "uint32")
             seed_hi: txl.uint32 = txl.cast(txl.shift_right(seed_u64, txl.uint64(32)), "uint32")
@@ -594,7 +615,9 @@ def get_kernel(**kwargs: Any):
                         elif DSTATE == 96:
                             with txl.unroll(3) as ii:
                                 sload_0 = txl.local_scalar("uint16")
-                                txl.ptx.ld.shared.b16(sload_0, s_state_u16.ptr_to([state_index + ii]))
+                                txl.ptx.ld.shared.b16(
+                                    sload_0, s_state_u16.ptr_to([state_index + ii])
+                                )
                                 txl.ptx.mov.b16(state_bits[ii], sload_0)
                         else:
                             txl.ptx.ld.shared.v4.b16(
@@ -757,6 +780,7 @@ def get_kernel(**kwargs: Any):
                                             STATE_VALUES_PER_THREAD=STATE_VALUES_PER_THREAD,
                                             HAS_INTERMEDIATE_STATES=True,
                                             PHILOX_ROUNDS=PHILOX_ROUNDS,
+                                            backend_config=backend_config,
                                         )
                                 with txl.Else():
                                     with txl.unroll(4) as wr:
@@ -785,6 +809,7 @@ def get_kernel(**kwargs: Any):
                                             STATE_VALUES_PER_THREAD=STATE_VALUES_PER_THREAD,
                                             HAS_INTERMEDIATE_STATES=True,
                                             PHILOX_ROUNDS=PHILOX_ROUNDS,
+                                            backend_config=backend_config,
                                         )
                         else:
                             with txl.If(write_final != 0), txl.Then():
@@ -813,6 +838,7 @@ def get_kernel(**kwargs: Any):
                                         STATE_VALUES_PER_THREAD=STATE_VALUES_PER_THREAD,
                                         HAS_INTERMEDIATE_STATES=False,
                                         PHILOX_ROUNDS=PHILOX_ROUNDS,
+                                        backend_config=backend_config,
                                     )
                     txl.assign(step, step + 1)
                 txl.assign(pass_idx, pass_idx + 1)
@@ -998,7 +1024,9 @@ def get_kernel(**kwargs: Any):
                                 output_bits[2],
                                 output_bits[3],
                             )
-                    txl.ptx.mbarrier.arrive.shared__cta.b64(bar_done_buf.ptr_to([group]), txl.uint32(1))
+                    txl.ptx.mbarrier.arrive.shared__cta.b64(
+                        bar_done_buf.ptr_to([group]), txl.uint32(1)
+                    )
 
         with update:
             with txl.If(state_batch == txl.cast(pad_slot_id, "int64")):
@@ -1209,15 +1237,20 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
     return result
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     expected_rejection = kwargs.pop("expected_rejection", None)
     if expected_rejection is not None:
         try:
@@ -1233,7 +1266,9 @@ def run_test(**kwargs: Any) -> None:
     from tirx_kernels.runner import compile_kernel
 
     case = prepare_data(**kwargs)
-    executable = compile_kernel(get_kernel(**kwargs))
+    executable = compile_kernel(
+        get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+    )
     executable(*_tirx_args(case))
     torch.cuda.synchronize()
     _run_reference(case)
@@ -1249,6 +1284,7 @@ def run_gpu(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1292,9 +1328,10 @@ def run_bench(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    return prepare_bench(**kwargs).run_gpu(
+    return prepare_bench(**kwargs, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

@@ -460,7 +460,7 @@ class Semaphore:
                         rs_queue.enqueue(signal_rank, TaskType.RS.value, m_idx, n_idx)
 
 
-def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
+def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, backend_config=None):
     """Trace one direct K specialization with its frozen host ABI."""
 
     M = config.M
@@ -475,7 +475,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
     RS_M_CLUSTERS = config.rs_m_clusters
     RS_N_CLUSTERS = config.rs_n_clusters
 
-    def host_prelude(params):
+    def prepare_host(params):
         A_tensor_map = txl.stack_alloca("tensormap", 1)
         B_tensor_map = txl.stack_alloca("tensormap", 1)
         D_tensor_map = txl.stack_alloca("tensormap", 1)
@@ -535,14 +535,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         )
         return A_tensor_map, B_tensor_map, D_tensor_map
 
-    @txl.kernel(
-        warps=NUM_THREADS // 32,
-        arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=SM_NUMBER,
-        host_prelude=host_prelude,
-        allowed_func_calls=_NVSHMEM_RUNTIME_FUNC_CALLS,
-    )
+    @txl.kernel(allowed_func_calls=_NVSHMEM_RUNTIME_FUNC_CALLS)
     def test_mma_ss_tma_2sm_persistent(
         A: txl.gptr[txl.f16, (M, K_LOCAL)],
         B: txl.gptr[txl.f16, (N, K_LOCAL)],
@@ -558,9 +551,33 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         rs_head: txl.gptr[txl.i32, (1,)],
         rs_tail: txl.gptr[txl.i32, (1,)],
         exit_barrier: txl.gptr[txl.u32, (2,)],
-        *,
-        host,
     ):
+        host = prepare_host(
+            {
+                "A": A,
+                "B": B,
+                "gemm_out": gemm_out,
+                "semaphore": semaphore,
+                "out": out,
+                "gemm_task_types": gemm_task_types,
+                "gemm_task_idxs": gemm_task_idxs,
+                "gemm_head": gemm_head,
+                "gemm_tail": gemm_tail,
+                "rs_task_types": rs_task_types,
+                "rs_task_idxs": rs_task_idxs,
+                "rs_head": rs_head,
+                "rs_tail": rs_tail,
+                "exit_barrier": exit_barrier,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=SM_NUMBER, block=NUM_THREADS // 32 * 32, cluster=(M_CLUSTER, N_CLUSTER)
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         A_tensor_map, B_tensor_map, D_tensor_map = host
         gemm_out = gemm_out.view(M, N)
         semaphore = semaphore.view(LOCAL_M // TILE_M, N // TILE_N)
@@ -575,7 +592,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         rs_tail = rs_tail.view(1)
         exit_barrier = exit_barrier.view(2)
 
-        cbx_expr, _ = txl.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
+        cbx_expr, _ = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
         cbx = cbx_expr
         bx = txl.cta_id()
         warp_id_in_cta = txl.warp_id()
@@ -971,7 +988,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
     return test_mma_ss_tma_2sm_persistent
 
 
-def build_kernel(config: GemmRSConfig | None = None) -> tvm.IRModule:
+def build_kernel(config: GemmRSConfig | None = None, *, backend_config=None) -> tvm.IRModule:
     config = config or derive_config()
     requested = (config.M, config.N, config.total_k, config.world_size)
     active = (M, N, TOTAL_K, WORLD_SIZE)
@@ -988,8 +1005,8 @@ def build_kernel(config: GemmRSConfig | None = None) -> tvm.IRModule:
                 _SPECIALIZATION_WORLD_SIZE_ENV: config.world_size,
             },
         )
-        return specialized.build_kernel()
-    device = _make_device_kernel(config)
+        return specialized.build_kernel(backend_config=backend_config)
+    device = _make_device_kernel(config, backend_config=backend_config)
     return tvm.IRModule({FUSED_DEVICE_ENTRYPOINT: device.func})
 
 
@@ -1012,12 +1029,14 @@ def get_kernel(
     world_size: int = 4,
     dtype: str = DTYPE,
     scheduler: str = "dynamic",
+    *,
+    backend_config=None,
     **_kwargs: Any,
 ) -> tvm.IRModule:
     """Build the hand-transcribed fused kernel directly, without the megakernel DSL."""
 
     config = _config(M, N, K, world_size, dtype, scheduler)
-    return build_kernel(config)
+    return build_kernel(config, backend_config=backend_config)
 
 
 def _get_benchmark_kernel(
@@ -1027,8 +1046,12 @@ def _get_benchmark_kernel(
     world_size: int = 4,
     dtype: str = DTYPE,
     scheduler: str = "dynamic",
+    *,
+    backend_config=None,
 ) -> tvm.IRModule:
-    return get_kernel(M, N, K, world_size, dtype, scheduler=scheduler)
+    return get_kernel(
+        M, N, K, world_size, dtype, scheduler=scheduler, backend_config=backend_config
+    )
 
 
 def prepare_data(
@@ -1369,13 +1392,15 @@ def run_test(
     dtype: str = DTYPE,
     seed: int = 42,
     scheduler: str = "dynamic",
+    *,
+    backend_config=None,
     **_kwargs: Any,
 ) -> None:
     """Validate the direct port for 20 reset/relaunch cycles."""
 
     _config(M, N, K, world_size, dtype, scheduler)
     run_distributed(
-        get_kernel(M, N, K, world_size, dtype, scheduler=scheduler),
+        get_kernel(M, N, K, world_size, dtype, scheduler=scheduler, backend_config=backend_config),
         world_size=world_size,
         worker=_run_worker,
         mode="test",
@@ -1388,6 +1413,7 @@ def run_test(
             "seed": seed,
             "scheduler": scheduler,
         },
+        backend_config=backend_config,
     )
 
 
@@ -1404,6 +1430,7 @@ def run_bench(
     rounds: int = 1,
     cooldown_s: float = 1.0,
     scheduler: str = "dynamic",
+    backend_config=None,
     **_kwargs: Any,
 ) -> dict[str, Any]:
     """Benchmark the direct port and external baselines."""
@@ -1414,11 +1441,17 @@ def run_bench(
     if warmup is not None or repeat is not None:
         raise ValueError("timer='kineto' uses fixed iteration counts and rejects overrides")
     return prepare_bench(
-        M=M, N=N, K=K, world_size=world_size, dtype=dtype, scheduler=scheduler
+        M=M,
+        N=N,
+        K=K,
+        world_size=world_size,
+        dtype=dtype,
+        scheduler=scheduler,
+        backend_config=backend_config,
     ).run_gpu(warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s)
 
 
-def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
+def run_gpu(prepared, *, backend_config=None, **kwargs: Any) -> dict[str, Any]:
     """Start distributed ranks only after the complete GPU claim exists."""
     return prepared.run_gpu(**kwargs)
 
@@ -1431,6 +1464,7 @@ def prepare_bench(
     dtype: str = DTYPE,
     *,
     scheduler: str = "dynamic",
+    backend_config=None,
     **_kwargs: Any,
 ):
     """Compile/export before assignment; ranks start CUDA in run_gpu."""
@@ -1438,7 +1472,9 @@ def prepare_bench(
 
     _config(M, N, K, world_size, dtype, scheduler)
     state = prepare_distributed_bench(
-        _get_benchmark_kernel(M, N, K, world_size, dtype, scheduler=scheduler),
+        _get_benchmark_kernel(
+            M, N, K, world_size, dtype, scheduler=scheduler, backend_config=backend_config
+        ),
         world_size=world_size,
         worker=_run_worker,
         worker_kwargs={
@@ -1450,8 +1486,15 @@ def prepare_bench(
             "scheduler": scheduler,
         },
         required_timer="kineto",
+        backend_config=backend_config,
     )
-    return prepared_gpu_benchmark(run_gpu, state, required_num_gpus=world_size, close=state.close)
+    return prepared_gpu_benchmark(
+        run_gpu,
+        state,
+        required_num_gpus=world_size,
+        close=state.close,
+        backend_config=backend_config,
+    )
 
 
 __all__ = [

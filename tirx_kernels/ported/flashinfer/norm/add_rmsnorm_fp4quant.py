@@ -43,7 +43,7 @@ from tirx_kernels.ported.flashinfer.norm.rmsnorm_fp4quant import (
     _widen_and_scale_16,
 )
 from tirx_kernels.ported.flashinfer.utils.fp_quant import absmax_8, hmax2
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import bench, cache_backend_config
 
 KERNEL_META = {
     "name": "flashinfer_add_rmsnorm_fp4quant",
@@ -789,7 +789,7 @@ def _validate(config: dict[str, Any]) -> None:
         raise ValueError("scale_format must be e4m3 or ue8m0")
 
 
-def get_kernel(**config: Any):
+def get_kernel(*, backend_config=None, **config: Any):
     """Return one source-faithful Add/RMSNorm/FP4 specialization."""
     _validate(config)
     input_dtype = str(config["input_dtype"])
@@ -843,14 +843,12 @@ def get_kernel(**config: Any):
             txl.ptx.griddepcontrol.wait()
 
         if cluster_n > 1:
-            block_x_raw, block_y_raw = txl.cta_id(
-                [txl.cast(txl.ceildiv(runtime_M, txl.int32(rows)), "int32"), cluster_n]
-            )
-            _, cta_rank_raw = txl.cta_id_in_cluster([1, cluster_n], preferred=[1, cluster_n])
+            block_x_raw, block_y_raw = (txl.cuda.block_idx("x"), txl.cuda.block_idx("y"))
+            _, cta_rank_raw = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
             block_y: txl.int32 = txl.cast(block_y_raw, "int32")
             cta_rank: txl.int32 = txl.cast(cta_rank_raw, "int32")
         else:
-            block_x_raw = txl.cta_id([txl.cast(txl.ceildiv(runtime_M, txl.int32(rows)), "int32")])
+            block_x_raw = txl.cuda.block_idx("x")
             block_y = txl.int32(0)
             cta_rank = txl.int32(0)
 
@@ -1202,7 +1200,7 @@ def get_kernel(**config: Any):
         if enable_pdl:
             txl.ptx.griddepcontrol.launch_dependents()
 
-    @txl.kernel(warps=threads // 32, arch="sm_100a", grid=False)
+    @txl.kernel()
     def flashinfer_add_rmsnorm_fp4quant(
         x: txl.gptr[input_dtype],
         residual: txl.gptr[input_dtype],
@@ -1215,7 +1213,20 @@ def get_kernel(**config: Any):
         runtime_M: txl.i32,
         runtime_eps: txl.f32,
     ):
-        txl.cuda.required_block_size(threads, 1, 1, 1, cluster_n, 1)
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(txl.cast(txl.ceildiv(runtime_M, txl.int32(rows)), "int32"), cluster_n)
+                if cluster_n > 1
+                else (txl.cast(txl.ceildiv(runtime_M, txl.int32(rows)), "int32"),),
+                block=threads // 32 * 32,
+                cluster=(1, cluster_n) if cluster_n > 1 else None,
+                preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
+                programmatic_stream_serialization=enable_pdl,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(required_block_size=True),
+            backend_config=backend_config,
+        )
+
         kernel_body(
             x,
             residual,
@@ -1229,16 +1240,7 @@ def get_kernel(**config: Any):
             runtime_eps,
         )
 
-    launch_params = ["blockIdx.x"]
-    if cluster_n > 1:
-        launch_params.extend(["blockIdx.y", "clusterCtaIdx.x", "clusterCtaIdx.y"])
-    launch_params.append("threadIdx.x")
-    if enable_pdl:
-        launch_params.append("tirx.use_programtic_dependent_launch")
-    launch_params.append("tirx.use_dyn_shared_memory")
-    return flashinfer_add_rmsnorm_fp4quant.func.with_attr(
-        "tirx.kernel_launch_params", launch_params
-    )
+    return flashinfer_add_rmsnorm_fp4quant.func
 
 
 def prepare_data(**config: Any):
@@ -1417,7 +1419,7 @@ def _launch_tirx(executable, data, output, config: dict[str, Any]):
     )
 
 
-@functools.cache
+@cache_backend_config
 def _compiled_test_specialization(
     input_dtype: str,
     H: int,
@@ -1427,6 +1429,8 @@ def _compiled_test_specialization(
     output_both_sf_layouts: bool,
     enable_pdl: bool,
     output_norm: bool,
+    *,
+    backend_config=None,
 ):
     from tirx_kernels.runner import compile_kernel
 
@@ -1448,7 +1452,9 @@ def _compiled_test_specialization(
             global_scale_mode="none",
             allocation="preallocated",
             data_mode="random",
-        )
+            backend_config=backend_config,
+        ),
+        backend_config=backend_config,
     )
 
 
@@ -1709,7 +1715,7 @@ def _check_public_allocation(reference, reference_data, config: dict[str, Any]) 
         raise AssertionError("public residual update differs from direct source kernel")
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     """Compile, launch, and validate one source-domain specialization."""
     import torch
 
@@ -1730,6 +1736,7 @@ def run_test(**config: Any) -> None:
         bool(config["output_both_sf_layouts"]),
         bool(config["enable_pdl"]),
         bool(config["output_norm"]),
+        backend_config=backend_config,
     )
     if _launch_tirx(executable, tirx_data, tirx_output, config) is not None:
         raise AssertionError("TIRx AddRMSNormFP4Quant ABI must return None")
@@ -1749,16 +1756,29 @@ def run_test(**config: Any) -> None:
     _check_public_allocation(source_output, source_data, config)
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Compile the specialization before the bench suite assigns a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(config), "executable": compile_kernel(get_kernel(**config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(config),
+        "executable": compile_kernel(
+            get_kernel(**config, backend_config=backend_config), backend_config=backend_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
-    prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs: Any
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **kwargs: Any,
 ):
     """Build and prevalidate independent TIRx and CuTeDSL launch closures."""
     import torch
@@ -1802,9 +1822,18 @@ def run_gpu(
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config: Any):
+def run_bench(
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **config: Any,
+):
     """Benchmark one specialization against the CuTeDSL kernel reference."""
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

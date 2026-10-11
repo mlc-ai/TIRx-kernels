@@ -33,7 +33,6 @@ IKET_EVENT_NAMES = (
     "h64-k-rope-load",
 )
 
-LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
 
 BAR_WG0_SYNC = 0
 BAR_WG0_WARP02 = 1
@@ -242,7 +241,9 @@ def _ring_mod3(value: Any, max_value: int) -> Any:
     if max_value <= 8:
         packed_mod3 = txl.uint32(0x10210210)
         shift = txl.cast(value, "uint32") * txl.uint32(4)
-        return txl.cast(txl.bitwise_and(txl.shift_right(packed_mod3, shift), txl.uint32(0xF)), "int32")
+        return txl.cast(
+            txl.bitwise_and(txl.shift_right(packed_mod3, shift), txl.uint32(0xF)), "int32"
+        )
 
     max_offset = (max_value // NUM_BUFS) * NUM_BUFS
     result = value - max_offset
@@ -255,14 +256,18 @@ def _ring_phase_parity(value: Any, max_value: int) -> Any:
     if max_value <= 8:
         packed_phase = txl.uint32(0x38)
         return txl.cast(
-            txl.bitwise_and(txl.shift_right(packed_phase, txl.cast(value, "uint32")), txl.uint32(1)),
+            txl.bitwise_and(
+                txl.shift_right(packed_phase, txl.cast(value, "uint32")), txl.uint32(1)
+            ),
             "int32",
         )
 
     max_offset = (max_value // NUM_BUFS) * NUM_BUFS
     result = txl.int32((max_offset // NUM_BUFS) & 1)
     for offset in range(max_offset, 0, -NUM_BUFS):
-        result = txl.Select(value < offset, txl.int32(((offset - NUM_BUFS) // NUM_BUFS) & 1), result)
+        result = txl.Select(
+            value < offset, txl.int32(((offset - NUM_BUFS) // NUM_BUFS) & 1), result
+        )
     return result
 
 
@@ -282,6 +287,8 @@ def make_kernel(
     have_attn_sink,
     have_topk_length,
     sm_scale_div_log2,
+    *,
+    backend_config=None,
 ):
     """Trace the kernel for one specialization.
 
@@ -305,7 +312,7 @@ def make_kernel(
         """orig:290-302. Same."""
         return _ring_phase_parity(value, max_k_blocks)
 
-    def host_prelude(params):
+    def prepare_host(params):
         q = params["q"]
         kv = params["kv"]
         out = params["out"]
@@ -387,7 +394,7 @@ def make_kernel(
             )
         return kv_part1, kv_part0, out_part1, out_part0, q_nope, q_rope
 
-    @txl.kernel(warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=s_q, host_prelude=host_prelude)
+    @txl.kernel()
     def sparse_flashmla_prefill_head64_phase1_kernel(
         q: txl.gptr[txl.bf16, (s_q, h_q, d_qk)],
         kv: txl.gptr[txl.bf16, (s_kv * stride_kv_s_kv,)],
@@ -397,9 +404,25 @@ def make_kernel(
         out: txl.gptr[txl.bf16, (s_q, h_q, D_V)],
         max_logits: txl.gptr[txl.f32, (s_q, h_q)],
         lse: txl.gptr[txl.f32, (s_q, h_q)],
-        *,
-        host,
     ):
+        host = prepare_host(
+            {
+                "q": q,
+                "kv": kv,
+                "indices": indices,
+                "attn_sink": attn_sink,
+                "topk_length": topk_length,
+                "out": out,
+                "max_logits": max_logits,
+                "lse": lse,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=s_q, block=12 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         (
             kv_part1_tensormap,
             kv_part0_tensormap,
@@ -418,7 +441,7 @@ def make_kernel(
         # so the port reads that rather than rebuilding it.
         warp_idx = txl.warp_id()
         lane_idx = txl.lane_id()
-        idx_in_warpgroup = txl.thread_id_in_wg([128])
+        idx_in_warpgroup = txl.cuda.thread_in_warpgroup()
         s_q_idx = txl.cta_id()
         topk_len_buf = txl.local_scalar("int32", init=txl.int32(topk))
         if have_topk_length:
@@ -490,7 +513,11 @@ def make_kernel(
         if have_rope:
             q_rope_cp_desc = txl.local_scalar("uint64")
             txl.cuda.tcgen05.encode_matrix_descriptor(
-                txl.address_of(q_rope_cp_desc), txl.reinterpret(txl.handle().ty, txl.uint64(0)), 1, 32, 2
+                txl.address_of(q_rope_cp_desc),
+                txl.reinterpret(txl.handle().ty, txl.uint64(0)),
+                1,
+                32,
+                2,
             )
         if not local_mma_desc:
             pv_a_lo_desc = txl.SmemDescriptor()
@@ -551,7 +578,9 @@ def make_kernel(
                 ),
                 "uint64",
             )
-            return txl.bitwise_or(txl.bitwise_and(desc, txl.bitwise_not(txl.uint64(0x3FFF))), start_addr)
+            return txl.bitwise_or(
+                txl.bitwise_and(desc, txl.bitwise_not(txl.uint64(0x3FFF))), start_addr
+            )
 
         def mul_f32x2(values, idx, multiplier):
             """orig:93-100, the `@txl.inline mul_f32x2`, as a kernel-local closure.
@@ -575,7 +604,9 @@ def make_kernel(
             {1,3} — the cross-warp P exchange's rendezvous. No FA4 analogue: it
             exists because the `.ws` M=64 gemm writes two batched 64x64
             lane-half partials that must be summed across the warp pair."""
-            txl.ptx.bar.sync(txl.uint32(BAR_WG0_WARP02 + txl.bitwise_and(warp_idx, txl.int32(1))), 64)
+            txl.ptx.bar.sync(
+                txl.uint32(BAR_WG0_WARP02 + txl.bitwise_and(warp_idx, txl.int32(1))), 64
+            )
 
         def iket_range(name):
             token = txl.alloc_local([1], "uint32")
@@ -874,7 +905,8 @@ def make_kernel(
                         for scale_i in range(32 // 2):
                             mul_f32x2(o_rescale, scale_i * 2, scale_for_old)
                         tmem_store(
-                            o_rescale, txl.cuda.get_tmem_addr(txl.uint32(o_tmem_col), 0, chunk_idx * 32)
+                            o_rescale,
+                            txl.cuda.get_tmem_addr(txl.uint32(o_tmem_col), 0, chunk_idx * 32),
                         )
                         txl.ptx.tcgen05.wait__st.sync.aligned()
                     txl.ptx.tcgen05.fence__before_thread_sync()
@@ -959,7 +991,9 @@ def make_kernel(
                         # orig:927-935, CUDA phase1.cuh:314-317 TMEM O load/fence.
                         tmem_load(
                             o_epi,
-                            txl.cuda.get_tmem_addr(txl.uint32(o_tmem_col), 0, epi_c * 128 + epi_k * 64),
+                            txl.cuda.get_tmem_addr(
+                                txl.uint32(o_tmem_col), 0, epi_c * 128 + epi_k * 64
+                            ),
                             64,
                         )
                         txl.ptx.tcgen05.wait__ld.sync.aligned()
@@ -1031,7 +1065,9 @@ def make_kernel(
                             )
 
             with txl.If(warp_idx == 0), txl.Then():
-                txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(txl.uint32(0), txl.uint32(512))
+                txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
+                    txl.uint32(0), txl.uint32(512)
+                )
             txl.cuda.iket.range_end(epilogue_token[0])
 
         def kv_nope_producer():
@@ -1197,7 +1233,9 @@ def make_kernel(
                     with txl.If(k < num_k_blocks_buf), txl.Then():
                         cur_buf = txl.local_scalar("int32", init=ring_mod3(k))
                         cur_phase = txl.local_scalar("int32", init=ring_phase_parity(k))
-                        bar_p_free.wait(0, txl.bitwise_xor(txl.bitwise_and(k, txl.int32(1)), txl.int32(1)))
+                        bar_p_free.wait(
+                            0, txl.bitwise_xor(txl.bitwise_and(k, txl.int32(1)), txl.int32(1))
+                        )
                         txl.ptx.tcgen05.fence__after_thread_sync()
 
                         if have_rope:
@@ -1230,7 +1268,8 @@ def make_kernel(
                             # orig:1245-1317, CUDA phase1.cuh:505-506 QNoPE x KNoPE.
                             clear_nope_accum = (not have_rope) and (kv_nope_part_idx == 0)
                             txl.assign(
-                                mma_p_accumulate, txl.uint32(0) if clear_nope_accum else txl.uint32(1)
+                                mma_p_accumulate,
+                                txl.uint32(0) if clear_nope_accum else txl.uint32(1),
                             )
                             if local_mma_desc:
                                 qk_nope_desc_local = txl.SmemDescriptor()
@@ -1247,7 +1286,9 @@ def make_kernel(
                         bar_so_ready.wait(0, txl.bitwise_and(k - 1, txl.int32(1)))
                         txl.ptx.tcgen05.fence__after_thread_sync()
                         # orig:1328-1457, CUDA phase1.cuh:521-523 S(i-1) x V(i-1).
-                        txl.assign(mma_o_accumulate, txl.if_then_else(k == 1, txl.uint32(0), txl.uint32(1)))
+                        txl.assign(
+                            mma_o_accumulate, txl.if_then_else(k == 1, txl.uint32(0), txl.uint32(1))
+                        )
                         if local_mma_desc:
                             pv_b_lo_desc_local = txl.SmemDescriptor()
                             pv_b_lo_desc_local.init(
@@ -1310,7 +1351,9 @@ def make_kernel(
                         ) // 8
                         txl.ptx[MMA_WS_F16](
                             txl.cast(tmem_p_col + mma_ni * 64, "uint32"),
-                            txl.cast(q_nope_tmem_col + kv_nope_part_idx * 64 + mma_ki * 8, "uint32"),
+                            txl.cast(
+                                q_nope_tmem_col + kv_nope_part_idx * 64 + mma_ki * 8, "uint32"
+                            ),
                             _add_smem_desc_offset(desc.desc, qk_nope_offset),
                             txl.uint32(ID_QK),
                             True if mma_ki != 0 else txl.cast(mma_p_accumulate, "bool"),
@@ -1450,7 +1493,7 @@ def make_kernel(
     return sparse_flashmla_prefill_head64_phase1_kernel
 
 
-def _make_kernel_for(**kwargs: Any):
+def _make_kernel_for(*, backend_config=None, **kwargs: Any):
     cfg = _cfg(**kwargs)
     stride_kv_s_kv = int(kwargs.get("stride_kv_s_kv", cfg.d_qk * cfg.h_kv))
     stride_indices_s_q = int(kwargs.get("stride_indices_s_q", cfg.topk * cfg.h_kv))
@@ -1465,14 +1508,13 @@ def _make_kernel_for(**kwargs: Any):
         have_attn_sink=cfg.have_attn_sink,
         have_topk_length=cfg.have_topk_length,
         sm_scale_div_log2=(1.0 / math.sqrt(cfg.d_qk)) * LOG_2_E,
+        backend_config=backend_config,
     )
 
 
-def get_kernel(**kwargs: Any):
-    return (
-        _make_kernel_for(**kwargs)
-        .func.with_attr("global_symbol", KERNEL_META["name"])
-        .with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+def get_kernel(*, backend_config=None, **kwargs: Any):
+    return _make_kernel_for(**kwargs, backend_config=backend_config).func.with_attr(
+        "global_symbol", KERNEL_META["name"]
     )
 
 
@@ -1489,15 +1531,20 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for sparse FlashMLA phase1")
 
@@ -1505,8 +1552,8 @@ def run_test(**kwargs: Any) -> None:
 
     case = prepare_data(**kwargs)
     cfg: SparseFlashMLAPrefillHead64Config = case["config"]
-    prim_func = get_kernel(**kwargs)
-    ex = compile_kernel(prim_func)
+    prim_func = get_kernel(**kwargs, backend_config=backend_config)
+    ex = compile_kernel(prim_func, backend_config=backend_config)
     ex(*_tirx_args(case))
     torch.cuda.synchronize()
     # Torch oracle retained by design: no library exposes phase-1's split
@@ -1525,6 +1572,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1568,11 +1616,16 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    backend_config=None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

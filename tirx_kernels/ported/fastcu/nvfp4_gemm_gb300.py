@@ -15,6 +15,7 @@ from typing import Any
 
 import tirx_kernels.tirx_lite as txl
 import tvm
+from tirx_kernels.runner import cache_backend_config, resolve_backend_config
 
 KERNEL_META = {
     "name": "fastcu_nvfp4_gemm_gb300",
@@ -212,11 +213,11 @@ def _uceil(x, divisor):
     return txl.cast((txl.cast(x, "uint32") + du - txl.uint32(1)) // du, "int32")
 
 
-@functools.lru_cache(maxsize=1)
-def make_kernel():
+@cache_backend_config(maxsize=1)
+def make_kernel(*, backend_config=None):
     """Build the fixed-topology r9 kernel with runtime M/N/K."""
 
-    @txl.kernel(warps=7, arch="sm_103a", min_blocks_per_sm=1, grid=(2, 1, _NUM_CLUSTERS))
+    @txl.kernel()
     def fastcu_nvfp4_gemm_gb300_kernel(
         A_tmap: txl.TensorMap,
         B_tmap: txl.TensorMap,
@@ -231,7 +232,15 @@ def make_kernel():
         cluster_side: txl.gptr[txl.i32],
         placement_errors: txl.gptr[txl.u32],
     ):
-        crank = txl.cta_id_in_cluster([2], preferred=[2])
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(2, 1, _NUM_CLUSTERS), block=7 * 32, cluster=(2,), preferred_cluster=[2]
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
+        crank = txl.cuda.cluster_cta_id("x")
         _, _, cluster_id = txl.cta_id()
         tid = txl.thread_id()
         warp = txl.warp_id()
@@ -1247,23 +1256,21 @@ def prepare_data(M: int, N: int, K: int, **_: Any):
 
 
 class _Runner:
-    def __init__(self):
-        previous = os.environ.get("TVM_CUDA_COMPILE_MODE")
-        previous_reg_level = os.environ.get("TVM_CUDA_PTXAS_REG_LEVEL")
-        os.environ["TVM_CUDA_COMPILE_MODE"] = "nvcc"
-        if previous_reg_level is None:
-            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = "4"
-        try:
-            self.lib = make_kernel().compile()
-        finally:
-            if previous is None:
-                os.environ.pop("TVM_CUDA_COMPILE_MODE", None)
-            else:
-                os.environ["TVM_CUDA_COMPILE_MODE"] = previous
-            if previous_reg_level is None:
-                os.environ.pop("TVM_CUDA_PTXAS_REG_LEVEL", None)
-            else:
-                os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = previous_reg_level
+    def __init__(self, *, backend_config=None):
+        backend_config = resolve_backend_config(
+            backend_config,
+            defaults={
+                "cuda": {
+                    "compiler": "nvcc",
+                    "ptxas": [
+                        "-v",
+                        "--warn-on-local-memory-usage",
+                        "--register-usage-level=" + str(4),
+                    ],
+                }
+            },
+        )
+        self.lib = make_kernel(backend_config=backend_config).compile(backend_config=backend_config)
         self._maps = None
         self._map_key = None
 
@@ -1377,7 +1384,7 @@ def _check_bitwise(data, M, N):
     )
 
 
-def run_test(**config: Any):
+def run_test(*, backend_config=None, **config: Any):
     """Compile and compare one deterministic configuration to frozen gemm9."""
     import torch
 
@@ -1407,16 +1414,26 @@ def run_test(**config: Any):
         source.close()
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Compile the TIRx kernel before GPU benchmark setup."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     M, N, K_dim = (int(config[name]) for name in ("M", "N", "K"))
     state = {"config": {"M": M, "N": N, "K": K_dim}, "runner": _runner()}
-    return prepared_gpu_benchmark(run_gpu, state)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **_):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **_,
+):
     """Benchmark one TIRx launch and optionally the pinned gemm9 launch."""
     import torch
 
@@ -1468,8 +1485,17 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         source.close()
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config: Any):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **config: Any,
+):
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

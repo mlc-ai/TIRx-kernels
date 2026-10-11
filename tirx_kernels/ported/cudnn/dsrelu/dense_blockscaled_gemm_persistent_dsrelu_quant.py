@@ -520,6 +520,8 @@ def _make_kernel(
     vector_f32,
     with_amax,
     with_sfd,
+    *,
+    backend_config=None,
 ):
     if ab_dtype == "uint8":
         raise ValueError("the non-running uint8 packed-FP4 alias is not supported")
@@ -672,7 +674,7 @@ def _make_kernel(
     sfb_n_box = _ceil_div(n_tile, 128)
     sfb_piece_values = 256 * sf_k_box * sfb_n_box // cluster_m_groups
 
-    def host_prelude(params):
+    def prepare_host(params):
         a = params["a"]
         b = params["b"]
         sfa = params["sfa"]
@@ -819,16 +821,43 @@ def _make_kernel(
         encode_output(d_map, d, d_dtype, d_bits)
         return a_map, b_map, sfa_map, sfb_map, c_map, d_map
 
-    def kernel(a, b, sfa, sfb, c, d, prob, dprob, amax, alpha, *, host):
+    def kernel(a, b, sfa, sfb, c, d, prob, dprob, amax, alpha):
+        host = prepare_host(
+            {
+                "a": a,
+                "b": b,
+                "sfa": sfa,
+                "sfb": sfb,
+                "c": c,
+                "d": d,
+                "prob": prob,
+                "dprob": dprob,
+                "amax": amax,
+                "alpha": alpha,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=7 * 32,
+                grid=(cluster_m, cluster_n, num_clusters),
+                cluster=[cluster_m, cluster_n],
+                preferred_cluster=[cluster_m, cluster_n],
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(
+                min_blocks_per_sm=1, max_registers_per_thread=entry_max_registers
+            ),
+            backend_config=backend_config,
+        )
+
         del a, b, sfa, sfb, c, d
         a_map, b_map, sfa_map, sfb_map, c_map, d_map = host
         if entry_max_registers is None:
             _block_x, _block_y, cluster_work_id = txl.cta_id()
         else:
-            txl.cuda.max_registers_per_thread(entry_max_registers)
             _block_x, _block_y, cluster_work_id = txl.cta_id()
-        cluster_x_scope, cluster_y_scope = txl.cta_id_in_cluster(
-            [cluster_m, cluster_n], preferred=[cluster_m, cluster_n]
+        cluster_x_scope, cluster_y_scope = (
+            txl.cuda.cluster_cta_id("x"),
+            txl.cuda.cluster_cta_id("y"),
         )
         del _block_x, _block_y, cluster_x_scope, cluster_y_scope
         cluster_rank = txl.local_scalar("int32", init=txl.cuda.mov_sreg(32, "cluster_ctarank"))
@@ -1975,13 +2004,7 @@ def _make_kernel(
         "amax": txl.gptr[txl.f32, (1,)],
         "alpha": txl.f32,
     }
-    return txl.kernel(
-        warps=7,
-        arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=[cluster_m, cluster_n, num_clusters],
-        host_prelude=host_prelude,
-    )(kernel)
+    return txl.kernel()(kernel)
 
 
 def get_kernel(
@@ -2003,6 +2026,8 @@ def get_kernel(
     with_amax=True,
     with_sfd=False,
     alpha=None,
+    *,
+    backend_config=None,
 ):
     del alpha
     if with_sfd:
@@ -2025,6 +2050,7 @@ def get_kernel(
         vector_f32,
         with_amax,
         with_sfd,
+        backend_config=backend_config,
     ).func
 
 
@@ -2323,7 +2349,7 @@ def _validate_outputs(data, config, *, with_source):
         )
 
 
-def run_test(**config):
+def run_test(*, backend_config=None, **config):
     """Compare TIRx with the cuDNN Frontend kernel on identical inputs."""
     import torch
 
@@ -2331,7 +2357,9 @@ def run_test(**config):
 
     kernel_config = _without_label(config)
     data = prepare_data(**kernel_config)
-    executable = compile_kernel(get_kernel(**kernel_config))
+    executable = compile_kernel(
+        get_kernel(**kernel_config, backend_config=backend_config), backend_config=backend_config
+    )
     tirx_launch = _tirx_launch(executable, data, kernel_config["alpha"])
     source_launch = _compile_reference(data, kernel_config)
     _reset_outputs(data, "tirx")
@@ -2343,16 +2371,32 @@ def run_test(**config):
     return {"amax": float(data["source_amax"].item())}
 
 
-def prepare_bench(**config):
+def prepare_bench(*, backend_config=None, **config):
     """Compile TIRx before entering the GPU benchmark child."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     kernel_config = _without_label(config)
-    state = {"config": kernel_config, "executable": compile_kernel(get_kernel(**kernel_config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": kernel_config,
+        "executable": compile_kernel(
+            get_kernel(**kernel_config, backend_config=backend_config),
+            backend_config=backend_config,
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    backend_config=None,
+    **kwargs,
+):
     """Validate once, then time closures containing exactly one kernel launch."""
     from tirx_kernels.runner import bench, defer_gpu_interrupts, external_references_enabled
 
@@ -2405,8 +2449,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, backend_config=None, **config
+):
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

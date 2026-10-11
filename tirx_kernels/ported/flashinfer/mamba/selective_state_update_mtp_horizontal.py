@@ -10,13 +10,12 @@ Upstream source: include/flashinfer/mamba/kernel_selective_state_update_mtp_hori
 
 import ctypes
 import functools
-import os
 from typing import Any
 
 import torch
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV
+from tirx_kernels.runner import resolve_backend_config
 from tvm.ir import PointerType, PrimType
 
 from . import selective_state_update_mtp_simple as _simple
@@ -83,13 +82,16 @@ def _store_state_tile(
     STATE_DTYPE,
     PAIRS_PER_TILE_MEMBER,
     PHILOX_ROUNDS,
+    backend_config=None,
 ):
     if STATE_DTYPE == "float32":
         words = txl.alloc_local((4,), "uint32")
         with txl.unroll(2) as pair:
             packed = values[pair_base + pair]
             txl.ptx.mov.b32(words[pair * 2], txl.reinterpret("uint32", txl.cuda.float2_x(packed)))
-            txl.ptx.mov.b32(words[pair * 2 + 1], txl.reinterpret("uint32", txl.cuda.float2_y(packed)))
+            txl.ptx.mov.b32(
+                words[pair * 2 + 1], txl.reinterpret("uint32", txl.cuda.float2_y(packed))
+            )
         txl.ptx.st.global_.v4.b32(destination_ptr, words[0], words[1], words[2], words[3])
     elif PHILOX_ROUNDS > 0:
         packed_words = txl.alloc_local((4,), "uint32")
@@ -100,6 +102,7 @@ def _store_state_tile(
                 txl.cuda.float2_y(packed),
                 txl.cuda.float2_x(packed),
                 random_words[random_base + pair // 2 * 4 + pair % 2],
+                backend_config=backend_config,
             )
         txl.ptx.st.global_.v4.b32(
             destination_ptr, packed_words[0], packed_words[1], packed_words[2], packed_words[3]
@@ -528,9 +531,9 @@ def _ptxas_level(spec: dict[str, Any], arch: str) -> str:
     return ptxas_level
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     spec = _specialization(kwargs)
-    arch = os.environ.get(PREPARE_CUDA_ARCH_ENV, "")
+    arch = resolve_backend_config(backend_config)["cuda"]["arch"]
     if _use_simple_dispatch(spec, arch):
         simple_kwargs = dict(kwargs)
         simple_kwargs["_assume_no_pad"] = int(kwargs.get("pad_every", 0)) == 0
@@ -548,7 +551,7 @@ def get_kernel(**kwargs: Any):
         min_blocks = _simple_min_blocks_per_sm(spec, arch)
         if min_blocks is not None:
             simple_kwargs["_min_blocks_per_sm"] = min_blocks
-        return _simple.get_kernel(**simple_kwargs)
+        return _simple.get_kernel(**simple_kwargs, backend_config=backend_config)
     NHEADS = spec["NHEADS"]
     DIM = spec["DIM"]
     DSTATE = spec["DSTATE"]
@@ -695,9 +698,7 @@ def get_kernel(**kwargs: Any):
         ) == (64, 64, 128, 4, 64):
             min_blocks = 5
 
-    @txl.kernel(
-        warps=5, arch="sm_100a", min_blocks_per_sm=min_blocks, grid=(spec["BATCH"], spec["NHEADS"])
-    )
+    @txl.kernel()
     def selective_state_update_mtp_horizontal(
         tensor_state: txl.TensorMap,
         tensor_b: txl.TensorMap,
@@ -747,6 +748,12 @@ def get_kernel(**kwargs: Any):
         update_state: txl.i32,
         pad_slot_id: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=(spec["BATCH"], spec["NHEADS"]), block=5 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=min_blocks),
+            backend_config=resolve_backend_config(backend_config),
+        )
+
         batch_i, head = txl.cta_id()
         if spec["HAS_STATE_INDICES"]:
             if spec["INDEX_DTYPE"] == "int32":
@@ -840,7 +847,9 @@ def get_kernel(**kwargs: Any):
                     txl.ptx["lg2.approx.ftz.f32"](log2_0, add_0)
                     log_value: txl.float32 = log2_0
                     txl.ptx["mul.ftz.f32"](dt_value, log_value, txl.float32(_LN_2))
-                txl.ptx.st.shared.b32(s_dt.ptr_to([flat_thread]), txl.reinterpret("uint32", dt_value))
+                txl.ptx.st.shared.b32(
+                    s_dt.ptr_to([flat_thread]), txl.reinterpret("uint32", dt_value)
+                )
 
             member: txl.int32 = lane % 8
             row_group: txl.int32 = lane // 8
@@ -862,7 +871,9 @@ def get_kernel(**kwargs: Any):
                     state_values = txl.alloc_local((NUM_TILES * PAIRS_PER_TILE_MEMBER,), "uint64")
 
                     with txl.unroll(NUM_TILES) as tile:
-                        member_col: txl.int32 = tile * ELEMS_PER_TILE + member * ELEMS_PER_TILE_MEMBER
+                        member_col: txl.int32 = (
+                            tile * ELEMS_PER_TILE + member * ELEMS_PER_TILE_MEMBER
+                        )
                         pair_base: txl.int32 = tile * PAIRS_PER_TILE_MEMBER
                         with txl.If(txl.And(txl.Not(IS_PAD), member_col < DSTATE)):
                             with txl.Then():
@@ -905,7 +916,9 @@ def get_kernel(**kwargs: Any):
                                         f16_f32_1 = txl.local_scalar("float32")
                                         txl.ptx.cvt.f32.f16(
                                             f16_f32_1,
-                                            txl.cast(_extract_u16(state_words[pair], True), "uint16"),
+                                            txl.cast(
+                                                _extract_u16(state_words[pair], True), "uint16"
+                                            ),
                                         )
                                         txl.assign(
                                             state_values[pair_base + pair],
@@ -916,7 +929,9 @@ def get_kernel(**kwargs: Any):
                                             state_values[pair_base + pair],
                                             (
                                                 txl.cuda.make_float2(
-                                                    txl.reinterpret("float32", state_words[pair * 2]),
+                                                    txl.reinterpret(
+                                                        "float32", state_words[pair * 2]
+                                                    ),
                                                     txl.reinterpret(
                                                         "float32", state_words[pair * 2 + 1]
                                                     ),
@@ -995,7 +1010,9 @@ def get_kernel(**kwargs: Any):
                         txl.ptx["mul.ftz.f32"](mul_3, dt_value, x_value)
                         dtx_value: txl.float32 = mul_3
                         out_pair = txl.local_scalar("uint64")
-                        txl.assign(out_pair, txl.cuda.make_float2(txl.float32(0.0), txl.float32(0.0)))
+                        txl.assign(
+                            out_pair, txl.cuda.make_float2(txl.float32(0.0), txl.float32(0.0))
+                        )
 
                         with txl.unroll(NUM_TILES) as tile:
                             member_col: txl.int32 = (
@@ -1084,6 +1101,7 @@ def get_kernel(**kwargs: Any):
                                         STATE_DTYPE=STATE_DTYPE,
                                         PAIRS_PER_TILE_MEMBER=PAIRS_PER_TILE_MEMBER,
                                         PHILOX_ROUNDS=PHILOX_ROUNDS,
+                                        backend_config=backend_config,
                                     )
                             txl.assign(
                                 intermediate_step_addr,
@@ -1110,6 +1128,7 @@ def get_kernel(**kwargs: Any):
                                             STATE_DTYPE=STATE_DTYPE,
                                             PAIRS_PER_TILE_MEMBER=PAIRS_PER_TILE_MEMBER,
                                             PHILOX_ROUNDS=PHILOX_ROUNDS,
+                                            backend_config=backend_config,
                                         )
 
                 txl.ptx.mbarrier.arrive.shared__cta.b64(empty_barriers.ptr_to([state_pipe.stage]))
@@ -1144,7 +1163,9 @@ def get_kernel(**kwargs: Any):
                         z_bits = txl.alloc_local((2,), "uint16")
                         output_bits = txl.alloc_local((2,), "uint16")
                         if HAS_Z:
-                            txl.ptx.ld.global_.v2.b16(z_bits[0], z_bits[1], z.ptr_to([(z_base + d)]))
+                            txl.ptx.ld.global_.v2.b16(
+                                z_bits[0], z_bits[1], z.ptr_to([(z_base + d)])
+                            )
                         with txl.unroll(2) as k:
                             out_value = txl.local_scalar(
                                 "float32", init=txl.reinterpret("float32", out_words[k])
@@ -1401,8 +1422,8 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     return case
 
 
-def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
-    if _use_simple_dispatch(case["spec"], os.environ.get(PREPARE_CUDA_ARCH_ENV, "")):
+def _tirx_args(case: dict[str, Any], *, backend_config=None) -> tuple[Any, ...]:
+    if _use_simple_dispatch(case["spec"], resolve_backend_config(backend_config)["cuda"]["arch"]):
         return _simple._tirx_args(case)
     maps = case["tensor_maps"]
     return (
@@ -1469,37 +1490,47 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
     return result
 
 
-def _compile_tirx(config: dict[str, Any]):
+def _compile_tirx(config: dict[str, Any], *, backend_config=None):
     from tirx_kernels.runner import compile_kernel
 
-    arch = os.environ.get(PREPARE_CUDA_ARCH_ENV, "")
+    arch = resolve_backend_config(backend_config)["cuda"]["arch"]
     spec = _specialization(config)
     ptxas_level = (
         _simple_ptxas_level(spec, arch)
         if _use_simple_dispatch(spec, arch)
         else _ptxas_level(spec, arch)
     )
-    previous = os.environ.get("TVM_CUDA_PTXAS_REG_LEVEL")
+    pass
     if ptxas_level is not None:
-        os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = ptxas_level
-    try:
-        return compile_kernel(get_kernel(**config))
-    finally:
-        if previous is None:
-            os.environ.pop("TVM_CUDA_PTXAS_REG_LEVEL", None)
-        else:
-            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = previous
+        backend_config = resolve_backend_config(
+            backend_config,
+            defaults={
+                "cuda": {
+                    "ptxas": [
+                        "-v",
+                        "--warn-on-local-memory-usage",
+                        "--register-usage-level=" + str(int(ptxas_level)),
+                    ]
+                }
+            },
+        )
+    return compile_kernel(
+        get_kernel(**config, backend_config=backend_config), backend_config=backend_config
+    )
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": _compile_tirx(kwargs)}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": _compile_tirx(kwargs, backend_config=backend_config),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     expected_rejection = kwargs.pop("expected_rejection", None)
     if expected_rejection is not None:
         try:
@@ -1512,8 +1543,8 @@ def run_test(**kwargs: Any) -> None:
             return
         raise AssertionError(f"expected horizontal rejection containing {expected_rejection!r}")
     case = prepare_data(**kwargs)
-    executable = _compile_tirx(kwargs)
-    executable(*_tirx_args(case))
+    executable = _compile_tirx(kwargs, backend_config=backend_config)
+    executable(*_tirx_args(case, backend_config=backend_config))
     torch.cuda.synchronize()
     _run_reference(case)
     torch.cuda.synchronize()
@@ -1528,6 +1559,7 @@ def run_gpu(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1537,7 +1569,7 @@ def run_gpu(
     from tirx_kernels.runner import bench
 
     case = prepare_data(**kwargs)
-    args = _tirx_args(case)
+    args = _tirx_args(case, backend_config=backend_config)
 
     def source_builder():
         executable(*args)
@@ -1571,9 +1603,10 @@ def run_bench(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    return prepare_bench(**kwargs).run_gpu(
+    return prepare_bench(**kwargs, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

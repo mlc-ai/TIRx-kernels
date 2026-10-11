@@ -15,11 +15,10 @@ token, ``min(d / 8, 1024)`` threads, 16-byte vectorized access, scalar
 remainder loop, and ``griddepcontrol`` PDL intrinsics.
 """
 
-import os
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
+from tirx_kernels.runner import bench, resolve_backend_config
 
 KERNEL_META = {
     "name": "act_and_mul",
@@ -89,7 +88,8 @@ def _fmaf_rn(a, b, c):
 
 def _unpack_lo(word, dtype):
     return txl.cast(
-        txl.reinterpret(dtype, txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")), "float32"
+        txl.reinterpret(dtype, txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")),
+        "float32",
     )
 
 
@@ -99,14 +99,16 @@ def _unpack_hi(word, dtype):
     )
 
 
-def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
+def get_kernel(act: str, dtype: str, num_tokens: int, d: int, *, backend_config=None, **kwargs):
     """Return the TIRx specialization for one (act, dtype, num_tokens, d) config."""
     _validate(act, dtype, d)
     block_size = _block_size(d)
     n_vec = d // VEC_SIZE
     rem = d % (block_size * VEC_SIZE)
     rem_off = d - rem
-    thor_bf16 = dtype == "bfloat16" and os.environ.get(PREPARE_CUDA_ARCH_ENV) == "sm_110a"
+    thor_bf16 = (
+        dtype == "bfloat16" and resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a"
+    )
     compact_vector_offset = thor_bf16 and num_tokens * (2 * d) < 2**32
 
     def vector_offset(token, idx, stride):
@@ -120,7 +122,9 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     def unpack_pair(dst, pair, word):
         if thor_bf16:
             # BF16 widening places its bits in the high half of an FP32 word.
-            txl.ptx.mov.b32(dst[2 * pair], txl.reinterpret("float32", txl.shift_left(word, txl.uint32(16))))
+            txl.ptx.mov.b32(
+                dst[2 * pair], txl.reinterpret("float32", txl.shift_left(word, txl.uint32(16)))
+            )
             txl.ptx.mov.b32(
                 dst[2 * pair + 1],
                 txl.reinterpret("float32", txl.bitwise_and(word, txl.uint32(0xFFFF0000))),
@@ -129,8 +133,13 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
             txl.ptx.mov.b32(dst[2 * pair], _unpack_lo(word, dtype))
             txl.ptx.mov.b32(dst[2 * pair + 1], _unpack_hi(word, dtype))
 
-    @txl.kernel(warps=(block_size + 31) // 32, arch="sm_100a", grid=num_tokens)
+    @txl.kernel()
     def act_and_mul(input_global: txl.gptr[dtype, 2], out_global: txl.gptr[dtype, 2]):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=num_tokens, block=(block_size + 31) // 32 * 32),
+            backend_config=resolve_backend_config(backend_config),
+        )
+
         token = txl.cta_id()
         tid = txl.thread_id()
         txl.ptx.griddepcontrol.wait()
@@ -212,7 +221,8 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                     xr16,
                     txl.address_of(
                         input_global[
-                            0, txl.cast(token, "int64") * (2 * d) + txl.cast(ridx, "int64") + rem_off
+                            0,
+                            txl.cast(token, "int64") * (2 * d) + txl.cast(ridx, "int64") + rem_off,
                         ]
                     ),
                 )
@@ -221,7 +231,10 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                     txl.address_of(
                         input_global[
                             0,
-                            txl.cast(token, "int64") * (2 * d) + txl.cast(ridx, "int64") + rem_off + d,
+                            txl.cast(token, "int64") * (2 * d)
+                            + txl.cast(ridx, "int64")
+                            + rem_off
+                            + d,
                         ]
                     ),
                 )
@@ -232,7 +245,8 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                     out_r = (xr / (txl.float32(1.0) + er)) * yr
                 elif act == "gelu":
                     out_r = (
-                        (xr * txl.float32(0.5)) * (txl.float32(1.0) + txl.erf(xr * txl.float32(_SQRT1_2)))
+                        (xr * txl.float32(0.5))
+                        * (txl.float32(1.0) + txl.erf(xr * txl.float32(_SQRT1_2)))
                     ) * yr
                 else:  # gelu_tanh
                     t1 = xr * txl.float32(_GELU_TANH_C0)
@@ -249,7 +263,9 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                     txl.ptx.cvt.rn.bf16.f32(ob16, out_r)
                 txl.ptx.st.global_.b16(
                     txl.address_of(
-                        out_global[0, txl.cast(token, "int64") * d + txl.cast(ridx, "int64") + rem_off]
+                        out_global[
+                            0, txl.cast(token, "int64") * d + txl.cast(ridx, "int64") + rem_off
+                        ]
                     ),
                     ob16,
                 )
@@ -270,23 +286,30 @@ def prepare_data(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     return (input_data,)
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
+def run_test(act: str, dtype: str, num_tokens: int, d: int, *, backend_config=None, **kwargs):
     """Compile, launch, and validate one config against the flashinfer source."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
 
     (input_data,) = prepare_data(act=act, dtype=dtype, num_tokens=num_tokens, d=d)
-    kernel = get_kernel(act=act, dtype=dtype, num_tokens=num_tokens, d=d)
-    ex = compile_kernel(kernel)
+    kernel = get_kernel(
+        act=act, dtype=dtype, num_tokens=num_tokens, d=d, backend_config=backend_config
+    )
+    ex = compile_kernel(kernel, backend_config=backend_config)
     out_tirx = torch.empty((num_tokens, d), dtype=_torch_dtype(dtype), device="cuda")
     ex(input_data, out_tirx)
     torch.cuda.synchronize()
@@ -298,7 +321,17 @@ def run_test(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     torch.testing.assert_close(out_tirx, ref, rtol=1e-3, atol=1e-3)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **kwargs,
+):
     """Benchmark the TIRx port against the flashinfer source kernel."""
     config = dict(prepared["config"])
     act = config.pop("act")
@@ -345,10 +378,13 @@ def run_bench(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
+    backend_config=None,
     **kwargs,
 ):
     config = dict(kwargs)
-    prepared = prepare_bench(act=act, dtype=dtype, num_tokens=num_tokens, d=d, **config)
+    prepared = prepare_bench(
+        act=act, dtype=dtype, num_tokens=num_tokens, d=d, **config, backend_config=backend_config
+    )
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

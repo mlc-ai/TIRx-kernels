@@ -5,7 +5,6 @@
 
 import ctypes
 from dataclasses import asdict, dataclass
-from functools import cache
 from importlib.util import find_spec
 from typing import Any
 from unittest import SkipTest
@@ -13,6 +12,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import cache_backend_config, cuda_target
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
@@ -549,7 +549,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     return _prepare_data(_make_config(**kwargs), compute_reference=True)
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     config = _make_config(**kwargs)
 
     num_heads = config.num_heads
@@ -605,7 +605,7 @@ def get_kernel(**kwargs: Any):
     MMA = "tcgen05.mma.cta_group::1.kind::f8f6f4"
     TC_LD = f"tcgen05.ld.sync.aligned.32x32b.x{num_heads}.b32"
 
-    @txl.kernel(warps=num_warps, arch="sm_100f", min_blocks_per_sm=1, grid=config.num_sms)
+    @txl.kernel()
     def sm100_fp8_paged_mqa_logits(
         batch_size: txl.u32,
         logits_stride: txl.u32,
@@ -620,11 +620,19 @@ def get_kernel(**kwargs: Any):
         tensor_map_kv_scales: txl.TensorMap,
         tensor_map_weights: txl.TensorMap,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=config.num_sms, block=num_warps * 32, programmatic_stream_serialization=True
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         cache_policy_evict_normal = txl.uint64(1152921504606846976)
         sm_idx_u32 = txl.Cast("uint32", txl.cta_id())
         warp_idx = txl.warp_id()
         warp_idx_u32 = txl.Cast("uint32", warp_idx)
-        warpgroup_idx = txl.warpgroup_id([num_warps // 4])
+        warpgroup_idx = txl.cuda.warpgroup_id()
         lane_idx = txl.lane_id()
         # The original reads laneid through mov_sreg for its u32 uses and keeps
         # txl.lane_id() for the `lane_idx == 0` guards. Two spellings, both kept.
@@ -808,7 +816,9 @@ def get_kernel(**kwargs: Any):
                 with txl.Then():
                     txl.ptx.mov.b32(scheduler_result[3], txl.uint32(0))
                 with txl.Else():
-                    txl.ptx.mov.b32(scheduler_result[5], cur_kv_idx + txl.uint32(num_tiles_per_split))
+                    txl.ptx.mov.b32(
+                        scheduler_result[5], cur_kv_idx + txl.uint32(num_tiles_per_split)
+                    )
                     with txl.If(scheduler_result[5] >= cur_num_kv), txl.Then():
                         txl.ptx.mov.b32(scheduler_result[5], txl.uint32(0))
                         load_atom_advance(cur_q_atom, end_q_atom)
@@ -834,15 +844,20 @@ def get_kernel(**kwargs: Any):
         end_q_atom_idx = txl.local_scalar("uint32")
         end_kv_tile_idx = txl.local_scalar("uint32")
         txl.ptx.ld.global_.u32(
-            start_q_atom_idx, schedule_meta_flat.ptr_to([txl.Cast("int32", sm_idx_u32 * txl.uint32(2))])
+            start_q_atom_idx,
+            schedule_meta_flat.ptr_to([txl.Cast("int32", sm_idx_u32 * txl.uint32(2))]),
         )
         txl.ptx.ld.global_.u32(
             start_kv_tile_idx,
-            schedule_meta_flat.ptr_to([txl.Cast("int32", sm_idx_u32 * txl.uint32(2) + txl.uint32(1))]),
+            schedule_meta_flat.ptr_to(
+                [txl.Cast("int32", sm_idx_u32 * txl.uint32(2) + txl.uint32(1))]
+            ),
         )
         txl.ptx.ld.global_.u32(
             end_q_atom_idx,
-            schedule_meta_flat.ptr_to([txl.Cast("int32", (sm_idx_u32 + txl.uint32(1)) * txl.uint32(2))]),
+            schedule_meta_flat.ptr_to(
+                [txl.Cast("int32", (sm_idx_u32 + txl.uint32(1)) * txl.uint32(2))]
+            ),
         )
         txl.ptx.ld.global_.u32(
             end_kv_tile_idx,
@@ -884,14 +899,22 @@ def get_kernel(**kwargs: Any):
         with txl.If(warp_idx == tma_warp_0), txl.Then():
             with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
                 for init_i in range(num_q_stages):
-                    txl.ptx.mbarrier.init.shared.b64(full_q_barriers.ptr_to([init_i]), txl.uint32(1))
-                    txl.ptx.mbarrier.init.shared.b64(empty_q_barriers.ptr_to([init_i]), txl.uint32(8))
+                    txl.ptx.mbarrier.init.shared.b64(
+                        full_q_barriers.ptr_to([init_i]), txl.uint32(1)
+                    )
+                    txl.ptx.mbarrier.init.shared.b64(
+                        empty_q_barriers.ptr_to([init_i]), txl.uint32(8)
+                    )
                 txl.ptx.fence.mbarrier_init.release.cluster()
         with txl.If(warp_idx == tma_warp_1), txl.Then():
             with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
                 for init_i in range(num_kv_stages):
-                    txl.ptx.mbarrier.init.shared.b64(full_kv_barriers.ptr_to([init_i]), txl.uint32(1))
-                    txl.ptx.mbarrier.init.shared.b64(empty_kv_barriers.ptr_to([init_i]), txl.uint32(4))
+                    txl.ptx.mbarrier.init.shared.b64(
+                        full_kv_barriers.ptr_to([init_i]), txl.uint32(1)
+                    )
+                    txl.ptx.mbarrier.init.shared.b64(
+                        empty_kv_barriers.ptr_to([init_i]), txl.uint32(4)
+                    )
                 txl.ptx.fence.mbarrier_init.release.cluster()
         with txl.If(warp_idx == umma_warp_0), txl.Then():
             with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
@@ -906,7 +929,9 @@ def get_kernel(**kwargs: Any):
         with txl.If(warp_idx == umma_warp_0 + 1), txl.Then():
             with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
                 for init_i in range(num_umma_barriers):
-                    txl.ptx.mbarrier.init.shared.b64(full_umma_barriers.ptr_to([init_i]), txl.uint32(1))
+                    txl.ptx.mbarrier.init.shared.b64(
+                        full_umma_barriers.ptr_to([init_i]), txl.uint32(1)
+                    )
                     txl.ptx.mbarrier.init.shared.b64(
                         empty_umma_barriers.ptr_to([init_i]), txl.uint32(4)
                     )
@@ -1028,7 +1053,9 @@ def get_kernel(**kwargs: Any):
 
         def issue_kv_tma(group, kv_state, kv_block_idx):
             base = group * num_kv_stages
-            empty_kv_barriers.wait(txl.uint32(base) + kv_state.stage, kv_state.phase ^ txl.uint32(1))
+            empty_kv_barriers.wait(
+                txl.uint32(base) + kv_state.stage, kv_state.phase ^ txl.uint32(1)
+            )
             with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
                 for block_i in range(num_pages_per_tile):
                     txl.ptx[TMA_G2S_3D](
@@ -1155,7 +1182,9 @@ def get_kernel(**kwargs: Any):
             # would be a deviation with nothing to win.
             runtime_instr_desc = txl.local_scalar("uint64")
             runtime_instr_desc_hi = txl.local_scalar("uint32")
-            txl.assign(runtime_instr_desc, txl.shift_left(txl.Cast("uint64", desc_i), txl.uint64(32)))
+            txl.assign(
+                runtime_instr_desc, txl.shift_left(txl.Cast("uint64", desc_i), txl.uint64(32))
+            )
             txl.assign(
                 runtime_instr_desc_hi,
                 txl.Cast("uint32", txl.shift_right(runtime_instr_desc, txl.uint64(32))),
@@ -1176,7 +1205,9 @@ def get_kernel(**kwargs: Any):
 
                 kv_stage = kv_state.stage
                 kv_phase = kv_state.phase
-                full_kv_barriers.wait(umma_group_idx * txl.uint32(num_kv_stages) + kv_stage, kv_phase)
+                full_kv_barriers.wait(
+                    umma_group_idx * txl.uint32(num_kv_stages) + kv_stage, kv_phase
+                )
                 umma_stage = umma_state.stage
                 umma_phase = umma_state.phase
                 empty_umma_barriers.wait(
@@ -1223,7 +1254,9 @@ def get_kernel(**kwargs: Any):
             # warp's tcgen05.alloc (see the UMMA role).
             txl.ptx.bar.sync(9, txl.uint32(num_math_threads + 2 * 32))
             math_wg_u32 = txl.Cast("uint32", warpgroup_idx)
-            tmem_start_base = txl.uint32(tmem_col) + math_wg_u32 * txl.uint32(umma_n * num_umma_stages)
+            tmem_start_base = txl.uint32(tmem_col) + math_wg_u32 * txl.uint32(
+                umma_n * num_umma_stages
+            )
             math_thread_idx = txl.local_scalar(
                 "uint32",
                 init=(txl.Cast("uint32", txl.warp_id_in_role()) % txl.uint32(4)) * txl.uint32(32)
@@ -1293,7 +1326,8 @@ def get_kernel(**kwargs: Any):
                     result = txl.Cast(logits_tir_dtype, result_f32)
                     logits_offset = (
                         txl.Cast("uint64", kv_offset)
-                        + txl.Cast("uint64", txl.uint32(q_inner_i)) * txl.Cast("uint64", logits_stride)
+                        + txl.Cast("uint64", txl.uint32(q_inner_i))
+                        * txl.Cast("uint64", logits_stride)
                         + txl.Cast("uint64", math_thread_idx)
                     )
                     if config.logits_dtype == "float32":
@@ -1375,18 +1409,6 @@ def get_kernel(**kwargs: Any):
                     txl.uint32(tmem_col), txl.uint32(num_tmem_cols)
                 )
 
-    # `@txl.kernel` has no `attrs=`. NOTE the paged original sets ONLY
-    # kernel_launch_params -- no tirx.persistent_kernel, unlike the non-paged
-    # sibling.
-    sm100_fp8_paged_mqa_logits.func = sm100_fp8_paged_mqa_logits.func.with_attr(
-        "tirx.kernel_launch_params",
-        [
-            "blockIdx.x",
-            "threadIdx.x",
-            "tirx.use_programtic_dependent_launch",
-            "tirx.use_dyn_shared_memory",
-        ],
-    )
     return sm100_fp8_paged_mqa_logits.func
 
 
@@ -1404,10 +1426,11 @@ def _compile_tirx_paged_mqa_for_config(
     context_lens_2d: bool,
     varlen: bool,
     indices_pair_stride: int,
+    backend_config=None,
 ) -> Any:
     import tvm
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100f"})
+    target = cuda_target(backend_config=backend_config)
     kernel = get_kernel(
         batch_size=batch_size,
         next_n=next_n,
@@ -1421,13 +1444,14 @@ def _compile_tirx_paged_mqa_for_config(
         context_lens_2d=context_lens_2d,
         varlen=varlen,
         indices_pair_stride=indices_pair_stride,
+        backend_config=backend_config,
     )
     with target:
         mod = tvm.IRModule({"main": kernel})
-        return tvm.compile(mod, target=target, tir_pipeline="tirx")
+        return tvm.compile(mod, target=target, tir_pipeline="tirx", backend_config=backend_config)
 
 
-_compile_tirx_paged_mqa_for_config = cache(_compile_tirx_paged_mqa_for_config)
+_compile_tirx_paged_mqa_for_config = cache_backend_config(_compile_tirx_paged_mqa_for_config)
 
 
 def _compile_tirx_paged_mqa_kwargs(config: PagedMQALogitsFP8Config) -> dict[str, Any]:
@@ -1451,9 +1475,9 @@ def _compile_tirx_paged_mqa_key(config: PagedMQALogitsFP8Config) -> tuple[tuple[
     return tuple(_compile_tirx_paged_mqa_kwargs(config).items())
 
 
-def _compile_tirx_paged_mqa(config: PagedMQALogitsFP8Config) -> Any:
+def _compile_tirx_paged_mqa(config: PagedMQALogitsFP8Config, *, backend_config=None) -> Any:
     compile_kwargs = _compile_tirx_paged_mqa_kwargs(config)
-    return _compile_tirx_paged_mqa_for_config(**compile_kwargs)
+    return _compile_tirx_paged_mqa_for_config(**compile_kwargs, backend_config=backend_config)
 
 
 def _run_deepgemm_paged_mqa(data: dict[str, Any], *, clean_logits: bool = False) -> torch.Tensor:
@@ -1675,13 +1699,17 @@ def _prepare_global_barrier(executable: Any) -> None:
 
 
 def _prepare_tirx_invocation(
-    data: dict[str, Any], logits: torch.Tensor | None = None, *, executable: Any | None = None
+    data: dict[str, Any],
+    logits: torch.Tensor | None = None,
+    *,
+    executable: Any | None = None,
+    backend_config=None,
 ) -> dict[str, Any]:
     config: PagedMQALogitsFP8Config = data["config"]
     if logits is None:
         logits = _allocate_logits(config)
     if executable is None:
-        executable = _compile_tirx_paged_mqa(config)
+        executable = _compile_tirx_paged_mqa(config, backend_config=backend_config)
     return {
         "executable": executable,
         "logits": logits,
@@ -1718,9 +1746,11 @@ def _run_tirx_invocation(data: dict[str, Any], invocation: dict[str, Any]) -> to
 
 
 def _launch_tirx_paged_mqa(
-    data: dict[str, Any], logits: torch.Tensor | None = None
+    data: dict[str, Any], logits: torch.Tensor | None = None, *, backend_config=None
 ) -> torch.Tensor:
-    return _run_tirx_invocation(data, _prepare_tirx_invocation(data, logits))
+    return _run_tirx_invocation(
+        data, _prepare_tirx_invocation(data, logits, backend_config=backend_config)
+    )
 
 
 def _calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
@@ -1782,14 +1812,14 @@ def _assert_valid_correct(
     return diff
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     data = prepare_data(**kwargs)
     config: PagedMQALogitsFP8Config = data["config"]
     deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
     # Library-anchored: the torch ref is a yardstick, not the arbiter --
     # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
     deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
-    tirx_logits = _launch_tirx_paged_mqa(data)
+    tirx_logits = _launch_tirx_paged_mqa(data, backend_config=backend_config)
     torch.cuda.synchronize()
     tirx_diff = _assert_correct(data, tirx_logits, name="TIRx")
     if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
@@ -1803,16 +1833,18 @@ def run_test(**kwargs: Any) -> None:
         _assert_correct(data, cutedsl_logits, name="SGLang CuTeDSL")
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Compile the paged MQA executable without allocating CUDA data."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _make_config(**kwargs)
-    executable = _compile_tirx_paged_mqa(config)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+    executable = _compile_tirx_paged_mqa(config, backend_config=backend_config)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(kwargs), "executable": executable}, backend_config=backend_config
+    )
 
 
-def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
+def run_gpu(prepared, *, backend_config=None, **kwargs: Any) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
     from tirx_kernels.runner import bench, external_references_enabled
 
@@ -1835,7 +1867,9 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     # The independent Python reference is intentionally omitted here: it iterates
     # page-by-page and is prohibitively slow for SGLang's 131K-context sweep.
     data = _prepare_data(config, compute_reference=False)
-    invocation = _prepare_tirx_invocation(data, executable=tirx_executable)
+    invocation = _prepare_tirx_invocation(
+        data, executable=tirx_executable, backend_config=backend_config
+    )
     deepgemm_logits = None
     max_diff = None
     if external_references_enabled():
@@ -1874,13 +1908,13 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     return result
 
 
-def run_bench(**kwargs: Any) -> dict[str, Any]:
+def run_bench(*, backend_config=None, **kwargs: Any) -> dict[str, Any]:
     protocol = {
         name: kwargs.pop(name)
         for name in ("warmup", "repeat", "timer", "rounds", "cooldown_s")
         if name in kwargs
     }
-    return prepare_bench(**kwargs).run_gpu(**protocol)
+    return prepare_bench(**kwargs, backend_config=backend_config).run_gpu(**protocol)
 
 
 __all__ = [

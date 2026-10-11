@@ -11,12 +11,11 @@ public interfaces are in ``csrc/norm.cu``, ``csrc/flashinfer_norm_binding.cu``,
 ``flashinfer/norm/__init__.py``, and ``flashinfer/diffusion_ops/__init__.py``.
 """
 
-import functools
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
 from tirx_kernels.ported.flashinfer.utils.fp_quant import cvt_e2m1x8
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import bench, cache_backend_config
 
 KERNEL_META = {
     "name": "flashinfer_fused_dit_layernorm",
@@ -487,6 +486,8 @@ def get_kernel(
     auxiliary_ndim: int,
     bias_ndim: int,
     epsilon: float = _DEFAULT_EPSILON,
+    *,
+    backend_config=None,
 ):
     """Return one of the eighteen compile-time source specializations."""
     _validate(
@@ -513,7 +514,7 @@ def get_kernel(
     elif output_format == "mxfp8":
         sf_k_tiles = (_HIDDEN_SIZE + 127) // 128
 
-    @txl.kernel(warps=_BLOCK_SIZE // 32, arch="sm_100a", grid="runtime_num_rows")
+    @txl.kernel()
     def flashinfer_fused_dit_layernorm(
         input_buffer: txl.gptr[txl.bf16],
         residual_buffer: txl.gptr[txl.bf16],
@@ -536,6 +537,11 @@ def get_kernel(
         runtime_has_residual: txl.i32,
     ):
         # TIRX_TRANSCRIBE_START flashinfer_fused_dit_layernorm
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=runtime_num_rows, block=_BLOCK_SIZE // 32 * 32),
+            backend_config=backend_config,
+        )
+
         row = txl.cta_id()
         tid = txl.thread_id()
         lane: txl.int32 = tid % 32
@@ -861,9 +867,7 @@ def get_kernel(
                     runtime_num_rows,
                 )
 
-    return flashinfer_fused_dit_layernorm.func.with_attr(
-        "tirx.kernel_launch_params", ["blockIdx.x", "threadIdx.x"]
-    )
+    return flashinfer_fused_dit_layernorm.func
 
 
 def prepare_data(**config: Any) -> tuple[Any, ...]:
@@ -875,7 +879,7 @@ def prepare_data(**config: Any) -> tuple[Any, ...]:
     return tuple(_tirx_args(data, output, config))
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     """Compile, launch, and validate one source-domain specialization."""
     import torch
 
@@ -886,7 +890,10 @@ def run_test(**config: Any) -> None:
     tirx_output = _prepare_output(config)
     source_output = _prepare_output(config)
     executable = _compiled_specialization(
-        str(config["mode"]), str(config["output_format"]), bool(config["use_input_sf_scale"])
+        str(config["mode"]),
+        str(config["output_format"]),
+        bool(config["use_input_sf_scale"]),
+        backend_config=backend_config,
     )
 
     if _launch_tirx(executable, data, tirx_output, config) is not None:
@@ -903,7 +910,7 @@ def run_test(**config: Any) -> None:
     _assert_inputs_unchanged(data, snapshot)
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Compile the selected specialization before GPU assignment."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
@@ -912,14 +919,25 @@ def prepare_bench(**config: Any):
     state = {
         "config": config,
         "executable": _compiled_specialization(
-            str(config["mode"]), str(config["output_format"]), bool(config["use_input_sf_scale"])
+            str(config["mode"]),
+            str(config["output_format"]),
+            bool(config["use_input_sf_scale"]),
+            backend_config=backend_config,
         ),
     }
-    return prepared_gpu_benchmark(run_gpu, state)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
-    prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs: Any
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **kwargs: Any,
 ):
     """Construct and prevalidate two direct single-kernel launch closures."""
     import torch
@@ -970,10 +988,11 @@ def run_bench(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    backend_config=None,
     **config: Any,
 ) -> dict[str, Any]:
     """Benchmark the TIRx kernel against one direct FlashInfer CUDA launch."""
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
@@ -1245,8 +1264,10 @@ def _launch_tirx(executable, data, output, config: dict[str, Any]):
     return executable(*_tirx_args(data, output, config))
 
 
-@functools.cache
-def _compiled_specialization(mode: str, output_format: str, use_input_sf_scale: bool):
+@cache_backend_config
+def _compiled_specialization(
+    mode: str, output_format: str, use_input_sf_scale: bool, *, backend_config=None
+):
     from tirx_kernels.runner import compile_kernel
 
     return compile_kernel(
@@ -1262,7 +1283,9 @@ def _compiled_specialization(mode: str, output_format: str, use_input_sf_scale: 
             auxiliary_ndim=3,
             bias_ndim=2,
             epsilon=_DEFAULT_EPSILON,
-        )
+            backend_config=backend_config,
+        ),
+        backend_config=backend_config,
     )
 
 

@@ -9,8 +9,9 @@ traced, PTX-level DSL over TIRx:
 import tirx_kernels.tirx_lite as txl
 
 
-@txl.kernel(warps=1, arch="sm_100a", grid=False)
+@txl.kernel()
 def zero(out: txl.gptr(txl.f32)):
+    txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32))
     txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 ```
 
@@ -47,6 +48,63 @@ You can learn tirx-lite APIs and complete implementation patterns from the canon
 modules under `tirx_kernels/`. Do not copy API spellings from historical TIRx
 parser kernels.
 
+## Launch configuration
+
+Declare `txl.device_entry` inside the function with
+`launch=txl.cuda.LaunchConfig(grid=..., block=..., cluster=...)` and optional
+`kernel_attrs=txl.cuda.KernelAttributes(...)` for compile-time CUDA kernel attributes.
+`grid` counts CTAs and `cluster` counts CTAs per cluster; `block` is a static
+one-dimensional multiple of 32 in tirx-lite.
+The raw TIRx API also supports three-dimensional blocks.
+
+Launch expressions refer directly to the function's bound ABI parameters:
+
+```python
+@txl.kernel()
+def zero(out: txl.gptr(txl.f32), n: txl.i32):
+    txl.device_entry(
+        launch=txl.cuda.LaunchConfig(grid=(n + 127) // 128, block=128),
+        kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+    )
+    i = txl.cta_id() * 128 + txl.thread_id()
+    with txl.If(i < n), txl.Then():
+        txl.ptx.st.global_.f32(out.ptr_to([i]), txl.float32(0))
+```
+
+A flat `txl.device_entry(...)` opens the device region for the remainder of the
+traced function. Use `with txl.device_entry(...):` for an explicit boundary;
+statements after the block run on the host. Each kernel requires exactly one
+entry at function scope, outside TIR branches and loops. Device coordinate,
+specialization, and shared-memory-pool helpers require an active device region.
+
+Host preparation belongs before entry. For example, a normal helper can allocate
+and encode TensorMap descriptors and return them to the function:
+
+```python
+@txl.kernel()
+def kernel(a: txl.gptr(txl.bf16), num_ctas: txl.i32):
+    descriptors = prepare_descriptors(a)
+    with txl.device_entry(launch=txl.cuda.LaunchConfig(grid=num_ctas, block=384)):
+        kernel_body(a, descriptors)
+```
+
+The function is traced once at decoration time. Its emitted host code computes
+launch values and prepares descriptors on each runtime invocation. Parameters
+used only by launch configuration remain host arguments; only device-body
+dependencies become GPU kernel parameters. The external call signature stays
+the same when the grid changes between invocations.
+
+The decorator accepts `allowed_func_calls` and `check_ir`. It no longer
+accepts launch configuration or host preparation callbacks, and `host` is not a
+special injected parameter. Move former launch factories into `device_entry`
+and call preparation helpers directly from the function body.
+
+The no-argument coordinate helpers remain entry-owned. `cta_id()` returns a
+scalar for a one-dimensional authored grid and an array for a two- or
+three-dimensional grid. Explicit hardware coordinates are also available as
+`txl.cuda.block_idx("x")`, `txl.cuda.cluster_cta_id("x")`, and the other finite
+CUDA index calls. Coordinates do not supply launch extents.
+
 ## Selecting shared-memory descriptors
 
 `SmemDescriptor` and `KDesc` implement TVM's `__tvm_ffi_object__` conversion
@@ -81,3 +139,38 @@ a_desc, a_off = a_tile.encode(major="k", mma_k=16)
 b_desc, b_off = b_tile.encode(major="k", mma_k=16)
 selected = txl.Select(choose_a, a_desc + a_off(kp), b_desc + b_off(kp))
 ```
+
+## CUDA compiler settings
+
+Pass the same nested `backend_config` mapping to the factory and compile entry.
+`txl.cuda.BackendConfig` is a `TypedDict` helper returning an ordinary dictionary:
+
+```python
+config = {"cuda": txl.cuda.BackendConfig(
+    arch="sm_100a", compiler="nvrtc",
+    nvrtc=["--use_fast_math", "--ftz=false"],
+)}
+kernel = make_kernel(..., backend_config=config)
+executable = kernel.compile(backend_config=config)
+```
+
+A factory that chooses Python code by architecture resolves its architecture
+before tracing and records it on `txl.device_entry(..., backend_config=config)`.
+Factories can use `runner.resolve_backend_config` to pin that architecture while
+leaving unspecified compiler defaults inheritable. Entry keys override compile
+settings, which override Target/tag settings and backend defaults. Each toolchain
+argument list replaces the inherited list, and `[]` clears it.
+
+Registered `get_kernel`, `run_test`, and `prepare_bench` functions receive
+`backend_config` as a keyword argument. `prepare_kernel_bench` requires an
+explicit architecture for CPU preparation and defaults to NVCC. The prepared
+benchmark carries that configuration into its GPU stage. Decorate cached
+factories with `runner.cache_backend_config`; it keys the cache on stable JSON
+snapshots, including the resolved architecture and target defaults. Compiler
+settings do not belong in `prepare_data` unless it chooses architecture-dependent
+data or descriptors.
+
+The test, benchmark, and remote benchmark CLIs accept, for example,
+`--backend-config '{"cuda":{"compiler":"nvcc","nvcc":["--ftz=false"]}}'`.
+Remote requests serialize the same nested mapping; their architecture must agree
+with the assigned server. Configuration boundaries copy mutable input lists.

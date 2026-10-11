@@ -684,8 +684,10 @@ def _tmem_cell(base, row, row_delta, column):
     return base + column + txl.shift_left(row + row_delta, txl.int32(16))
 
 
-def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out):
-    @txl.kernel(warps=32, arch="sm_100a", grid=1)
+def _make_prologue(
+    *, run_order, order_generate, dynamic_scheduler, n_heads_out, backend_config=None
+):
+    @txl.kernel()
     def prologue(
         base_q: txl.gptr[txl.i64],
         base_k: txl.gptr[txl.i64],
@@ -738,6 +740,10 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out)
         checkpoint_row_stride_bytes: txl.i32,
         checkpoint_every_n: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=1, block=32 * 32), backend_config=backend_config
+        )
+
         thread = txl.thread_id()
         warp = txl.warp_id()
         if run_order:
@@ -1017,8 +1023,9 @@ def _make_main(
     q_ratio,
     k_ratio,
     v_ratio,
+    backend_config=None,
 ):
-    @txl.kernel(warps=16, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
+    @txl.kernel()
     def main(
         descriptor_workspace: txl.gptr[txl.i64],
         n_desc: txl.i32,
@@ -1033,6 +1040,12 @@ def _make_main(
         scheduler: txl.gptr[txl.i32],
         scale: txl.f32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=num_sms, block=16 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         arena = txl.alloc_tensor((_MAIN_SMEM_BYTES,), txl.u8, scope="shared.dyn", align=1024)
         # The pool owns only the fixed pipeline/barrier header over the arena;
         # all data storage below is addressed by integer byte offsets.
@@ -4024,7 +4037,7 @@ def _normalized_config(config):
     return config
 
 
-def get_kernel(**config):
+def get_kernel(*, backend_config=None, **config):
     config = _normalized_config(config)
     num_sms = int(config.get("num_sms", 148))
     prologue = _make_prologue(
@@ -4032,6 +4045,7 @@ def get_kernel(**config):
         order_generate=bool(config.get("order_generate", False)),
         dynamic_scheduler=bool(config.get("dynamic_scheduler", False)),
         n_heads_out=int(config.get("n_heads_out", config.get("heads", 1))),
+        backend_config=backend_config,
     )
     main = _make_main(
         num_sms=num_sms,
@@ -4047,6 +4061,7 @@ def get_kernel(**config):
         q_ratio=int(config.get("q_ratio", config["heads"] // config["q_heads"])),
         k_ratio=int(config.get("k_ratio", config["heads"] // config["k_heads"])),
         v_ratio=int(config.get("v_ratio", config["heads"] // config["v_heads"])),
+        backend_config=backend_config,
     )
     return [prologue.func, main.func]
 
@@ -4481,7 +4496,7 @@ def _validate_outputs(data, *, sources):
         raise AssertionError(f"GDN-2 backward validation failed for {config}: {failures}")
 
 
-def run_test(**config):
+def run_test(*, backend_config=None, **config):
     """Compare TIRx with the upstream kernel on identical inputs."""
     import torch
 
@@ -4489,7 +4504,10 @@ def run_test(**config):
 
     kernel_config = _normalized_config(config)
     data = _prepare_data(kernel_config)
-    executables = [compile_kernel(func) for func in get_kernel(**kernel_config)]
+    executables = [
+        compile_kernel(func, backend_config=backend_config)
+        for func in get_kernel(**kernel_config, backend_config=backend_config)
+    ]
     tirx_launch = _tirx_launch(executables, data)
     source_launch = _source_launch(data)
     tirx_launch()
@@ -4499,19 +4517,32 @@ def run_test(**config):
     return {"tokens": sum(kernel_config["seq_lens"]), "heads": kernel_config["heads"]}
 
 
-def prepare_bench(**config):
+def prepare_bench(*, backend_config=None, **config):
     """Compile the two TIRx launches without importing torch or touching CUDA."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     kernel_config = _normalized_config(config)
     state = {
         "config": kernel_config,
-        "executables": [compile_kernel(func) for func in get_kernel(**kernel_config)],
+        "executables": [
+            compile_kernel(func, backend_config=backend_config)
+            for func in get_kernel(**kernel_config, backend_config=backend_config)
+        ],
     }
-    return prepared_gpu_benchmark(run_gpu, state)
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    backend_config=None,
+    **kwargs,
+):
     """Validate once, then let bench_suite time the exact two-launch paths."""
     import torch
 
@@ -4541,8 +4572,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, backend_config=None, **config
+):
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

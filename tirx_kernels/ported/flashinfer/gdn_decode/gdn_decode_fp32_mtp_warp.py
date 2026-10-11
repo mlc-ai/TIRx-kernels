@@ -9,14 +9,13 @@ Upstream source: flashinfer/gdn_kernels/gdn_decode_mtp.py.
 """
 
 import functools
-import os
 from typing import Any
 from unittest import SkipTest
 
 import torch
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import bench, cache_backend_config, resolve_backend_config
 
 KERNEL_META = {
     "name": "gdn_decode_fp32_mtp_warp",
@@ -528,10 +527,9 @@ def _make_gdn_decode_fp32_mtp_warp(
     ROWS_PER_GROUP,
     ITERS_PER_GROUP,
     PREFETCH_ROWS,
+    backend_config=None,
 ):
-    @txl.kernel(
-        warps=NUM_WARPS, arch="sm_100a", grid=lambda p: p["batch"] * NUM_V_HEADS * NUM_V_TILES
-    )
+    @txl.kernel()
     def gdn_decode_fp32_mtp_warp(
         state: txl.gptr[txl.f32],
         intermediate: txl.gptr[txl.f32],
@@ -553,6 +551,13 @@ def _make_gdn_decode_fp32_mtp_warp(
         v_batch_stride: txl.i64,
         batch: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=batch * NUM_V_HEADS * NUM_V_TILES, block=NUM_WARPS * 32
+            ),
+            backend_config=backend_config,
+        )
+
         smem = txl.smem_pool()
         s_q = smem.alloc((S_K_BYTE_OFFSET // 4,), txl.f32, align=16)
         s_k = smem.alloc(((S_G_BYTE_OFFSET - S_K_BYTE_OFFSET) // 4,), txl.f32, align=16)
@@ -721,7 +726,8 @@ def _make_gdn_decode_fp32_mtp_warp(
                     )
                     shared_g_ptr = s_g.ptr_to([t])
                     txl.ptx.st.shared.b32(
-                        shared_g_ptr, txl.reinterpret("uint32", txl.cuda.float2_x(gate_pair_value[0]))
+                        shared_g_ptr,
+                        txl.reinterpret("uint32", txl.cuda.float2_x(gate_pair_value[0])),
                     )
                     _shared_store_f32_ptr_offset(
                         shared_g_ptr,
@@ -731,7 +737,9 @@ def _make_gdn_decode_fp32_mtp_warp(
                     )
                     if USE_SMEM_V:
                         with txl.If(tid < TILE_V), txl.Then():
-                            v_input_base = txl.cast(n, "int64") * effective_v_batch_stride + txl.cast(
+                            v_input_base = txl.cast(
+                                n, "int64"
+                            ) * effective_v_batch_stride + txl.cast(
                                 (t * NUM_V_HEADS + hv) * V + v_tile * TILE_V + tid, "int64"
                             )
                             v_input_ptr = v.ptr_to([v_input_base])
@@ -754,7 +762,9 @@ def _make_gdn_decode_fp32_mtp_warp(
                 if USE_SMEM_V:
                     for t in range(SEQ_LEN):
                         with txl.If(tid < TILE_V), txl.Then():
-                            v_input_base = txl.cast(n, "int64") * effective_v_batch_stride + txl.cast(
+                            v_input_base = txl.cast(
+                                n, "int64"
+                            ) * effective_v_batch_stride + txl.cast(
                                 (t * NUM_V_HEADS + hv) * V + v_tile * TILE_V + tid, "int64"
                             )
                             v_input_ptr = v.ptr_to([v_input_base])
@@ -849,7 +859,9 @@ def _make_gdn_decode_fp32_mtp_warp(
                             for row in range(ILP_ROWS):
                                 index = _local_scalar("int32", row * VEC_SIZE + elem)
                                 txl.ptx["mul.f32"](r_h[index[0]], r_h[index[0]], g_value[0])
-                                txl.ptx["fma.rn.f32"](sums[row], r_h[index[0]], r_k[elem], sums[row])
+                                txl.ptx["fma.rn.f32"](
+                                    sums[row], r_h[index[0]], r_k[elem], sums[row]
+                                )
                     for delta_index in range(5):
                         delta = _local_scalar("int32", txl.shift_right(txl.int32(16), delta_index))
                         for row in range(ILP_ROWS):
@@ -932,7 +944,9 @@ def _make_gdn_decode_fp32_mtp_warp(
                                         r_h[base[0] + 1],
                                     )
                                 txl.ptx.mov.b32(r_h[base[0]], txl.cuda.float2_x(packed_value[0]))
-                                txl.ptx.mov.b32(r_h[base[0] + 1], txl.cuda.float2_y(packed_value[0]))
+                                txl.ptx.mov.b32(
+                                    r_h[base[0] + 1], txl.cuda.float2_y(packed_value[0])
+                                )
                                 _packed_fma_store(
                                     packed_value,
                                     r_h[base[0]],
@@ -1099,7 +1113,8 @@ def _make_gdn_decode_fp32_mtp_warp(
                 if not DISABLE_STATE_UPDATE and (not PER_TOKEN_POOL_SCATTER):
                     with txl.If(write_slot_raw[0] >= 0), txl.Then():
                         write_offset = _local_scalar(
-                            "int64", write_state_base[0] + txl.cast(v_base * K + k_start[0], "int64")
+                            "int64",
+                            write_state_base[0] + txl.cast(v_base * K + k_start[0], "int64"),
                         )
                         write_ptr = state.ptr_to([write_offset[0]])
                         for row in range(ILP_ROWS):
@@ -1147,7 +1162,7 @@ def _pool_factor(config: dict[str, Any]) -> int:
     return factor
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     """Return the source-specialized TIRx PrimFunc."""
     config = dict(kwargs)
     _require_supported_config(config)
@@ -1211,6 +1226,7 @@ def get_kernel(**kwargs: Any):
         ROWS_PER_GROUP=tile_v // NUM_GROUPS,
         ITERS_PER_GROUP=(tile_v // NUM_GROUPS) // ilp_rows,
         PREFETCH_ROWS=0 if ilp_rows == 8 else ilp_rows,
+        backend_config=backend_config,
     )
 
 
@@ -1336,7 +1352,7 @@ def _load_oracle():
     return public.gated_delta_rule_mtp
 
 
-@functools.cache
+@cache_backend_config
 def _compile_tirx(
     work_units: int,
     seq_len: int,
@@ -1353,6 +1369,8 @@ def _compile_tirx(
     per_token_pool_scatter: bool,
     padded_pool: bool,
     packed_qkv: bool,
+    *,
+    backend_config=None,
 ):
     from tirx_kernels.runner import compile_kernel
 
@@ -1391,14 +1409,25 @@ def _compile_tirx(
         reg_level = 0
     elif seq_len == 8 and num_heads <= 4:
         reg_level = 4
-    if reg_level is None:
-        os.environ.pop("TVM_CUDA_PTXAS_REG_LEVEL", None)
-    else:
-        os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = str(reg_level)
-    return compile_kernel(get_kernel(**config))
+    if reg_level is not None:
+        backend_config = resolve_backend_config(
+            backend_config,
+            defaults={
+                "cuda": {
+                    "ptxas": [
+                        "-v",
+                        "--warn-on-local-memory-usage",
+                        "--register-usage-level=" + str(reg_level),
+                    ]
+                }
+            },
+        )
+    return compile_kernel(
+        get_kernel(**config, backend_config=backend_config), backend_config=backend_config
+    )
 
 
-def _compile_tirx_for_config(config: dict[str, Any]):
+def _compile_tirx_for_config(config: dict[str, Any], *, backend_config=None):
     return _compile_tirx(
         int(config["batch"]) * int(config["num_v_heads"]),
         int(config["seq_len"]),
@@ -1415,11 +1444,12 @@ def _compile_tirx_for_config(config: dict[str, Any]):
         bool(config.get("per_token_pool_scatter", False)),
         bool(config.get("padded_pool", False)),
         bool(config.get("packed_qkv", False)),
+        backend_config=backend_config,
     )
 
 
-def _tirx_executable(case: dict[str, Any]):
-    return _compile_tirx_for_config(case["config"])
+def _tirx_executable(case: dict[str, Any], *, backend_config=None):
+    return _compile_tirx_for_config(case["config"], backend_config=backend_config)
 
 
 def _storage_span(tensor: torch.Tensor, elements: int) -> torch.Tensor:
@@ -1649,9 +1679,9 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     }
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     case = prepare_data(**kwargs)
-    executable = _tirx_executable(case)
+    executable = _tirx_executable(case, backend_config=backend_config)
     executable(*_tirx_args(case))
     torch.cuda.synchronize(case["tirx_state"].device)
     _run_reference(case)
@@ -1659,14 +1689,16 @@ def run_test(**kwargs: Any) -> None:
     _assert_case_close(case)
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Compile the selected FP32 MTP warp specialization before CUDA setup."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = dict(kwargs)
     _require_supported_config(config)
-    executable = _compile_tirx_for_config(config)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+    executable = _compile_tirx_for_config(config, backend_config=backend_config)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(kwargs), "executable": executable}, backend_config=backend_config
+    )
 
 
 def run_gpu(
@@ -1677,6 +1709,7 @@ def run_gpu(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
@@ -1716,9 +1749,10 @@ def run_bench(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    return prepare_bench(**kwargs).run_gpu(
+    return prepare_bench(**kwargs, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
