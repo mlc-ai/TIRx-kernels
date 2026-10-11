@@ -42,9 +42,8 @@ log-sum-exp output.  The surrounding BSA wrapper's final BSHD-to-BHSD copies
 are deliberately outside this kernel.
 """
 
-from functools import lru_cache
-
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import cache_backend_config
 
 KERNEL_META = {
     "name": "cudnn_sm100_bsa_forward_combine_blk64",
@@ -154,8 +153,8 @@ def _shfl_bfly_i32(value, lane_mask):
     return txl.reinterpret("int32", out)
 
 
-@lru_cache(maxsize=8)
-def _make_kernel(log_max_splits):
+@cache_backend_config(maxsize=8)
+def _make_kernel(log_max_splits, *, backend_config=None):
     if not 1 <= log_max_splits <= 8:
         raise ValueError(f"log_max_splits must be in [1, 8], got {log_max_splits}")
 
@@ -181,7 +180,11 @@ def _make_kernel(log_max_splits):
     ):
         # CUDA TRANSCRIPTION START
         row_tiles = txl.ceildiv(seqlen_q * num_heads, _TILE_M)
-        row_tile, dim_tile, batch_idx = txl.cta_id([row_tiles, _HEAD_DIM // _K_BLOCK, batch])
+        row_tile, dim_tile, batch_idx = (
+            txl.cuda.block_idx("x"),
+            txl.cuda.block_idx("y"),
+            txl.cuda.block_idx("z"),
+        )
         tid = txl.thread_id()
 
         arena = txl.alloc_tensor((smem_bytes,), txl.u8, scope="shared.dyn", align=1024)
@@ -499,15 +502,7 @@ def _make_kernel(log_max_splits):
                     txl.ptx.st.global_.v2.b32(out.ptr_to([out_index]), word0, word1)
         # CUDA TRANSCRIPTION END
 
-    @txl.kernel(
-        warps=4,
-        arch="sm_100a",
-        grid=lambda p: [
-            txl.ceildiv(p["seqlen_q"] * p["num_heads"], _TILE_M),
-            _HEAD_DIM // _K_BLOCK,
-            p["batch"],
-        ],
-    )
+    @txl.kernel()
     def combine(
         o_partial: txl.gptr[txl.f32],
         lse_partial: txl.gptr[txl.f32],
@@ -521,7 +516,15 @@ def _make_kernel(log_max_splits):
         seqlen_div_s1: txl.i32,
         seqlen_div_s2: txl.i32,
     ):
-        txl.cuda.required_block_size(128, 1, 1, 1, 1, 1)
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=[txl.ceildiv(seqlen_q * num_heads, _TILE_M), _HEAD_DIM // _K_BLOCK, batch],
+                block=4 * 32,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(required_block_size=True),
+            backend_config=backend_config,
+        )
+
         kernel_body(
             o_partial,
             lse_partial,
@@ -539,9 +542,13 @@ def _make_kernel(log_max_splits):
     return combine
 
 
-def get_kernel(*, batch, num_heads, seqlen_q, kv_splits, seed=0, data_pattern="mixed"):
+def get_kernel(
+    *, batch, num_heads, seqlen_q, kv_splits, seed=0, data_pattern="mixed", backend_config=None
+):
     del batch, num_heads, seqlen_q, seed, data_pattern
-    return _make_kernel(_ceil_log2(kv_splits)).func.with_attr("global_symbol", KERNEL_META["name"])
+    return _make_kernel(_ceil_log2(kv_splits), backend_config=backend_config).func.with_attr(
+        "global_symbol", KERNEL_META["name"]
+    )
 
 
 def _without_label(config):
@@ -813,14 +820,20 @@ def prepare_data(**config):
     }
 
 
-def run_test(**config):
+def run_test(*, backend_config=None, **config):
     import torch
 
     from tirx_kernels.runner import compile_kernel
 
     kernel_config = _without_label(config)
     data = prepare_data(**kernel_config)
-    tirx_launch = _tirx_launch(compile_kernel(get_kernel(**kernel_config)), data)
+    tirx_launch = _tirx_launch(
+        compile_kernel(
+            get_kernel(**kernel_config, backend_config=backend_config),
+            backend_config=backend_config,
+        ),
+        data,
+    )
     source_launch = _compile_reference(data)
     tirx_launch()
     source_launch()
@@ -828,15 +841,31 @@ def run_test(**config):
     return _validate_outputs(data)
 
 
-def prepare_bench(**config):
+def prepare_bench(*, backend_config=None, **config):
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     kernel_config = _without_label(config)
-    state = {"config": kernel_config, "executable": compile_kernel(get_kernel(**kernel_config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": kernel_config,
+        "executable": compile_kernel(
+            get_kernel(**kernel_config, backend_config=backend_config),
+            backend_config=backend_config,
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    backend_config=None,
+    **config,
+):
     from tirx_kernels.runner import bench, defer_gpu_interrupts, external_references_enabled
 
     with defer_gpu_interrupts():
@@ -882,8 +911,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, backend_config=None, **config
+):
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

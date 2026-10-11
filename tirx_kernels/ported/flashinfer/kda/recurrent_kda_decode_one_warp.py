@@ -434,7 +434,7 @@ def _specialization(kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
+def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any], *, backend_config=None):
     NUM_SEQS = spec["NUM_SEQS"]
     NUM_HEADS = spec["NUM_HEADS"]
     NUM_VALUE_HEADS = spec["NUM_VALUE_HEADS"]
@@ -447,7 +447,7 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
     USE_LOWER_BOUND = spec["USE_LOWER_BOUND"]
     STATE_SLOT_STRIDE = spec["STATE_SLOT_STRIDE"]
 
-    @txl.kernel(warps=1, arch="sm_100a", grid=NUM_SEQS * NUM_VALUE_HEADS * NUM_V_TILES)
+    @txl.kernel()
     def _recurrent_kda_decode_one_warp(
         q: txl.gptr[txl.bf16],
         k: txl.gptr[txl.bf16],
@@ -466,6 +466,13 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
     ):
         # TIRX_TRANSCRIBE_START recurrent_kda_decode_one_warp
         # --- lane and CTA coordinates (recurrent_kda.py:229-246) ----------------
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=NUM_SEQS * NUM_VALUE_HEADS * NUM_V_TILES, block=1 * 32
+            ),
+            backend_config=backend_config,
+        )
+
         bidx = txl.cta_id()
         tidx_axis = txl.thread_id()
         tidx = txl.local_scalar("int32")
@@ -783,9 +790,11 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
     return _recurrent_kda_decode_one_warp.func
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     """Return the specialized one-warp recurrent-KDA decode PrimFunc."""
-    return _make_recurrent_kda_decode_one_warp(_specialization(kwargs))
+    return _make_recurrent_kda_decode_one_warp(
+        _specialization(kwargs), backend_config=backend_config
+    )
 
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
@@ -944,19 +953,26 @@ _ATOL = 1.0e-4
 # The FP32 oracle reassociates freely, so it only needs to agree to bf16 noise.
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     from tirx_kernels.runner import compile_kernel
 
     case = prepare_data(**kwargs)
-    executable = compile_kernel(get_kernel(**kwargs))
+    executable = compile_kernel(
+        get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+    )
     executable(*_tirx_args(case))
     torch.cuda.synchronize()
 
@@ -1001,6 +1017,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1047,11 +1064,16 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    backend_config=None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

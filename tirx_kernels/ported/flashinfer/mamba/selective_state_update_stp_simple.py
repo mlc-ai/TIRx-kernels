@@ -359,7 +359,7 @@ def _specialization(kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     """Build the K entry for one simple specialization."""
     spec = _specialization(kwargs)
 
@@ -381,7 +381,7 @@ def get_kernel(**kwargs: Any):
     STATE_VECTOR = spec["STATE_VECTOR"]
     WEIGHT_DTYPE = spec["WEIGHT_DTYPE"]
 
-    @txl.kernel(warps=4, arch="sm_100a", grid=(spec["BATCH"], spec["NHEADS"], "dim_tiles_runtime"))
+    @txl.kernel()
     def selective_state_update_stp_simple(
         state: txl.gptr[spec["STATE_DTYPE"]],
         state_scale: txl.gptr[txl.f32],
@@ -414,6 +414,13 @@ def get_kernel(**kwargs: Any):
         pad_slot_id: txl.i32,
         dim_tiles_runtime: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(spec["BATCH"], spec["NHEADS"], dim_tiles_runtime), block=4 * 32
+            ),
+            backend_config=backend_config,
+        )
+
         batch_i, head, dim_tile = txl.cta_id()
         smem = txl.smem_pool()
         s_x = smem.alloc((spec["ROWS_PER_BLOCK"],), txl.bf16, align=16)
@@ -1373,19 +1380,26 @@ def _assert_case_close(case: dict[str, Any]) -> None:
         )
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     from tirx_kernels.runner import compile_kernel
 
     case = prepare_data(**kwargs)
-    executable = compile_kernel(get_kernel(**kwargs))
+    executable = compile_kernel(
+        get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+    )
     executable(*_tirx_args(case))
     _run_reference(case)
     torch.cuda.synchronize()
@@ -1398,6 +1412,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1437,11 +1452,16 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    backend_config=None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

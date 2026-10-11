@@ -249,7 +249,7 @@ class _IRScanner:
         structural_walk(body, [(tvm.ir.Call, self._visit_call)])
 
     def _record(self, node: Any, detail: str) -> None:
-        span = getattr(node, "span", None)
+        span = getattr(node, "loc", None)
         suffix = f" span={span}" if span is not None else ""
         self.findings.append(Finding("IR", self.specialization, detail + suffix))
 

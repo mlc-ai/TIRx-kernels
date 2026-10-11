@@ -10,11 +10,10 @@ The source implementation is ``RMSNormKernel`` plus its 2-D host dispatch in
 ``rmsnorm`` and ``gemma_rmsnorm`` in ``flashinfer/norm/__init__.py``.
 """
 
-import os
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
+from tirx_kernels.runner import bench, resolve_backend_config
 
 KERNEL_META = {
     "name": "flashinfer_rmsnorm",
@@ -48,8 +47,8 @@ _CVT_PAIR_FROM_F32 = {"float16": "cvt.rn.f16x2.f32", "bfloat16": "cvt.rn.bf16x2.
 _CP_ASYNC = "cp.async.ca.shared.global"
 
 
-def _preparing_for_thor() -> bool:
-    return os.environ.get(PREPARE_CUDA_ARCH_ENV, "sm_100a") == "sm_110a"
+def _preparing_for_thor(*, backend_config=None) -> bool:
+    return resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a"
 
 
 def _ceil_div(lhs: int, rhs: int) -> int:
@@ -117,7 +116,7 @@ def _estimate_smem(H: int, cluster_n: int) -> int:
     )
 
 
-def _source_config(H: int) -> dict[str, int | bool]:
+def _source_config(H: int, *, backend_config=None) -> dict[str, int | bool]:
     cluster_n = 16
     for candidate in (1, 2, 4, 8, 16):
         if H % candidate == 0 and _estimate_smem(H, candidate) <= _OPTIN_SMEM_BYTES:
@@ -125,7 +124,7 @@ def _source_config(H: int) -> dict[str, int | bool]:
             break
     # Thor supports at most eight CTAs in one cluster. Recompute every derived
     # launch and storage quantity after shrinking a source-selected cluster.
-    if _preparing_for_thor():
+    if _preparing_for_thor(backend_config=backend_config):
         cluster_n = min(cluster_n, 8)
     return _derived_config(H, cluster_n)
 
@@ -461,14 +460,21 @@ def get_kernel(
     output_layout: str,
     enable_pdl: bool,
     eps: float = _DEFAULT_EPS,
+    *,
+    backend_config=None,
     **kwargs: Any,
 ):
     """Return the compact or explicit-i64-strided runtime-M specialization."""
     _validate(variant, dtype, M, H, input_layout, output_layout, eps)
     compact = _uses_compact_specialization(M, H, input_layout, output_layout)
-    source = _source_config(H)
+    source = _source_config(H, backend_config=backend_config)
     # A wider CTA plus register-resident input wins for this cold-cache Thor row.
-    if _preparing_for_thor() and variant == "rmsnorm" and dtype == "bfloat16" and H == 8192:
+    if (
+        _preparing_for_thor(backend_config=backend_config)
+        and variant == "rmsnorm"
+        and dtype == "bfloat16"
+        and H == 8192
+    ):
         source = {
             **source,
             "tpr": 256,
@@ -495,7 +501,7 @@ def get_kernel(
     pair_values = packed_pairs * 2
     packed_narrow = not (vec == 1 or (vec == 2 and vec_blocks == 3))
     weight_bias = 0.0 if variant == "rmsnorm" else 1.0
-    is_thor = _preparing_for_thor()
+    is_thor = _preparing_for_thor(backend_config=backend_config)
     thor_zero_weight_bias = is_thor and variant == "rmsnorm"
     thor_full_rows = is_thor and compact and M % rows == 0
     thor_full_cols = is_thor and H == cluster_n * cols
@@ -548,10 +554,6 @@ def get_kernel(
         if not (is_thor and variant == "rmsnorm" and M == 32 and H == 4096 and enable_pdl):
             max_registers = 64 if enable_pdl else (96 if H == 8192 else 93)
 
-    def entry_registers():
-        if max_registers is not None:
-            txl.cuda.max_registers_per_thread(max_registers)
-
     def kernel_body(x, weight, y, runtime_M, runtime_eps, x_row_stride, y_row_stride):
         # TIRX_TRANSCRIBE_START flashinfer_rmsnorm
         grid_rows = (
@@ -560,12 +562,12 @@ def get_kernel(
             else txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32")
         )
         if cluster_n > 1:
-            block_x_raw, block_y_raw = txl.cta_id([grid_rows, cluster_n])
-            _, cta_rank_raw = txl.cta_id_in_cluster([1, cluster_n], preferred=[1, cluster_n])
+            block_x_raw, block_y_raw = (txl.cuda.block_idx("x"), txl.cuda.block_idx("y"))
+            _, cta_rank_raw = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
             block_y = txl.cast(block_y_raw, "int32")
             cta_rank = txl.cast(cta_rank_raw, "int32")
         else:
-            block_x_raw = txl.cta_id([grid_rows])
+            block_x_raw = txl.cuda.block_idx("x")
             block_y = 0
             cta_rank = 0
         tid = txl.thread_id()
@@ -922,16 +924,9 @@ def get_kernel(
         if enable_pdl:
             txl.ptx.griddepcontrol.launch_dependents()
 
-    entry_kwargs = {
-        "warps": threads // 32,
-        "arch": "sm_100a",
-        "grid": False,
-        "min_blocks_per_sm": None if threads == 128 else 1,
-    }
-
     if compact:
 
-        @txl.kernel(**entry_kwargs)
+        @txl.kernel()
         def flashinfer_rmsnorm_compact(
             x: txl.gptr[dtype],
             weight: txl.gptr[dtype, (H,)],
@@ -939,13 +934,38 @@ def get_kernel(
             runtime_M: txl.i64,
             runtime_eps: txl.f32,
         ):
-            entry_registers()
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=(
+                        txl.int32(M // rows)
+                        if thor_full_rows
+                        else txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"),
+                        cluster_n,
+                    )
+                    if cluster_n > 1
+                    else (
+                        txl.int32(M // rows)
+                        if thor_full_rows
+                        else txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"),
+                    ),
+                    block=threads,
+                    cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    programmatic_stream_serialization=enable_pdl,
+                ),
+                kernel_attrs=txl.cuda.KernelAttributes(
+                    min_blocks_per_sm=None if threads == 128 else 1,
+                    max_registers_per_thread=max_registers,
+                ),
+                backend_config=resolve_backend_config(backend_config),
+            )
+
             kernel_body(x, weight, y, runtime_M, runtime_eps, txl.int64(H), txl.int64(H))
 
         kernel = flashinfer_rmsnorm_compact.func
     else:
 
-        @txl.kernel(**entry_kwargs)
+        @txl.kernel()
         def flashinfer_rmsnorm_strided(
             x: txl.gptr[dtype],
             weight: txl.gptr[dtype, (H,)],
@@ -955,24 +975,42 @@ def get_kernel(
             x_row_stride: txl.i64,
             y_row_stride: txl.i64,
         ):
-            entry_registers()
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=(
+                        txl.int32(M // rows)
+                        if thor_full_rows
+                        else txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"),
+                        cluster_n,
+                    )
+                    if cluster_n > 1
+                    else (
+                        txl.int32(M // rows)
+                        if thor_full_rows
+                        else txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"),
+                    ),
+                    block=threads,
+                    cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    programmatic_stream_serialization=enable_pdl,
+                ),
+                kernel_attrs=txl.cuda.KernelAttributes(
+                    min_blocks_per_sm=None if threads == 128 else 1,
+                    max_registers_per_thread=max_registers,
+                ),
+                backend_config=resolve_backend_config(backend_config),
+            )
+
             kernel_body(x, weight, y, runtime_M, runtime_eps, x_row_stride, y_row_stride)
 
         kernel = flashinfer_rmsnorm_strided.func
 
-    launch_params = ["blockIdx.x"]
-    if cluster_n > 1:
-        launch_params.extend(["blockIdx.y", "clusterCtaIdx.x", "clusterCtaIdx.y"])
-    launch_params.append("threadIdx.x")
-    if enable_pdl:
-        launch_params.append("tirx.use_programtic_dependent_launch")
-    launch_params.append("tirx.use_dyn_shared_memory")
-    return kernel.with_attr("tirx.kernel_launch_params", launch_params)
+    return kernel
 
 
-def prepare_data(**config: Any):
+def prepare_data(*, backend_config=None, **config: Any):
     """Create deterministic tensors for one specialization."""
-    data = _prepare_tensors(config)
+    data = _prepare_tensors(config, backend_config=backend_config)
     return data["x"], data["weight"]
 
 
@@ -997,7 +1035,7 @@ def _storage_size(M: int, H: int, row_stride: int) -> int:
     return (M - 1) * row_stride + H
 
 
-def _prepare_tensors(config: dict[str, Any]) -> dict[str, Any]:
+def _prepare_tensors(config: dict[str, Any], *, backend_config=None) -> dict[str, Any]:
     import torch
 
     M = int(config["M"])
@@ -1008,7 +1046,7 @@ def _prepare_tensors(config: dict[str, Any]) -> dict[str, Any]:
     eps = float(config.get("eps", _DEFAULT_EPS))
     _validate(str(config["variant"]), dtype, M, H, input_layout, output_layout, eps)
     x_stride, y_stride = _row_strides(config)
-    vec = int(_source_config(H)["vec"])
+    vec = int(_source_config(H, backend_config=backend_config)["vec"])
     if x_stride < H or y_stride < H:
         raise ValueError(f"row strides must cover H={H}: x={x_stride}, y={y_stride}")
     if x_stride % vec != 0 or y_stride % vec != 0:
@@ -1126,25 +1164,32 @@ def _flashinfer_api(variant: str, device):
     return api, flashinfer_norm
 
 
-def _compile_tirx(config: dict[str, Any]):
+def _compile_tirx(config: dict[str, Any], *, backend_config=None):
     from tirx_kernels.runner import compile_kernel
 
     use_thor_h8192_schedule = (
-        _preparing_for_thor()
+        _preparing_for_thor(backend_config=backend_config)
         and config["variant"] == "rmsnorm"
         and config["dtype"] == "bfloat16"
         and int(config["H"]) == 8192
     )
-    previous = os.environ.get("TVM_CUDA_PTXAS_REG_LEVEL")
+    pass
     if use_thor_h8192_schedule:
-        os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = "2"
-    try:
-        return compile_kernel(get_kernel(**config))
-    finally:
-        if previous is None:
-            os.environ.pop("TVM_CUDA_PTXAS_REG_LEVEL", None)
-        else:
-            os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = previous
+        backend_config = resolve_backend_config(
+            backend_config,
+            defaults={
+                "cuda": {
+                    "ptxas": [
+                        "-v",
+                        "--warn-on-local-memory-usage",
+                        "--register-usage-level=" + str(2),
+                    ]
+                }
+            },
+        )
+    return compile_kernel(
+        get_kernel(**config, backend_config=backend_config), backend_config=backend_config
+    )
 
 
 def _launch_tirx(executable, data, output, config: dict[str, Any]) -> None:
@@ -1195,7 +1240,7 @@ def _assert_inputs_unchanged(data, snapshot, M: int, H: int) -> None:
     _assert_guard(data["weight_backing"], H, name="weight")
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     """Compile, launch, and validate one config."""
     import torch
 
@@ -1206,12 +1251,12 @@ def run_test(**config: Any) -> None:
     variant = str(config["variant"])
     eps = float(config.get("eps", _DEFAULT_EPS))
     enable_pdl = bool(config["enable_pdl"])
-    data = _prepare_tensors(config)
+    data = _prepare_tensors(config, backend_config=backend_config)
     snapshot = _input_snapshot(data, M, H)
     output = _prepare_output(M, H, data["y_row_stride"], dtype, initialize_padding=True)
     reference_out = _prepare_output(M, H, data["y_row_stride"], dtype, initialize_padding=True)
 
-    executable = _compile_tirx(config)
+    executable = _compile_tirx(config, backend_config=backend_config)
     _launch_tirx(executable, data, output, config)
 
     api, flashinfer_norm = _flashinfer_api(variant, data["x"].device)
@@ -1250,16 +1295,27 @@ def run_test(**config: Any) -> None:
     _assert_output_padding(reference_out, M, H, data["y_row_stride"], name="FlashInfer output")
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Compile the selected TIRx specialization before GPU assignment."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
-    state = {"config": dict(config), "executable": _compile_tirx(dict(config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(config),
+        "executable": _compile_tirx(dict(config), backend_config=backend_config),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
-    prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs: Any
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **kwargs: Any,
 ):
     """Construct and validate both timed closures before benchmarking."""
     import torch
@@ -1272,7 +1328,7 @@ def run_gpu(
     variant = str(config["variant"])
     eps = float(config.get("eps", _DEFAULT_EPS))
     enable_pdl = bool(config["enable_pdl"])
-    data = _prepare_tensors(config)
+    data = _prepare_tensors(config, backend_config=backend_config)
     tirx_output = _prepare_output(M, H, data["y_row_stride"], dtype, initialize_padding=False)
     flashinfer_output = _prepare_output(M, H, data["y_row_stride"], dtype, initialize_padding=False)
     executable = prepared["executable"]
@@ -1310,9 +1366,18 @@ def run_gpu(
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config: Any):
+def run_bench(
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **config: Any,
+):
     """Benchmark a TIRx specialization against FlashInfer CuTe-DSL."""
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

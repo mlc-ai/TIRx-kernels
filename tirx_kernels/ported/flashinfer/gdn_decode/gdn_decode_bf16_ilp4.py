@@ -16,7 +16,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import bench, cache_backend_config
 
 KERNEL_META = {
     "name": "gdn_decode_bf16_ilp4",
@@ -166,7 +166,9 @@ def _gate_pair(a, b_gate, A_value, dt_value, index):
     _mul2 = txl.local_scalar("float32")
     txl.ptx["mul.f32"](_mul2, _log2, txl.float32(LN_2))
     softplus_value = _mul2
-    use_softplus = txl.if_then_else(x_value <= txl.float32(20.0), txl.float32(1.0), txl.float32(0.0))
+    use_softplus = txl.if_then_else(
+        x_value <= txl.float32(20.0), txl.float32(1.0), txl.float32(0.0)
+    )
     _sub = txl.local_scalar("float32")
     txl.ptx["sub.f32"](_sub, txl.float32(1.0), use_softplus)
     _mul3 = txl.local_scalar("float32")
@@ -342,8 +344,9 @@ def _make_gdn_decode_bf16_ilp4(
     PER_REQUEST_ACCEPTED_STEPS,
     PER_TOKEN_POOL_SCATTER,
     PER_TOKEN_POOL_SCATTER_FLAT,
+    backend_config=None,
 ):
-    @txl.kernel(warps=NUM_WARPS, arch="sm_100a", min_blocks_per_sm=8, grid=False)
+    @txl.kernel()
     def gdn_decode_bf16_ilp4(
         state: txl.gptr[txl.bf16],
         intermediate: txl.gptr[txl.bf16],
@@ -365,6 +368,14 @@ def _make_gdn_decode_bf16_ilp4(
         v_batch_stride: txl.i64,
         batch: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(batch * NUM_V_HEADS * NUM_V_TILES,), block=NUM_WARPS * 32
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=8),
+            backend_config=backend_config,
+        )
+
         smem = txl.smem_pool()
         if SEQ_LEN > 1:
             s_q = smem.alloc((S_K_BYTE_OFFSET // 4,), txl.f32, align=16)
@@ -374,7 +385,7 @@ def _make_gdn_decode_bf16_ilp4(
             scratch = smem.alloc((SHARED_BYTES,), txl.u8, align=16)
             s_q = s_k = s_gb = scratch
         smem.commit(SHARED_BYTES)
-        linear_cta = txl.cta_id([batch * NUM_V_HEADS * NUM_V_TILES])
+        linear_cta = txl.cuda.block_idx("x")
         tid = txl.thread_id()
         warp = _local_scalar("int32", tid // LANES_PER_GROUP)
         lane = _local_scalar("int32", tid % LANES_PER_GROUP)
@@ -669,7 +680,9 @@ def _make_gdn_decode_bf16_ilp4(
                 for delta_index in range(5):
                     delta = _local_scalar("int32", txl.shift_right(txl.int32(16), delta_index))
                     for row in range(ILP_ROWS):
-                        txl.ptx["add.f32"](sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0]))
+                        txl.ptx["add.f32"](
+                            sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0])
+                        )
                 v_input_base = _local_scalar(
                     "int64",
                     txl.cast(n[0], "int64") * v_batch_stride
@@ -829,7 +842,7 @@ def _require_supported_config(config: dict[str, Any]) -> None:
             raise ValueError("accepted_steps values must be in [0, seq_len)")
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     """Return the source-specialized TIRx PrimFunc."""
     config = dict(kwargs)
     _require_supported_config(config)
@@ -874,6 +887,7 @@ def get_kernel(**kwargs: Any):
         PER_REQUEST_ACCEPTED_STEPS=bool(config.get("per_request_accepted_steps", False)),
         PER_TOKEN_POOL_SCATTER=scatter,
         PER_TOKEN_POOL_SCATTER_FLAT=scatter_flat,
+        backend_config=backend_config,
     )
 
 
@@ -1110,7 +1124,7 @@ def _load_oracle():
     return source_module.gated_delta_rule_mtp
 
 
-@functools.cache
+@cache_backend_config
 def _compile_tirx(
     seq_len: int,
     num_heads: int,
@@ -1125,6 +1139,8 @@ def _compile_tirx(
     per_request_accepted_steps: bool,
     per_token_pool_scatter: bool,
     padded_pool: bool,
+    *,
+    backend_config=None,
 ):
     from tirx_kernels.runner import compile_kernel
 
@@ -1144,10 +1160,12 @@ def _compile_tirx(
         "padded_pool": padded_pool,
         "pool_factor_override": pool_factor,
     }
-    return compile_kernel(get_kernel(**config))
+    return compile_kernel(
+        get_kernel(**config, backend_config=backend_config), backend_config=backend_config
+    )
 
 
-def _compile_tirx_for_config(config: dict[str, Any]):
+def _compile_tirx_for_config(config: dict[str, Any], *, backend_config=None):
     return _compile_tirx(
         int(config["seq_len"]),
         int(config["num_heads"]),
@@ -1162,11 +1180,12 @@ def _compile_tirx_for_config(config: dict[str, Any]):
         bool(config.get("per_request_accepted_steps", False)),
         bool(config.get("per_token_pool_scatter", False)),
         bool(config.get("padded_pool", False)),
+        backend_config=backend_config,
     )
 
 
-def _tirx_executable(case: dict[str, Any]):
-    return _compile_tirx_for_config(case["config"])
+def _tirx_executable(case: dict[str, Any], *, backend_config=None):
+    return _compile_tirx_for_config(case["config"], backend_config=backend_config)
 
 
 def _storage_span(tensor: torch.Tensor, elements: int) -> torch.Tensor:
@@ -1272,9 +1291,9 @@ def _assert_case_close(case: dict[str, Any]) -> None:
         torch.testing.assert_close(case["qkv_backing"], case["qkv_snapshot"], atol=0, rtol=0)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     case = prepare_data(**kwargs)
-    executable = _tirx_executable(case)
+    executable = _tirx_executable(case, backend_config=backend_config)
     executable(*_tirx_args(case))
     torch.cuda.synchronize(case["tirx_state"].device)
     _run_reference(case)
@@ -1282,14 +1301,16 @@ def run_test(**kwargs: Any) -> None:
     _assert_case_close(case)
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Compile the selected ILP4 specialization before CUDA setup."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = dict(kwargs)
     _require_supported_config(config)
-    executable = _compile_tirx_for_config(config)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+    executable = _compile_tirx_for_config(config, backend_config=backend_config)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(kwargs), "executable": executable}, backend_config=backend_config
+    )
 
 
 def run_gpu(
@@ -1300,6 +1321,7 @@ def run_gpu(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
@@ -1339,9 +1361,10 @@ def run_bench(
     timer: str | None = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    return prepare_bench(**kwargs).run_gpu(
+    return prepare_bench(**kwargs, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

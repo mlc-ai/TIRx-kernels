@@ -108,10 +108,6 @@ def _without_label(config):
 
 def assert_nvrtc_ptx92():
     """Require the default GB200 compiler contract: unset mode, NVRTC 13.2/PTX 9.2."""
-    if "TVM_CUDA_COMPILE_MODE" in os.environ:
-        raise RuntimeError(
-            "TVM_CUDA_COMPILE_MODE must be absent; this kernel always uses default NVRTC"
-        )
     from cuda.bindings import nvrtc
 
     error, major, minor = nvrtc.nvrtcVersion()

@@ -62,7 +62,7 @@ MUL_F32X2 = "mul.rz.ftz.f32x2"
 CVT_F16X2 = "cvt.rn.f16x2.f32"
 
 
-def make_kernel(hidden_size: int):
+def make_kernel(hidden_size: int, *, backend_config=None):
     """Trace the kernel for one ``hidden_size``. Batch size stays dynamic."""
     # orig:L650-653 — the schedule is a pure function of hidden_size.
     vec = math.gcd(16 // F16_BYTES, hidden_size)
@@ -92,7 +92,7 @@ def make_kernel(hidden_size: int):
     # and 8 was the smallest value that clawed the allocation back. `None` is
     # strictly better — it also matches at hs=128, where the pin gave 32 vs the
     # original's 34.
-    @txl.kernel(warps=bdy, arch="sm_100a", grid=SM_COUNT)
+    @txl.kernel()
     def rmsnorm(
         inp: txl.gptr[txl.f16],
         wgt: txl.gptr[txl.f16],
@@ -101,6 +101,11 @@ def make_kernel(hidden_size: int):
         # count the way the original's match_buffer does; it is an argument.
         batch_size: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=SM_COUNT, block=bdy * 32),
+            backend_config=backend_config,
+        )
+
         bx = txl.cta_id()
         tid = txl.thread_id()
         lane = tid & 31  # orig tx
@@ -261,27 +266,32 @@ def _kernel_args(input_data, weights, output):
     return input_data.view(-1), weights, output.view(-1), input_data.shape[0]
 
 
-def get_kernel(hidden_size, **kwargs):
-    return make_kernel(hidden_size).func
+def get_kernel(hidden_size, *, backend_config=None, **kwargs):
+    return make_kernel(hidden_size, backend_config=backend_config).func
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(hidden_size, batch_size, **kwargs):
+def run_test(hidden_size, batch_size, *, backend_config=None, **kwargs):
     """Compile, run, and verify rmsnorm kernel."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
 
     input_data, weights = prepare_data(batch_size, hidden_size)
-    kernel = get_kernel(hidden_size)
-    ex = compile_kernel(kernel)
+    kernel = get_kernel(hidden_size, backend_config=backend_config)
+    ex = compile_kernel(kernel, backend_config=backend_config)
     output_tir = torch.empty((batch_size, hidden_size), dtype=torch.float16, device="cuda")
     ex(*_kernel_args(input_data, weights, output_tir))
     torch.cuda.synchronize()
@@ -299,7 +309,7 @@ def run_test(hidden_size, batch_size, **kwargs):
 # tiny (~2µs) kernel whose event wall is ~3x inflated by launch overhead, and its
 # reference is flashinfer (Python-dispatch-heavy). Proton measures the true ~2µs kernel
 # time and an undistorted ratio.
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, backend_config=None, **kwargs):
     """Allocate, validate, and measure after GPU assignment."""
     return _run_gpu(
         prepared["executable"],
@@ -343,8 +353,10 @@ def _run_gpu(ex, hidden_size, batch_size, warmup=None, repeat=None, timer=None, 
     )
 
 
-def run_bench(hidden_size, batch_size, warmup=None, repeat=None, timer=None, **kwargs):
+def run_bench(
+    hidden_size, batch_size, warmup=None, repeat=None, timer=None, *, backend_config=None, **kwargs
+):
     """Standalone wrapper over the same explicit prepare and GPU stages."""
-    return prepare_bench(hidden_size=hidden_size, batch_size=batch_size).run_gpu(
-        warmup=warmup, repeat=repeat, timer=timer, **kwargs
-    )
+    return prepare_bench(
+        hidden_size=hidden_size, batch_size=batch_size, backend_config=backend_config
+    ).run_gpu(warmup=warmup, repeat=repeat, timer=timer, **kwargs)

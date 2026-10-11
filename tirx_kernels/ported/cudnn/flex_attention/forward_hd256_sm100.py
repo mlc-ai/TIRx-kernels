@@ -47,6 +47,7 @@ import random
 from array import array
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import resolve_backend_config
 
 KERNEL_META = {
     "name": "cudnn_sm100_flex_attention_forward_hd256",
@@ -370,7 +371,7 @@ def _tmem_store16(src, address):
     txl.ptx[_TMEM_ST16](txl.cast(address, "uint32"), *(src[i] for i in range(16)))
 
 
-def _make_kernel(**config):
+def _make_kernel(*, backend_config=None, **config):
     hq = int(config["num_q_heads"])
     hkv = int(config["num_kv_heads"])
     total_q = int(config["seqlen"])
@@ -486,7 +487,7 @@ def _make_kernel(**config):
     tmem_dealloc = f"tcgen05.dealloc.cta_group::{cta_group}.sync.aligned.b32"
     tmem_relinquish = f"tcgen05.relinquish_alloc_permit.cta_group::{cta_group}.sync.aligned"
 
-    def host_prelude(params):
+    def prepare_host(params):
         def encode(tensor, dims, strides, box):
             descriptor = txl.stack_alloca("tensormap", 1)
             txl.call_packed(
@@ -564,7 +565,7 @@ def _make_kernel(**config):
         if cta_group == 1:
             cta_rank = txl.int32(0)
         else:
-            cta_rank = txl.cta_id_in_cluster([2], preferred=[2])
+            cta_rank = txl.cuda.cluster_cta_id("x")
         block_x = txl.cta_id()
         task = txl.local_scalar("int32", init=block_x // cta_group)
         work_valid = txl.local_scalar("int32", init=1)
@@ -1547,11 +1548,43 @@ def _make_kernel(**config):
         fwd_work_desc,
         softmax_scale_log2,
         softmax_scale,
-        *,
-        host,
     ):
+        host = prepare_host(
+            {
+                "q": q,
+                "k": k,
+                "v": v,
+                "out": out,
+                "lse": lse,
+                "cu_q": cu_q,
+                "cu_k": cu_k,
+                "sequence_desc": sequence_desc,
+                "mask_block_cnt": mask_block_cnt,
+                "mask_block_offset": mask_block_offset,
+                "mask_block_idx": mask_block_idx,
+                "full_block_cnt": full_block_cnt,
+                "full_block_offset": full_block_offset,
+                "full_block_idx": full_block_idx,
+                "mask_payload": mask_payload,
+                "fwd_work_desc": fwd_work_desc,
+                "softmax_scale_log2": softmax_scale_log2,
+                "softmax_scale": softmax_scale,
+            }
+        )
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=384,
+                grid=task_count * cta_group,
+                cluster=2 if cta_group == 2 else None,
+                preferred_cluster=2 if cta_group == 2 else None,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(
+                min_blocks_per_sm=1, required_block_size=cta_group == 2
+            ),
+            backend_config=backend_config,
+        )
+
         if cta_group == 2:
-            txl.cuda.required_block_size(384, 1, 1, cta_group, 1, 1)
             kernel_body(
                 q,
                 k,
@@ -1616,17 +1649,11 @@ def _make_kernel(**config):
         "softmax_scale_log2": txl.f32,
         "softmax_scale": txl.f32,
     }
-    return txl.kernel(
-        warps=12,
-        arch="sm_100a",
-        grid=[task_count * cta_group],
-        min_blocks_per_sm=1,
-        host_prelude=host_prelude,
-    )(kernel)
+    return txl.kernel()(kernel)
 
 
-def get_kernel(**config):
-    return _make_kernel(**config).func
+def get_kernel(*, backend_config=None, **config):
+    return _make_kernel(**config, backend_config=backend_config).func
 
 
 def _torch_dtype(torch, name):
@@ -2162,28 +2189,32 @@ def _ptxas_register_usage_level(config):
     return 0
 
 
-def _compile_tirx(config):
-    import os
-
+def _compile_tirx(config, *, backend_config=None):
     from tirx_kernels.runner import compile_kernel
 
-    name = "TVM_CUDA_PTXAS_REG_LEVEL"
-    previous = os.environ.get(name)
-    os.environ[name] = str(_ptxas_register_usage_level(config))
-    try:
-        return compile_kernel(get_kernel(**config))
-    finally:
-        if previous is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = previous
+    pass
+    backend_config = resolve_backend_config(
+        backend_config,
+        defaults={
+            "cuda": {
+                "ptxas": [
+                    "-v",
+                    "--warn-on-local-memory-usage",
+                    "--register-usage-level=" + str(int(str(_ptxas_register_usage_level(config)))),
+                ]
+            }
+        },
+    )
+    return compile_kernel(
+        get_kernel(**config, backend_config=backend_config), backend_config=backend_config
+    )
 
 
-def run_test(**config):
+def run_test(*, backend_config=None, **config):
     import torch
 
     data = prepare_data(**config)
-    executable = _compile_tirx(config)
+    executable = _compile_tirx(config, backend_config=backend_config)
     tirx_launch = _tirx_launch(executable, data)
     source_launch = _compile_reference(data)
     source_launch()
@@ -2205,14 +2236,26 @@ def run_test(**config):
     _assert_immutable(torch, data)
 
 
-def prepare_bench(**config):
+def prepare_bench(*, backend_config=None, **config):
     from tirx_kernels.runner import prepared_gpu_benchmark
 
-    executable = _compile_tirx(config)
-    return prepared_gpu_benchmark(run_gpu, {"config": dict(config), "executable": executable})
+    executable = _compile_tirx(config, backend_config=backend_config)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": dict(config), "executable": executable}, backend_config=backend_config
+    )
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **kwargs,
+):
     from tirx_kernels.runner import bench, defer_gpu_interrupts, external_references_enabled
 
     with defer_gpu_interrupts():
@@ -2261,8 +2304,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, backend_config=None, **config
+):
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

@@ -115,7 +115,9 @@ def _philox4x32_horizontal(random_words, random_seed, random_offset, *, PHILOX_R
     k0 = txl.local_scalar("uint32", init=txl.cast(txl.reinterpret("uint64", random_seed), "uint32"))
     k1 = txl.local_scalar(
         "uint32",
-        init=txl.cast(txl.shift_right(txl.reinterpret("uint64", random_seed), txl.uint64(32)), "uint32"),
+        init=txl.cast(
+            txl.shift_right(txl.reinterpret("uint64", random_seed), txl.uint64(32)), "uint32"
+        ),
     )
     with txl.unroll(PHILOX_ROUNDS) as _round:
         old_c0 = txl.local_scalar("uint32", init=c0)
@@ -330,7 +332,7 @@ def _specialization(kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     """Build the K entry for one horizontal specialization."""
     spec = _specialization(kwargs)
     DIM = spec["DIM"]
@@ -353,12 +355,7 @@ def get_kernel(**kwargs: Any):
     STATE_STAGE_VALUES = spec["STATE_STAGE_VALUES"]
     STATE_STAGE_BYTES = spec["STATE_STAGE_BYTES"]
 
-    @txl.kernel(
-        warps=spec["NUM_WARPS"],
-        arch="sm_100a",
-        min_blocks_per_sm=spec["MIN_BLOCKS_PER_SM"],
-        grid=(spec["BATCH"], spec["NHEADS"]),
-    )
+    @txl.kernel()
     def selective_state_update_stp_horizontal(
         tensor_state: txl.TensorMap,
         state: txl.gptr[spec["STATE_DTYPE"]],
@@ -387,6 +384,14 @@ def get_kernel(**kwargs: Any):
         update_state: txl.i32,
         pad_slot_id: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(spec["BATCH"], spec["NHEADS"]), block=spec["NUM_WARPS"] * 32
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=spec["MIN_BLOCKS_PER_SM"]),
+            backend_config=backend_config,
+        )
+
         batch_i, head = txl.cta_id()
         smem = txl.smem_pool()
         s_state = smem.alloc(
@@ -788,7 +793,8 @@ def get_kernel(**kwargs: Any):
                 d: txl.int32 = warp * 16 + row_group
                 gload_3 = txl.local_scalar("uint16")
                 txl.ptx.ld.global_.b16(
-                    gload_3, x.ptr_to([txl.cast(batch_i, "int64") * x_stride_batch + head * DIM + d])
+                    gload_3,
+                    x.ptr_to([txl.cast(batch_i, "int64") * x_stride_batch + head * DIM + d]),
                 )
                 bf16_f32_5 = txl.local_scalar("float32")
                 txl.ptx.cvt.f32.bf16(bf16_f32_5, txl.cast(gload_3, "uint16"))
@@ -1021,19 +1027,26 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
     return result
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     from tirx_kernels.runner import compile_kernel
 
     case = prepare_data(**kwargs)
-    executable = compile_kernel(get_kernel(**kwargs))
+    executable = compile_kernel(
+        get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+    )
     executable(*_tirx_args(case))
     _run_reference(case)
     torch.cuda.synchronize()
@@ -1046,6 +1059,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(prepared["config"])
@@ -1085,11 +1099,16 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    backend_config=None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     config = dict(kwargs)
     protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 

@@ -12,12 +12,11 @@ helpers from ``flashinfer/norm/kernels/rmsnorm.py`` and
 ``flashinfer.norm.fused_add_rmsnorm_quant``.
 """
 
-import functools
 import math
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import bench, cache_backend_config
 
 from ._tirx_lite_helpers import (
     _add_f32,
@@ -457,6 +456,8 @@ def get_kernel(
     enable_pdl: bool,
     scale: float,
     eps: float = _DEFAULT_EPS,
+    *,
+    backend_config=None,
     **kwargs: Any,
 ):
     """Return the compact or explicit-int64-strided source specialization."""
@@ -523,14 +524,12 @@ def get_kernel(
     ):
         # TIRX_TRANSCRIBE_START flashinfer_fused_add_rmsnorm_quant
         if cluster_n > 1:
-            block_x_raw, block_y_raw = txl.cta_id(
-                [txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"), cluster_n]
-            )
-            _, cta_rank_raw = txl.cta_id_in_cluster([1, cluster_n], preferred=[1, cluster_n])
+            block_x_raw, block_y_raw = (txl.cuda.block_idx("x"), txl.cuda.block_idx("y"))
+            _, cta_rank_raw = (txl.cuda.cluster_cta_id("x"), txl.cuda.cluster_cta_id("y"))
             block_y: txl.int32 = txl.cast(block_y_raw, "int32")
             cta_rank: txl.int32 = txl.cast(cta_rank_raw, "int32")
         else:
-            block_x_raw = txl.cta_id([txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32")])
+            block_x_raw = txl.cuda.block_idx("x")
             block_y = txl.int32(0)
             cta_rank = txl.int32(0)
         tid = txl.thread_id()
@@ -546,7 +545,9 @@ def get_kernel(
         row_in_cta: txl.int32 = tid // tpr
         thread_in_row: txl.int32 = tid % tpr
         compact_row_i32: txl.int32 = block_x * rows + row_in_cta
-        actual_row: txl.int64 = txl.cast(block_x, "int64") * txl.int64(rows) + txl.cast(row_in_cta, "int64")
+        actual_row: txl.int64 = txl.cast(block_x, "int64") * txl.int64(rows) + txl.cast(
+            row_in_cta, "int64"
+        )
         row_valid: txl.bool = actual_row < runtime_M
         warp: txl.int32 = tid // 32
         lane: txl.int32 = tid % 32
@@ -862,9 +863,13 @@ def get_kernel(
                         clamped: txl.float32 = _minimum_f32(clamped_low, txl.float32(fp8_max))
                         pair: txl.uint16 = _cvt_fp8_pair(clamped, txl.float32(0.0), output_dtype)
                         if compact:
-                            scalar_offset = actual_row * txl.int64(H) + txl.cast(scalar_col, "int64")
+                            scalar_offset = actual_row * txl.int64(H) + txl.cast(
+                                scalar_col, "int64"
+                            )
                         else:
-                            scalar_offset = actual_row * y_row_stride + txl.cast(scalar_col, "int64")
+                            scalar_offset = actual_row * y_row_stride + txl.cast(
+                                scalar_col, "int64"
+                            )
                         txl.ptx.st.global_.b8(out.ptr_to([scalar_offset]), txl.cast(pair, "uint8"))
 
             vector_guard = txl.And(absolute_col + vec <= H, row_valid)
@@ -904,7 +909,7 @@ def get_kernel(
 
     if compact:
 
-        @txl.kernel(warps=threads // 32, arch="sm_100a", grid=False)
+        @txl.kernel()
         def flashinfer_fused_add_rmsnorm_quant_compact(
             output: txl.gptr[output_dtype],
             input_buffer: txl.gptr[input_dtype],
@@ -914,6 +919,19 @@ def get_kernel(
             scale_buffer: txl.gptr[txl.f32, (1,)],
             runtime_eps: txl.f32,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=(txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"), cluster_n)
+                    if cluster_n > 1
+                    else (txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"),),
+                    block=threads // 32 * 32,
+                    cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    programmatic_stream_serialization=enable_pdl,
+                ),
+                backend_config=backend_config,
+            )
+
             kernel_body(
                 output,
                 input_buffer,
@@ -930,7 +948,7 @@ def get_kernel(
         kernel = flashinfer_fused_add_rmsnorm_quant_compact.func
     else:
 
-        @txl.kernel(warps=threads // 32, arch="sm_100a", grid=False)
+        @txl.kernel()
         def flashinfer_fused_add_rmsnorm_quant_strided(
             output: txl.gptr[output_dtype],
             input_buffer: txl.gptr[input_dtype],
@@ -943,6 +961,19 @@ def get_kernel(
             x_row_stride: txl.i64,
             residual_row_stride: txl.i64,
         ):
+            txl.device_entry(
+                launch=txl.cuda.LaunchConfig(
+                    grid=(txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"), cluster_n)
+                    if cluster_n > 1
+                    else (txl.cast(txl.ceildiv(runtime_M, txl.int64(rows)), "int32"),),
+                    block=threads // 32 * 32,
+                    cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    preferred_cluster=(1, cluster_n) if cluster_n > 1 else None,
+                    programmatic_stream_serialization=enable_pdl,
+                ),
+                backend_config=backend_config,
+            )
+
             kernel_body(
                 output,
                 input_buffer,
@@ -958,14 +989,7 @@ def get_kernel(
 
         kernel = flashinfer_fused_add_rmsnorm_quant_strided.func
 
-    launch_params = ["blockIdx.x"]
-    if cluster_n > 1:
-        launch_params.extend(["blockIdx.y", "clusterCtaIdx.x", "clusterCtaIdx.y"])
-    launch_params.append("threadIdx.x")
-    if enable_pdl:
-        launch_params.append("tirx.use_programtic_dependent_launch")
-    launch_params.append("tirx.use_dyn_shared_memory")
-    return kernel.with_attr("tirx.kernel_launch_params", launch_params)
+    return kernel
 
 
 def prepare_data(**config: Any):
@@ -1271,9 +1295,15 @@ def _launch_tirx(executable, data, output, config: dict[str, Any]):
     )
 
 
-@functools.cache
+@cache_backend_config
 def _compiled_test_specialization(
-    input_dtype: str, output_dtype: str, H: int, compact: bool, enable_pdl: bool
+    input_dtype: str,
+    output_dtype: str,
+    H: int,
+    compact: bool,
+    enable_pdl: bool,
+    *,
+    backend_config=None,
 ):
     from tirx_kernels.runner import compile_kernel
 
@@ -1293,7 +1323,9 @@ def _compiled_test_specialization(
             x_row_stride=H,
             residual_row_stride=H,
             y_row_stride=H,
-        )
+            backend_config=backend_config,
+        ),
+        backend_config=backend_config,
     )
 
 
@@ -1309,7 +1341,7 @@ def _assert_identity(data: dict[str, Any], output: dict[str, Any]) -> None:
         raise AssertionError("output stride changed")
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     """Compile, launch, and validate both mutable outputs for one config."""
     import torch
 
@@ -1330,7 +1362,12 @@ def run_test(**config: Any) -> None:
         str(config["output_layout"]),
     )
     executable = _compiled_test_specialization(
-        str(config["input_dtype"]), output_dtype, H, compact, enable_pdl
+        str(config["input_dtype"]),
+        output_dtype,
+        H,
+        compact,
+        enable_pdl,
+        backend_config=backend_config,
     )
     returned = _launch_tirx(executable, data, output, config)
     if returned is not None:
@@ -1420,12 +1457,17 @@ def run_test(**config: Any) -> None:
     )
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Compile the specialization before the bench suite assigns a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(config), "executable": compile_kernel(get_kernel(**config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(config),
+        "executable": compile_kernel(
+            get_kernel(**config, backend_config=backend_config), backend_config=backend_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_gpu(
@@ -1436,6 +1478,7 @@ def run_gpu(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
+    backend_config=None,
     **kwargs: Any,
 ):
     """Build independent mutable closures and validate them before timing."""
@@ -1515,9 +1558,18 @@ def run_gpu(
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config: Any):
+def run_bench(
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **config: Any,
+):
     """Benchmark the implemented kernel against FlashInfer CuTe-DSL."""
-    prepared = prepare_bench(**config)
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )

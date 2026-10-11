@@ -46,7 +46,17 @@ from tvm.script.ir_builder import IRBuilder
 from tvm.tirx.script import ir_builder as _I
 
 from . import idioms
-from .entry import Kernel, TensorMap, cta_id, gptr, kernel, lane_id, thread_id, warp_id
+from .entry import (
+    Kernel,
+    TensorMap,
+    cta_id,
+    device_entry,
+    gptr,
+    kernel,
+    lane_id,
+    thread_id,
+    warp_id,
+)
 from .entry import current as _current_session
 from .smem import (
     KDesc,
@@ -116,6 +126,16 @@ def keep_alive(value):
 def reinterpret(dtype, value):
     """Reinterpret the bits of a value as the requested scalar or vector type."""
     return _T.reinterpret(value, ty=dtype)
+
+
+def ptr_byte_offset(data, byte_offset, dtype, *, ty=None, loc=tvm.ir.UNKNOWN_LOC):
+    """Apply a byte offset and select the result dtype, preserving pointer scope."""
+    if ty is None:
+        element_type = tvm.ir.PrimType(dtype) if isinstance(dtype, str) else dtype
+        data_type = getattr(data, "ty", None)
+        scope = data_type.storage_scope if isinstance(data_type, tvm.ir.PointerType) else "global"
+        ty = tvm.ir.PointerType(element_type, scope)
+    return _T.ptr_byte_offset(data, byte_offset, ty=ty, loc=loc)
 
 
 def call_packed(*args):
@@ -247,7 +267,7 @@ class _StmtProxy:
             raise TypeError(f"{obj!r}: missing the trailing src-size operand.\n\n{_CP_ASYNC_HELP}")
         result = obj(*args, **kwargs)
         if isinstance(result, tvm.ir.Expr) and _current_session(required=False) is not None:
-            result = IRBuilder.current()._set_current_source_span(result)
+            result = IRBuilder.current()._set_current_loc(result)
         if _is_void_call(result):
             _T.evaluate(result)
             return None
@@ -260,7 +280,7 @@ class _StmtProxy:
 class _PTXProxy(_StmtProxy):
     def addr(self, ptr, byte_offset):
         """Preserve the pointer's element type while applying a byte offset."""
-        return _T.ptr_byte_offset(ptr, byte_offset, str(ptr.ty.element_type.dtype))
+        return _T.ptr_byte_offset(ptr, byte_offset, ty=ptr.ty)
 
 
 ptx = _PTXProxy(_T.ptx)
@@ -301,6 +321,16 @@ class _CUDAProxy(_StmtProxy):
         return _StmtProxy(_T.cuda.func_call)(func_name, *args, source_code, ty=ty)
 
     def __getattr__(self, name):
+        if name in {
+            "LaunchConfig",
+            "BackendConfig",
+            "KernelAttributes",
+            "MemSyncDomainMap",
+            "AccessPolicyWindow",
+            "ProgrammaticEvent",
+            "LaunchCompletionEvent",
+        }:
+            return getattr(_T.cuda, name)
         hint = _RETIRED_CUDA_VALUE_MEMBERS.get(name)
         if hint is not None:
             raise AttributeError(
@@ -491,7 +521,6 @@ _FORBIDDEN_TIRX_NAMES = {
     "alloc_cast_frag",
     "alloc_shared",
     "alloc_tcgen05_ldst_frag",
-    "device_entry",
     "function",
     "function_",
     "inline",
@@ -598,6 +627,7 @@ __all__ = [
     "cta_id",
     "cuda",
     "decl_tensor",
+    "device_entry",
     "f16",
     "f32",
     "gptr",

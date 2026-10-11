@@ -785,6 +785,9 @@ def main() -> None:
         action="store_true",
         help="Import every unique kernel in --workloads and exit (for CI import gates)",
     )
+    from tvm.backend.config import add_backend_config_argument
+
+    add_backend_config_argument(ap)
     args = ap.parse_args()
     if args.rounds < 1:
         print("[bench-suite] --rounds must be >= 1", file=sys.stderr)
@@ -815,6 +818,8 @@ def main() -> None:
         workloads_path = args.workloads
 
     workloads = load_workloads(workloads_path)
+    if args.backend_config is not None:
+        workloads = [dict(w, backend_config=args.backend_config) for w in workloads]
     if args.filter:
         workloads = [w for w in workloads if args.filter in w["kernel"]]
     if not workloads:

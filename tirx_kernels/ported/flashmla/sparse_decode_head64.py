@@ -8,7 +8,6 @@ import math
 import random
 from dataclasses import dataclass, fields
 from enum import Enum
-from functools import lru_cache
 from typing import Any
 from unittest import SkipTest
 
@@ -16,6 +15,7 @@ import torch
 
 import tirx_kernels.tirx_lite as txl
 import tvm
+from tirx_kernels.runner import cache_backend_config
 from tvm.ir import PointerType, PrimType
 
 B_H = 64
@@ -37,21 +37,7 @@ BAR_EVERYONE_SYNC = CUTLASS_USER_BARRIER_BASE + 4
 BAR_WG0_SYNC = CUTLASS_USER_BARRIER_BASE + 1
 BAR_WG0_WARP02 = CUTLASS_USER_BARRIER_BASE + 2
 
-LAUNCH_TAGS = (
-    "blockIdx.x",
-    "blockIdx.y",
-    "blockIdx.z",
-    "threadIdx.x",
-    "tirx.use_dyn_shared_memory",
-)
-COMBINE_LAUNCH_TAGS = ("blockIdx.x", "blockIdx.y", "blockIdx.z", "threadIdx.x")
-COMBINE_PDL_LAUNCH_TAGS = (
-    "blockIdx.x",
-    "blockIdx.y",
-    "blockIdx.z",
-    "threadIdx.x",
-    "tirx.use_programtic_dependent_launch",
-)
+
 MAIN_OPTIONAL_BUFFER_PARAMS = (
     "topk_length_h",
     "attn_sink_h",
@@ -309,7 +295,7 @@ def _kv_storage_spec(
     return bytes_per_token, tma_k_stride, stride_kv_block, num_tma_rows
 
 
-def make_main_kernel(model_type, presence, use_pdl=False):
+def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None):
     is_v32 = model_type is ModelType.V32
     (
         have_topk_length,
@@ -329,7 +315,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
     kv_rope_start = (d_nope + (16 if is_v32 else 0)) // BF16_BYTES
     source_smem_size = 232192 if is_v32 else 218848
 
-    @txl.kernel(warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=("s_q", "num_sm_parts", 1))
+    @txl.kernel()
     def sparse_flashmla_decode_head64_main(
         q: txl.gptr[txl.bf16],
         kv: txl.gptr[txl.bf16],
@@ -386,10 +372,16 @@ def make_main_kernel(model_type, presence, use_pdl=False):
         extra_page_block_size: txl.i32,
         num_sm_parts: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=(s_q, num_sm_parts, 1), block=12 * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         s_q_idx, partition_idx, _ = txl.cta_id()
         warp_idx = txl.warp_id()
         lane_idx = txl.lane_id()
-        idx_in_warpgroup = txl.thread_id_in_wg([128])
+        idx_in_warpgroup = txl.cuda.thread_in_warpgroup()
         with txl.If(warp_idx == 0), txl.Then():
             with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
                 for _prefetch_i in range(8):
@@ -2004,8 +1996,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
     return sparse_flashmla_decode_head64_main
 
 
-def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
-    @txl.kernel(warps=8, arch="sm_100a", grid=False)
+def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False, *, backend_config=None):
+    @txl.kernel()
     def sparse_decode_head64_combine(
         lse: txl.gptr[txl.f32],
         out: txl.gptr[txl.bf16],
@@ -2029,11 +2021,24 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
         d_v: txl.i32,
         num_sm_parts: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=(b * s_q, 1, (h_q + 7) // 8),
+                block=8 * 32,
+                programmatic_stream_serialization=use_pdl,
+            ),
+            backend_config=backend_config,
+        )
+
         smem = txl.smem_pool()
         lse_scales = smem.alloc((8, max_splits), "float32")
 
         # combine.cu:18-43. One warp per head, eight heads per CTA.
-        batch_s_q_idx, _, h_block_idx = txl.cta_id([b * s_q, 1, (h_q + 7) // 8])
+        batch_s_q_idx, _, h_block_idx = (
+            txl.cuda.block_idx("x"),
+            txl.cuda.block_idx("y"),
+            txl.cuda.block_idx("z"),
+        )
         thread_idx = txl.thread_id()
         warp_idx = txl.local_scalar("int32", init=thread_idx // 32)
         lane_idx = txl.local_scalar("int32", init=thread_idx % 32)
@@ -2330,44 +2335,44 @@ def _absent_specialization_kwargs(
     }
 
 
-@lru_cache(maxsize=64)
+@cache_backend_config(maxsize=64)
 def _specialized_main_kernel(
-    model_type: ModelType, presence: MainPresenceMask, use_pdl: bool = False
+    model_type: ModelType, presence: MainPresenceMask, use_pdl: bool = False, *, backend_config=None
 ):
-    return (
-        make_main_kernel(model_type, presence, use_pdl)
-        .func.with_attr("global_symbol", KERNEL_META["name"])
-        .with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
-    )
+    return make_main_kernel(
+        model_type, presence, use_pdl, backend_config=backend_config
+    ).func.with_attr("global_symbol", KERNEL_META["name"])
 
 
-@lru_cache(maxsize=20)
-def _specialized_combine_kernel(max_splits: int, have_attn_sink: bool, use_pdl: bool = False):
-    return (
-        make_combine_kernel(max_splits, have_attn_sink, use_pdl)
-        .func.with_attr("global_symbol", "sparse_flashmla_decode_head64_combine")
-        .with_attr(
-            "tirx.kernel_launch_params",
-            list(COMBINE_PDL_LAUNCH_TAGS if use_pdl else COMBINE_LAUNCH_TAGS),
-        )
-    )
+@cache_backend_config(maxsize=20)
+def _specialized_combine_kernel(
+    max_splits: int, have_attn_sink: bool, use_pdl: bool = False, *, backend_config=None
+):
+    return make_combine_kernel(
+        max_splits, have_attn_sink, use_pdl, backend_config=backend_config
+    ).func.with_attr("global_symbol", "sparse_flashmla_decode_head64_combine")
 
 
 def _specialized_decode_kernels(
-    model_type: ModelType, max_splits: int, presence: MainPresenceMask, use_pdl: bool = False
+    model_type: ModelType,
+    max_splits: int,
+    presence: MainPresenceMask,
+    use_pdl: bool = False,
+    *,
+    backend_config=None,
 ):
     if not use_pdl:
         return (
-            _specialized_main_kernel(model_type, presence),
-            _specialized_combine_kernel(max_splits, presence[1]),
+            _specialized_main_kernel(model_type, presence, backend_config=backend_config),
+            _specialized_combine_kernel(max_splits, presence[1], backend_config=backend_config),
         )
     return (
-        _specialized_main_kernel(model_type, presence, True),
-        _specialized_combine_kernel(max_splits, presence[1], True),
+        _specialized_main_kernel(model_type, presence, True, backend_config=backend_config),
+        _specialized_combine_kernel(max_splits, presence[1], True, backend_config=backend_config),
     )
 
 
-def get_kernel(**kwargs: Any):
+def get_kernel(*, backend_config=None, **kwargs: Any):
     cfg = _cfg(**kwargs)
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for sparse FlashMLA decode")
@@ -2375,7 +2380,11 @@ def get_kernel(**kwargs: Any):
     shape = _kernel_shape_params(cfg, device)
     return list(
         _specialized_decode_kernels(
-            cfg.normalized_model_type, shape["max_splits"], _main_presence_mask(cfg), cfg.b == 2
+            cfg.normalized_model_type,
+            shape["max_splits"],
+            _main_presence_mask(cfg),
+            cfg.b == 2,
+            backend_config=backend_config,
         )
     )
 
@@ -3068,21 +3077,33 @@ def _tirx_combine_args(case: dict[str, Any]) -> tuple[Any, ...]:
     return args
 
 
-@lru_cache(maxsize=128)
-def _compile_main_kernel_cached(model_type: ModelType, presence: MainPresenceMask, use_pdl: bool):
+@cache_backend_config(maxsize=128)
+def _compile_main_kernel_cached(
+    model_type: ModelType, presence: MainPresenceMask, use_pdl: bool, *, backend_config=None
+):
     from tirx_kernels.runner import compile_kernel
 
-    return compile_kernel(_specialized_main_kernel(model_type, presence, use_pdl))
+    return compile_kernel(
+        _specialized_main_kernel(model_type, presence, use_pdl, backend_config=backend_config),
+        backend_config=backend_config,
+    )
 
 
-@lru_cache(maxsize=20)
-def _compile_combine_kernel_cached(max_splits: int, have_attn_sink: bool, use_pdl: bool):
+@cache_backend_config(maxsize=20)
+def _compile_combine_kernel_cached(
+    max_splits: int, have_attn_sink: bool, use_pdl: bool, *, backend_config=None
+):
     from tirx_kernels.runner import compile_kernel
 
-    return compile_kernel(_specialized_combine_kernel(max_splits, have_attn_sink, use_pdl))
+    return compile_kernel(
+        _specialized_combine_kernel(
+            max_splits, have_attn_sink, use_pdl, backend_config=backend_config
+        ),
+        backend_config=backend_config,
+    )
 
 
-def _compile_decode_kernels(**kwargs: Any):
+def _compile_decode_kernels(*, backend_config=None, **kwargs: Any):
     from tirx_kernels.runner import hardware_num_sms
 
     cfg = _cfg(**kwargs)
@@ -3091,17 +3112,24 @@ def _compile_decode_kernels(**kwargs: Any):
     presence = _main_presence_mask(cfg)
     use_pdl = cfg.b == 2
     return (
-        _compile_main_kernel_cached(cfg.normalized_model_type, presence, use_pdl),
-        _compile_combine_kernel_cached(shape["max_splits"], presence[1], use_pdl),
+        _compile_main_kernel_cached(
+            cfg.normalized_model_type, presence, use_pdl, backend_config=backend_config
+        ),
+        _compile_combine_kernel_cached(
+            shape["max_splits"], presence[1], use_pdl, backend_config=backend_config
+        ),
     )
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Compile both sparse-decode executables without touching CUDA."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executables": _compile_decode_kernels(**kwargs)}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executables": _compile_decode_kernels(**kwargs, backend_config=backend_config),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def _launch_tirx(case: dict[str, Any], executables: tuple[Any, Any]) -> None:
@@ -3113,13 +3141,13 @@ def _launch_tirx(case: dict[str, Any], executables: tuple[Any, Any]) -> None:
     combine_ex(*_tirx_combine_args(case))
 
 
-def run_test(**kwargs: Any) -> None:
+def run_test(*, backend_config=None, **kwargs: Any) -> None:
     cfg = _cfg(**kwargs)
     # Upstream clears the allocator before every generated case; keep the
     # 15-case performance sweep from retaining cached pressure-shape blocks.
     torch.cuda.empty_cache()
     case = prepare_data(**kwargs)
-    executables = _compile_decode_kernels(**kwargs)
+    executables = _compile_decode_kernels(**kwargs, backend_config=backend_config)
 
     from tirx_kernels.ported.flashmla.utils._flashmla_bench import (
         _import_flash_mla,
@@ -3159,6 +3187,7 @@ def run_gpu(
     warmup: int | None = None,
     repeat: int | None = None,
     timer: str | None = None,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
@@ -3191,11 +3220,16 @@ def run_gpu(
 
 
 def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    backend_config=None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     rounds = kwargs.pop("rounds", 1)
     cooldown_s = kwargs.pop("cooldown_s", 1.0)
-    return prepare_bench(**kwargs).run_gpu(
+    return prepare_bench(**kwargs, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

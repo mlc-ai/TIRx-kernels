@@ -190,26 +190,20 @@ def _warp_inclusive_sum(value, lane):
     result = value
     for offset in (1, 2, 4, 8, 16):
         tmp = txl.alloc_local([1], "int32")
-        txl.ptx.shfl_sync.up.b32(tmp[0], result, txl.uint32(offset), txl.uint32(0), txl.uint32(0xFFFFFFFF))
+        txl.ptx.shfl_sync.up.b32(
+            tmp[0], result, txl.uint32(offset), txl.uint32(0), txl.uint32(0xFFFFFFFF)
+        )
         result = txl.Select(lane >= offset, result + tmp[0], result)
     return result
 
 
-def _launch_tags(cluster: int, *, cooperative: bool = False, pdl: bool = False) -> list[str]:
-    tags = ["blockIdx.x"]
-    if cluster > 1:
-        tags.append("clusterCtaIdx.x")
-    tags.append("threadIdx.x")
-    if cooperative:
-        tags.append("tirx.use_cooperative_launch")
-    if pdl:
-        tags.append("tirx.use_programtic_dependent_launch")
-    tags.append("tirx.use_dyn_shared_memory")
-    return tags
-
-
 def _build_dispatch_kernel(
-    num_sms: int, num_max_tokens_per_rank: int, expert_alignment: int, num_ranks: int
+    num_sms: int,
+    num_max_tokens_per_rank: int,
+    expert_alignment: int,
+    num_ranks: int,
+    *,
+    backend_config=None,
 ) -> Any:
     """`dispatch_impl` for the direct single-domain path (frozen sketch kernel 1)."""
 
@@ -224,7 +218,7 @@ def _build_dispatch_kernel(
     cluster = 2 - num_sms % 2
     recv_region_bytes_per_rank = num_max_tokens_per_rank * TOKEN_BYTES_GMEM
 
-    @txl.kernel(warps=num_threads // 32, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
+    @txl.kernel()
     def deepep_dispatch(
         x: txl.gptr[txl.u8],
         topk_idx: txl.gptr[txl.i64],
@@ -241,11 +235,22 @@ def _build_dispatch_kernel(
         num_tokens: txl.i32,
         rank_idx: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_sms,
+                block=num_threads // 32 * 32,
+                cluster=(cluster,) if cluster > 1 else None,
+                cooperative=True,
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         smem = txl.smem_pool().alloc([SMEM_TOTAL], "uint8")
 
         sm_idx = txl.cta_id()
         if cluster > 1:
-            txl.cta_id_in_cluster([cluster])
+            pass
         thread_idx = txl.thread_id()
         lane = txl.lane_id()
 
@@ -329,7 +334,8 @@ def _build_dispatch_kernel(
                 global_warp_idx = warp * num_sms + sm_idx
                 notify_stride = NUM_NOTIFY_WARPS * num_sms
                 notify_trips = txl.max(
-                    txl.int32(0), (num_tokens - global_warp_idx + notify_stride - 1) // notify_stride
+                    txl.int32(0),
+                    (num_tokens - global_warp_idx + notify_stride - 1) // notify_stride,
                 )
                 with txl.serial(0, notify_trips) as notify_it:
                     i = global_warp_idx + notify_it * notify_stride
@@ -349,7 +355,10 @@ def _build_dispatch_kernel(
                     txl.ptx.match.any.sync.b32(match_mask[0], dst_rank, txl.uint32(0xFFFFFFFF))
                     master = txl.alloc_local([1], "uint32")
                     txl.ptx.bfind.u32(master[0], match_mask[0])
-                    with txl.If(txl.And(txl.cast(master[0], "int32") == lane, dst_rank >= 0)), txl.Then():
+                    with (
+                        txl.If(txl.And(txl.cast(master[0], "int32") == lane, dst_rank >= 0)),
+                        txl.Then(),
+                    ):
                         txl.ptx.atom.shared.add.s32(
                             atom_dst[0], rank_expert_count.ptr_to([dst_rank]), txl.int32(1)
                         )
@@ -363,7 +372,9 @@ def _build_dispatch_kernel(
                     txl.ptx.red.gpu.global_.add.u64(
                         _gptr(ws_u64, WS_NOTIFY_REDUCTION + i * 8),
                         (txl.uint64(1) << txl.uint64(32))
-                        | txl.cast(txl.cast(_ld_shared_s32(rank_expert_count, i), "uint32"), "uint64"),
+                        | txl.cast(
+                            txl.cast(_ld_shared_s32(rank_expert_count, i), "uint32"), "uint64"
+                        ),
                     )
 
                 with txl.If(sm_idx == 0), txl.Then():
@@ -381,7 +392,9 @@ def _build_dispatch_kernel(
                             txl.cast(status[0] >> txl.uint64(32), "int64") != txl.int64(num_sms)
                         ):
                             with (
-                                txl.If(txl.cuda.clock64() - start_clock >= txl.uint64(TIMEOUT_CYCLES)),
+                                txl.If(
+                                    txl.cuda.clock64() - start_clock >= txl.uint64(TIMEOUT_CYCLES)
+                                ),
                                 txl.Then(),
                             ):
                                 txl.cuda.printf(
@@ -393,7 +406,9 @@ def _build_dispatch_kernel(
                                 )
                                 txl.cuda.trap_when_assert_failed(False)
                             _ld_volatile_u64(status[0], _gptr(ws_u64, WS_NOTIFY_REDUCTION + i * 8))
-                        total = txl.cast(txl.bitwise_and(status[0], txl.uint64(0xFFFFFFFF)), "int64")
+                        total = txl.cast(
+                            txl.bitwise_and(status[0], txl.uint64(0xFFFFFFFF)), "int64"
+                        )
                         encoded = txl.cast(-total - 1, "int32")
                         _st_shared_s32(rank_expert_count, i, encoded)
                         txl.ptx.st.global_.u64(
@@ -440,7 +455,9 @@ def _build_dispatch_kernel(
                         decoded = txl.local_scalar(txl.i64, init=-count[0] - 1)
                         with txl.While(decoded < 0):
                             with (
-                                txl.If(txl.cuda.clock64() - start_clock >= txl.uint64(TIMEOUT_CYCLES)),
+                                txl.If(
+                                    txl.cuda.clock64() - start_clock >= txl.uint64(TIMEOUT_CYCLES)
+                                ),
                                 txl.Then(),
                             ):
                                 txl.cuda.printf(
@@ -606,7 +623,9 @@ def _build_dispatch_kernel(
                     master = txl.alloc_local([1], "uint32")
                     txl.ptx.bfind.u32(master[0], match_mask[0])
                     with (
-                        txl.If(txl.And(txl.cast(master[0], "int32") == lane, stored_dst_rank[0] >= 0)),
+                        txl.If(
+                            txl.And(txl.cast(master[0], "int32") == lane, stored_dst_rank[0] >= 0)
+                        ),
                         txl.Then(),
                     ):
                         txl.ptx.atom.global_.add.s32(
@@ -627,7 +646,9 @@ def _build_dispatch_kernel(
 
                     # Publish expected bytes and wait TMA load arrival (dispatch.cuh:356-359)
                     with txl.If(txl.cuda.elect_sync()), txl.Then():
-                        txl.ptx.mbarrier.arrive.expect_tx.shared.b64(tma_mbar, txl.uint32(HIDDEN_BYTES))
+                        txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                            tma_mbar, txl.uint32(HIDDEN_BYTES)
+                        )
                         txl.cuda.mbarrier_wait(tma_mbar, phase[0])
                         txl.assign(phase[0], phase[0] ^ txl.uint32(1))
                     txl.cuda.warp_sync()
@@ -659,13 +680,16 @@ def _build_dispatch_kernel(
         # Chain the copy epilogue (dispatch.cuh:403)
         txl.ptx.griddepcontrol.launch_dependents()
 
-    return deepep_dispatch.func.with_attr(
-        "tirx.kernel_launch_params", _launch_tags(cluster, cooperative=True)
-    )
+    return deepep_dispatch.func
 
 
 def _build_epilogue_kernel(
-    num_sms: int, num_max_tokens_per_rank: int, expert_alignment: int, num_ranks: int
+    num_sms: int,
+    num_max_tokens_per_rank: int,
+    expert_alignment: int,
+    num_ranks: int,
+    *,
+    backend_config=None,
 ) -> Any:
     """`dispatch_copy_epilogue_impl` (frozen sketch kernel 2)."""
 
@@ -676,7 +700,7 @@ def _build_epilogue_kernel(
     num_threads = num_warps * 32
     recv_region_bytes_per_rank = num_max_tokens_per_rank * TOKEN_BYTES_GMEM
 
-    @txl.kernel(warps=num_warps, arch="sm_100a", min_blocks_per_sm=1, grid=num_sms)
+    @txl.kernel()
     def deepep_dispatch_copy_epilogue(
         buffer_addr: txl.i64,
         psum_rank: txl.gptr[txl.i32, (NUM_RANKS,)],
@@ -689,6 +713,14 @@ def _build_epilogue_kernel(
         num_recv_tokens: txl.i32,
         rank_idx: txl.i32,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                grid=num_sms, block=num_warps * 32, programmatic_stream_serialization=True
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
+            backend_config=backend_config,
+        )
+
         smem = txl.smem_pool().alloc([SMEM_TOTAL], "uint8")
 
         sm_idx = txl.cta_id()
@@ -739,7 +771,9 @@ def _build_epilogue_kernel(
         txl.assign(rank_end[0], 0)
         txl.assign(stored_psum[0], 0)
         epi_stride = num_warps * num_sms
-        epi_trips = txl.max(txl.int32(0), (num_recv - global_warp_idx + epi_stride - 1) // epi_stride)
+        epi_trips = txl.max(
+            txl.int32(0), (num_recv - global_warp_idx + epi_stride - 1) // epi_stride
+        )
         with txl.serial(0, epi_trips) as epi_it:
             i = global_warp_idx + epi_it * epi_stride
             # Locate the source rank of received token i via the inclusive prefix
@@ -747,9 +781,14 @@ def _build_epilogue_kernel(
                 txl.assign(current_rank[0], current_rank[0] + 1)
                 txl.cuda.trap_when_assert_failed(current_rank[0] < NUM_RANKS)
                 stored_lane = current_rank[0] % 32
-                with txl.If(txl.And(stored_lane == 0, current_rank[0] + lane < NUM_RANKS)), txl.Then():
+                with (
+                    txl.If(txl.And(stored_lane == 0, current_rank[0] + lane < NUM_RANKS)),
+                    txl.Then(),
+                ):
                     # Plain ld.global (no .nc): PDL visibility rule (epilogue.cuh:59).
-                    txl.ptx.ld.global_.s32(stored_psum[0], psum_rank.ptr_to([current_rank[0] + lane]))
+                    txl.ptx.ld.global_.s32(
+                        stored_psum[0], psum_rank.ptr_to([current_rank[0] + lane])
+                    )
                 txl.assign(rank_start[0], rank_end[0])
                 shuffled = txl.alloc_local([1], "uint32")
                 txl.ptx.shfl_sync.idx.b32(
@@ -855,9 +894,7 @@ def _build_epilogue_kernel(
                 )
             txl.cuda.warp_sync()
 
-    return deepep_dispatch_copy_epilogue.func.with_attr(
-        "tirx.kernel_launch_params", _launch_tags(1, pdl=True)
-    )
+    return deepep_dispatch_copy_epilogue.func
 
 
 # ---------------------------------------------------------------------------
@@ -888,6 +925,8 @@ def get_kernel(
     num_topk: int = NUM_TOPK,
     expert_alignment: int = 1,
     num_sms: int = 0,
+    *,
+    backend_config=None,
     **_: Any,
 ) -> list[Any]:
     """Return the dispatch kernel pair (main + copy epilogue), closure-specialized."""
@@ -905,8 +944,16 @@ def get_kernel(
     # not the dispatch kernel's num_sms.
     epilogue_num_sms = _device_num_sms()
     return [
-        _build_dispatch_kernel(num_sms, num_tokens, expert_alignment, world_size),
-        _build_epilogue_kernel(epilogue_num_sms, num_tokens, expert_alignment, world_size),
+        _build_dispatch_kernel(
+            num_sms, num_tokens, expert_alignment, world_size, backend_config=backend_config
+        ),
+        _build_epilogue_kernel(
+            epilogue_num_sms,
+            num_tokens,
+            expert_alignment,
+            world_size,
+            backend_config=backend_config,
+        ),
     ]
 
 
@@ -1176,19 +1223,22 @@ def _resolve_num_sms(config: dict[str, Any]) -> int:
     )
 
 
-def run_test(**config: Any) -> None:
+def run_test(*, backend_config=None, **config: Any) -> None:
     """Correctness entry point used by the runner."""
 
     from .utils._runtime import run_distributed
 
     num_sms = _resolve_num_sms(config)
-    dispatch_kernel, epilogue_kernel = get_kernel(**config, num_sms=num_sms)
+    dispatch_kernel, epilogue_kernel = get_kernel(
+        **config, num_sms=num_sms, backend_config=backend_config
+    )
     run_distributed(
         {"dispatch": dispatch_kernel, "epilogue": epilogue_kernel},
         world_size=config["world_size"],
         worker=_run_worker,
         mode="test",
         worker_kwargs={**config, "num_sms": num_sms},
+        backend_config=backend_config,
     )
 
 
@@ -1219,7 +1269,7 @@ def _resolve_num_sms_cpu(config: dict[str, Any]) -> int:
     return min(num_sms, device_sms)
 
 
-def _run_bench_gpu(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+def _run_bench_gpu(state: dict[str, Any], *, backend_config=None, **kwargs: Any) -> dict[str, Any]:
     """Launch ranks against libraries compiled by the CPU prepare stage."""
 
     from .utils._runtime import run_distributed
@@ -1237,10 +1287,11 @@ def _run_bench_gpu(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
             "cooldown_s": kwargs.get("cooldown_s", 1.0),
         },
         prepared_libraries=state["library_paths"],
+        backend_config=backend_config,
     )
 
 
-def prepare_bench(**config: Any):
+def prepare_bench(*, backend_config=None, **config: Any):
     """Specialize and compile without initializing CUDA, then await GPU assignment."""
 
     import tempfile
@@ -1254,10 +1305,14 @@ def prepare_bench(**config: Any):
             f"deepep_dispatch is distributed and supports only kineto, got {config['timer']}"
         )
     num_sms = _resolve_num_sms_cpu(config)
-    dispatch_kernel, epilogue_kernel = get_kernel(**config, num_sms=num_sms)
+    dispatch_kernel, epilogue_kernel = get_kernel(
+        **config, num_sms=num_sms, backend_config=backend_config
+    )
     tmpdir = tempfile.TemporaryDirectory(prefix="tirx-deepep-prepare-")
     library_paths = compile_kernels(
-        {"dispatch": dispatch_kernel, "epilogue": epilogue_kernel}, tmpdir.name
+        {"dispatch": dispatch_kernel, "epilogue": epilogue_kernel},
+        tmpdir.name,
+        backend_config=backend_config,
     )
     state = {
         "config": dict(config),
@@ -1266,7 +1321,11 @@ def prepare_bench(**config: Any):
         "tmpdir": tmpdir,
     }
     return prepared_gpu_benchmark(
-        _run_bench_gpu, state, required_num_gpus=config["world_size"], close=state["tmpdir"].cleanup
+        _run_bench_gpu,
+        state,
+        required_num_gpus=config["world_size"],
+        close=state["tmpdir"].cleanup,
+        backend_config=backend_config,
     )
 
 
@@ -1277,6 +1336,7 @@ def run_bench(
     timer: Any = None,
     rounds: int = 1,
     cooldown_s: float = 1.0,
+    backend_config=None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Benchmark entry point used by the runner (kineto only, distributed)."""
@@ -1288,7 +1348,9 @@ def run_bench(
     config = dict(kwargs)
     if args:
         raise TypeError(f"unexpected positional arguments: {args}")
-    return prepare_bench(**config).run_gpu(rounds=rounds, cooldown_s=cooldown_s)
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
+        rounds=rounds, cooldown_s=cooldown_s
+    )
 
 
 __all__ = [

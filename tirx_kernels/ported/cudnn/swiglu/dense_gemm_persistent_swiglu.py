@@ -14,6 +14,7 @@ from functools import cache
 from itertools import combinations, product
 
 import tirx_kernels.tirx_lite as txl
+from tirx_kernels.runner import cache_backend_config
 
 _TRY_WAIT_TICKS = 10_000_000
 _SMEM_CAPACITY = 232_448
@@ -358,7 +359,7 @@ CONFIGS = _correctness_configs()
 BENCH_CONFIGS = _benchmark_configs()
 
 
-@cache
+@cache_backend_config
 def _make_kernel(
     M,
     N,
@@ -373,6 +374,8 @@ def _make_kernel(
     c_major,
     mma_tiler_mn,
     cluster_shape_mn,
+    *,
+    backend_config=None,
 ):
     mma_tiler_mn = tuple(mma_tiler_mn)
     cluster_shape_mn = tuple(cluster_shape_mn)
@@ -512,7 +515,7 @@ def _make_kernel(
     a_desc_base = _descriptor_base(ldo=a_ldo, sdo=a_sdo, swizzle=a_swizzle)
     b_desc_base = _descriptor_base(ldo=b_ldo, sdo=b_sdo, swizzle=b_swizzle)
 
-    def host_prelude(params):
+    def prepare_host(params):
         a = params["a"]
         b = params["b"]
         ab12 = params["ab12"]
@@ -609,16 +612,28 @@ def _make_kernel(
         encode_output(c_map, c, c_dtype, N // 2, c_bits, epi_n)
         return a_map, b_map, ab12_map, c_map
 
-    def kernel(a, b, ab12, c, alpha, *, host):
+    def kernel(a, b, ab12, c, alpha):
+        host = prepare_host({"a": a, "b": b, "ab12": ab12, "c": c, "alpha": alpha})
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(
+                block=6 * 32,
+                grid=(cluster_m, cluster_n, num_clusters),
+                cluster=[cluster_m, cluster_n],
+                preferred_cluster=[cluster_m, cluster_n],
+            ),
+            kernel_attrs=txl.cuda.KernelAttributes(max_registers_per_thread=entry_max_registers),
+            backend_config=backend_config,
+        )
+
         del a, b, ab12, c
         a_map, b_map, ab12_map, c_map = host
         if entry_max_registers is None:
             _block_x, _block_y, cluster_work_id = txl.cta_id()
         else:
-            txl.cuda.max_registers_per_thread(entry_max_registers)
             _block_x, _block_y, cluster_work_id = txl.cta_id()
-        cluster_x_scope, cluster_y_scope = txl.cta_id_in_cluster(
-            [cluster_m, cluster_n], preferred=[cluster_m, cluster_n]
+        cluster_x_scope, cluster_y_scope = (
+            txl.cuda.cluster_cta_id("x"),
+            txl.cuda.cluster_cta_id("y"),
         )
         del _block_x, _block_y, cluster_x_scope, cluster_y_scope
         cluster_rank = txl.local_scalar("int32", init=txl.cuda.mov_sreg(32, "cluster_ctarank"))
@@ -1519,12 +1534,7 @@ def _make_kernel(
         "c": txl.gptr[txl.u8, (M * (N // 2) * L * c_bits // 8,)],
         "alpha": txl.f32,
     }
-    return txl.kernel(
-        warps=6,
-        arch="sm_100a",
-        grid=[cluster_m, cluster_n, num_clusters],
-        host_prelude=host_prelude,
-    )(kernel)
+    return txl.kernel()(kernel)
 
 
 def get_kernel(
@@ -1542,6 +1552,8 @@ def get_kernel(
     mma_tiler_mn,
     cluster_shape_mn,
     alpha=None,
+    *,
+    backend_config=None,
 ):
     del alpha
     return _make_kernel(
@@ -1558,6 +1570,7 @@ def get_kernel(
         c_major,
         tuple(mma_tiler_mn),
         tuple(cluster_shape_mn),
+        backend_config=backend_config,
     ).func
 
 
@@ -1745,7 +1758,7 @@ def _validate_outputs(data, *, with_source):
     )
 
 
-def run_test(**config):
+def run_test(*, backend_config=None, **config):
     """Compare TIRx with the cuDNN Frontend kernel on identical inputs."""
     import torch
 
@@ -1754,7 +1767,12 @@ def run_test(**config):
     kernel_config = _without_label(config)
     data = prepare_data(**kernel_config)
     tirx_launch = _tirx_launch(
-        compile_kernel(get_kernel(**kernel_config)), data, kernel_config["alpha"]
+        compile_kernel(
+            get_kernel(**kernel_config, backend_config=backend_config),
+            backend_config=backend_config,
+        ),
+        data,
+        kernel_config["alpha"],
     )
     source_launch = _compile_reference(data, kernel_config)
     tirx_launch()
@@ -1764,16 +1782,32 @@ def run_test(**config):
     return {"max_abs": float(data["source_ab12"]["source"].float().abs().amax().item())}
 
 
-def prepare_bench(**config):
+def prepare_bench(*, backend_config=None, **config):
     """Compile only TIRx; reference imports and CUDA work stay in ``run_gpu``."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     kernel_config = _without_label(config)
-    state = {"config": kernel_config, "executable": compile_kernel(get_kernel(**kernel_config))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": kernel_config,
+        "executable": compile_kernel(
+            get_kernel(**kernel_config, backend_config=backend_config),
+            backend_config=backend_config,
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=0.0,
+    backend_config=None,
+    **kwargs,
+):
     """Validate once, then time pure launches with the canonical timer."""
     import torch
 
@@ -1804,8 +1838,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
-    return prepare_bench(**config).run_gpu(
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, backend_config=None, **config
+):
+    return prepare_bench(**config, backend_config=backend_config).run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 

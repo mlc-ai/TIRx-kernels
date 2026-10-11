@@ -138,7 +138,14 @@ def _sf_numel(m: int, k: int, sf_layout: str) -> int:
 
 
 def get_kernel(
-    dtype: str, m: int, k: int, sf_layout: str = "128x4", enable_pdl: bool = False, **kwargs
+    dtype: str,
+    m: int,
+    k: int,
+    sf_layout: str = "128x4",
+    enable_pdl: bool = False,
+    *,
+    backend_config=None,
+    **kwargs,
 ):
     """Return the TIRx specialization for one (dtype, m, k, sf_layout) config."""
     _validate(dtype, m, k, sf_layout)
@@ -152,7 +159,7 @@ def get_kernel(
             return row * pad_cols + col  # compute_sf_index_linear_gpu
         return sf_offset_128x4(row, col, pad_cols)
 
-    @txl.kernel(warps=_PER_TOKEN_WARPS, arch="sm_100a", min_blocks_per_sm=2, grid=m)
+    @txl.kernel()
     def nvfp4_quantize_per_token(
         in_global: txl.gptr[dtype],
         out_global: txl.gptr[txl.u8],
@@ -161,6 +168,12 @@ def get_kernel(
         m_rows: txl.i32,
         gsi: txl.gptr[txl.f32],
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=m, block=_PER_TOKEN_WARPS * 32),
+            kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
+            backend_config=backend_config,
+        )
+
         bx = txl.cta_id()
         tx = txl.thread_id()
 
@@ -302,12 +315,17 @@ def _run_reference(a, gs_inv, sf_layout: str, enable_pdl: bool):
     )
 
 
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
-    return prepared_gpu_benchmark(run_gpu, state)
+    state = {
+        "config": dict(kwargs),
+        "executable": compile_kernel(
+            get_kernel(**kwargs, backend_config=backend_config), backend_config=backend_config
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
 def run_test(
@@ -317,6 +335,8 @@ def run_test(
     sf_layout: str = "128x4",
     enable_pdl: bool = False,
     zero_row: bool = False,
+    *,
+    backend_config=None,
     **kwargs,
 ):
     """Compile, launch, and validate one config against the flashinfer source."""
@@ -325,8 +345,15 @@ def run_test(
     from tirx_kernels.runner import compile_kernel
 
     a, gs_inv = prepare_data(dtype=dtype, m=m, k=k, sf_layout=sf_layout, zero_row=zero_row)
-    kernel = get_kernel(dtype=dtype, m=m, k=k, sf_layout=sf_layout, enable_pdl=enable_pdl)
-    ex = compile_kernel(kernel)
+    kernel = get_kernel(
+        dtype=dtype,
+        m=m,
+        k=k,
+        sf_layout=sf_layout,
+        enable_pdl=enable_pdl,
+        backend_config=backend_config,
+    )
+    ex = compile_kernel(kernel, backend_config=backend_config)
     out_tirx, sf_tirx, pts_tirx = _alloc_outputs(m, k, sf_layout)
     ex(a.view(-1), out_tirx.view(-1), sf_tirx, pts_tirx, m, gs_inv)
     torch.cuda.synchronize()
@@ -337,7 +364,17 @@ def run_test(
     torch.testing.assert_close(pts_tirx, ref_pts, rtol=0, atol=0)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **kwargs,
+):
     """Benchmark the TIRx port against the CuTe-DSL source (kernel-only)."""
     config = dict(prepared["config"])
     dtype = config.pop("dtype")
@@ -405,6 +442,7 @@ def run_bench(
     timer=None,
     rounds=1,
     cooldown_s=1.0,
+    backend_config=None,
     **kwargs,
 ):
     config = dict(kwargs)
@@ -416,6 +454,7 @@ def run_bench(
         enable_pdl=enable_pdl,
         zero_row=zero_row,
         **config,
+        backend_config=backend_config,
     )
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s

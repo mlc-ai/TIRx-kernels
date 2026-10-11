@@ -53,8 +53,7 @@ SM100 cluster kernel, which the ``FLASHINFER_TOPK_ALGO=filtered`` pin keeps out 
 the reference path.
 """
 
-import os
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
@@ -98,7 +97,7 @@ from tirx_kernels.ported.flashinfer.utils.topk_radix import (
     st_global_u16,
     st_global_u32,
 )
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
+from tirx_kernels.runner import bench, resolve_backend_config
 
 # Patterns whose whole purpose is to overflow the candidate arena; prepare_data
 # asserts on the host that they still do.
@@ -125,8 +124,6 @@ KERNEL_META = {
 }
 # The unified kernel takes the 128 KiB candidate arena as dynamic shared memory;
 # the finalize kernel's BlockRadixSort scratch is static-sized per (BT, IPT).
-LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
-FINALIZE_LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
 
 # --- source constants (topk.cuh:2339-2347) ---------------------------------
 FILTERED_TOPK_MAX_K = 2048
@@ -286,28 +283,32 @@ def _select_ptxas_reg_level(
     return "10"
 
 
-@contextmanager
-def _thor_ptxas_reg_level(config: dict[str, Any]):
-    """Scope Thor's measured compiler setting to this module's compilation."""
-    if os.environ.get(PREPARE_CUDA_ARCH_ENV, "sm_100a") != "sm_110a":
-        yield
-        return
-    name = "TVM_CUDA_PTXAS_REG_LEVEL"
-    previous = os.environ.get(name)
-    os.environ[name] = _select_ptxas_reg_level(
-        config["num_rows"],
-        config["length"],
-        config["k"],
-        config["deterministic"],
-        config["tie_break"],
+def _thor_backend_config(config, backend_config):
+    if resolve_backend_config(backend_config)["cuda"]["arch"] != "sm_110a":
+        return backend_config
+    return resolve_backend_config(
+        backend_config,
+        defaults={
+            "cuda": {
+                "ptxas": [
+                    "-v",
+                    "--warn-on-local-memory-usage",
+                    "--register-usage-level="
+                    + str(
+                        int(
+                            _select_ptxas_reg_level(
+                                config["num_rows"],
+                                config["length"],
+                                config["k"],
+                                config["deterministic"],
+                                config["tie_break"],
+                            )
+                        )
+                    ),
+                ]
+            }
+        },
     )
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = previous
 
 
 def get_kernel(
@@ -324,6 +325,8 @@ def get_kernel(
     row_to_batch: bool = False,
     trivial: bool = False,
     pattern: str = "random",
+    *,
+    backend_config=None,
     **kwargs,
 ):
     """Return the TIRx specialization of `FilteredTopKUnifiedKernel` for one cell."""
@@ -375,7 +378,7 @@ def get_kernel(
         radix=RADIX,
     )
 
-    @txl.kernel(warps=FILTERED_TOPK_BLOCK_THREADS // 32, arch="sm_100a", grid=grid)
+    @txl.kernel()
     def filtered_topk(
         inp: txl.gptr[dtype, (num_rows * length,)],
         out_idx: txl.gptr[txl.i32, (num_rows * k,)],
@@ -387,6 +390,11 @@ def get_kernel(
         row_to_batch_g: txl.gptr[txl.i32, (num_rows,)],
         aux_stride: txl.i64,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=grid, block=FILTERED_TOPK_BLOCK_THREADS // 32 * 32),
+            backend_config=resolve_backend_config(backend_config),
+        )
+
         row = txl.cta_id()
         tx = txl.thread_id()
 
@@ -535,7 +543,7 @@ def get_kernel(
                     cfg,
                 )
 
-    return filtered_topk.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+    return filtered_topk.func
 
 
 def get_finalize_kernel(
@@ -552,6 +560,8 @@ def get_finalize_kernel(
     row_to_batch: bool = False,
     trivial: bool = False,
     pattern: str = "random",
+    *,
+    backend_config=None,
     **kwargs,
 ):
     """Return the TIRx specialization of `FinalizeTopKIndicesKernel`, or None.
@@ -576,7 +586,7 @@ def get_finalize_kernel(
     val_bytes = dtype_bytes(dtype)
     aux_elems = aux_elements(mode, num_rows, length, row_to_batch)
 
-    @txl.kernel(warps=block_threads // 32, arch="sm_100a", grid=num_rows)
+    @txl.kernel()
     def filtered_topk_finalize(
         out_idx: txl.gptr[txl.i32, (num_rows * k,)],
         out_val: txl.gptr[dtype, (num_rows * k,)],
@@ -585,6 +595,11 @@ def get_finalize_kernel(
         row_to_batch_g: txl.gptr[txl.i32, (num_rows,)],
         aux_stride: txl.i64,
     ):
+        txl.device_entry(
+            launch=txl.cuda.LaunchConfig(grid=num_rows, block=block_threads // 32 * 32),
+            backend_config=resolve_backend_config(backend_config),
+        )
+
         row = txl.cta_id()
         tx = txl.thread_id()
 
@@ -671,14 +686,17 @@ def get_finalize_kernel(
                 elif page_table:
                     page_id = txl.local_scalar("int32", init=txl.int32(-1))
                     with txl.If(key != txl.uint32(0xFFFFFFFF)), txl.Then():
-                        src = txl.local_scalar("int64", init=txl.cast(batch_idx, "int64") * aux_stride)
+                        src = txl.local_scalar(
+                            "int64", init=txl.cast(batch_idx, "int64") * aux_stride
+                        )
                         txl.assign(
                             page_id,
                             txl.reinterpret(
                                 "int32",
                                 ld_global_u32(
                                     aux,
-                                    src + txl.cast(page_start + txl.reinterpret("int32", key), "int64"),
+                                    src
+                                    + txl.cast(page_start + txl.reinterpret("int32", key), "int64"),
                                 ),
                             ),
                         )
@@ -689,9 +707,7 @@ def get_finalize_kernel(
                         txl.assign(val2, txl.reinterpret("int32", key) + offset)
                     st_global_u32(out_idx, slot2, txl.reinterpret("uint32", val2))
 
-    return filtered_topk_finalize.func.with_attr(
-        "tirx.kernel_launch_params", list(FINALIZE_LAUNCH_TAGS)
-    )
+    return filtered_topk_finalize.func
 
 
 _ = (
@@ -998,7 +1014,7 @@ def _launch_tirx(ex, ex_finalize, args) -> None:
         ex_finalize(*args["finalize"])
 
 
-def run_test(**config):
+def run_test(*, backend_config=None, **config):
     """Compile, launch, and validate one config against the FlashInfer source."""
     import unittest
 
@@ -1034,11 +1050,13 @@ def run_test(**config):
     assert_reference_is_top_k(cfg, data, ref_out)
     assert_reference_tie_break(cfg, data, ref_out)
 
-    with _thor_ptxas_reg_level(cfg):
-        kernel = get_kernel(**cfg)
-        finalize = get_finalize_kernel(**cfg)
-        ex = compile_kernel(kernel)
-        ex_finalize = compile_kernel(finalize) if finalize is not None else None
+    backend_config = _thor_backend_config(cfg, backend_config, backend_config=backend_config)
+    kernel = get_kernel(**cfg, backend_config=backend_config)
+    finalize = get_finalize_kernel(**cfg, backend_config=backend_config)
+    ex = compile_kernel(kernel, backend_config=backend_config)
+    ex_finalize = (
+        compile_kernel(finalize, backend_config=backend_config) if finalize is not None else None
+    )
 
     tirx_out = alloc_outputs(cfg)
     _launch_tirx(ex, ex_finalize, build_tirx_args(cfg, data, tirx_out))
@@ -1193,23 +1211,37 @@ def compare_filtered_outputs(
 # ---------------------------------------------------------------------------
 # Benchmark entry points.
 # ---------------------------------------------------------------------------
-def prepare_bench(**kwargs: Any):
+def prepare_bench(*, backend_config=None, **kwargs: Any):
     """Specialize and compile both executables before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     cfg = _normalize_config(kwargs)
-    with _thor_ptxas_reg_level(cfg):
-        finalize = get_finalize_kernel(**cfg)
-        state = {
-            "config": cfg,
-            "executable": compile_kernel(get_kernel(**cfg)),
-            # None where `finalize_plan` says the dispatcher issues no second launch.
-            "finalize": compile_kernel(finalize) if finalize is not None else None,
-        }
-    return prepared_gpu_benchmark(run_gpu, state)
+    backend_config = _thor_backend_config(cfg, backend_config, backend_config=backend_config)
+    finalize = get_finalize_kernel(**cfg, backend_config=backend_config)
+    state = {
+        "config": cfg,
+        "executable": compile_kernel(
+            get_kernel(**cfg, backend_config=backend_config), backend_config=backend_config
+        ),
+        # None where `finalize_plan` says the dispatcher issues no second launch.
+        "finalize": compile_kernel(finalize, backend_config=backend_config)
+        if finalize is not None
+        else None,
+    }
+    return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 
 
-def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
+def run_gpu(
+    prepared,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    backend_config=None,
+    **kwargs,
+):
     """Timed comparison against the FlashInfer source pipeline.
 
     Both sides enqueue the same number of kernels: one where ``finalize_plan``
@@ -1243,8 +1275,10 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
-    prepared = prepare_bench(**config)
+def run_bench(
+    *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, backend_config=None, **config
+):
+    prepared = prepare_bench(**config, backend_config=backend_config)
     return prepared.run_gpu(
         warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
