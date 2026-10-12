@@ -104,10 +104,7 @@ def test_tile_primitive_is_rejected_before_lowering(composite):
     with pytest.raises(LowLevelIRContractError) as error:
         check_low_level_ir(probe)
 
-    assert any(
-        item.kind == ("tile_composite" if composite else "tile_primitive")
-        for item in error.value.report.violations
-    )
+    assert any(item.kind == "tile_op" for item in error.value.report.violations)
 
 
 def test_func_call_is_rejected_by_default_and_reports_callee():

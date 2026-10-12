@@ -460,7 +460,7 @@ def test_alloc_tensor_preserves_defaults_and_positional_options():
         assert region.dtype == "float32"
         view = txl.alloc_tensor((1,), txl.f32, region.data, 1, None, "local", 16)
         assert int(view.elem_offset) == 1
-        assert view.scope() == "local"
+        assert str(view.scope()) == "local"
         assert view.data_alignment == 16
         txl.assign(view[0], txl.float32(1))
         txl.ptx.st.global_.f32(out.ptr_to([0]), view[0])
@@ -474,7 +474,7 @@ def test_decl_tensor_preserves_defaults_and_positional_options():
         assert region.dtype == "float32"
         view = txl.decl_tensor((1,), txl.f32, region.data, 1, None, "local", 16)
         assert int(view.elem_offset) == 1
-        assert view.scope() == "local"
+        assert str(view.scope()) == "local"
         assert view.data_alignment == 16
         txl.assign(view[0], txl.float32(1))
         txl.ptx.st.global_.f32(out.ptr_to([0]), view[0])
