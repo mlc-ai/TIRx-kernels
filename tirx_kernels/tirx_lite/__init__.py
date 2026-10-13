@@ -455,7 +455,9 @@ def assign(dst, value):
         raise TypeError(
             f"txl.assign destination must be a writable scalar, got {type(dst).__name__}"
         )
-    if not tvm.tirx.is_tensor_var(dst.source) or dst.source.scope() != "local":
+    if not tvm.tirx.is_tensor_var(dst.source) or dst.source.scope() != tvm.runtime.MemoryScope(
+        "local"
+    ):
         raise TypeError("txl.assign destination must be a local scalar element")
     return _I.tensor_store(dst.source, list(dst.indices), value)
 
