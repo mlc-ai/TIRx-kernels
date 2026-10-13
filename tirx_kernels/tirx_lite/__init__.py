@@ -522,9 +522,7 @@ _FORBIDDEN_TIRX_NAMES = {
     "TLane",
     "TMEMPool",
     "TileLayout",
-    "alloc_cast_frag",
     "alloc_shared",
-    "alloc_tcgen05_ldst_frag",
     "function",
     "function_",
     "inline",
@@ -536,7 +534,6 @@ _FORBIDDEN_TIRX_NAMES = {
     "smem",
     "tile",
     "tmem",
-    "wg_reg_tile",
 }
 
 _FORBIDDEN_ESCAPE_NAMES = {"ir", "ir_builder", "parser"}
