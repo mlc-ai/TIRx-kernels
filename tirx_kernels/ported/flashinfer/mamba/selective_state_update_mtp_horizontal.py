@@ -16,7 +16,7 @@ import torch
 
 import tirx_kernels.tirx_lite as txl
 from tirx_kernels.runner import resolve_backend_config
-from tvm.ir import PointerType, PrimType
+from tvm.ir import PrimType, PtrType
 
 from . import selective_state_update_mtp_simple as _simple
 from . import selective_state_update_mtp_vertical as _vertical
@@ -1094,7 +1094,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                         random_words,
                                         tile * 8,
                                         txl.reinterpret(
-                                            PointerType(PrimType(STATE_DTYPE), "global"),
+                                            PtrType(PrimType(STATE_DTYPE), "global"),
                                             intermediate_step_addr
                                             + txl.cast(member_col * STATE_BYTES, "uint64"),
                                         ),

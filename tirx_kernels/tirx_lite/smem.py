@@ -26,10 +26,10 @@ import warnings
 from tvm import DataType
 from tvm.backend.cuda.lang import SMEMPool
 from tvm.backend.cuda.lang.alloc_pool import _validate_mma_alloc_shape
-from tvm.backend.cuda.tile_primitive.layout_utils import strip_swizzle_to_tile
-from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
+from tvm.backend.cuda.layout import SwizzleMode, mma_shared_layout
 from tvm.script import tirx as T
 from tvm.tirx.analysis import undefined_vars
+from tvm.tirx.layout import ComposeLayout, S, TileLayout
 from tvm.tirx.script import ir_builder as _I
 
 from . import entry as _entry
@@ -233,7 +233,12 @@ class KTile:
         # One swizzle atom is [8, atom_cols]; addresses step in 16B units.
         self.atom_cols = self.atom_bytes * 8 // self.bits
         self.elem_per_16b = 128 // self.bits
-        self._tile_layout = strip_swizzle_to_tile(buf.ty.layout, lambda: self.shape)
+        layout = buf.ty.layout
+        if isinstance(layout, ComposeLayout):
+            layout = layout.tile_layout
+            if layout.is_trivial():
+                layout = TileLayout(S[self.shape])
+        self._tile_layout = layout
 
     # -- physical (pre-xor) offsets, straight off the allocated layout --------
 

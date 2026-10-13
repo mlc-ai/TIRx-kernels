@@ -40,7 +40,7 @@ instruction or a shape.
 from __future__ import annotations
 
 import tvm
-from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
+from tvm.backend.cuda.layout import SwizzleMode
 from tvm.script import tirx as _T
 from tvm.script.ir_builder import IRBuilder
 from tvm.tirx.script import ir_builder as _I
@@ -133,8 +133,8 @@ def ptr_byte_offset(data, byte_offset, dtype, *, ty=None, loc=tvm.ir.UNKNOWN_LOC
     if ty is None:
         element_type = tvm.ir.PrimType(dtype) if isinstance(dtype, str) else dtype
         data_type = getattr(data, "ty", None)
-        scope = data_type.storage_scope if isinstance(data_type, tvm.ir.PointerType) else "global"
-        ty = tvm.ir.PointerType(element_type, scope)
+        scope = data_type.storage_scope if isinstance(data_type, tvm.ir.PtrType) else "global"
+        ty = tvm.ir.PtrType(element_type, scope)
     return _T.ptr_byte_offset(data, byte_offset, ty=ty, loc=loc)
 
 
@@ -353,7 +353,7 @@ tvm_storage_sync = _StmtProxy(_T.gpu_storage_sync)
 
 
 # ---------------------------------------------------------------------------
-# tensors: ordinary default layout only
+# tensors: ordinary tensors without a tile layout
 # ---------------------------------------------------------------------------
 
 
@@ -367,7 +367,7 @@ def alloc_tensor(
     align=-1,
     annotations=None,
 ):
-    """Allocate an ordinary tensor using TIRx's default layout.
+    """Allocate an ordinary tensor with layout=None.
 
     Tensor memory is not a regular TIR buffer in tirx-lite.  Its column allocation,
     row mapping, and ``tcgen05`` load/store address form are instruction-level
@@ -379,7 +379,7 @@ def alloc_tensor(
             'tirx-lite does not support scope="tmem" buffers; use raw tcgen05 column '
             "operands and txl.cuda.get_tmem_addr(...)"
         )
-    return _I.alloc_tensor(
+    tensor_type = _I.Tensor(
         shape,
         dtype,
         data=data,
@@ -387,20 +387,20 @@ def alloc_tensor(
         byte_offset=byte_offset,
         scope=scope,
         align=align,
-        annotations=annotations,
     )
+    return _I.bind(_I.alloc_tensor(ty_args=[tensor_type], annotations=annotations))
 
 
 def decl_tensor(
     shape, dtype="float32", data=None, elem_offset=None, byte_offset=None, scope="global", align=0
 ):
-    """Declare an ordinary tensor using TIRx's default layout."""
+    """Declare an ordinary tensor with layout=None."""
     if scope == "tmem":
         raise ValueError(
             'tirx-lite does not support scope="tmem" buffers; use raw tcgen05 column '
             "operands and txl.cuda.get_tmem_addr(...)"
         )
-    return _I.decl_tensor(
+    tensor_type = _I.Tensor(
         shape,
         dtype,
         data=data,
@@ -409,15 +409,17 @@ def decl_tensor(
         scope=scope,
         align=align,
     )
+    pointer = _I.ptr(dtype, storage_scope=scope) if data is None else data
+    return _I.bind(_I.decl_tensor(pointer, ty_args=[tensor_type]))
 
 
 def alloc_local(shape, dtype="float32", *, align=-1, annotations=None):
-    """Allocate a default-layout register tensor."""
+    """Allocate a register tensor with layout=None."""
     return alloc_tensor(shape, dtype, scope="local", align=align, annotations=annotations)
 
 
 def local_scalar(dtype="float32", init=None, *, name=None):
-    """Allocate one default-layout local scalar and return its writable element.
+    """Allocate one local scalar with layout=None and return its writable element.
 
     ``init`` performs one immediate ``txl.assign`` into the fresh element; the
     emitted TIR is identical to the two-statement declare-then-assign form.
@@ -453,7 +455,9 @@ def assign(dst, value):
         raise TypeError(
             f"txl.assign destination must be a writable scalar, got {type(dst).__name__}"
         )
-    if not tvm.tirx.is_tensor_var(dst.source) or dst.source.scope() != "local":
+    if not tvm.tirx.is_tensor_var(dst.source) or dst.source.scope() != tvm.runtime.MemoryScope(
+        "local"
+    ):
         raise TypeError("txl.assign destination must be a local scalar element")
     return _I.tensor_store(dst.source, list(dst.indices), value)
 
@@ -518,9 +522,7 @@ _FORBIDDEN_TIRX_NAMES = {
     "TLane",
     "TMEMPool",
     "TileLayout",
-    "alloc_cast_frag",
     "alloc_shared",
-    "alloc_tcgen05_ldst_frag",
     "function",
     "function_",
     "inline",
@@ -532,7 +534,6 @@ _FORBIDDEN_TIRX_NAMES = {
     "smem",
     "tile",
     "tmem",
-    "wg_reg_tile",
 }
 
 _FORBIDDEN_ESCAPE_NAMES = {"ir", "ir_builder", "parser"}

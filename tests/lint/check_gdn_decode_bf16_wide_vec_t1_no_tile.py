@@ -88,7 +88,7 @@ def _tile_call_reason(name: str | None, call: ast.Call) -> str | None:
     leaf = parts[-1]
     if leaf == "TilePrimitiveCall" or ".tile." in name:
         return f"explicit tile primitive call {name}"
-    if "tile_primitive" in parts and leaf not in {"SwizzleMode", "sf_smem_layout"}:
+    if "tile" in parts and leaf not in {"SwizzleMode"}:
         return f"tile-primitive helper call {name}"
 
     # TIRx script exposes both direct and execution-scope tile APIs.  Cast has
@@ -236,11 +236,10 @@ class _IRScanner:
     def _visit_call(self, call: tvm.ir.Call) -> None:
         op = getattr(call, "op", None)
         op_name = getattr(op, "name", None)
-        category = op.get_attr("TIRxOpCategory") if isinstance(op, tvm.ir.Op) else None
         if op_name is not None and op_name.startswith("tirx.tile."):
             self._record(call, f"forbidden operator {op_name}")
-        elif category in {"tile_primitive", "tile_composite"}:
-            self._record(call, f"operator {op_name} has TIRxOpCategory={category}")
+        elif isinstance(op, tvm.ir.Op) and op.get_attr("FTileOpDispatch") is not None:
+            self._record(call, f"operator {op_name} has a tile dispatcher")
 
 
 def _ir_findings() -> list[Finding]:

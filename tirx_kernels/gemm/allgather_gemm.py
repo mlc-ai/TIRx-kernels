@@ -15,7 +15,7 @@ import torch.distributed as dist
 
 import tirx_kernels.tirx_lite as txl
 import tvm
-from tvm.ir.type import PointerType, PrimType
+from tvm.ir.type import PrimType, PtrType
 
 from .utils._baselines import create_baseline_suite
 from .utils._baselines import ratios as baseline_ratios
@@ -623,7 +623,7 @@ def _make_device_kernel(*, backend_config=None):
         # rank: 0 -- _mapa_u64_tx already materializes the mapa into a local
         # scalar, so the reinterpret over it is a pure type re-tag.
         packed_ptr = txl.reinterpret(
-            PointerType(PrimType("uint64")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)
+            PtrType(PrimType("uint64")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)
         )
         packed_value = txl.decl_tensor([1], "uint64", data=packed_ptr, scope="shared")
         # Initialize in source order after the packed-value mapa.
@@ -636,7 +636,7 @@ def _make_device_kernel(*, backend_config=None):
         out_pipe.full.init(1)
         out_pipe.empty.init(128 * NUM_CONSUMER)
         ptr = txl.reinterpret(
-            PointerType(PrimType("uint64")), _mapa_u64_tx(ab_pipe.full.ptr_to([0]), 0)
+            PtrType(PrimType("uint64")), _mapa_u64_tx(ab_pipe.full.ptr_to([0]), 0)
         )
         tma_finished = txl.decl_tensor([PIPELINE_DEPTH], "uint64", data=ptr, scope="shared")
         ab_state = txl.PipelineState(1, phase=0)

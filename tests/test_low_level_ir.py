@@ -90,11 +90,16 @@ def test_address_of_still_checks_memory_reads_in_its_index():
 
 @pytest.mark.parametrize("composite", [False, True])
 def test_tile_primitive_is_rejected_before_lowering(composite):
-    instruction = T.cuda.tile.compose.exp if composite else T.cuda.tile.ld
+    @T.function(private=True)
+    def scalar(x: T.float32) -> T.float32:
+        return T.exp(x)
 
     @T.function
     def probe(a: T.Tensor((32,), "float32"), b: T.Tensor((32,), "float32")):
-        instruction(b[:], a[:])
+        if T.constexpr(composite):
+            T.cuda.tile.ewise(scalar, b[:], a[:])
+        else:
+            T.cuda.tile.apply(T.ptx["ld.global.b32"], b[:], a[:])
 
     with pytest.raises(LowLevelIRContractError) as error:
         check_low_level_ir(probe)

@@ -14,7 +14,7 @@ import torch.distributed as dist
 
 import tirx_kernels.tirx_lite as txl
 import tvm
-from tvm.ir.type import PointerType, PrimType
+from tvm.ir.type import PrimType, PtrType
 
 from .utils._baselines import create_baseline_suite
 from .utils._baselines import ratios as baseline_ratios
@@ -658,7 +658,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
         )
 
         packed_ptr = txl.reinterpret(
-            PointerType(PrimType("uint32")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)
+            PtrType(PrimType("uint32")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)
         )
         packed_value = txl.decl_tensor((4,), "uint32", data=packed_ptr, scope="shared")
         tile_scheduler = MixedDynamicTileScheduler(gemm_queue, rs_queue, packed_value, sch_pipe)

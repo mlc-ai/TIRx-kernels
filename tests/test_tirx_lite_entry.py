@@ -35,6 +35,23 @@ def _split(kernel):
     return mod["main"], device[0]
 
 
+def test_tensormap_parameter_uses_addressable_pointer_type():
+    @txl.kernel()
+    def probe(descriptor: txl.TensorMap):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32))
+        txl.ptx.prefetch.tensormap(txl.address_of(descriptor))
+
+    parameter = probe.func.params[0]
+    assert isinstance(parameter.ty, ir.PtrType)
+    assert isinstance(parameter.ty.element_type, tvm.tirx.TensorMapType)
+    address = next(
+        call for call in _nodes(probe.func, ir.Call) if call.op.name == "tirx.address_of"
+    )
+    assert address.ty == ir.PrimType("uint64")
+    _, device = _split(probe)
+    assert isinstance(device.params[0].ty.element_type, tvm.tirx.TensorMapType)
+
+
 def test_flat_and_with_entries_generate_the_same_ir():
     def build(managed):
         @txl.kernel()
