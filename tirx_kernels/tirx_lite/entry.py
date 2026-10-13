@@ -399,7 +399,7 @@ def _declare_param(name, ann, scalar_params):
             shape = ann.shape or [tvm.tirx.Var(f"{name}_dim{i}", "int64") for i in range(ann.ndim)]
         return I.arg_(name, I.Tensor(shape, ann.dtype))
     if ann is TensorMap or isinstance(ann, TensorMap):
-        return I.arg_(name, I.Ptr(I.TensorMap(), ""))
+        return I.arg_(name, I.Ptr(I.TensorMap()))
     if isinstance(ann, str):
         return I.arg_(name, scalar_params[name])
     raise TypeError(
