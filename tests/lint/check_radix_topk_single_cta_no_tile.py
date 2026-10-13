@@ -258,8 +258,12 @@ class _IRScanner:
         op_name = getattr(op, "name", None)
         if op_name is not None and op_name.startswith("tirx.tile."):
             self._record(call, f"forbidden operator {op_name}")
-        elif isinstance(op, tvm.ir.Op) and op.get_attr("FTileOpDispatch") is not None:
-            self._record(call, f"operator {op_name} has a tile dispatcher")
+        elif (
+            isinstance(op, tvm.ir.Op)
+            and op.has_attr("FTileOpDispatch")
+            and op.get_attr("FTileOpDispatch") is not None
+        ):
+            self._record(call, f"operator {op_name} has FTileOpDispatch")
 
 
 def _ir_findings() -> list[Finding]:
