@@ -40,7 +40,7 @@ instruction or a shape.
 from __future__ import annotations
 
 import tvm
-from tvm.backend.cuda.tile.tma_utils import SwizzleMode
+from tvm.backend.cuda.layout import SwizzleMode
 from tvm.script import tirx as _T
 from tvm.script.ir_builder import IRBuilder
 from tvm.tirx.script import ir_builder as _I

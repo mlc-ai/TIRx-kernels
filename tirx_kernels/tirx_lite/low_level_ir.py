@@ -166,9 +166,9 @@ class _LowLevelIRInspector:
 
     def _visit_call(self, op: tvm.ir.Call, visitor: Any) -> None:
         op_name = getattr(op.op, "name", None)
-        category = op.op.get_attr("TIRxOpCategory") if isinstance(op.op, tvm.ir.Op) else None
-        if category in {"tile_primitive", "tile_composite"}:
-            self.violations.append(self._finding(op, str(category), callee=op_name))
+        if isinstance(op.op, tvm.ir.Op) and op.op.get_attr("FTileOpDispatch") is not None:
+            category = "tile_composite" if op_name == "tirx.cuda.tile.ewise" else "tile_primitive"
+            self.violations.append(self._finding(op, category, callee=op_name))
         if op_name == _SETMAXNREG_OP:
             self.setmaxnreg_calls.append(self._finding(op, "setmaxnreg_without_min_blocks_per_sm"))
         if op_name == _FUNC_CALL_OP:
