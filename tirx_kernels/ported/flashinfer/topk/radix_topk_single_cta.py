@@ -302,15 +302,15 @@ def _emit(out_idx, out_val, row_out, i, key, pos, offset, basic, ragged, is32, d
     """The mode epilogue the collect passes call per selected element (:1339-1375)."""
     slot = row_out + txl.cast(pos, "int64")
     if basic:
-        st_global_u32(out_idx, slot, txl.reinterpret("uint32", i))
+        st_global_u32(out_idx, slot, txl.reinterpret(i, ty="uint32"))
         if is32:
             st_global_u32(out_val, slot, from_ordered_u32(key))
         else:
             st_global_u16(out_val, slot, from_ordered_u16(txl.cast(key, "uint16")))
     elif ragged:
-        st_global_u32(out_idx, slot, txl.reinterpret("uint32", i + offset))
+        st_global_u32(out_idx, slot, txl.reinterpret(i + offset, ty="uint32"))
     else:
-        st_global_u32(out_idx, slot, txl.reinterpret("uint32", i))
+        st_global_u32(out_idx, slot, txl.reinterpret(i, ty="uint32"))
 
 
 # ---------------------------------------------------------------------------
@@ -379,10 +379,10 @@ def get_kernel(
         st_shared_u32(buf, i, v) if is32 else st_shared_u16(buf, i, v)
 
     def ld_i32(buf, i):
-        return txl.reinterpret("int32", ld_global_u32(buf, i))
+        return txl.reinterpret(ld_global_u32(buf, i), ty="int32")
 
     def st_i32(buf, i, v):
-        st_global_u32(buf, i, txl.reinterpret("uint32", v))
+        st_global_u32(buf, i, txl.reinterpret(v, ty="uint32"))
 
     def copy_value(dst, dst_i, src, src_i):
         bits = _ld_global_bits(src, src_i, is32)
@@ -393,14 +393,14 @@ def get_kernel(
 
     @txl.kernel()
     def radix_topk_single_cta(
-        inp: txl.gptr[dtype, (num_rows * length,)],
-        out_idx: txl.gptr[txl.i32, (num_rows * k,)],
-        out_val: txl.gptr[dtype, (num_rows * k,)],
-        aux: txl.gptr[txl.i32, (aux_elems,)],
-        lengths_g: txl.gptr[txl.i32, (num_rows,)],
-        row_starts_g: txl.gptr[txl.i32, (num_rows,)],
-        pt_starts_g: txl.gptr[txl.i32, (num_rows,)],
-        row_to_batch_g: txl.gptr[txl.i32, (num_rows,)],
+        inp: txl.Tensor((num_rows * length,), dtype),
+        out_idx: txl.Tensor((num_rows * k,), txl.i32),
+        out_val: txl.Tensor((num_rows * k,), dtype),
+        aux: txl.Tensor((aux_elems,), txl.i32),
+        lengths_g: txl.Tensor((num_rows,), txl.i32),
+        row_starts_g: txl.Tensor((num_rows,), txl.i32),
+        pt_starts_g: txl.Tensor((num_rows,), txl.i32),
+        row_to_batch_g: txl.Tensor((num_rows,), txl.i32),
         aux_stride: txl.i64,
     ):
         txl.device_entry(

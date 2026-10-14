@@ -986,7 +986,7 @@ def get_kernel(*, backend_config=None, **config: Any):
                 reduce_index: txl.int32 = row_warp + warp_in_row * rows
                 txl.ptx.st.shared.b32(
                     shared_raw.ptr_to([reduce_base + reduce_index * 4]),
-                    txl.reinterpret("uint32", warp_sum),
+                    txl.reinterpret(warp_sum, ty="uint32"),
                 )
             txl.ptx.bar.sync(txl.uint32(0))
             final_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
@@ -996,7 +996,7 @@ def get_kernel(*, backend_config=None, **config: Any):
                 txl.ptx.ld.shared.b32(
                     reduce_word[0], shared_raw.ptr_to([reduce_base + reduce_index * 4])
                 )
-                txl.assign(final_sum, txl.reinterpret("float32", reduce_word[0]))
+                txl.assign(final_sum, txl.reinterpret(reduce_word[0], ty="float32"))
             txl.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
             sum_sq: txl.float32 = final_sum
         elif cluster_n > 1:
@@ -1031,7 +1031,8 @@ def get_kernel(*, backend_config=None, **config: Any):
                         reduce_word[0], shared_raw.ptr_to([reduce_base + reduce_index * 4])
                     )
                     txl.assign(
-                        final_sum, _add_f32(final_sum, txl.reinterpret("float32", reduce_word[0]))
+                        final_sum,
+                        _add_f32(final_sum, txl.reinterpret(reduce_word[0], ty="float32")),
                     )
             txl.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
             sum_sq = final_sum
@@ -1049,7 +1050,7 @@ def get_kernel(*, backend_config=None, **config: Any):
         if use_e4m3_scale:
             scale_bits = txl.alloc_local((1,), "uint32")
             txl.ptx.ld.global_.b32(scale_bits[0], global_scale.ptr_to([0]))
-            global_scale_value = txl.reinterpret("float32", scale_bits[0])
+            global_scale_value = txl.reinterpret(scale_bits[0], ty="float32")
 
         if cluster_n > 1:
             txl.ptx.barrier.cluster.arrive.relaxed()
@@ -1202,14 +1203,14 @@ def get_kernel(*, backend_config=None, **config: Any):
 
     @txl.kernel()
     def flashinfer_add_rmsnorm_fp4quant(
-        x: txl.gptr[input_dtype],
-        residual: txl.gptr[input_dtype],
-        weight: txl.gptr[input_dtype, (H,)],
-        y: txl.gptr[txl.u8],
-        scales: txl.gptr[txl.u8],
-        scales_unswizzled: txl.gptr[txl.u8],
-        y_norm: txl.gptr[input_dtype],
-        global_scale: txl.gptr[txl.f32, (1,)],
+        x: txl.Tensor((txl.int64(),), input_dtype),
+        residual: txl.Tensor((txl.int64(),), input_dtype),
+        weight: txl.Tensor((H,), input_dtype),
+        y: txl.Tensor((txl.int64(),), txl.u8),
+        scales: txl.Tensor((txl.int64(),), txl.u8),
+        scales_unswizzled: txl.Tensor((txl.int64(),), txl.u8),
+        y_norm: txl.Tensor((txl.int64(),), input_dtype),
+        global_scale: txl.Tensor((1,), txl.f32),
         runtime_M: txl.i32,
         runtime_eps: txl.f32,
     ):

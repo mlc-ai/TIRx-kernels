@@ -219,18 +219,18 @@ def make_kernel(*, backend_config=None):
 
     @txl.kernel()
     def fastcu_nvfp4_gemm_gb300_kernel(
-        A_tmap: txl.TensorMap,
-        B_tmap: txl.TensorMap,
-        SFA_tmap: txl.TensorMap,
-        SFB_tmap: txl.TensorMap,
-        C: txl.gptr[txl.f16],
+        A_tmap: txl.Ptr(txl.TensorMap),
+        B_tmap: txl.Ptr(txl.TensorMap),
+        SFA_tmap: txl.Ptr(txl.TensorMap),
+        SFB_tmap: txl.Ptr(txl.TensorMap),
+        C: txl.Tensor((txl.int64(),), txl.f16),
         M: txl.i32,
         N: txl.i32,
         K_dim: txl.i32,
-        route_table: txl.gptr[txl.i32],
-        sm_side: txl.gptr[txl.i32],
-        cluster_side: txl.gptr[txl.i32],
-        placement_errors: txl.gptr[txl.u32],
+        route_table: txl.Tensor((txl.int64(),), txl.i32),
+        sm_side: txl.Tensor((txl.int64(),), txl.i32),
+        cluster_side: txl.Tensor((txl.int64(),), txl.i32),
+        placement_errors: txl.Tensor((txl.int64(),), txl.u32),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -307,30 +307,55 @@ def make_kernel(*, backend_config=None):
         with txl.If((warp == 0) & (lane == 0)), txl.Then():
             for stage in range(6):
                 txl.ptx.mbarrier.init.shared.b64(
-                    txl.ptr_byte_offset(smem.ptr_to([0]), _AB_READY + stage * 8, "uint64"),
+                    txl.ptr_byte_offset(
+                        smem.ptr_to([0]),
+                        _AB_READY + stage * 8,
+                        ty=txl.Ptr("uint64", (smem.ptr_to([0])).ty.scope),
+                    ),
                     txl.uint32(1),
                 )
                 txl.ptx.mbarrier.init.shared.b64(
-                    txl.ptr_byte_offset(smem.ptr_to([0]), _AB_FREE + stage * 8, "uint64"),
+                    txl.ptr_byte_offset(
+                        smem.ptr_to([0]),
+                        _AB_FREE + stage * 8,
+                        ty=txl.Ptr("uint64", (smem.ptr_to([0])).ty.scope),
+                    ),
                     txl.uint32(1),
                 )
             for stage in range(7):
                 txl.ptx.mbarrier.init.shared.b64(
-                    txl.ptr_byte_offset(smem.ptr_to([0]), _SF_READY + stage * 8, "uint64"),
+                    txl.ptr_byte_offset(
+                        smem.ptr_to([0]),
+                        _SF_READY + stage * 8,
+                        ty=txl.Ptr("uint64", (smem.ptr_to([0])).ty.scope),
+                    ),
                     txl.uint32(1),
                 )
                 txl.ptx.mbarrier.init.shared.b64(
-                    txl.ptr_byte_offset(smem.ptr_to([0]), _SF_FREE + stage * 8, "uint64"),
+                    txl.ptr_byte_offset(
+                        smem.ptr_to([0]),
+                        _SF_FREE + stage * 8,
+                        ty=txl.Ptr("uint64", (smem.ptr_to([0])).ty.scope),
+                    ),
                     txl.uint32(1),
                 )
             txl.ptx.mbarrier.init.shared.b64(
-                txl.ptr_byte_offset(smem.ptr_to([0]), _ACC_READY, "uint64"), txl.uint32(1)
+                txl.ptr_byte_offset(
+                    smem.ptr_to([0]), _ACC_READY, ty=txl.Ptr("uint64", (smem.ptr_to([0])).ty.scope)
+                ),
+                txl.uint32(1),
             )
             txl.ptx.mbarrier.init.shared.b64(
-                txl.ptr_byte_offset(smem.ptr_to([0]), _ACC_FREE, "uint64"), txl.uint32(8)
+                txl.ptr_byte_offset(
+                    smem.ptr_to([0]), _ACC_FREE, ty=txl.Ptr("uint64", (smem.ptr_to([0])).ty.scope)
+                ),
+                txl.uint32(8),
             )
             txl.ptx.mbarrier.init.shared.b64(
-                txl.ptr_byte_offset(smem.ptr_to([0]), _DEALLOC, "uint64"), txl.uint32(32)
+                txl.ptr_byte_offset(
+                    smem.ptr_to([0]), _DEALLOC, ty=txl.Ptr("uint64", (smem.ptr_to([0])).ty.scope)
+                ),
+                txl.uint32(32),
             )
             txl.ptx.fence.mbarrier_init.release.cluster()
         txl.ptx.barrier.cluster.arrive.release.aligned()
@@ -344,7 +369,10 @@ def make_kernel(*, backend_config=None):
                 )
             txl.ptx.bar.sync(txl.uint32(2), txl.uint32(160))
             txl.ptx.ld.shared.b32(
-                taddr, txl.ptr_byte_offset(smem.ptr_to([0]), _TMEM_ADDR, "uint32")
+                taddr,
+                txl.ptr_byte_offset(
+                    smem.ptr_to([0]), _TMEM_ADDR, ty=txl.Ptr("uint32", (smem.ptr_to([0])).ty.scope)
+                ),
             )
 
         with ab_role:
@@ -919,7 +947,7 @@ def make_kernel(*, backend_config=None):
                 row = txl.local_scalar("int32", init=(m_row * 2 + m_pair) * 128 + warp * 32 + lane)
                 row_in = txl.local_scalar("uint32", init=txl.cast(row < M, "uint32"))
                 row_base = txl.local_scalar("int64", init=txl.cast(row, "int64") * N)
-                c_addr = txl.reinterpret("uint64", C.ptr_to([0]))
+                c_addr = txl.reinterpret(C.ptr_to([0]), ty="uint64")
                 aligned = txl.local_scalar(
                     "uint32",
                     init=txl.cast(

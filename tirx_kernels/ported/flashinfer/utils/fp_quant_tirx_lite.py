@@ -80,11 +80,13 @@ def unpack_lo_f32(word, dtype):
     and.b32 + shl.b32 + mov.b32)."""
     if dtype == "float16":
         return txl.cast(
-            txl.reinterpret("float16", txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")),
+            txl.reinterpret(
+                txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16"), ty="float16"
+            ),
             "float32",
         )
     return txl.reinterpret(
-        "float32", txl.shift_left(txl.bitwise_and(word, txl.uint32(0xFFFF)), txl.uint32(16))
+        txl.shift_left(txl.bitwise_and(word, txl.uint32(0xFFFF)), txl.uint32(16)), ty="float32"
     )
 
 
@@ -92,9 +94,14 @@ def unpack_hi_f32(word, dtype):
     """High lane of a packed pair as f32 (bf16: shr.b32 + shl.b32 + mov.b32)."""
     if dtype == "float16":
         return txl.cast(
-            txl.reinterpret("float16", txl.cast(txl.shift_right(word, txl.uint32(16)), "uint16")), "float32"
+            txl.reinterpret(
+                txl.cast(txl.shift_right(word, txl.uint32(16)), "uint16"), ty="float16"
+            ),
+            "float32",
         )
-    return txl.reinterpret("float32", txl.shift_left(txl.shift_right(word, txl.uint32(16)), txl.uint32(16)))
+    return txl.reinterpret(
+        txl.shift_left(txl.shift_right(word, txl.uint32(16)), txl.uint32(16)), ty="float32"
+    )
 
 
 def pair_max_to_f32(x, dtype):
@@ -119,9 +126,13 @@ def shfl_xor_f32(val, lane_xor):
     """``shfl.sync.bfly.b32`` with full membermask (utils:498 shuffle_xor_f32)."""
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out, txl.reinterpret("uint32", val), txl.uint32(lane_xor), txl.uint32(31), txl.uint32(0xFFFFFFFF)
+        out,
+        txl.reinterpret(val, ty="uint32"),
+        txl.uint32(lane_xor),
+        txl.uint32(31),
+        txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", out)
+    return txl.reinterpret(out, ty="float32")
 
 
 def reduce_max_2threads(val):
@@ -155,7 +166,7 @@ def float_to_ue8m0(value):
     setp.gt.u32 / selp.u32 x2 -- all explicit so the FTZ-flagged host
     compiler cannot reinterpret the float compare or the selects.
     """
-    bits = txl.reinterpret("uint32", value)
+    bits = txl.reinterpret(value, ty="uint32")
     exp = txl.bitwise_and(txl.shift_right(bits, txl.uint32(23)), txl.uint32(255))
     mant = txl.bitwise_and(bits, txl.uint32(0x7FFFFF))
     p_zero = txl.local_scalar("uint32")
@@ -188,7 +199,7 @@ def ue8m0_to_inv_scale(ue8m0_val):
     p_zero = txl.local_scalar("uint32")
     txl.ptx.setp.eq.u32(p_zero, ue8m0_val, txl.uint32(0))
     new_exp = txl.max(txl.int32(254) - txl.cast(ue8m0_val, "int32"), txl.int32(0))
-    inv = txl.reinterpret("float32", txl.shift_left(txl.cast(new_exp, "uint32"), txl.uint32(23)))
+    inv = txl.reinterpret(txl.shift_left(txl.cast(new_exp, "uint32"), txl.uint32(23)), ty="float32")
     out = txl.local_scalar("float32")
     txl.ptx.selp.f32(out, txl.float32(0.0), inv, txl.ptx.pred(p_zero))
     return out
@@ -302,7 +313,9 @@ def cvt_e2m1x8(vals):
 
 def pack_u32x2_to_u64(lo, hi):
     """(u64(hi) << 32) | u64(lo): plain u64 shift/or (utils:996-997)."""
-    return txl.bitwise_or(txl.shift_left(txl.cast(hi, "uint64"), txl.uint64(32)), txl.cast(lo, "uint64"))
+    return txl.bitwise_or(
+        txl.shift_left(txl.cast(hi, "uint64"), txl.uint64(32)), txl.cast(lo, "uint64")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +396,8 @@ def nvfp4_compute_output_scale(sf_u32, global_scale):
     h2 = txl.local_scalar("uint32")
     txl.ptx.cvt.rn.f16x2.e4m3x2(h2, pair16)
     sf_f32 = txl.cast(
-        txl.reinterpret("float16", txl.cast(txl.bitwise_and(h2, txl.uint32(0xFFFF)), "uint16")), "float32"
+        txl.reinterpret(txl.cast(txl.bitwise_and(h2, txl.uint32(0xFFFF)), "uint16"), ty="float16"),
+        "float32",
     )
     product = mul_f32(sf_f32, rcp_approx_ftz(global_scale))
     result = rcp_approx_ftz(product)

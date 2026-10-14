@@ -260,7 +260,7 @@ def _mma(mma, d, a_desc, b_desc, idesc, accumulate, pred=None):
     diverging on every chain.
     """
     ops = (
-        txl.Cast("uint32", d),
+        txl.Cast(d, "uint32"),
         a_desc,
         b_desc,
         txl.uint32(idesc),
@@ -578,15 +578,15 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
 
     @txl.kernel()
     def bwd(
-        desc_q: txl.TensorMap,
-        desc_do: txl.TensorMap,
-        desc_dq: txl.TensorMap,
-        kv: txl.gptr[elem],
-        dq: txl.gptr[elem],
-        ws_dkv: txl.gptr[txl.f32],
-        topk_idxs: txl.gptr[txl.i32],
-        topk_length: txl.gptr[txl.i32],
-        ws: txl.gptr[txl.f32],
+        desc_q: txl.Ptr(txl.TensorMap),
+        desc_do: txl.Ptr(txl.TensorMap),
+        desc_dq: txl.Ptr(txl.TensorMap),
+        kv: txl.Tensor((txl.int64(),), elem),
+        dq: txl.Tensor((txl.int64(),), elem),
+        ws_dkv: txl.Tensor((txl.int64(),), txl.f32),
+        topk_idxs: txl.Tensor((txl.int64(),), txl.i32),
+        topk_length: txl.Tensor((txl.int64(),), txl.i32),
+        ws: txl.Tensor((txl.int64(),), txl.f32),
         seqlen_q: txl.i32,
         seqlen_kv: txl.i32,
         plane: txl.i32,
@@ -1521,9 +1521,9 @@ def _shfl_bfly_f32(value, lane_xor, membermask):
     """One ``shfl.sync.bfly.b32`` on an f32, reinterpreted through u32."""
     out = txl.local_scalar(txl.u32)
     txl.ptx.shfl_sync.bfly.b32(
-        out, txl.reinterpret(txl.u32, value), txl.uint32(lane_xor), txl.uint32(31), membermask
+        out, txl.reinterpret(value, ty=txl.u32), txl.uint32(lane_xor), txl.uint32(31), membermask
     )
-    return txl.reinterpret(txl.f32, out)
+    return txl.reinterpret(out, ty=txl.f32)
 
 
 def _butterfly_sum_f32(value, lane_xors):
@@ -1555,11 +1555,11 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk, backend_config=N
 
     @txl.kernel()
     def sum_odo(
-        out: txl.gptr[elem],
-        dout: txl.gptr[elem],
-        lse: txl.gptr[txl.f32],
-        attn_sink: txl.gptr[txl.f32],
-        ws: txl.gptr[txl.f32],
+        out: txl.Tensor((txl.int64(),), elem),
+        dout: txl.Tensor((txl.int64(),), elem),
+        lse: txl.Tensor((txl.int64(),), txl.f32),
+        attn_sink: txl.Tensor((txl.int64(),), txl.f32),
+        ws: txl.Tensor((txl.int64(),), txl.f32),
         seqlen_q: txl.i32,
         plane: txl.i32,
         sum_odo_scale: txl.f32,
@@ -1691,7 +1691,11 @@ def make_convert_kernel(*, head_dim, dtype, max_topk, backend_config=None):
     threads_d = 32
 
     @txl.kernel()
-    def convert(ws_dkv: txl.gptr[txl.f32], dkv: txl.gptr[elem], seqlen_kv: txl.i32):
+    def convert(
+        ws_dkv: txl.Tensor((txl.int64(),), txl.f32),
+        dkv: txl.Tensor((txl.int64(),), elem),
+        seqlen_kv: txl.i32,
+    ):
         # ---- kernel body starts here ----
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -1751,9 +1755,9 @@ def make_sum_dsink_kernel(*, num_head, backend_config=None):
 
     @txl.kernel()
     def sum_dsink(
-        ws: txl.gptr[txl.f32],
-        attn_sink: txl.gptr[txl.f32],
-        d_sink: txl.gptr[txl.f32],
+        ws: txl.Tensor((txl.int64(),), txl.f32),
+        attn_sink: txl.Tensor((txl.int64(),), txl.f32),
+        d_sink: txl.Tensor((txl.int64(),), txl.f32),
         seqlen_q: txl.i32,
         plane: txl.i32,
     ):

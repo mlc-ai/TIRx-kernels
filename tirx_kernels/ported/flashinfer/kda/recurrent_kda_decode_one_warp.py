@@ -171,12 +171,12 @@ def _shfl_bfly_f32(value, lane_xor):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         out,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(lane_xor),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", out)
+    return txl.reinterpret(out, ty="float32")
 
 
 def _shfl_idx_f32(value, source_lane):
@@ -184,24 +184,24 @@ def _shfl_idx_f32(value, source_lane):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.idx.b32(
         out,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.cast(source_lane, "uint32"),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", out)
+    return txl.reinterpret(out, ty="float32")
 
 
 def _load_f32(buffer, index):
     out = txl.local_scalar("uint32")
     txl.ptx.ld.global_.b32(out, buffer.ptr_to([index]))
-    return txl.reinterpret("float32", out)
+    return txl.reinterpret(out, ty="float32")
 
 
 def _load_i32(buffer, index):
     out = txl.local_scalar("uint32")
     txl.ptx.ld.global_.b32(out, buffer.ptr_to([index]))
-    return txl.reinterpret("int32", out)
+    return txl.reinterpret(out, ty="int32")
 
 
 def _load_bf16_bits(buffer, index):
@@ -238,10 +238,10 @@ def _load_bf16x8(buffer, index):
     bits = txl.alloc_local((8,), "uint16")
     for pair in range(4):
         txl.tensor_store(
-            bits, txl.cast(txl.bitwise_and(words[pair], txl.uint32(0xFFFF)), "uint16"), [2 * pair]
+            bits, [2 * pair], txl.cast(txl.bitwise_and(words[pair], txl.uint32(0xFFFF)), "uint16")
         )
         txl.tensor_store(
-            bits, txl.cast(txl.shift_right(words[pair], txl.uint32(16)), "uint16"), [2 * pair + 1]
+            bits, [2 * pair + 1], txl.cast(txl.shift_right(words[pair], txl.uint32(16)), "uint16")
         )
     return bits
 
@@ -449,17 +449,17 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any], *, backend_config=
 
     @txl.kernel()
     def _recurrent_kda_decode_one_warp(
-        q: txl.gptr[txl.bf16],
-        k: txl.gptr[txl.bf16],
-        v: txl.gptr[txl.bf16],
-        g: txl.gptr[txl.bf16],
-        beta: txl.gptr[txl.bf16],
-        state: txl.gptr[txl.bf16],
-        out: txl.gptr[txl.bf16],
-        a_log: txl.gptr[txl.f32],
-        dt_bias: txl.gptr[txl.f32],
-        cu_seqlens: txl.gptr[txl.i32],
-        ssm_state_indices: txl.gptr[txl.i32],
+        q: txl.Tensor((txl.int64(),), txl.bf16),
+        k: txl.Tensor((txl.int64(),), txl.bf16),
+        v: txl.Tensor((txl.int64(),), txl.bf16),
+        g: txl.Tensor((txl.int64(),), txl.bf16),
+        beta: txl.Tensor((txl.int64(),), txl.bf16),
+        state: txl.Tensor((txl.int64(),), txl.bf16),
+        out: txl.Tensor((txl.int64(),), txl.bf16),
+        a_log: txl.Tensor((txl.int64(),), txl.f32),
+        dt_bias: txl.Tensor((txl.int64(),), txl.f32),
+        cu_seqlens: txl.Tensor((txl.int64(),), txl.i32),
+        ssm_state_indices: txl.Tensor((txl.int64(),), txl.i32),
         scale: txl.f32,
         eps: txl.f32,
         lower_bound: txl.f32,
@@ -500,7 +500,7 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any], *, backend_config=
 
         def gidx(offset):
             txl.assign(global_offset, offset)
-            return txl.Cast("int64", global_offset)
+            return txl.Cast(global_offset, "int64")
 
         # --- sequence metadata (recurrent_kda.py:248-252) -----------------------
         token_base_offset = txl.local_scalar("int32")

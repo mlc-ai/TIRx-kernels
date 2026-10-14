@@ -131,7 +131,7 @@ _EVICT_NORMAL = 0x1000000000000000
 
 
 def _gptr(base_u64, byte_off):
-    return txl.reinterpret("handle", base_u64 + txl.cast(byte_off, "uint64"))
+    return txl.reinterpret(base_u64 + txl.cast(byte_off, "uint64"), ty="handle")
 
 
 def _peer_u64(table, dst):
@@ -165,12 +165,12 @@ def _build_combine_kernel(
 
     @txl.kernel()
     def deepep_combine(
-        x: txl.gptr[txl.u8],
-        topk_weights: txl.gptr[txl.f32],
-        src_metadata: txl.gptr[txl.i32],
-        psum_rank: txl.gptr[txl.i32, (NUM_RANKS_,)],
-        peer_ws: txl.gptr[txl.i64, (NUM_RANKS_,)],
-        peer_buf: txl.gptr[txl.i64, (NUM_RANKS_,)],
+        x: txl.Tensor((txl.int64(),), txl.u8),
+        topk_weights: txl.Tensor((txl.int64(),), txl.f32),
+        src_metadata: txl.Tensor((txl.int64(),), txl.i32),
+        psum_rank: txl.Tensor((NUM_RANKS_,), txl.i32),
+        peer_ws: txl.Tensor((NUM_RANKS_,), txl.i64),
+        peer_buf: txl.Tensor((NUM_RANKS_,), txl.i64),
         workspace_addr: txl.i64,
         buffer_addr: txl.i64,
         num_reduced_tokens: txl.i32,
@@ -323,7 +323,7 @@ def _build_combine_kernel(
                 txl.cuda.mbarrier_wait(tma_mbar, phase[0])
                 txl.assign(phase[0], phase[0] ^ txl.uint32(1))
                 txl.ptx[_BULK_S2G_CHAIN](
-                    txl.reinterpret("handle", master_u64),
+                    txl.reinterpret(master_u64, ty="handle"),
                     smem.ptr_to([tok_off]),
                     txl.uint32(HIDDEN_BYTES),
                     txl.uint64(_EVICT_NORMAL),
@@ -368,9 +368,9 @@ def _build_reduce_epilogue_kernel(
 
     @txl.kernel()
     def deepep_combine_reduce_epilogue(
-        combined_x: txl.gptr[txl.u8],
-        combined_topk_weights: txl.gptr[txl.f32],
-        combined_topk_idx: txl.gptr[txl.i32],
+        combined_x: txl.Tensor((txl.int64(),), txl.u8),
+        combined_topk_weights: txl.Tensor((txl.int64(),), txl.f32),
+        combined_topk_idx: txl.Tensor((txl.int64(),), txl.i32),
         buffer_addr: txl.i64,
         num_combined_tokens: txl.i32,
     ):
@@ -467,8 +467,8 @@ def _build_reduce_epilogue_kernel(
                                     values_0[j * 4 + 2],
                                     values_0[j * 4 + 3],
                                     txl.reinterpret(
-                                        "handle",
                                         base0 + txl.cast((c * 128 + j * 32 + lane) * 16, "uint64"),
+                                        ty="handle",
                                     ),
                                     txl.uint64(_EVICT_FIRST),
                                 )
@@ -485,8 +485,8 @@ def _build_reduce_epilogue_kernel(
                                     values_1[j * 4 + 2],
                                     values_1[j * 4 + 3],
                                     txl.reinterpret(
-                                        "handle",
                                         base1 + txl.cast((c * 128 + j * 32 + lane) * 16, "uint64"),
+                                        ty="handle",
                                     ),
                                     txl.uint64(_EVICT_FIRST),
                                 )
@@ -532,9 +532,9 @@ def _build_reduce_epilogue_kernel(
                                         values[j * 4 + 2],
                                         values[j * 4 + 3],
                                         txl.reinterpret(
-                                            "handle",
                                             base_k
                                             + txl.cast((c * 128 + j * 32 + lane) * 16, "uint64"),
+                                            ty="handle",
                                         ),
                                         txl.uint64(_EVICT_FIRST),
                                     )

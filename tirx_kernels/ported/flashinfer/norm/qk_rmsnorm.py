@@ -110,12 +110,12 @@ def _butterfly_sum_f32(acc, lane_xors: tuple[int, ...]) -> None:
     for lane_xor in lane_xors:
         txl.ptx.shfl_sync.bfly.b32(
             peer,
-            txl.reinterpret("uint32", acc),
+            txl.reinterpret(acc, ty="uint32"),
             txl.uint32(lane_xor),
             txl.uint32(31),
             txl.uint32(0xFFFFFFFF),
         )
-        txl.ptx.add.f32(acc, acc, txl.reinterpret("float32", peer))
+        txl.ptx.add.f32(acc, acc, txl.reinterpret(peer, ty="float32"))
 
 
 def _load_global_element(values, value_offset: int, buffer, index, vec: int) -> None:
@@ -457,9 +457,9 @@ def get_kernel(
 
     @txl.kernel()
     def flashinfer_qk_rmsnorm(
-        x: txl.gptr[dtype],
-        weight: txl.gptr[dtype, (H,)],
-        y: txl.gptr[dtype],
+        x: txl.Tensor((txl.int64(),), dtype),
+        weight: txl.Tensor((H,), dtype),
+        y: txl.Tensor((txl.int64(),), dtype),
         runtime_B: txl.i64,
         runtime_N: txl.i64,
         runtime_eps: txl.f32,
@@ -487,7 +487,7 @@ def get_kernel(
         block = txl.cast(block_raw, "int32")
         row_in_cta = tid // tpr
         thread_in_row = tid % tpr
-        # The row index is 32-bit in the source. A ``txl.gptr`` axis is int64 and
+        # The row index is 32-bit in the source. This Tensor parameter's axis is int64 and
         # the simplifier distributes a cast over a sum, so landing the finished
         # int32 value in a local gives the widening a single Var to sit on.
         row_i32 = txl.local_scalar(txl.i32, init=block * rows + row_in_cta)
@@ -638,7 +638,7 @@ def get_kernel(
             with txl.If(lane == 0), txl.Then():
                 txl.ptx.st.shared.b32(
                     shared_raw.ptr_to([reduce_base + (row_warp + warp_in_row * rows) * 4]),
-                    txl.reinterpret("uint32", warp_sum),
+                    txl.reinterpret(warp_sum, ty="uint32"),
                 )
             txl.ptx.bar.sync(txl.uint32(0))
             final_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
@@ -647,7 +647,7 @@ def get_kernel(
                 txl.ptx.ld.shared.b32(
                     reduce_word, shared_raw.ptr_to([reduce_base + (row_warp + lane * rows) * 4])
                 )
-                txl.assign(final_sum, txl.reinterpret("float32", reduce_word))
+                txl.assign(final_sum, txl.reinterpret(reduce_word, ty="float32"))
             _butterfly_sum_f32(final_sum, full_lane_xors)
             sum_sq = final_sum
         else:

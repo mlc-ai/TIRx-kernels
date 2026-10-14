@@ -157,18 +157,18 @@ def _idesc(n, fp8, trans_b, m=64):
 
 def _desc_add(desc, off16):
     """Descriptor start-address bump in 16B units, kept as plain arithmetic."""
-    low = txl.Cast("uint64", txl.Cast("uint32", desc) + txl.Cast("uint32", off16))
+    low = txl.Cast(txl.Cast(desc, "uint32") + txl.Cast(off16, "uint32"), "uint64")
     return txl.bitwise_or(txl.bitwise_and(desc, txl.bitwise_not(txl.uint64(0xFFFFFFFF))), low)
 
 
 def _replace_smem_desc_addr(desc, smem_ptr):
     """Splice a shared address into an encoded descriptor without changing its layout."""
     start = txl.Cast(
-        "uint64",
         txl.bitwise_and(
             txl.shift_right(txl.cuda.cvta_generic_to_shared(smem_ptr), txl.uint32(4)),
             txl.uint32(0x3FFF),
         ),
+        "uint64",
     )
     return txl.bitwise_or(txl.bitwise_and(desc, txl.bitwise_not(txl.uint64(0x3FFF))), start)
 
@@ -321,13 +321,13 @@ def make_kernel(
 
     @txl.kernel()
     def mla_dsv4_splitk(
-        q: txl.gptr[gt, (q_rows * D,)],
-        swa: txl.gptr[gt, (swa_rows * D,)],
-        comp: txl.gptr[gt, (comp_rows * D,)],
-        indices: txl.gptr[txl.i32, (q_tokens * ktot,)],
-        lens: txl.gptr[txl.i32, (q_tokens,)],
-        sinks: txl.gptr[txl.f32, (h_total,)],
-        out: txl.gptr[txl.bf16, (q_rows * D,)],
+        q: txl.Tensor((q_rows * D,), gt),
+        swa: txl.Tensor((swa_rows * D,), gt),
+        comp: txl.Tensor((comp_rows * D,), gt),
+        indices: txl.Tensor((q_tokens * ktot,), txl.i32),
+        lens: txl.Tensor((q_tokens,), txl.i32),
+        sinks: txl.Tensor((h_total,), txl.f32),
+        out: txl.Tensor((q_rows * D,), txl.bf16),
         scale_log2: txl.f32,
         bmm2_scale: txl.f32,
         item_base: txl.i32,
@@ -437,7 +437,7 @@ def make_kernel(
             addr = bar_addr(bar, i)
             with txl.While(done == txl.uint32(0)):
                 txl.ptx["mbarrier.try_wait.parity.acquire.cta.shared::cta.b64"](
-                    done, addr, txl.Cast("uint32", parity)
+                    done, addr, txl.Cast(parity, "uint32")
                 )
 
         len_t = txl.local_scalar("int32")
@@ -518,7 +518,7 @@ def make_kernel(
                     if q_in_tmem:
                         txl.ptx[_TMA_4D](
                             cvta(q_tile.ptr_to(0, 0)),
-                            txl.reinterpret(txl.handle().ty, txl.address_of(q_tmap)),
+                            txl.reinterpret(txl.address_of(q_tmap), ty=txl.handle().ty),
                             txl.int32(0),
                             grp * 64,
                             txl.int32(0),
@@ -530,7 +530,7 @@ def make_kernel(
                         for a in range(natom):
                             txl.ptx[_TMA_2D](
                                 cvta(q_tile.ptr_to(0, a * atom)),
-                                txl.reinterpret(txl.handle().ty, txl.address_of(q_tmap)),
+                                txl.reinterpret(txl.address_of(q_tmap), ty=txl.handle().ty),
                                 txl.int32(a * atom),
                                 tok * h_total + grp * 64,
                                 bar_addr(q_ready, 0),
@@ -573,7 +573,7 @@ def make_kernel(
                     txl.ptx.shfl_sync.idx.b32(
                         idx_q[rq],
                         idx,
-                        txl.Cast("uint32", rq * 4 + txl.shift_right(lane, txl.int32(3))),
+                        txl.Cast(rq * 4 + txl.shift_right(lane, txl.int32(3)), "uint32"),
                         txl.uint32(0x1F),
                         txl.uint32(0xFFFFFFFF),
                     )
@@ -591,7 +591,7 @@ def make_kernel(
                 iket_end(t_we)
                 t_gi = iket_range("ld-gather-issue")
                 with txl.If(lane == 0), txl.Then():
-                    txl.ptx.st.shared.u16(maskbuf.ptr_to([stage, lw]), txl.Cast("uint16", m))
+                    txl.ptx.st.shared.u16(maskbuf.ptr_to([stage, lw]), txl.Cast(m, "uint16"))
                     txl.ptx["mbarrier.arrive.shared.b64"](
                         bar_addr(mask_ready, stage), txl.uint32(1)
                     )
@@ -601,8 +601,8 @@ def make_kernel(
                     for rq in range(4):
                         row = 16 * lw + rq * 4 + txl.shift_right(lane, txl.int32(3))
                         src_row = txl.Cast(
-                            "int64",
                             txl.min(txl.max(idx_q[rq], txl.int32(0)), txl.int32(pool_rows - 1)),
+                            "int64",
                         )
                         for a in range(natom):
                             col_e = a * atom + sub * chunk_elems
@@ -666,7 +666,7 @@ def make_kernel(
                     q_cp_desc = txl.local_scalar("uint64")
                     txl.cuda.tcgen05.encode_matrix_descriptor(
                         txl.address_of(q_cp_desc),
-                        txl.reinterpret(txl.handle().ty, txl.uint64(0)),
+                        txl.reinterpret(txl.uint64(0), ty=txl.handle().ty),
                         1,
                         64,
                         3,
@@ -675,7 +675,7 @@ def make_kernel(
                         q_src = txl.ptr_byte_offset(
                             q_tile.ptr_to(0, 0),
                             (qi % 4 * 1024 + (qi // 4) % 4 * 2) * 16,
-                            "bfloat16",
+                            ty=txl.Ptr("bfloat16", (q_tile.ptr_to(0, 0)).ty.scope),
                         )
                         txl.ptx[_TCGEN_CP_128X256](
                             txl.uint32(256 + qi % 4 * 32 + (qi // 4) % 4 * 8),
@@ -698,7 +698,7 @@ def make_kernel(
 
                     txl.ptx["fence.proxy.async.shared::cta"]()
                     txl.ptx["tcgen05.fence::after_thread_sync"]()
-                    s_col = txl.uint32(S_BASE) + txl.Cast("uint32", sbuf) * txl.uint32(S_STRIDE)
+                    s_col = txl.uint32(S_BASE) + txl.Cast(sbuf, "uint32") * txl.uint32(S_STRIDE)
                     if q_in_tmem:
                         for ks in range(16):
                             k_delta = (ks // 4) * 1024 + (ks % 4) * 2
@@ -707,7 +707,7 @@ def make_kernel(
                                 txl.uint32(256 + ks * 8),
                                 _desc_add(qk_tmem_b.desc, stage * stage16 + k_delta),
                                 txl.uint32(idesc_qk),
-                                txl.ptx.pred(txl.Cast("bool", txl.uint32(1 if ks > 0 else 0))),
+                                txl.ptx.pred(txl.Cast(txl.uint32(1 if ks > 0 else 0), "bool")),
                                 txl.uint64(0),
                             )
                     else:
@@ -717,7 +717,7 @@ def make_kernel(
                                 _desc_add(qd.value, q_off(ks)),
                                 _desc_add(kd.value, stage * stage16 + k_off(ks)),
                                 txl.uint32(idesc_qk),
-                                txl.ptx.pred(txl.Cast("bool", txl.uint32(1 if ks > 0 else 0))),
+                                txl.ptx.pred(txl.Cast(txl.uint32(1 if ks > 0 else 0), "bool")),
                                 txl.uint64(0),
                             )
                     txl.ptx[_COMMIT](bar_addr(s_ready, sbuf))
@@ -778,8 +778,8 @@ def make_kernel(
                                 txl.uint32(idesc_pv),
                                 txl.ptx.pred(
                                     txl.Cast(
-                                        "bool",
                                         txl.bitwise_or(accum0, txl.uint32(1 if ks > 0 else 0)),
+                                        "bool",
                                     )
                                 ),
                                 txl.uint64(0),
@@ -796,7 +796,7 @@ def make_kernel(
             cluster_wait()
 
         def load_s(sbuf, dst):
-            s_col = txl.uint32(S_BASE) + txl.Cast("uint32", sbuf) * txl.uint32(S_STRIDE)
+            s_col = txl.uint32(S_BASE) + txl.Cast(sbuf, "uint32") * txl.uint32(S_STRIDE)
             if q_in_tmem:
                 peer = txl.alloc_local((32,), "float32")
                 with txl.If(warp < N_LOADER_WARPS + 2):
@@ -827,7 +827,7 @@ def make_kernel(
                         peer_words[4 * i + 3],
                     )
                 txl.ptx["bar.sync"](
-                    txl.uint32(8) + txl.Cast("uint32", txl.bitwise_and(w, 1)), txl.uint32(64)
+                    txl.uint32(8) + txl.Cast(txl.bitwise_and(w, 1), "uint32"), txl.uint32(64)
                 )
                 incoming = txl.alloc_local((4,), "float32")
                 incoming_words = incoming.view("uint32")
@@ -944,7 +944,7 @@ def make_kernel(
                         txl.assign(total, txl.max(total, peer))
                     return total
                 txl.ptx["bar.sync"](
-                    txl.uint32(8) + txl.Cast("uint32", txl.bitwise_and(w, 1)), txl.uint32(64)
+                    txl.uint32(8) + txl.Cast(txl.bitwise_and(w, 1), "uint32"), txl.uint32(64)
                 )
                 peer = txl.local_scalar("float32")
                 txl.ptx.ld.shared.f32(
@@ -1109,7 +1109,7 @@ def make_kernel(
                     txl.assign(l_tot, l_tot + peer_l)
             else:
                 txl.ptx["bar.sync"](
-                    txl.uint32(8) + txl.Cast("uint32", txl.bitwise_and(w, 1)), txl.uint32(64)
+                    txl.uint32(8) + txl.Cast(txl.bitwise_and(w, 1), "uint32"), txl.uint32(64)
                 )
                 peer_l = txl.local_scalar("float32")
                 txl.ptx.ld.shared.f32(peer_l, lbuf.ptr_to([txl.bitwise_xor(w, 2) * 32 + lane]))
@@ -1149,7 +1149,7 @@ def make_kernel(
 
             def pair_sync():
                 txl.ptx["bar.sync"](
-                    txl.uint32(4) + txl.Cast("uint32", pid), txl.uint32(32 if small else 64)
+                    txl.uint32(4) + txl.Cast(pid, "uint32"), txl.uint32(32 if small else 64)
                 )
 
             def o_col(c):
@@ -1169,7 +1169,7 @@ def make_kernel(
                 else:
                     txl.ptx["tcgen05.fence::after_thread_sync"]()
                 if small:
-                    base = txl.uint32(O_BASE) + txl.Cast("uint32", c // 4) * txl.uint32(64)
+                    base = txl.uint32(O_BASE) + txl.Cast(c // 4, "uint32") * txl.uint32(64)
                     txl.ptx[_TMEM_LD32](
                         *[oa[i] for i in range(32)], txl.cuda.get_tmem_addr(base, 0, 0)
                     )
@@ -1225,7 +1225,9 @@ def make_kernel(
                 txl.ptx["st.shared.v4.u32"](
                     cvta(
                         txl.ptr_byte_offset(
-                            staging.ptr_to([0]), c * CHUNK + head * 128 + piece * 16, "uint16"
+                            staging.ptr_to([0]),
+                            c * CHUNK + head * 128 + piece * 16,
+                            ty=txl.Ptr("uint16", (staging.ptr_to([0])).ty.scope),
                         )
                     ),
                     pk[4 * i],
@@ -1253,10 +1255,16 @@ def make_kernel(
             def tma_store_chunk(c):
                 """Store staging chunk c (h_valid heads x 64 dims bf16, 128B-swizzled) to the output."""
                 txl.ptx[_TMA_S2G_2D](
-                    txl.reinterpret(txl.handle().ty, txl.address_of(out_tmap)),
+                    txl.reinterpret(txl.address_of(out_tmap), ty=txl.handle().ty),
                     txl.int32(c * 64),
                     tok * h_total + grp * 64,
-                    cvta(txl.ptr_byte_offset(staging.ptr_to([0]), c * CHUNK, "uint16")),
+                    cvta(
+                        txl.ptr_byte_offset(
+                            staging.ptr_to([0]),
+                            c * CHUNK,
+                            ty=txl.Ptr("uint16", (staging.ptr_to([0])).ty.scope),
+                        )
+                    ),
                 )
                 txl.ptx["cp.async.bulk.commit_group"]()
 
@@ -1360,21 +1368,29 @@ def make_kernel(
                     src_idx = rank - txl.if_then_else(rank > dest, txl.int32(1), txl.int32(0))
                     rb = txl.local_scalar("uint32")
                     txl.ptx["mapa.shared::cluster.u32"](
-                        rb, bar_addr(recv_full, slot), txl.Cast("uint32", dest)
+                        rb, bar_addr(recv_full, slot), txl.Cast(dest, "uint32")
                     )
                     raddr = txl.local_scalar("uint32")
                     txl.ptx["mapa.shared::cluster.u32"](
                         raddr,
                         cvta(
                             txl.ptr_byte_offset(
-                                recv.ptr_to([0]), (slot * (C - 1) + src_idx) * XCHUNK, "uint16"
+                                recv.ptr_to([0]),
+                                (slot * (C - 1) + src_idx) * XCHUNK,
+                                ty=txl.Ptr("uint16", (recv.ptr_to([0])).ty.scope),
                             )
                         ),
-                        txl.Cast("uint32", dest),
+                        txl.Cast(dest, "uint32"),
                     )
                     txl.ptx[_BULK_S2C](
                         raddr,
-                        cvta(txl.ptr_byte_offset(staging.ptr_to([0]), c * CHUNK, "uint16")),
+                        cvta(
+                            txl.ptr_byte_offset(
+                                staging.ptr_to([0]),
+                                c * CHUNK,
+                                ty=txl.Ptr("uint16", (staging.ptr_to([0])).ty.scope),
+                            )
+                        ),
                         txl.uint32(XCHUNK),
                         rb,
                     )
@@ -1416,7 +1432,7 @@ def make_kernel(
                                     txl.ptr_byte_offset(
                                         recv.ptr_to([0]),
                                         (slot * (C - 1) + si) * XCHUNK + head * 128 + piece * 16,
-                                        "uint16",
+                                        ty=txl.Ptr("uint16", (recv.ptr_to([0])).ty.scope),
                                     )
                                 ),
                             )
@@ -1894,13 +1910,13 @@ def _make_h128_bf16_prefill(*, backend_config=None):
 
         @txl.kernel()
         def mla_dsv4_sparse_prefill_pkt_pingpong(
-            q: txl.gptr[txl.bf16, (s_q, B_H, D_QK)],
-            swa: txl.gptr[txl.bf16, (swa_rows * D_QK,)],
-            comp: txl.gptr[txl.bf16, (comp_rows * D_QK,)],
-            indices: txl.gptr[txl.i32, (s_q * topk,)],
-            topk_lens: txl.gptr[txl.i32, (s_q,)],
-            sinks: txl.gptr[txl.f32, (B_H,)],
-            out: txl.gptr[txl.bf16, (s_q, B_H, D_V)],
+            q: txl.Tensor((s_q, B_H, D_QK), txl.bf16),
+            swa: txl.Tensor((swa_rows * D_QK,), txl.bf16),
+            comp: txl.Tensor((comp_rows * D_QK,), txl.bf16),
+            indices: txl.Tensor((s_q * topk,), txl.i32),
+            topk_lens: txl.Tensor((s_q,), txl.i32),
+            sinks: txl.Tensor((B_H,), txl.f32),
+            out: txl.Tensor((s_q, B_H, D_V), txl.bf16),
             scale_log2: txl.f32,
             bmm2_scale: txl.f32,
         ):
@@ -1990,7 +2006,9 @@ def _make_h128_bf16_prefill(*, backend_config=None):
             ring_base = txl.address_of(ring_smem[0, 0])
 
             def ring_ptr(byte_offset):
-                return txl.ptr_byte_offset(ring_base, byte_offset, "bfloat16")
+                return txl.ptr_byte_offset(
+                    ring_base, byte_offset, ty=txl.Ptr("bfloat16", (ring_base).ty.scope)
+                )
 
             class CLCJobScheduler:
                 """One role-local walk over the shared CLC job stream."""
@@ -2031,7 +2049,7 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                 addr = txl.cuda.cvta_generic_to_shared(txl.address_of(bar_elem))
                 with txl.While(done == txl.uint32(0)):
                     txl.ptx["mbarrier.try_wait.parity.acquire.cta.shared::cta.b64"](
-                        done, addr, txl.Cast("uint32", parity)
+                        done, addr, txl.Cast(parity, "uint32")
                     )
 
             def ex2_emulation_2(out, idx, x, y):
@@ -2131,8 +2149,8 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                                                                             99
                                                                             + regular
                                                                             + txl.Cast(
-                                                                                "int32",
                                                                                 regular >= 29,
+                                                                                "int32",
                                                                             ),
                                                                         )
                                                                     with txl.Else():
@@ -2289,7 +2307,9 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                 head = cta_idx * 64 + idx_in_warpgroup % 64
                 d_half = idx_in_warpgroup // 64
                 out_row = txl.ptr_byte_offset(
-                    out.ptr_to([s_q_idx, head, 0]), d_half * 256 * BF16_BYTES, "uint32"
+                    out.ptr_to([s_q_idx, head, 0]),
+                    d_half * 256 * BF16_BYTES,
+                    ty=txl.Ptr("uint32", (out.ptr_to([s_q_idx, head, 0])).ty.scope),
                 )
                 output_storage = txl.alloc_local((32,))
                 bf16_storage = txl.alloc_local((16,), "uint32")
@@ -2322,7 +2342,9 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                     for f in range(2):
                         txl.ptx["st.global.L1::no_allocate.v8.b32"](
                             txl.ptr_byte_offset(
-                                out_row, (epi_k * 32 + f * 16) * BF16_BYTES, "uint32"
+                                out_row,
+                                (epi_k * 32 + f * 16) * BF16_BYTES,
+                                ty=txl.Ptr("uint32", (out_row).ty.scope),
                             ),
                             bf16_storage[f * 8],
                             bf16_storage[f * 8 + 1],
@@ -2378,7 +2400,7 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                                 cp_desc = txl.local_scalar("uint64")
                                 txl.cuda.tcgen05.encode_matrix_descriptor(
                                     cp_desc.source.data,
-                                    txl.reinterpret(txl.handle().ty, txl.uint64(0)),
+                                    txl.reinterpret(txl.uint64(0), ty=txl.handle().ty),
                                     1,
                                     64,
                                     3,
@@ -2393,13 +2415,12 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                                                 + kq * 32
                                             )
                                             txl.ptx["tcgen05.cp.cta_group::2.128x256b"](
-                                                txl.Cast("uint32", TMEM_Q + p_glob * 32 + kq * 8),
+                                                txl.Cast(TMEM_Q + p_glob * 32 + kq * 8, "uint32"),
                                                 txl.bitwise_or(
                                                     txl.bitwise_and(
                                                         cp_desc, txl.bitwise_not(txl.uint64(16383))
                                                     ),
                                                     txl.Cast(
-                                                        "uint64",
                                                         txl.bitwise_and(
                                                             txl.shift_right(
                                                                 txl.cuda.cvta_generic_to_shared(
@@ -2409,6 +2430,7 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                                                             ),
                                                             txl.uint32(16383),
                                                         ),
+                                                        "uint64",
                                                     ),
                                                 ),
                                             )
@@ -2418,13 +2440,13 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                                         txl.cuda.cvta_generic_to_shared(
                                             txl.address_of(k_empty.buf[unit])
                                         ),
-                                        txl.Cast("uint16", 3),
+                                        txl.Cast(3, "uint16"),
                                     )
                                 txl.ptx[_COMMIT_MC](
                                     txl.cuda.cvta_generic_to_shared(
                                         txl.address_of(q_consumed.buf[0])
                                     ),
-                                    txl.Cast("uint16", 3),
+                                    txl.Cast(3, "uint16"),
                                 )
 
                     ring_linear = txl.local_scalar("int32", init=ring.stage + n_blocks)
@@ -2496,7 +2518,7 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                                         ring_ptr(ring.stage * (UNIT_ELEMS * BF16_BYTES))
                                     ),
                                     txl.reinterpret(
-                                        txl.handle().ty, txl.address_of(q_tma_tensormap)
+                                        txl.address_of(q_tma_tensormap), ty=txl.handle().ty
                                     ),
                                     0,
                                     cta_idx * 64,
@@ -2538,7 +2560,7 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                                     is_k_valid.ptr_to(
                                         [mask_pipe.stage, local_row * 4 + wg1_warp_idx]
                                     ),
-                                    txl.reinterpret("uint8", txl.Cast("int8", terms[0])),
+                                    txl.reinterpret(txl.Cast(terms[0], "int8"), ty="uint8"),
                                 )
                             txl.ptx["mbarrier.arrive.shared.b64"](
                                 txl.cuda.cvta_generic_to_shared(
@@ -2573,7 +2595,7 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                                                 ring_ptr(kv_dst_offset)
                                             ),
                                             txl.reinterpret(
-                                                txl.handle().ty, txl.address_of(tensor_map)
+                                                txl.address_of(tensor_map), ty=txl.handle().ty
                                             ),
                                             src_col + col_atom * 64,
                                             cur_indices[row_group * 4],
@@ -2636,7 +2658,7 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                         txl.cuda.tcgen05.encode_matrix_descriptor(
                             txl.address_of(descB_local), ring_base, 512, 64, 3
                         )
-                        s_col = txl.Cast("uint32", TMEM_S0 + 64 * s_buf)
+                        s_col = txl.Cast(TMEM_S0 + 64 * s_buf, "uint32")
                         with txl.unroll(16) as ki:
                             descB_off = txl.local_scalar("uint64")
                             _add_smem_desc_offset(
@@ -2646,7 +2668,7 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                             )
                             txl.ptx[_MMA_F16](
                                 s_col,
-                                txl.Cast("uint32", ki * 8 + TMEM_Q),
+                                txl.Cast(ki * 8 + TMEM_Q, "uint32"),
                                 descB_off,
                                 txl.uint32(_IDESC_QK),
                                 txl.uint32(0),
@@ -2661,7 +2683,7 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                             )
                         txl.ptx[_COMMIT_MC](
                             txl.cuda.cvta_generic_to_shared(txl.address_of(umma_ready.buf[s_buf])),
-                            txl.Cast("uint16", 3),
+                            txl.Cast(3, "uint16"),
                         )
                         with txl.If(is_last), txl.Then():
                             txl.ptx[_COMMIT_ONE](
@@ -2739,7 +2761,7 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                                     (pv_ring.stage * UNIT_ELEMS + ki * 1024 + b_half) // 8,
                                 )
                                 txl.ptx[_MMA_F16](
-                                    txl.Cast("uint32", TMEM_O + n_half),
+                                    txl.Cast(TMEM_O + n_half, "uint32"),
                                     descA_off,
                                     descB_off,
                                     txl.uint32(_IDESC_PV),
@@ -2751,19 +2773,19 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                                     txl.uint32(0),
                                     txl.uint32(0),
                                     txl.uint32(0),
-                                    txl.Or(ki != 0, txl.Cast("bool", o_accumulate)),
+                                    txl.Or(ki != 0, txl.Cast(o_accumulate, "bool")),
                                 )
                         txl.ptx[_COMMIT_MC](
                             txl.cuda.cvta_generic_to_shared(
                                 txl.address_of(softmax_ready.buf[pbuf])
                             ),
-                            txl.Cast("uint16", 3),
+                            txl.Cast(3, "uint16"),
                         )
                         txl.ptx[_COMMIT_MC](
                             txl.cuda.cvta_generic_to_shared(
                                 txl.address_of(k_empty.buf[pv_ring.stage])
                             ),
-                            txl.Cast("uint16", 3),
+                            txl.Cast(3, "uint16"),
                         )
                         txl.cuda.iket.range_end(mm_pv_tok[0])
                         pv_ring.advance()
@@ -2779,7 +2801,7 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                         txl.ptx["tcgen05.fence::before_thread_sync"]()
                         txl.ptx[_COMMIT_MC](
                             txl.cuda.cvta_generic_to_shared(txl.address_of(q_released.buf[0])),
-                            txl.Cast("uint16", 3),
+                            txl.Cast(3, "uint16"),
                         )
                         jobs.advance()
                 txl.cuda.iket.range_end(pv_role_token[0])
@@ -2812,7 +2834,7 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                 local_warp_idx = warp_idx - (12 + 4 * sel)
                 other = 1 - sel
                 s_col = txl.uint32(TMEM_S0 + 64 * sel)
-                pair_bar = txl.Cast("uint32", 2 + 2 * sel + txl.bitwise_and(local_warp_idx, 1))
+                pair_bar = txl.Cast(2 + 2 * sel + txl.bitwise_and(local_warp_idx, 1), "uint32")
                 head_in_half = idx_in_warpgroup % 64
                 jobs = CLCJobScheduler()
 
@@ -2834,8 +2856,8 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                     my_blocks = (wg3_num_k_blocks - k_first + 1) // 2
                     with txl.serial(my_blocks, unroll=False) as kk:
                         k = kk * 2 + k_first
-                        v_stage = txl.Cast("int32", valid_ring.stage)
-                        v_phase = txl.Cast("int32", valid_ring.phase)
+                        v_stage = txl.Cast(valid_ring.stage, "int32")
+                        v_phase = txl.Cast(valid_ring.phase, "int32")
                         sm_wait_tok = iket_range("sm-wait-s")
                         hot_wait(valid_full.buf[v_stage], v_phase)
                         p = txl.alloc_local((32,), "uint32")
@@ -2891,7 +2913,7 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                         with txl.If(is_k_valid_u32 != txl.uint32(4294967295)), txl.Then():
                             with txl.unroll(32) as p_i:
                                 invalid_p_predicate = txl.bitwise_and(
-                                    txl.shift_right(is_k_valid_u32, txl.Cast("uint32", p_i)),
+                                    txl.shift_right(is_k_valid_u32, txl.Cast(p_i, "uint32")),
                                     txl.uint32(1),
                                 ) == txl.uint32(0)
                                 txl.ptx.mov.b32(
@@ -3075,7 +3097,9 @@ def _make_h128_bf16_prefill(*, backend_config=None):
                             s_ptr = txl.ptr_byte_offset(
                                 txl.address_of(s_smem_gemm[sel, 0, 0]),
                                 (s_base + f * 512) * BF16_BYTES,
-                                "bfloat16",
+                                ty=txl.Ptr(
+                                    "bfloat16", (txl.address_of(s_smem_gemm[sel, 0, 0])).ty.scope
+                                ),
                             )
                             txl.ptx["st.shared.v4.u32"](
                                 txl.cuda.cvta_generic_to_shared(s_ptr),

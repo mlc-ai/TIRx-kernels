@@ -590,11 +590,11 @@ def _load_i32(buffer, index):
 def _ld_shared_f32(buffer, index):
     bits = txl.local_scalar("uint32")
     txl.ptx.ld.shared.b32(bits, buffer.ptr_to([index]))
-    return txl.reinterpret("float32", bits)
+    return txl.reinterpret(bits, ty="float32")
 
 
 def _st_shared_f32(buffer, index, value):
-    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret("uint32", value))
+    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret(value, ty="uint32"))
 
 
 def _exp2(value):
@@ -1388,7 +1388,7 @@ def _make_kernel(*, backend_config=None, **config):
             if cta_group == 2:
                 mapped = txl.local_scalar("uint64")
                 txl.ptx.mapa.u64(mapped, barrier, txl.uint32(0))
-                return txl.reinterpret("handle", mapped)
+                return txl.reinterpret(mapped, ty="handle")
             return txl.cuda.cvta_generic_to_shared(barrier)
 
         def tcgen_commit(barrier):
@@ -2879,20 +2879,20 @@ def _make_kernel(*, backend_config=None, **config):
 
     plan_item_capacity = plan_row_capacity * max_blocks
     kernel.__annotations__ = {
-        "q": txl.gptr[elem_dtype, (total_q * hq * logical_d,)],
-        "k": txl.gptr[elem_dtype, (total_k * hkv * logical_d,)],
-        "v": txl.gptr[elem_dtype, (total_k * hkv * logical_dv,)],
-        "out": txl.gptr[elem_dtype, (total_q * hq * logical_dv,)],
-        "lse": txl.gptr[txl.f32, (total_q * hq,)],
-        "partial_count": txl.gptr[txl.i32, (plan_row_capacity,)],
-        "partial_offset": txl.gptr[txl.i32, (plan_row_capacity + 1,)],
-        "partial_index": txl.gptr[txl.i32, (plan_item_capacity,)],
-        "full_count": txl.gptr[txl.i32, (plan_row_capacity,)],
-        "full_offset": txl.gptr[txl.i32, (plan_row_capacity + 1,)],
-        "full_index": txl.gptr[txl.i32, (plan_item_capacity,)],
-        "mask_payload": txl.gptr[txl.u32, (plan_item_capacity * work_q_tiles * 128 * 4,)],
-        "sequence_desc": txl.gptr[txl.i32, (batch * 8,)],
-        "fwd_work_desc": txl.gptr[txl.i32, (num_work_records * 4,)],
+        "q": txl.Tensor((total_q * hq * logical_d,), elem_dtype),
+        "k": txl.Tensor((total_k * hkv * logical_d,), elem_dtype),
+        "v": txl.Tensor((total_k * hkv * logical_dv,), elem_dtype),
+        "out": txl.Tensor((total_q * hq * logical_dv,), elem_dtype),
+        "lse": txl.Tensor((total_q * hq,), txl.f32),
+        "partial_count": txl.Tensor((plan_row_capacity,), txl.i32),
+        "partial_offset": txl.Tensor((plan_row_capacity + 1,), txl.i32),
+        "partial_index": txl.Tensor((plan_item_capacity,), txl.i32),
+        "full_count": txl.Tensor((plan_row_capacity,), txl.i32),
+        "full_offset": txl.Tensor((plan_row_capacity + 1,), txl.i32),
+        "full_index": txl.Tensor((plan_item_capacity,), txl.i32),
+        "mask_payload": txl.Tensor((plan_item_capacity * work_q_tiles * 128 * 4,), txl.u32),
+        "sequence_desc": txl.Tensor((batch * 8,), txl.i32),
+        "fwd_work_desc": txl.Tensor((num_work_records * 4,), txl.i32),
         "softmax_scale_log2": txl.f32,
     }
     return txl.kernel()(kernel)

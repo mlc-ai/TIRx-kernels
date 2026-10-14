@@ -17,7 +17,7 @@ def leader_mbar(bar_ptr: Any) -> Any:
     # leader (rank 0) so both CTAs' issues aggregate on one barrier.
     mapped = txl.local_scalar("uint64")
     txl.ptx.mapa.u64(mapped, bar_ptr, txl.uint32(0))
-    return txl.reinterpret("handle", mapped)
+    return txl.reinterpret(mapped, ty="handle")
 
 
 def tma_config(

@@ -313,11 +313,11 @@ def _load_i32(buffer, index):
 def _ld_shared_f32(buffer, index):
     bits = txl.local_scalar("uint32")
     txl.ptx.ld.shared.b32(bits, buffer.ptr_to([index]))
-    return txl.reinterpret("float32", bits)
+    return txl.reinterpret(bits, ty="float32")
 
 
 def _st_shared_f32(buffer, index, value):
-    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret("uint32", value))
+    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret(value, ty="uint32"))
 
 
 def _exp2(value):
@@ -1535,14 +1535,14 @@ def _make_kernel(*, backend_config=None, **config):
         )
 
     kernel.__annotations__ = {
-        "q": txl.gptr[elem_dtype, (batch * hq * seqlen_q * d,)],
-        "k": txl.gptr[elem_dtype, (batch * hkv * seqlen_kv * d,)],
-        "v": txl.gptr[elem_dtype, (batch * hkv * seqlen_kv * d,)],
-        "out": txl.gptr[elem_dtype, (batch * hq * seqlen_q * d,)],
-        "lse": txl.gptr[txl.f32, (batch * hq * seqlen_q,)],
-        "block_index": txl.gptr[txl.i32, (batch * scheduled_heads * q_blocks * max_blocks,)],
-        "block_sizes": txl.gptr[txl.i32, (physical_blocks,)],
-        "block_nums": txl.gptr[txl.i32, (batch * scheduled_heads * q_blocks,)],
+        "q": txl.Tensor((batch * hq * seqlen_q * d,), elem_dtype),
+        "k": txl.Tensor((batch * hkv * seqlen_kv * d,), elem_dtype),
+        "v": txl.Tensor((batch * hkv * seqlen_kv * d,), elem_dtype),
+        "out": txl.Tensor((batch * hq * seqlen_q * d,), elem_dtype),
+        "lse": txl.Tensor((batch * hq * seqlen_q,), txl.f32),
+        "block_index": txl.Tensor((batch * scheduled_heads * q_blocks * max_blocks,), txl.i32),
+        "block_sizes": txl.Tensor((physical_blocks,), txl.i32),
+        "block_nums": txl.Tensor((batch * scheduled_heads * q_blocks,), txl.i32),
         "block_sparse_num": txl.i32,
         "softmax_scale_log2": txl.f32,
     }

@@ -156,10 +156,10 @@ def _tma_g2s_4d(dst, tensor_map, c0, c1, c2, c3, barrier):
 
 
 def _philox4x32(random_words, seed_lo, seed_hi, counter, *, PHILOX_ROUNDS):
-    c0 = txl.local_scalar("uint32", init=txl.reinterpret("uint32", counter))
+    c0 = txl.local_scalar("uint32", init=txl.reinterpret(counter, ty="uint32"))
     high_signed = txl.local_scalar("int32")
     txl.ptx.shr.s32(high_signed, counter, txl.uint32(31))
-    c1 = txl.local_scalar("uint32", init=txl.reinterpret("uint32", high_signed))
+    c1 = txl.local_scalar("uint32", init=txl.reinterpret(high_signed, ty="uint32"))
     c2 = txl.local_scalar("uint32", init=0)
     c3 = txl.local_scalar("uint32", init=0)
     k0 = txl.local_scalar("uint32", init=seed_lo)
@@ -176,19 +176,19 @@ def _philox4x32(random_words, seed_lo, seed_hi, counter, *, PHILOX_ROUNDS):
         txl.ptx["mul.hi.u32"](mul_hi_1, txl.uint32(0xD2511F53), old_c0)
         txl.assign(next_c2, txl.bitwise_xor(txl.bitwise_xor(mul_hi_1, c3), k1))
         next_c1 = txl.local_scalar("int32")
-        txl.ptx["mul.lo.s32"](next_c1, txl.int32(-845247145), txl.reinterpret("int32", old_c2))
+        txl.ptx["mul.lo.s32"](next_c1, txl.int32(-845247145), txl.reinterpret(old_c2, ty="int32"))
         next_c3 = txl.local_scalar("int32")
-        txl.ptx["mul.lo.s32"](next_c3, txl.int32(-766435501), txl.reinterpret("int32", old_c0))
+        txl.ptx["mul.lo.s32"](next_c3, txl.int32(-766435501), txl.reinterpret(old_c0, ty="int32"))
         next_k0 = txl.local_scalar("int32")
-        txl.ptx["add.s32"](next_k0, txl.reinterpret("int32", k0), txl.int32(-1640531527))
+        txl.ptx["add.s32"](next_k0, txl.reinterpret(k0, ty="int32"), txl.int32(-1640531527))
         next_k1 = txl.local_scalar("int32")
-        txl.ptx["add.s32"](next_k1, txl.reinterpret("int32", k1), txl.int32(-1150833019))
+        txl.ptx["add.s32"](next_k1, txl.reinterpret(k1, ty="int32"), txl.int32(-1150833019))
         txl.assign(c0, next_c0)
-        txl.assign(c1, txl.reinterpret("uint32", next_c1))
+        txl.assign(c1, txl.reinterpret(next_c1, ty="uint32"))
         txl.assign(c2, next_c2)
-        txl.assign(c3, txl.reinterpret("uint32", next_c3))
-        txl.assign(k0, txl.reinterpret("uint32", next_k0))
-        txl.assign(k1, txl.reinterpret("uint32", next_k1))
+        txl.assign(c3, txl.reinterpret(next_c3, ty="uint32"))
+        txl.assign(k0, txl.reinterpret(next_k0, ty="uint32"))
+        txl.assign(k1, txl.reinterpret(next_k1, ty="uint32"))
     txl.ptx.mov.b32(random_words[0], c0)
     txl.ptx.mov.b32(random_words[1], c1)
     txl.ptx.mov.b32(random_words[2], c2)
@@ -231,7 +231,7 @@ def _store_state_row(
     elif STATE_DTYPE == "float32":
         words = txl.alloc_local((4,), "uint32")
         with txl.unroll(4) as k:
-            txl.ptx.mov.b32(words[k], txl.reinterpret("uint32", values[wr, k]))
+            txl.ptx.mov.b32(words[k], txl.reinterpret(values[wr, k], ty="uint32"))
         if HAS_INTERMEDIATE_STATES:
             with txl.If(write_final != 0):
                 with txl.Then():
@@ -397,29 +397,29 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
 
     @txl.kernel()
     def selective_state_update_mtp_vertical(
-        tensor_state: txl.TensorMap,
-        tensor_b: txl.TensorMap,
-        tensor_c: txl.TensorMap,
-        tensor_x: txl.TensorMap,
-        state: txl.gptr[spec["STATE_DTYPE"]],
-        state_scale: txl.gptr[txl.f32],
-        x: txl.gptr[txl.bf16],
-        dt: txl.gptr[spec["WEIGHT_DTYPE"]],
-        matrix_a: txl.gptr[txl.f32],
-        matrix_b: txl.gptr[txl.bf16],
-        matrix_c: txl.gptr[txl.bf16],
-        d_weight: txl.gptr[spec["WEIGHT_DTYPE"]],
-        z: txl.gptr[txl.bf16],
-        dt_bias: txl.gptr[spec["WEIGHT_DTYPE"]],
-        state_indices: txl.gptr[spec["INDEX_DTYPE"]],
-        dst_indices: txl.gptr[spec["INDEX_DTYPE"]],
-        intermediate_states: txl.gptr[spec["STATE_DTYPE"]],
-        intermediate_indices: txl.gptr[spec["INDEX_DTYPE"]],
-        intermediate_scales: txl.gptr[txl.f32],
-        cu_seqlens: txl.gptr[str(kwargs["cu_seqlens_dtype"])],
-        num_accepted_tokens: txl.gptr[str(kwargs["accepted_dtype"])],
-        rand_seed: txl.gptr[txl.i64],
-        output: txl.gptr[txl.bf16],
+        tensor_state: txl.Ptr(txl.TensorMap),
+        tensor_b: txl.Ptr(txl.TensorMap),
+        tensor_c: txl.Ptr(txl.TensorMap),
+        tensor_x: txl.Ptr(txl.TensorMap),
+        state: txl.Tensor((txl.int64(),), spec["STATE_DTYPE"]),
+        state_scale: txl.Tensor((txl.int64(),), txl.f32),
+        x: txl.Tensor((txl.int64(),), txl.bf16),
+        dt: txl.Tensor((txl.int64(),), spec["WEIGHT_DTYPE"]),
+        matrix_a: txl.Tensor((txl.int64(),), txl.f32),
+        matrix_b: txl.Tensor((txl.int64(),), txl.bf16),
+        matrix_c: txl.Tensor((txl.int64(),), txl.bf16),
+        d_weight: txl.Tensor((txl.int64(),), spec["WEIGHT_DTYPE"]),
+        z: txl.Tensor((txl.int64(),), txl.bf16),
+        dt_bias: txl.Tensor((txl.int64(),), spec["WEIGHT_DTYPE"]),
+        state_indices: txl.Tensor((txl.int64(),), spec["INDEX_DTYPE"]),
+        dst_indices: txl.Tensor((txl.int64(),), spec["INDEX_DTYPE"]),
+        intermediate_states: txl.Tensor((txl.int64(),), spec["STATE_DTYPE"]),
+        intermediate_indices: txl.Tensor((txl.int64(),), spec["INDEX_DTYPE"]),
+        intermediate_scales: txl.Tensor((txl.int64(),), txl.f32),
+        cu_seqlens: txl.Tensor((txl.int64(),), str(kwargs["cu_seqlens_dtype"])),
+        num_accepted_tokens: txl.Tensor((txl.int64(),), str(kwargs["accepted_dtype"])),
+        rand_seed: txl.Tensor((txl.int64(),), txl.i64),
+        output: txl.Tensor((txl.int64(),), txl.bf16),
         state_stride_batch: txl.i64,
         state_scale_stride_batch: txl.i64,
         x_stride_batch: txl.i64,
@@ -514,7 +514,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
 
             gload_0 = txl.local_scalar("uint32")
             txl.ptx.ld.global_.b32(gload_0, matrix_a.ptr_to([head]))
-            a_value: txl.float32 = txl.reinterpret("float32", gload_0)
+            a_value: txl.float32 = txl.reinterpret(gload_0, ty="float32")
             d_value = txl.local_scalar("float32", init=0.0)
             if HAS_D:
                 txl.assign(d_value, _load_weight(d_weight, head, WEIGHT_DTYPE))
@@ -559,14 +559,14 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         txl.ptx["mul.ftz.f32"](dt_value, log_value, txl.float32(_LN_2))
                     txl.ptx.st.shared.b32(
                         s_dt.ptr_to([group * NTOKENS + dt_step]),
-                        txl.reinterpret("uint32", dt_value),
+                        txl.reinterpret(dt_value, ty="uint32"),
                     )
 
             _mbarrier_arrive_wait(bar_full_buf.ptr_to([group]))
             lane_indicator: txl.float32 = txl.if_then_else(
                 lane == 0, txl.float32(1.0), txl.float32(0.0)
             )
-            seed_u64: txl.uint64 = txl.reinterpret("uint64", random_seed)
+            seed_u64: txl.uint64 = txl.reinterpret(random_seed, ty="uint64")
             seed_lo: txl.uint32 = txl.cast(seed_u64, "uint32")
             seed_hi: txl.uint32 = txl.cast(txl.shift_right(seed_u64, txl.uint64(32)), "uint32")
             state_head_i32: txl.int32 = txl.cast(
@@ -601,7 +601,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         )
                         with txl.unroll(4) as ii:
                             txl.ptx.mov.b32(
-                                r_state[wr, ii], txl.reinterpret("float32", state_words[ii])
+                                r_state[wr, ii], txl.reinterpret(state_words[ii], ty="float32")
                             )
                     else:
                         state_bits = txl.alloc_local((4,), "uint16")
@@ -661,7 +661,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                 with txl.While(step < NTOKENS):
                     sload_1 = txl.local_scalar("uint32")
                     txl.ptx.ld.shared.b32(sload_1, s_dt.ptr_to([group * NTOKENS + step]))
-                    shared_dt: txl.float32 = txl.reinterpret("float32", sload_1)
+                    shared_dt: txl.float32 = txl.reinterpret(sload_1, ty="float32")
                     mul_1 = txl.local_scalar("float32")
                     txl.ptx["mul.ftz.f32"](mul_1, a_value, shared_dt)
                     mul_2 = txl.local_scalar("float32")
@@ -738,7 +738,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         with txl.If(lane == 0), txl.Then():
                             txl.ptx.st.shared.b32(
                                 s_out.ptr_to([group * NTOKENS * DIM + step * DIM + dd]),
-                                txl.reinterpret("uint32", out_value),
+                                txl.reinterpret(out_value, ty="uint32"),
                             )
 
                     if not IS_PAD:
@@ -951,7 +951,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                 )
                             with txl.unroll(2) as k:
                                 out_value = txl.local_scalar(
-                                    "float32", init=txl.reinterpret("float32", out_words[k])
+                                    "float32", init=txl.reinterpret(out_words[k], ty="float32")
                                 )
                                 if HAS_Z:
                                     bf16_f32_2 = txl.local_scalar("float32")
@@ -995,7 +995,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                 )
                             with txl.unroll(4) as k:
                                 out_value = txl.local_scalar(
-                                    "float32", init=txl.reinterpret("float32", out_words[k])
+                                    "float32", init=txl.reinterpret(out_words[k], ty="float32")
                                 )
                                 if HAS_Z:
                                     bf16_f32_3 = txl.local_scalar("float32")

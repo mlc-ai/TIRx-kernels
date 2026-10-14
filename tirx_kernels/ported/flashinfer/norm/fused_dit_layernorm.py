@@ -140,18 +140,20 @@ def _rcp_f32(value):
 
 def _rsqrt_accurate(value, result):
     """Transcribe the SM100 ``__frsqrt_rn`` expansion from fresh source PTX."""
-    bits: txl.int32 = txl.reinterpret("int32", value)
+    bits: txl.int32 = txl.reinterpret(value, ty="int32")
     adjusted = txl.alloc_local((1,), "int32")
     txl.ptx.add.s32(adjusted[0], bits, txl.int32(-0x00800000))
-    with txl.If(txl.reinterpret("uint32", adjusted[0]) <= txl.uint32(0x7EFFFFFF)):
+    with txl.If(txl.reinterpret(adjusted[0], ty="uint32") <= txl.uint32(0x7EFFFFFF)):
         with txl.Then():
             mantissa = txl.alloc_local((1,), "uint32")
             normalized_bits = txl.alloc_local((1,), "uint32")
             exponent_adjust = txl.alloc_local((1,), "int32")
-            txl.ptx.and_.b32(mantissa[0], txl.reinterpret("uint32", bits), 0x00FFFFFF)
+            txl.ptx.and_.b32(mantissa[0], txl.reinterpret(bits, ty="uint32"), 0x00FFFFFF)
             txl.ptx.or_.b32(normalized_bits[0], mantissa[0], txl.uint32(0x3F000000))
-            txl.ptx.sub.s32(exponent_adjust[0], txl.reinterpret("int32", normalized_bits[0]), bits)
-            normalized: txl.float32 = txl.reinterpret("float32", normalized_bits[0])
+            txl.ptx.sub.s32(
+                exponent_adjust[0], txl.reinterpret(normalized_bits[0], ty="int32"), bits
+            )
+            normalized: txl.float32 = txl.reinterpret(normalized_bits[0], ty="float32")
             seed = txl.alloc_local((1,), "float32")
             txl.ptx.rsqrt.approx.ftz.f32(seed[0], normalized)
             seed_sq: txl.float32 = _mul_f32(seed[0], seed[0])
@@ -165,9 +167,10 @@ def _rsqrt_accurate(value, result):
             half_adjust = txl.alloc_local((1,), "int32")
             result_bits = txl.alloc_local((1,), "int32")
             txl.ptx.shr.s32(half_adjust[0], exponent_adjust[0], txl.uint32(1))
-            txl.ptx.add.s32(result_bits[0], half_adjust[0], txl.reinterpret("int32", refined))
+            txl.ptx.add.s32(result_bits[0], half_adjust[0], txl.reinterpret(refined, ty="int32"))
             txl.assign(
-                result[0], txl.reinterpret("float32", txl.reinterpret("uint32", result_bits[0]))
+                result[0],
+                txl.reinterpret(txl.reinterpret(result_bits[0], ty="uint32"), ty="float32"),
             )
         with txl.Else():
             txl.ptx.rsqrt.approx.ftz.f32(result[0], value)
@@ -308,7 +311,7 @@ def _store_mxfp8(output_words, norm_output, sf_output, batch, row, tid, runtime_
         txl.ptx.and_.b16(sf_low[0], sf_pair[0], txl.uint16(0x00FF))
         txl.ptx.cvt.rn.bf16x2.ue8m0x2(decoded_pair[0], sf_low[0])
         txl.ptx.shl.b32(decoded_bits[0], decoded_pair[0], txl.uint32(16))
-        txl.ptx.rcp.approx.ftz.f32(output_scale, txl.reinterpret("float32", decoded_bits[0]))
+        txl.ptx.rcp.approx.ftz.f32(output_scale, txl.reinterpret(decoded_bits[0], ty="float32"))
 
     sf_col: txl.int32 = tid // 4
     sf_offset: txl.int64 = _sf_offset(batch, row, sf_col, runtime_num_rows, 24)
@@ -516,21 +519,21 @@ def get_kernel(
 
     @txl.kernel()
     def flashinfer_fused_dit_layernorm(
-        input_buffer: txl.gptr[txl.bf16],
-        residual_buffer: txl.gptr[txl.bf16],
-        gate_buffer: txl.gptr[txl.bf16],
-        gate_bias_buffer: txl.gptr[txl.f32],
-        gamma_buffer: txl.gptr[txl.f32],
-        beta_buffer: txl.gptr[txl.f32],
-        scale_buffer: txl.gptr[txl.bf16],
-        scale_bias_buffer: txl.gptr[txl.f32],
-        shift_buffer: txl.gptr[txl.bf16],
-        shift_bias_buffer: txl.gptr[txl.f32],
-        residual_output_buffer: txl.gptr[txl.bf16],
-        norm_output_buffer: txl.gptr[norm_dtype],
-        sf_output_buffer: txl.gptr[txl.u8],
-        output_sf_scale_buffer: txl.gptr[txl.f32],
-        input_sf_scale_buffer: txl.gptr[txl.f32],
+        input_buffer: txl.Tensor((txl.int64(),), txl.bf16),
+        residual_buffer: txl.Tensor((txl.int64(),), txl.bf16),
+        gate_buffer: txl.Tensor((txl.int64(),), txl.bf16),
+        gate_bias_buffer: txl.Tensor((txl.int64(),), txl.f32),
+        gamma_buffer: txl.Tensor((txl.int64(),), txl.f32),
+        beta_buffer: txl.Tensor((txl.int64(),), txl.f32),
+        scale_buffer: txl.Tensor((txl.int64(),), txl.bf16),
+        scale_bias_buffer: txl.Tensor((txl.int64(),), txl.f32),
+        shift_buffer: txl.Tensor((txl.int64(),), txl.bf16),
+        shift_bias_buffer: txl.Tensor((txl.int64(),), txl.f32),
+        residual_output_buffer: txl.Tensor((txl.int64(),), txl.bf16),
+        norm_output_buffer: txl.Tensor((txl.int64(),), norm_dtype),
+        sf_output_buffer: txl.Tensor((txl.int64(),), txl.u8),
+        output_sf_scale_buffer: txl.Tensor((txl.int64(),), txl.f32),
+        input_sf_scale_buffer: txl.Tensor((txl.int64(),), txl.f32),
         runtime_batch_size: txl.i32,
         runtime_num_rows: txl.i32,
         runtime_epsilon: txl.f32,
@@ -694,14 +697,14 @@ def get_kernel(
                 peer_sq_word = txl.alloc_local((1,), "uint32")
                 txl.ptx.shfl_sync.down.b32(
                     peer_sum_word[0],
-                    txl.reinterpret("uint32", thread_sum),
+                    txl.reinterpret(thread_sum, ty="uint32"),
                     txl.cast(delta, "uint32"),
                     txl.uint32(31),
                     txl.uint32(_FULL_MASK),
                 )
                 txl.ptx.shfl_sync.down.b32(
                     peer_sq_word[0],
-                    txl.reinterpret("uint32", thread_sum_sq),
+                    txl.reinterpret(thread_sum_sq, ty="uint32"),
                     txl.cast(delta, "uint32"),
                     txl.uint32(31),
                     txl.uint32(_FULL_MASK),
@@ -711,8 +714,8 @@ def get_kernel(
                         "add.rn.ftz.f32x2",
                         thread_sum,
                         thread_sum_sq,
-                        txl.reinterpret("float32", peer_sum_word[0]),
-                        txl.reinterpret("float32", peer_sq_word[0]),
+                        txl.reinterpret(peer_sum_word[0], ty="float32"),
+                        txl.reinterpret(peer_sq_word[0], ty="float32"),
                     )
                     txl.assign(thread_sum, reduced[0])
                     txl.assign(thread_sum_sq, reduced[1])
@@ -720,8 +723,8 @@ def get_kernel(
             with txl.If(lane == 0), txl.Then():
                 txl.ptx.st.shared.v2.b32(
                     reduce_store.ptr_to([16 + warp * 8]),
-                    txl.reinterpret("uint32", thread_sum),
-                    txl.reinterpret("uint32", thread_sum_sq),
+                    txl.reinterpret(thread_sum, ty="uint32"),
+                    txl.reinterpret(thread_sum_sq, ty="uint32"),
                 )
             txl.ptx.bar.sync(txl.uint32(0))
 
@@ -746,13 +749,13 @@ def get_kernel(
                 _rsqrt_accurate(_add_f32(variance, runtime_epsilon), inv_std)
                 txl.ptx.st.shared.v2.b32(
                     shared_mean.ptr_to([0]),
-                    txl.reinterpret("uint32", mean),
-                    txl.reinterpret("uint32", mean),
+                    txl.reinterpret(mean, ty="uint32"),
+                    txl.reinterpret(mean, ty="uint32"),
                 )
                 txl.ptx.st.shared.v2.b32(
                     shared_inv_std.ptr_to([0]),
-                    txl.reinterpret("uint32", inv_std[0]),
-                    txl.reinterpret("uint32", inv_std[0]),
+                    txl.reinterpret(inv_std[0], ty="uint32"),
+                    txl.reinterpret(inv_std[0], ty="uint32"),
                 )
             txl.ptx.bar.sync(txl.uint32(0))
 

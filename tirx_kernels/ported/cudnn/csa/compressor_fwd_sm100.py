@@ -82,7 +82,7 @@ def _validate(head_dim: int, coff: int) -> None:
 
 
 def _f32_bits(bits: int):
-    return txl.reinterpret("float32", txl.uint32(bits))
+    return txl.reinterpret(txl.uint32(bits), ty="float32")
 
 
 def _source_exp(value, magic_bias, magic_scale):
@@ -134,12 +134,12 @@ def get_kernel(head_dim: int, coff: int, *, backend_config=None, **kwargs):
 
     @txl.kernel()
     def compressor_fwd(
-        kv: txl.gptr[txl.bf16],
-        score: txl.gptr[txl.bf16],
-        ape: txl.gptr[txl.f32],
-        cu_seqlens: txl.gptr[txl.i32],
-        cu_seqlens_comp: txl.gptr[txl.i32],
-        out: txl.gptr[txl.bf16],
+        kv: txl.Tensor((txl.int64(),), txl.bf16),
+        score: txl.Tensor((txl.int64(),), txl.bf16),
+        ape: txl.Tensor((txl.int64(),), txl.f32),
+        cu_seqlens: txl.Tensor((txl.int64(),), txl.i32),
+        cu_seqlens_comp: txl.Tensor((txl.int64(),), txl.i32),
+        out: txl.Tensor((txl.int64(),), txl.bf16),
         nb_total: txl.i32,
         n_seq: txl.i32,
     ):

@@ -130,12 +130,12 @@ def _shuffle_xor_f32(value, delta):
     shuffled = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         shuffled,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(delta),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", shuffled)
+    return txl.reinterpret(shuffled, ty="float32")
 
 
 def _config(label, tokens):
@@ -784,16 +784,16 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
                     )
 
     kernel.__annotations__ = {
-        "x_code": txl.gptr[txl.u8, (tokens * k_dim,)],
-        "x_scale": txl.gptr[txl.u8, (tokens * (k_dim // _BLOCK),)],
-        "w_code": txl.gptr[txl.u8, (num_heads * _HEAD_DIM * k_dim,)],
-        "w_scale": txl.gptr[txl.u8, (num_heads * _HEAD_DIM * (k_dim // _BLOCK),)],
-        "cos": txl.gptr[txl.bf16, (tokens * _QK_ROPE,)],
-        "sin": txl.gptr[txl.bf16, (tokens * _QK_ROPE,)],
-        "out_fp8_row": txl.gptr[txl.u8, (tokens * num_heads * _HEAD_DIM,)],
-        "out_scales_row": txl.gptr[txl.u8, (tokens * num_heads * (_HEAD_DIM // _BLOCK),)],
-        "out_fp8_col": txl.gptr[txl.u8, (tokens * num_heads * _HEAD_DIM,)],
-        "out_scales_col": txl.gptr[txl.u8, ((tokens // _BLOCK) * num_heads * _HEAD_DIM,)],
+        "x_code": txl.Tensor((tokens * k_dim,), txl.u8),
+        "x_scale": txl.Tensor((tokens * (k_dim // _BLOCK),), txl.u8),
+        "w_code": txl.Tensor((num_heads * _HEAD_DIM * k_dim,), txl.u8),
+        "w_scale": txl.Tensor((num_heads * _HEAD_DIM * (k_dim // _BLOCK),), txl.u8),
+        "cos": txl.Tensor((tokens * _QK_ROPE,), txl.bf16),
+        "sin": txl.Tensor((tokens * _QK_ROPE,), txl.bf16),
+        "out_fp8_row": txl.Tensor((tokens * num_heads * _HEAD_DIM,), txl.u8),
+        "out_scales_row": txl.Tensor((tokens * num_heads * (_HEAD_DIM // _BLOCK),), txl.u8),
+        "out_fp8_col": txl.Tensor((tokens * num_heads * _HEAD_DIM,), txl.u8),
+        "out_scales_col": txl.Tensor(((tokens // _BLOCK) * num_heads * _HEAD_DIM,), txl.u8),
     }
     return txl.kernel()(kernel)
 

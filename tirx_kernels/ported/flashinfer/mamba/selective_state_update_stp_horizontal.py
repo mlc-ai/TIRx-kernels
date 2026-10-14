@@ -51,7 +51,7 @@ def _load_weight(buffer, index, dtype: str):
     if dtype == "float32":
         gload_0 = txl.local_scalar("uint32")
         txl.ptx.ld.global_.b32(gload_0, buffer.ptr_to([index]))
-        return txl.reinterpret("float32", gload_0)
+        return txl.reinterpret(gload_0, ty="float32")
     gload_1 = txl.local_scalar("uint16")
     txl.ptx.ld.global_.b16(gload_1, buffer.ptr_to([index]))
     bf16_f32_0 = txl.local_scalar("float32")
@@ -112,11 +112,13 @@ def _philox4x32_horizontal(random_words, random_seed, random_offset, *, PHILOX_R
     )
     c2 = txl.local_scalar("uint32", init=0)
     c3 = txl.local_scalar("uint32", init=0)
-    k0 = txl.local_scalar("uint32", init=txl.cast(txl.reinterpret("uint64", random_seed), "uint32"))
+    k0 = txl.local_scalar(
+        "uint32", init=txl.cast(txl.reinterpret(random_seed, ty="uint64"), "uint32")
+    )
     k1 = txl.local_scalar(
         "uint32",
         init=txl.cast(
-            txl.shift_right(txl.reinterpret("uint64", random_seed), txl.uint64(32)), "uint32"
+            txl.shift_right(txl.reinterpret(random_seed, ty="uint64"), txl.uint64(32)), "uint32"
         ),
     )
     with txl.unroll(PHILOX_ROUNDS) as _round:
@@ -357,20 +359,20 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
 
     @txl.kernel()
     def selective_state_update_stp_horizontal(
-        tensor_state: txl.TensorMap,
-        state: txl.gptr[spec["STATE_DTYPE"]],
-        x: txl.gptr[txl.bf16],
-        dt: txl.gptr[spec["WEIGHT_DTYPE"]],
-        matrix_a: txl.gptr[txl.f32],
-        matrix_b: txl.gptr[txl.bf16],
-        matrix_c: txl.gptr[txl.bf16],
-        d_weight: txl.gptr[spec["WEIGHT_DTYPE"]],
-        z: txl.gptr[txl.bf16],
-        dt_bias: txl.gptr[spec["WEIGHT_DTYPE"]],
-        state_indices: txl.gptr[spec["INDEX_DTYPE"]],
-        dst_indices: txl.gptr[spec["INDEX_DTYPE"]],
-        rand_seed: txl.gptr[txl.i64],
-        output: txl.gptr[txl.bf16],
+        tensor_state: txl.Ptr(txl.TensorMap),
+        state: txl.Tensor((txl.int64(),), spec["STATE_DTYPE"]),
+        x: txl.Tensor((txl.int64(),), txl.bf16),
+        dt: txl.Tensor((txl.int64(),), spec["WEIGHT_DTYPE"]),
+        matrix_a: txl.Tensor((txl.int64(),), txl.f32),
+        matrix_b: txl.Tensor((txl.int64(),), txl.bf16),
+        matrix_c: txl.Tensor((txl.int64(),), txl.bf16),
+        d_weight: txl.Tensor((txl.int64(),), spec["WEIGHT_DTYPE"]),
+        z: txl.Tensor((txl.int64(),), txl.bf16),
+        dt_bias: txl.Tensor((txl.int64(),), spec["WEIGHT_DTYPE"]),
+        state_indices: txl.Tensor((txl.int64(),), spec["INDEX_DTYPE"]),
+        dst_indices: txl.Tensor((txl.int64(),), spec["INDEX_DTYPE"]),
+        rand_seed: txl.Tensor((txl.int64(),), txl.i64),
+        output: txl.Tensor((txl.int64(),), txl.bf16),
         state_stride_batch: txl.i64,
         x_stride_batch: txl.i64,
         dt_stride_batch: txl.i64,
@@ -631,7 +633,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         state_word: txl.uint32 = sload_0
                         state_value = txl.local_scalar("float32", init=0.0)
                         if USE_STATE_CACHE:
-                            txl.assign(state_value, txl.reinterpret("float32", state_word))
+                            txl.assign(state_value, txl.reinterpret(state_word, ty="float32"))
                         sload_1 = txl.local_scalar("uint16")
                         txl.ptx.ld.shared.b16(sload_1, s_b.ptr_to([state_column]))
                         bf16_f32_3 = txl.local_scalar("float32")
@@ -653,7 +655,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         new_state: txl.float32 = fma_1
                         txl.ptx["fma.rn.ftz.f32"](out_value, c_value, new_state, out_value)
                         txl.ptx.st.shared.b32(
-                            s_state.ptr_to([state_index]), txl.reinterpret("uint32", new_state)
+                            s_state.ptr_to([state_index]), txl.reinterpret(new_state, ty="uint32")
                         )
 
                 txl.ptx.mbarrier.arrive.shared__cta.b64(
@@ -731,7 +733,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
 
                 gload_2 = txl.local_scalar("uint32")
                 txl.ptx.ld.global_.b32(gload_2, matrix_a.ptr_to([head]))
-                a_value: txl.float32 = txl.reinterpret("float32", gload_2)
+                a_value: txl.float32 = txl.reinterpret(gload_2, ty="float32")
                 d_value = txl.local_scalar("float32", init=0.0)
                 if HAS_D:
                     txl.assign(d_value, _load_weight(d_weight, head, WEIGHT_DTYPE))

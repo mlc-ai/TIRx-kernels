@@ -177,7 +177,7 @@ def mma_chain(tm, dcol, a, b, idesc_val, accumulate, a_units=None, b_units=None)
     assert a.n_k == n_k, (a.n_k, n_k)
     for kp in range(n_k):
         txl.ptx[MMA_SS](
-            txl.Cast("uint32", tm[0] + dcol),
+            txl.Cast(tm[0] + dcol, "uint32"),
             a.desc(kp, a_units),
             b.desc(kp, b_units),
             txl.uint32(idesc_val),
@@ -197,8 +197,8 @@ def mma_chain_ta(tm, dcol, a_col, b, idesc_val, accumulate, b_units=None):
     """
     for kp in range(b.n_k):
         txl.ptx[MMA_SS](
-            txl.Cast("uint32", tm[0] + dcol),
-            txl.Cast("uint32", tm[0] + a_col + 8 * kp),
+            txl.Cast(tm[0] + dcol, "uint32"),
+            txl.Cast(tm[0] + a_col + 8 * kp, "uint32"),
             b.desc(kp, b_units),
             txl.uint32(idesc_val),
             txl.uint32(0),
@@ -272,13 +272,13 @@ def _load_bf16_f32(ptr, *, shared=False):
         txl.ptx.ld.shared.b16(word, ptr)
     else:
         txl.ptx.ld.global_.nc.b16(word, ptr)
-    return txl.reinterpret("float32", txl.Cast("uint32", word) << txl.uint32(16))
+    return txl.reinterpret(txl.Cast(word, "uint32") << txl.uint32(16), ty="float32")
 
 
 def _load_gate(g, token, head, channel, stride):
     value = txl.local_scalar("float32")
     txl.ptx.ld.global_.nc.f32(
-        value, g.ptr_to([token * txl.int64(stride) + txl.Cast("int64", head * D + channel)])
+        value, g.ptr_to([token * txl.int64(stride) + txl.Cast(head * D + channel, "int64")])
     )
     return value
 
@@ -300,9 +300,9 @@ def _needs_stable(g_last, range_safe):
     word = txl.local_scalar("uint32")
     txl.ptx.ex2.approx.ftz.f32(value, g_last + _gate_offset(g_last, range_safe))
     txl.ptx.cvt.rn.bf16x2.f32(word, value, value)
-    return txl.reinterpret("float32", (word & txl.uint32(0xFFFF)) << txl.uint32(16)) < _gate_floor(
-        range_safe
-    )
+    return txl.reinterpret(
+        (word & txl.uint32(0xFFFF)) << txl.uint32(16), ty="float32"
+    ) < _gate_floor(range_safe)
 
 
 def _state_needs_stable(g_last):
@@ -311,21 +311,21 @@ def _state_needs_stable(g_last):
     word = txl.local_scalar("uint32")
     txl.ptx.ex2.approx.ftz.f32(value, g_last)
     txl.ptx.cvt.rn.bf16x2.f32(word, value, value)
-    return txl.reinterpret("float32", (word & txl.uint32(0xFFFF)) << txl.uint32(16)) < txl.float32(
-        0.0625
-    )
+    return txl.reinterpret(
+        (word & txl.uint32(0xFFFF)) << txl.uint32(16), ty="float32"
+    ) < txl.float32(0.0625)
 
 
 def make_range_guard(HV, PARTS, *, backend_config=None):
     @txl.kernel()
     def guard(
-        v: txl.gptr[txl.bf16],
-        do: txl.gptr[txl.bf16],
-        h0: txl.gptr[txl.f32],
-        dht: txl.gptr[txl.f32],
-        g: txl.gptr[txl.f32],
-        cu: txl.gptr[txl.i64],
-        flags: txl.gptr[txl.i32],
+        v: txl.Tensor((txl.int64(),), txl.bf16),
+        do: txl.Tensor((txl.int64(),), txl.bf16),
+        h0: txl.Tensor((txl.int64(),), txl.f32),
+        dht: txl.Tensor((txl.int64(),), txl.f32),
+        g: txl.Tensor((txl.int64(),), txl.f32),
+        cu: txl.Tensor((txl.int64(),), txl.i64),
+        flags: txl.Tensor((txl.int64(),), txl.i32),
         num_entries: txl.i32,
     ):
         txl.device_entry(
@@ -334,7 +334,7 @@ def make_range_guard(HV, PARTS, *, backend_config=None):
         )
 
         guard_tid = txl.thread_id()
-        guard_entry = txl.Cast("int32", txl.cta_id())
+        guard_entry = txl.Cast(txl.cta_id(), "int32")
         guard_chain = guard_entry // PARTS
         guard_partition = guard_entry % PARTS
         guard_seq = guard_chain // HV
@@ -344,7 +344,7 @@ def make_range_guard(HV, PARTS, *, backend_config=None):
         txl.ptx.ld.global_.s64(guard_bos, cu.ptr_to([guard_seq]))
         txl.ptx.ld.global_.s64(guard_eos, cu.ptr_to([guard_seq + 1]))
         guard_bad_gate = txl.local_scalar("bool", init=False)
-        guard_chunk = txl.local_scalar("int64", init=txl.Cast("int64", guard_tid // 32))
+        guard_chunk = txl.local_scalar("int64", init=txl.Cast(guard_tid // 32, "int64"))
         with txl.While(guard_bos + 64 * guard_chunk < guard_eos):
             # Each warp issues four independent chunk-end loads before consuming
             # them. Clamping the final group only duplicates the last real end;
@@ -368,7 +368,7 @@ def make_range_guard(HV, PARTS, *, backend_config=None):
         guard_bad = txl.local_scalar("bool", init=False)
         with txl.If(guard_gate_count != txl.uint32(0)), txl.Then():
             guard_token = txl.local_scalar(
-                "int64", init=guard_bos + txl.Cast("int64", guard_tid // 8 + 16 * guard_partition)
+                "int64", init=guard_bos + txl.Cast(guard_tid // 8 + 16 * guard_partition, "int64")
             )
             with txl.While(guard_token < guard_eos):
                 guard_pos = (guard_token * HV + guard_hv) * D + (guard_tid % 8) * 16
@@ -390,7 +390,7 @@ def make_range_guard(HV, PARTS, *, backend_config=None):
                 txl.assign(guard_token, guard_token + txl.int64(16 * PARTS))
             guard_state_i = txl.local_scalar("int32", init=guard_tid * 4 + 512 * guard_partition)
             with txl.While(guard_state_i < txl.int32(D * D)):
-                guard_pos = txl.Cast("int64", guard_chain) * (D * D) + guard_state_i
+                guard_pos = txl.Cast(guard_chain, "int64") * (D * D) + guard_state_i
                 for inputs in (h0, dht):
                     words = txl.alloc_local([4], "uint32")
                     txl.ptx["ld.global.v4.b32"](
@@ -451,47 +451,47 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
 
     @txl.kernel()
     def kda_bwd_native_mega(
-        q: txl.gptr[txl.bf16],
-        k: txl.gptr[txl.bf16],
-        v: txl.gptr[txl.bf16],
-        beta: txl.gptr[txl.bf16],
-        aqk: txl.gptr[txl.bf16],
-        akk: txl.gptr[txl.bf16],
-        g: txl.gptr[txl.f32],
-        egcache: txl.gptr[txl.bf16],
-        do: txl.gptr[txl.bf16],
-        dht: txl.gptr[txl.f32],
-        h0: txl.gptr[txl.f32],
-        hsnap: txl.gptr[txl.bf16],
-        dhsnap: txl.gptr[txl.bf16],
-        cu_seqlens: txl.gptr[txl.i64],
-        dq: txl.gptr[txl.f32],
-        dk: txl.gptr[txl.f32],
-        dv: txl.gptr[txl.bf16],
-        db: txl.gptr[txl.f32],
-        dg: txl.gptr[txl.f32],
-        dh0: txl.gptr[txl.f32],
-        stream_counter: txl.gptr[txl.i32],
-        flags: txl.gptr[txl.i64],
-        stream_tab: txl.gptr[txl.i32],
-        item_tab: txl.gptr[txl.i32],
-        seq_tab: txl.gptr[txl.i32],
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        g_map: txl.TensorMap,
-        eg_map: txl.TensorMap,
-        do_map: txl.TensorMap,
-        aqk_map: txl.TensorMap,
-        akk_map: txl.TensorMap,
-        h_map: txl.TensorMap,
-        dh_map: txl.TensorMap,
+        q: txl.Tensor((txl.int64(),), txl.bf16),
+        k: txl.Tensor((txl.int64(),), txl.bf16),
+        v: txl.Tensor((txl.int64(),), txl.bf16),
+        beta: txl.Tensor((txl.int64(),), txl.bf16),
+        aqk: txl.Tensor((txl.int64(),), txl.bf16),
+        akk: txl.Tensor((txl.int64(),), txl.bf16),
+        g: txl.Tensor((txl.int64(),), txl.f32),
+        egcache: txl.Tensor((txl.int64(),), txl.bf16),
+        do: txl.Tensor((txl.int64(),), txl.bf16),
+        dht: txl.Tensor((txl.int64(),), txl.f32),
+        h0: txl.Tensor((txl.int64(),), txl.f32),
+        hsnap: txl.Tensor((txl.int64(),), txl.bf16),
+        dhsnap: txl.Tensor((txl.int64(),), txl.bf16),
+        cu_seqlens: txl.Tensor((txl.int64(),), txl.i64),
+        dq: txl.Tensor((txl.int64(),), txl.f32),
+        dk: txl.Tensor((txl.int64(),), txl.f32),
+        dv: txl.Tensor((txl.int64(),), txl.bf16),
+        db: txl.Tensor((txl.int64(),), txl.f32),
+        dg: txl.Tensor((txl.int64(),), txl.f32),
+        dh0: txl.Tensor((txl.int64(),), txl.f32),
+        stream_counter: txl.Tensor((txl.int64(),), txl.i32),
+        flags: txl.Tensor((txl.int64(),), txl.i64),
+        stream_tab: txl.Tensor((txl.int64(),), txl.i32),
+        item_tab: txl.Tensor((txl.int64(),), txl.i32),
+        seq_tab: txl.Tensor((txl.int64(),), txl.i32),
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        g_map: txl.Ptr(txl.TensorMap),
+        eg_map: txl.Ptr(txl.TensorMap),
+        do_map: txl.Ptr(txl.TensorMap),
+        aqk_map: txl.Ptr(txl.TensorMap),
+        akk_map: txl.Ptr(txl.TensorMap),
+        h_map: txl.Ptr(txl.TensorMap),
+        dh_map: txl.Ptr(txl.TensorMap),
         scale: txl.f32,
         num_seqs: txl.i32,
         num_items: txl.i32,
         num_ctas: txl.i32,
         epoch: txl.i32,
-        range_flags: txl.gptr[txl.i32],
+        range_flags: txl.Tensor((txl.int64(),), txl.i32),
         range_entries: txl.i32,
     ):
         txl.device_entry(
@@ -521,10 +521,10 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
         num_chains = num_seqs * txl.int32(HV)
         num_streams = num_chains * txl.int32(2)
         total_work = num_streams + num_items
-        cta = txl.local_scalar("int32", init=txl.Cast("int32", txl.cta_id()))
+        cta = txl.local_scalar("int32", init=txl.Cast(txl.cta_id(), "int32"))
         ITEM_RING = 4
 
-        ep64 = txl.local_scalar("int64", init=txl.Cast("int64", epoch) * txl.int64(1 << 32))
+        ep64 = txl.local_scalar("int64", init=txl.Cast(epoch, "int64") * txl.int64(1 << 32))
 
         sp = txl.specialize()
         cg = sp.role("cg", warps=list(range(8)), regs=208)
@@ -678,7 +678,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                         + (k_i & txl.int32(7))
                     ]
                 ),
-                txl.Cast("uint16", txl.Select(n_i == k_i, txl.int32(0x3F80), txl.int32(0))),
+                txl.Cast(txl.Select(n_i == k_i, txl.int32(0x3F80), txl.int32(0)), "uint16"),
             )
             txl.ptx[FENCE_ASYNC]()
         txl.cuda.cta_sync()
@@ -729,13 +729,13 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
             return phase, phase_end
 
         def bf16_bits_to_f32(u16val):
-            return txl.reinterpret("float32", txl.Cast("uint32", u16val) << txl.uint32(16))
+            return txl.reinterpret(txl.Cast(u16val, "uint32") << txl.uint32(16), ty="float32")
 
         def lo(w):
-            return txl.reinterpret("float32", w << txl.uint32(16))
+            return txl.reinterpret(w << txl.uint32(16), ty="float32")
 
         def hi(w):
-            return txl.reinterpret("float32", w & txl.uint32(0xFFFF0000))
+            return txl.reinterpret(w & txl.uint32(0xFFFF0000), ty="float32")
 
         def seq_info(seq):
             """(bos, seq_len, nch) of a sequence from the SMEM table, or from cu_seqlens when it does not fit."""
@@ -745,14 +745,14 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                 with txl.Then():
                     b32 = txl.local_scalar("int32")
                     txl.ptx.ld.shared.s32(b32, txl.address_of(s_seq[seq, 0]))
-                    txl.assign(bos, txl.Cast("int64", b32))
+                    txl.assign(bos, txl.Cast(b32, "int64"))
                     txl.ptx.ld.shared.s32(seq_len, txl.address_of(s_seq[seq, 1]))
                 with txl.Else():
                     cs = txl.alloc_local([2], "int64")
                     txl.ptx.ld.global_.s64(cs[0], cu_seqlens.ptr_to([seq]))
                     txl.ptx.ld.global_.s64(cs[1], cu_seqlens.ptr_to([seq + txl.int32(1)]))
                     txl.assign(bos, cs[0])
-                    txl.assign(seq_len, txl.Cast("int32", cs[1] - cs[0]))
+                    txl.assign(seq_len, txl.Cast(cs[1] - cs[0], "int32"))
             nch = txl.local_scalar("int32", init=(seq_len + txl.int32(CHUNK - 1)) >> 6)
             return bos, seq_len, nch
 
@@ -779,7 +779,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                         txl.ptx.ld.global_.s64(cs[1], cu_seqlens.ptr_to([i + 1]))
                         txl.assign(
                             cb,
-                            cb + ((txl.Cast("int32", cs[1] - cs[0]) + txl.int32(CHUNK - 1)) >> 6),
+                            cb + ((txl.Cast(cs[1] - cs[0], "int32") + txl.int32(CHUNK - 1)) >> 6),
                         )
             return cb
 
@@ -792,11 +792,11 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
             for j in range(2):
                 t = lane + txl.int32(32 * j)
                 tokc = bos + txl.Cast(
-                    "int64", n * txl.int32(CHUNK) + txl.min(t, rows - txl.int32(1))
+                    n * txl.int32(CHUNK) + txl.min(t, rows - txl.int32(1)), "int64"
                 )
                 u = txl.local_scalar("uint16")
                 txl.ptx.ld.global_.nc.u16(
-                    u, beta.ptr_to([tokc * txl.int64(HV) + txl.Cast("int64", hv)])
+                    u, beta.ptr_to([tokc * txl.int64(HV) + txl.Cast(hv, "int64")])
                 )
                 val = txl.Select(t < rows, bf16_bits_to_f32(u), txl.float32(0.0))
                 txl.ptx.st.shared.f32(dst_ptr_fn(t), val)
@@ -805,7 +805,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
             cs = txl.alloc_local([2], "int64")
             txl.ptx.ld.global_.s64(cs[0], cu_seqlens.ptr_to([sq]))
             txl.ptx.ld.global_.s64(cs[1], cu_seqlens.ptr_to([sq + 1]))
-            return cs[0], txl.Cast("int32", cs[1] - cs[0])
+            return cs[0], txl.Cast(cs[1] - cs[0], "int32")
 
         def item_coords(item):
             """Item index -> (c, hq, seq, n, bos, rows, nch).
@@ -833,15 +833,15 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
             for j in range(2):
                 t = lane + txl.int32(32 * j)
                 tokc = bos + txl.Cast(
-                    "int64", n * txl.int32(CHUNK) + txl.min(t, rows - txl.int32(1))
+                    n * txl.int32(CHUNK) + txl.min(t, rows - txl.int32(1)), "int64"
                 )
                 u = txl.local_scalar("uint16")
                 txl.ptx.ld.global_.nc.u16(
-                    u, beta.ptr_to([tokc * txl.int64(HV) + txl.Cast("int64", hv)])
+                    u, beta.ptr_to([tokc * txl.int64(HV) + txl.Cast(hv, "int64")])
                 )
                 val = txl.Select(
                     t < rows,
-                    txl.reinterpret("float32", txl.Cast("uint32", u) << txl.uint32(16)),
+                    txl.reinterpret(txl.Cast(u, "uint32") << txl.uint32(16), ty="float32"),
                     txl.float32(0.0),
                 )
                 txl.ptx.st.shared.f32(txl.address_of(s_beta[slot, t]), val)
@@ -948,14 +948,14 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
             quad = txl.local_scalar("int32", init=wr & 3)
             x = txl.local_scalar("int32", init=quad * 32 + lane)
             row0 = txl.local_scalar("int32", init=wg * 32)
-            x64 = txl.Cast("int64", x)
+            x64 = txl.Cast(x, "int64")
             xs = txl.local_scalar("int32", init=x >> 6)
             xr = txl.local_scalar("int32", init=x & 63)
             xg = txl.local_scalar("int32", init=x >> 5)
             xgc = txl.local_scalar("int32", init=(x & 31) * 2)
 
             def tmem_at(col):
-                return txl.Cast("uint32", tm[0] + col + (quad << 21))
+                return txl.Cast(tm[0] + col + (quad << 21), "uint32")
 
             def bar_all():
                 txl.ptx.bar.sync(txl.uint32(1), txl.uint32(256))
@@ -990,7 +990,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                 """Forward state recurrence, software-pipelined: while the tensor core runs chunk n's
                 Vn / state-update MMAs, the compute warps prepare chunk n+1's tiles (from K/V transposed
                 into TMEM by the MMA warp) and read chunk n+2's gate."""
-                hv64 = txl.Cast("int64", hv)
+                hv64 = txl.Cast(hv, "int64")
                 gcol = txl.local_scalar("int64", init=hv64 * txl.int64(D) + x64)
                 gn_c = txl.local_scalar("float32", init=txl.float32(0.0))
                 gn_1 = txl.local_scalar("float32", init=txl.float32(0.0))
@@ -1016,7 +1016,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                     [u_lo, u_hi) of its kg / kbg / vb tiles into set m & 1 (the last half publishes)."""
                     rows = txl.local_scalar("int32", init=chunk_rows(seq_len, m))
                     tok0 = txl.local_scalar(
-                        "int64", init=bos + txl.Cast("int64", m * txl.int32(CHUNK))
+                        "int64", init=bos + txl.Cast(m * txl.int32(CHUNK), "int64")
                     )
                     sset = txl.local_scalar("int32", init=m & txl.int32(1))
                     if u_lo == 0:
@@ -1056,9 +1056,9 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                             bu1 = txl.local_scalar("uint16")
                             txl.ptx.cvt.rn.bf16.f32(bu0, eg0)
                             txl.ptx.cvt.rn.bf16.f32(bu1, eg1)
-                            egidx0 = (tok0 + txl.Cast("int64", row0 + txl.int32(i))) * HVK64 + gcol
+                            egidx0 = (tok0 + txl.Cast(row0 + txl.int32(i), "int64")) * HVK64 + gcol
                             egidx1 = (
-                                tok0 + txl.Cast("int64", row0 + txl.int32(i + 1))
+                                tok0 + txl.Cast(row0 + txl.int32(i + 1), "int64")
                             ) * HVK64 + gcol
                             with txl.If(valid0), txl.Then():
                                 txl.ptx["st.global.L1::no_allocate.b16"](
@@ -1133,8 +1133,8 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                     with txl.If(n == txl.int32(0)):
                         with txl.Then():
                             h0base = (
-                                (txl.Cast("int64", seq) * txl.int64(HV) + hv64) * txl.int64(D) + x64
-                            ) * txl.int64(D) + txl.Cast("int64", hc0)
+                                (txl.Cast(seq, "int64") * txl.int64(HV) + hv64) * txl.int64(D) + x64
+                            ) * txl.int64(D) + txl.Cast(hc0, "int64")
                             for m8 in range(8):
                                 txl.ptx[
                                     "ld.global.nc.L1::no_allocate.L2::evict_normal.L2::256B.v8.f32"
@@ -1242,7 +1242,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                 """Backward state-gradient recurrence, software-pipelined: chunk n-1's operand
                 preparation (q^T/k^T from TMEM transposes, T1/kbg into TMEM, T2 into shared memory)
                 overlaps chunk n's dv2 and dh MMAs."""
-                hv64 = txl.Cast("int64", hv)
+                hv64 = txl.Cast(hv, "int64")
                 gn_c = txl.local_scalar("float32", init=txl.float32(0.0))
                 gn_1 = txl.local_scalar("float32", init=txl.float32(0.0))
                 bpair = txl.alloc_local([2], "float32")
@@ -1359,8 +1359,8 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                     with txl.If(rn == txl.int32(0)):
                         with txl.Then():
                             dbase = (
-                                (txl.Cast("int64", seq) * txl.int64(HV) + hv64) * txl.int64(D) + x64
-                            ) * txl.int64(D) + txl.Cast("int64", wg * 64)
+                                (txl.Cast(seq, "int64") * txl.int64(HV) + hv64) * txl.int64(D) + x64
+                            ) * txl.int64(D) + txl.Cast(wg * 64, "int64")
                             for m8 in range(8):
                                 txl.ptx[
                                     "ld.global.nc.L1::no_allocate.L2::evict_normal.L2::256B.v8.f32"
@@ -1459,8 +1459,8 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                 txl.ptx[TC_LD32](*(acc[32 + i] for i in range(32)), tmem_at(TM_DH + wg * 64 + 32))
                 txl.ptx[WAIT_LD]()
                 obase = (
-                    (txl.Cast("int64", seq) * txl.int64(HV) + hv64) * txl.int64(D) + x64
-                ) * txl.int64(D) + txl.Cast("int64", wg * 64)
+                    (txl.Cast(seq, "int64") * txl.int64(HV) + hv64) * txl.int64(D) + x64
+                ) * txl.int64(D) + txl.Cast(wg * 64, "int64")
                 for m8 in range(8):
                     txl.ptx["st.global.L1::no_allocate.v8.f32"](
                         dh0.ptr_to([obase + txl.int64(8 * m8)]),
@@ -1491,7 +1491,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
             quad = txl.local_scalar("int32", init=wr & 3)
             x = txl.local_scalar("int32", init=quad * 32 + lane)
             row0 = txl.local_scalar("int32", init=wg * 32)
-            x64 = txl.Cast("int64", x)
+            x64 = txl.Cast(x, "int64")
             xs = txl.local_scalar("int32", init=x >> 6)
             xr = txl.local_scalar("int32", init=x & 63)
             phalf = txl.local_scalar("int32", init=x & 1)
@@ -1502,7 +1502,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
             cyc = txl.local_scalar("int32", init=txl.int32(0))
 
             def tmem_at(col):
-                return txl.Cast("uint32", tm[0] + col + (quad << 21))
+                return txl.Cast(tm[0] + col + (quad << 21), "uint32")
 
             def ld32(regs, col, base=0):
                 txl.ptx[TC_LD32](*(regs[base + i] for i in range(32)), tmem_at(col))
@@ -1530,7 +1530,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                 txl.ptx.bar.sync(txl.uint32(1), txl.uint32(256))
 
             def bar_wg():
-                txl.ptx.bar.sync(txl.uint32(2) + txl.Cast("uint32", wg), txl.uint32(128))
+                txl.ptx.bar.sync(txl.uint32(2) + txl.Cast(wg, "uint32"), txl.uint32(128))
 
             def twait(nm):
                 TCG[nm].wait(0, cyc & txl.int32(1))
@@ -1609,20 +1609,20 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
             with txl.While(cur < total_work):
                 txl.assign(item, cur - num_streams)
                 c, hq, seq, n, bos, rows, nch_i = item_coords(item)
-                hq64 = txl.Cast("int64", hq)
-                tok0 = txl.local_scalar("int64", init=bos + txl.Cast("int64", n * txl.int32(CHUNK)))
+                hq64 = txl.Cast(hq, "int64")
+                tok0 = txl.local_scalar("int64", init=bos + txl.Cast(n * txl.int32(CHUNK), "int64"))
                 last = txl.local_scalar("int32", init=rows - txl.int32(1))
                 xq_base = txl.local_scalar(
                     "int64",
-                    init=(tok0 + txl.Cast("int64", row0)) * HQK64 + hq64 * txl.int64(D) + x64,
+                    init=(tok0 + txl.Cast(row0, "int64")) * HQK64 + hq64 * txl.int64(D) + x64,
                 )
                 with txl.serial(G) as gi:
                     hv = txl.local_scalar("int32", init=hq * txl.int32(G) + gi)
-                    hv64 = txl.Cast("int64", hv)
+                    hv64 = txl.Cast(hv, "int64")
                     par = cyc & txl.int32(1)
                     x_base = txl.local_scalar(
                         "int64",
-                        init=(tok0 + txl.Cast("int64", row0)) * HVK64 + hv64 * txl.int64(D) + x64,
+                        init=(tok0 + txl.Cast(row0, "int64")) * HVK64 + hv64 * txl.int64(D) + x64,
                     )
 
                     phase("w-in")
@@ -1938,12 +1938,12 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                                 with txl.If(row0 + txl.int32(i) < rows), txl.Then():
                                     txl.ptx["st.global.L1::no_allocate.b16"](
                                         dv.ptr_to([x_base + txl.int64(i * HVK)]),
-                                        txl.Cast("uint16", pa_word),
+                                        txl.Cast(pa_word, "uint16"),
                                     )
                                 with txl.If(row0 + txl.int32(i + 1) < rows), txl.Then():
                                     txl.ptx["st.global.L1::no_allocate.b16"](
                                         dv.ptr_to([x_base + txl.int64((i + 1) * HVK)]),
-                                        txl.Cast("uint16", pa_word >> txl.uint32(16)),
+                                        txl.Cast(pa_word >> txl.uint32(16), "uint16"),
                                     )
                             for e in range(8):
                                 i = 8 * b + e
@@ -2172,16 +2172,16 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                             r = txl.local_scalar("uint32")
                             txl.ptx.shfl_sync.bfly.b32(
                                 r,
-                                txl.reinterpret("uint32", dsum),
+                                txl.reinterpret(dsum, ty="uint32"),
                                 txl.uint32(s),
                                 txl.uint32(0x1F),
                                 txl.uint32(0xFFFFFFFF),
                             )
-                            txl.assign(dsum, dsum + txl.reinterpret("float32", r))
+                            txl.assign(dsum, dsum + txl.reinterpret(r, ty="float32"))
                         with txl.If((tq == txl.int32(0)) & (row0 + ti < rows)), txl.Then():
                             txl.ptx["st.global.L1::no_allocate.f32"](
                                 db.ptr_to(
-                                    [(tok0 + txl.Cast("int64", row0 + ti)) * txl.int64(HV) + hv64]
+                                    [(tok0 + txl.Cast(row0 + ti, "int64")) * txl.int64(HV) + hv64]
                                 ),
                                 dsum,
                             )
@@ -2289,7 +2289,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                         for src, dst in ((op_kraw, TM_KT), (op_vraw, TM_VT)):
                             for j in range(4):
                                 txl.ptx[MMA_SS](
-                                    txl.Cast("uint32", tm[0] + dst + 16 * j),
+                                    txl.Cast(tm[0] + dst + 16 * j, "uint32"),
                                     src.desc(j),
                                     bdI1[0],
                                     txl.uint32(ID_T1),
@@ -2315,7 +2315,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                         for src, dst in ((op_qraw, TM_QT), (op_kraw_b, TM_KTB)):
                             for j in range(4):
                                 txl.ptx[MMA_SS](
-                                    txl.Cast("uint32", tm[0] + dst + 16 * j),
+                                    txl.Cast(tm[0] + dst + 16 * j, "uint32"),
                                     src.desc(j),
                                     bdI1[0],
                                     txl.uint32(ID_T1),
@@ -2341,12 +2341,12 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                             with txl.serial(nch) as n:
                                 set_u = txl.local_scalar(
                                     "uint64",
-                                    init=txl.Cast("uint64", n & txl.int32(1))
+                                    init=txl.Cast(n & txl.int32(1), "uint64")
                                     * txl.uint64(SET_UNITS),
                                 )
                                 akk_u = txl.local_scalar(
                                     "uint64",
-                                    init=txl.Cast("uint64", st_akk.stage)
+                                    init=txl.Cast(st_akk.stage, "uint64")
                                     * txl.uint64(UNITS_PER_STAGE),
                                 )
                                 dW = (n & txl.int32(1)) * 64
@@ -2427,7 +2427,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                                 t1_col = TM_T1 + par * 32
                                 kb_col = TM_KB + par * 32
                                 do_u = txl.local_scalar(
-                                    "uint64", init=txl.Cast("uint64", par) * txl.uint64(DO2_UNITS)
+                                    "uint64", init=txl.Cast(par, "uint64") * txl.uint64(DO2_UNITS)
                                 )
                                 mphase("bmw-prep")
                                 MB["prep_ready"].wait(0, par)
@@ -2495,7 +2495,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                 lphase, lphase_end = make_phaser()
                 with txl.While(cur < num_streams):
                     is_fwd, seq, hv, hq, bos, seq_len, nch = stream_coords(cur)
-                    bos32 = txl.local_scalar("int32", init=txl.Cast("int32", bos))
+                    bos32 = txl.local_scalar("int32", init=txl.Cast(bos, "int32"))
                     with txl.If(is_fwd == txl.int32(1)):
                         with txl.Then():
                             with txl.serial(nch) as n:
@@ -2749,7 +2749,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                                     txl.ptx["fence.proxy.async.global"]()
                                     txl.ptx["st.release.gpu.global.s64"](
                                         flags.ptr_to([fidx_s]),
-                                        ep64 + txl.Cast("int64", n + txl.int32(1)),
+                                        ep64 + txl.Cast(n + txl.int32(1), "int64"),
                                     )
                                 st_hs.advance()
                         with txl.Else():
@@ -2775,7 +2775,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                                     txl.ptx["fence.proxy.async.global"]()
                                     txl.ptx["st.release.gpu.global.s64"](
                                         flags.ptr_to([num_chains + fidx_s]),
-                                        ep64 + txl.Cast("int64", rn + txl.int32(1)),
+                                        ep64 + txl.Cast(rn + txl.int32(1), "int64"),
                                     )
                                 txl.assign(bcyc, bcyc + txl.int32(1))
                     with txl.If(elected()), txl.Then():
@@ -2927,7 +2927,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                             swizzle=txl.SW128B.value,
                         )
                         akk_u = txl.local_scalar(
-                            "uint64", init=txl.Cast("uint64", par) * txl.uint64(UNITS_PER_STAGE)
+                            "uint64", init=txl.Cast(par, "uint64") * txl.uint64(UNITS_PER_STAGE)
                         )
                         mphase("mw-xT")
                         b_in_full.wait(0, par)
@@ -2940,7 +2940,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                             for src, dst in ((op_egT, S1), (op_vT, S2), (op_qT, S3), (op_kT, S4)):
                                 for j in range(4):
                                     txl.ptx[MMA_SS](
-                                        txl.Cast("uint32", tm[0] + dst + 16 * j),
+                                        txl.Cast(tm[0] + dst + 16 * j, "uint32"),
                                         src.desc(j),
                                         bdI[0],
                                         txl.uint32(ID_T),
@@ -3090,15 +3090,15 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
                 with txl.While(cur < total_work):
                     txl.assign(item, cur - num_streams)
                     c, hq, seq, n, bos, rows, nch_i = item_coords(item)
-                    bos32 = txl.local_scalar("int32", init=txl.Cast("int32", bos))
+                    bos32 = txl.local_scalar("int32", init=txl.Cast(bos, "int32"))
                     tok0 = txl.local_scalar("int32", init=bos32 + n * txl.int32(CHUNK))
 
                     lphase("lw-flags")
                     with txl.If(elected()), txl.Then():
                         tgt_f = txl.local_scalar(
-                            "int64", init=ep64 + txl.Cast("int64", n + txl.int32(1))
+                            "int64", init=ep64 + txl.Cast(n + txl.int32(1), "int64")
                         )
-                        tgt_b = txl.local_scalar("int64", init=ep64 + txl.Cast("int64", nch_i - n))
+                        tgt_b = txl.local_scalar("int64", init=ep64 + txl.Cast(nch_i - n, "int64"))
                         for gi_ in range(G):
                             fidx = seq * txl.int32(HV) + hq * txl.int32(G) + txl.int32(gi_)
                             flf = txl.local_scalar("int64", init=txl.int64(0))
@@ -3304,7 +3304,7 @@ def make_native_mega_kernel(HQ: int, HV: int, static_grid=None, *, backend_confi
         with txl.If(txl.warp_id() == 8), txl.Then():
             txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"]()
             txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
-                txl.Cast("uint32", txl.local_scalar("int32", init=tmem_preamble()[0])),
+                txl.Cast(txl.local_scalar("int32", init=tmem_preamble()[0]), "uint32"),
                 txl.uint32(TMEM_COLS),
             )
 
@@ -3359,47 +3359,47 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
 
     @txl.kernel()
     def kda_bwd_mega(
-        q: txl.gptr[txl.bf16],
-        k: txl.gptr[txl.bf16],
-        v: txl.gptr[txl.bf16],
-        beta: txl.gptr[txl.bf16],
-        aqk: txl.gptr[txl.bf16],
-        akk: txl.gptr[txl.bf16],
-        g: txl.gptr[txl.f32],
-        egcache: txl.gptr[txl.bf16],
-        do: txl.gptr[txl.bf16],
-        dht: txl.gptr[txl.f32],
-        h0: txl.gptr[txl.f32],
-        hsnap: txl.gptr[txl.bf16],
-        dhsnap: txl.gptr[txl.bf16],
-        cu_seqlens: txl.gptr[txl.i64],
-        dq: txl.gptr[txl.f32],
-        dk: txl.gptr[txl.f32],
-        dv: txl.gptr[txl.bf16],
-        db: txl.gptr[txl.f32],
-        dg: txl.gptr[txl.f32],
-        dh0: txl.gptr[txl.f32],
-        stream_counter: txl.gptr[txl.i32],
-        flags: txl.gptr[txl.i64],
-        stream_tab: txl.gptr[txl.i32],
-        item_tab: txl.gptr[txl.i32],
-        seq_tab: txl.gptr[txl.i32],
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        g_map: txl.TensorMap,
-        eg_map: txl.TensorMap,
-        do_map: txl.TensorMap,
-        aqk_map: txl.TensorMap,
-        akk_map: txl.TensorMap,
-        h_map: txl.TensorMap,
-        dh_map: txl.TensorMap,
+        q: txl.Tensor((txl.int64(),), txl.bf16),
+        k: txl.Tensor((txl.int64(),), txl.bf16),
+        v: txl.Tensor((txl.int64(),), txl.bf16),
+        beta: txl.Tensor((txl.int64(),), txl.bf16),
+        aqk: txl.Tensor((txl.int64(),), txl.bf16),
+        akk: txl.Tensor((txl.int64(),), txl.bf16),
+        g: txl.Tensor((txl.int64(),), txl.f32),
+        egcache: txl.Tensor((txl.int64(),), txl.bf16),
+        do: txl.Tensor((txl.int64(),), txl.bf16),
+        dht: txl.Tensor((txl.int64(),), txl.f32),
+        h0: txl.Tensor((txl.int64(),), txl.f32),
+        hsnap: txl.Tensor((txl.int64(),), txl.bf16),
+        dhsnap: txl.Tensor((txl.int64(),), txl.bf16),
+        cu_seqlens: txl.Tensor((txl.int64(),), txl.i64),
+        dq: txl.Tensor((txl.int64(),), txl.f32),
+        dk: txl.Tensor((txl.int64(),), txl.f32),
+        dv: txl.Tensor((txl.int64(),), txl.bf16),
+        db: txl.Tensor((txl.int64(),), txl.f32),
+        dg: txl.Tensor((txl.int64(),), txl.f32),
+        dh0: txl.Tensor((txl.int64(),), txl.f32),
+        stream_counter: txl.Tensor((txl.int64(),), txl.i32),
+        flags: txl.Tensor((txl.int64(),), txl.i64),
+        stream_tab: txl.Tensor((txl.int64(),), txl.i32),
+        item_tab: txl.Tensor((txl.int64(),), txl.i32),
+        seq_tab: txl.Tensor((txl.int64(),), txl.i32),
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        g_map: txl.Ptr(txl.TensorMap),
+        eg_map: txl.Ptr(txl.TensorMap),
+        do_map: txl.Ptr(txl.TensorMap),
+        aqk_map: txl.Ptr(txl.TensorMap),
+        akk_map: txl.Ptr(txl.TensorMap),
+        h_map: txl.Ptr(txl.TensorMap),
+        dh_map: txl.Ptr(txl.TensorMap),
         scale: txl.f32,
         num_seqs: txl.i32,
         num_items: txl.i32,
         num_ctas: txl.i32,
         epoch: txl.i32,
-        range_flags: txl.gptr[txl.i32],
+        range_flags: txl.Tensor((txl.int64(),), txl.i32),
         range_allowed: txl.i32,
         range_entries: txl.i32,
     ):
@@ -3445,10 +3445,10 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
             txl.ptx.ld.global_.s32(retry_count, range_flags.ptr_to([range_entries]))
         num_streams = txl.int32(0) if item_only else num_chains * txl.int32(2)
         total_work = retry_count if item_only else num_streams + num_items
-        cta = txl.local_scalar("int32", init=txl.Cast("int32", txl.cta_id()))
+        cta = txl.local_scalar("int32", init=txl.Cast(txl.cta_id(), "int32"))
         ITEM_RING = 4
 
-        ep64 = txl.local_scalar("int64", init=txl.Cast("int64", epoch) * txl.int64(1 << 32))
+        ep64 = txl.local_scalar("int64", init=txl.Cast(epoch, "int64") * txl.int64(1 << 32))
 
         sp = txl.specialize()
         cg = sp.role("cg", warps=list(range(8)), regs=232)
@@ -3606,7 +3606,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                         + (k_i & txl.int32(7))
                     ]
                 ),
-                txl.Cast("uint16", txl.Select(n_i == k_i, txl.int32(0x3F80), txl.int32(0))),
+                txl.Cast(txl.Select(n_i == k_i, txl.int32(0x3F80), txl.int32(0)), "uint16"),
             )
             txl.ptx[FENCE_ASYNC]()
         txl.cuda.cta_sync()
@@ -3657,13 +3657,13 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
             return phase, phase_end
 
         def bf16_bits_to_f32(u16val):
-            return txl.reinterpret("float32", txl.Cast("uint32", u16val) << txl.uint32(16))
+            return txl.reinterpret(txl.Cast(u16val, "uint32") << txl.uint32(16), ty="float32")
 
         def lo(w):
-            return txl.reinterpret("float32", w << txl.uint32(16))
+            return txl.reinterpret(w << txl.uint32(16), ty="float32")
 
         def hi(w):
-            return txl.reinterpret("float32", w & txl.uint32(0xFFFF0000))
+            return txl.reinterpret(w & txl.uint32(0xFFFF0000), ty="float32")
 
         def seq_info(seq):
             """(bos, seq_len, nch) of a sequence from the SMEM table, or from cu_seqlens when it does not fit."""
@@ -3673,14 +3673,14 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                 with txl.Then():
                     b32 = txl.local_scalar("int32")
                     txl.ptx.ld.shared.s32(b32, txl.address_of(s_seq[seq, 0]))
-                    txl.assign(bos, txl.Cast("int64", b32))
+                    txl.assign(bos, txl.Cast(b32, "int64"))
                     txl.ptx.ld.shared.s32(seq_len, txl.address_of(s_seq[seq, 1]))
                 with txl.Else():
                     cs = txl.alloc_local([2], "int64")
                     txl.ptx.ld.global_.s64(cs[0], cu_seqlens.ptr_to([seq]))
                     txl.ptx.ld.global_.s64(cs[1], cu_seqlens.ptr_to([seq + txl.int32(1)]))
                     txl.assign(bos, cs[0])
-                    txl.assign(seq_len, txl.Cast("int32", cs[1] - cs[0]))
+                    txl.assign(seq_len, txl.Cast(cs[1] - cs[0], "int32"))
             nch = txl.local_scalar("int32", init=(seq_len + txl.int32(CHUNK - 1)) >> 6)
             return bos, seq_len, nch
 
@@ -3707,7 +3707,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                         txl.ptx.ld.global_.s64(cs[1], cu_seqlens.ptr_to([i + 1]))
                         txl.assign(
                             cb,
-                            cb + ((txl.Cast("int32", cs[1] - cs[0]) + txl.int32(CHUNK - 1)) >> 6),
+                            cb + ((txl.Cast(cs[1] - cs[0], "int32") + txl.int32(CHUNK - 1)) >> 6),
                         )
             return cb
 
@@ -3720,11 +3720,11 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
             for j in range(2):
                 t = lane + txl.int32(32 * j)
                 tokc = bos + txl.Cast(
-                    "int64", n * txl.int32(CHUNK) + txl.min(t, rows - txl.int32(1))
+                    n * txl.int32(CHUNK) + txl.min(t, rows - txl.int32(1)), "int64"
                 )
                 u = txl.local_scalar("uint16")
                 txl.ptx.ld.global_.nc.u16(
-                    u, beta.ptr_to([tokc * txl.int64(HV) + txl.Cast("int64", hv)])
+                    u, beta.ptr_to([tokc * txl.int64(HV) + txl.Cast(hv, "int64")])
                 )
                 val = txl.Select(t < rows, bf16_bits_to_f32(u), txl.float32(0.0))
                 txl.ptx.st.shared.f32(dst_ptr_fn(t), val)
@@ -3733,7 +3733,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
             cs = txl.alloc_local([2], "int64")
             txl.ptx.ld.global_.s64(cs[0], cu_seqlens.ptr_to([sq]))
             txl.ptx.ld.global_.s64(cs[1], cu_seqlens.ptr_to([sq + 1]))
-            return cs[0], txl.Cast("int32", cs[1] - cs[0])
+            return cs[0], txl.Cast(cs[1] - cs[0], "int32")
 
         def item_coords(item):
             """Item index -> (c, hq, seq, n, bos, rows, nch).
@@ -3767,15 +3767,15 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
             for j in range(2):
                 t = lane + txl.int32(32 * j)
                 tokc = bos + txl.Cast(
-                    "int64", n * txl.int32(CHUNK) + txl.min(t, rows - txl.int32(1))
+                    n * txl.int32(CHUNK) + txl.min(t, rows - txl.int32(1)), "int64"
                 )
                 u = txl.local_scalar("uint16")
                 txl.ptx.ld.global_.nc.u16(
-                    u, beta.ptr_to([tokc * txl.int64(HV) + txl.Cast("int64", hv)])
+                    u, beta.ptr_to([tokc * txl.int64(HV) + txl.Cast(hv, "int64")])
                 )
                 val = txl.Select(
                     t < rows,
-                    txl.reinterpret("float32", txl.Cast("uint32", u) << txl.uint32(16)),
+                    txl.reinterpret(txl.Cast(u, "uint32") << txl.uint32(16), ty="float32"),
                     txl.float32(0.0),
                 )
                 txl.ptx.st.shared.f32(txl.address_of(s_beta[slot, t]), val)
@@ -3882,14 +3882,14 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
             quad = txl.local_scalar("int32", init=wr & 3)
             x = txl.local_scalar("int32", init=quad * 32 + lane)
             row0 = txl.local_scalar("int32", init=wg * 32)
-            x64 = txl.Cast("int64", x)
+            x64 = txl.Cast(x, "int64")
             xs = txl.local_scalar("int32", init=x >> 6)
             xr = txl.local_scalar("int32", init=x & 63)
             xg = txl.local_scalar("int32", init=x >> 5)
             xgc = txl.local_scalar("int32", init=(x & 31) * 2)
 
             def tmem_at(col):
-                return txl.Cast("uint32", tm[0] + col + (quad << 21))
+                return txl.Cast(tm[0] + col + (quad << 21), "uint32")
 
             def bar_all():
                 txl.ptx.bar.sync(txl.uint32(1), txl.uint32(256))
@@ -3924,7 +3924,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                 """Forward state recurrence, software-pipelined: while the tensor core runs chunk n's
                 Vn / state-update MMAs, the compute warps prepare chunk n+1's tiles (from K/V transposed
                 into TMEM by the MMA warp) and read chunk n+2's gate."""
-                hv64 = txl.Cast("int64", hv)
+                hv64 = txl.Cast(hv, "int64")
                 gcol = txl.local_scalar("int64", init=hv64 * txl.int64(D) + x64)
                 gn_c = txl.local_scalar("float32", init=txl.float32(0.0))
                 gn_1 = txl.local_scalar("float32", init=txl.float32(0.0))
@@ -3950,7 +3950,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                     [u_lo, u_hi) of its kg / kbg / vb tiles into set m & 1 (the last half publishes)."""
                     rows = txl.local_scalar("int32", init=chunk_rows(seq_len, m))
                     tok0 = txl.local_scalar(
-                        "int64", init=bos + txl.Cast("int64", m * txl.int32(CHUNK))
+                        "int64", init=bos + txl.Cast(m * txl.int32(CHUNK), "int64")
                     )
                     sset = txl.local_scalar("int32", init=m & txl.int32(1))
                     if u_lo == 0:
@@ -3990,9 +3990,9 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                             bu1 = txl.local_scalar("uint16")
                             txl.ptx.cvt.rn.bf16.f32(bu0, eg0)
                             txl.ptx.cvt.rn.bf16.f32(bu1, eg1)
-                            egidx0 = (tok0 + txl.Cast("int64", row0 + txl.int32(i))) * HVK64 + gcol
+                            egidx0 = (tok0 + txl.Cast(row0 + txl.int32(i), "int64")) * HVK64 + gcol
                             egidx1 = (
-                                tok0 + txl.Cast("int64", row0 + txl.int32(i + 1))
+                                tok0 + txl.Cast(row0 + txl.int32(i + 1), "int64")
                             ) * HVK64 + gcol
                             with txl.If(valid0), txl.Then():
                                 txl.ptx["st.global.L1::no_allocate.b16"](
@@ -4067,8 +4067,8 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                     with txl.If(n == txl.int32(0)):
                         with txl.Then():
                             h0base = (
-                                (txl.Cast("int64", seq) * txl.int64(HV) + hv64) * txl.int64(D) + x64
-                            ) * txl.int64(D) + txl.Cast("int64", hc0)
+                                (txl.Cast(seq, "int64") * txl.int64(HV) + hv64) * txl.int64(D) + x64
+                            ) * txl.int64(D) + txl.Cast(hc0, "int64")
                             for m8 in range(8):
                                 txl.ptx[
                                     "ld.global.nc.L1::no_allocate.L2::evict_normal.L2::256B.v8.f32"
@@ -4176,7 +4176,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                 """Backward state-gradient recurrence, software-pipelined: chunk n-1's operand
                 preparation (q^T/k^T from TMEM transposes, T1/kbg into TMEM, T2 into shared memory)
                 overlaps chunk n's dv2 and dh MMAs."""
-                hv64 = txl.Cast("int64", hv)
+                hv64 = txl.Cast(hv, "int64")
                 gn_c = txl.local_scalar("float32", init=txl.float32(0.0))
                 gn_1 = txl.local_scalar("float32", init=txl.float32(0.0))
                 bpair = txl.alloc_local([2], "float32")
@@ -4296,8 +4296,8 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                     with txl.If(rn == txl.int32(0)):
                         with txl.Then():
                             dbase = (
-                                (txl.Cast("int64", seq) * txl.int64(HV) + hv64) * txl.int64(D) + x64
-                            ) * txl.int64(D) + txl.Cast("int64", wg * 64)
+                                (txl.Cast(seq, "int64") * txl.int64(HV) + hv64) * txl.int64(D) + x64
+                            ) * txl.int64(D) + txl.Cast(wg * 64, "int64")
                             for m8 in range(8):
                                 txl.ptx[
                                     "ld.global.nc.L1::no_allocate.L2::evict_normal.L2::256B.v8.f32"
@@ -4403,8 +4403,8 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                 txl.ptx[TC_LD32](*(acc[32 + i] for i in range(32)), tmem_at(TM_DH + wg * 64 + 32))
                 txl.ptx[WAIT_LD]()
                 obase = (
-                    (txl.Cast("int64", seq) * txl.int64(HV) + hv64) * txl.int64(D) + x64
-                ) * txl.int64(D) + txl.Cast("int64", wg * 64)
+                    (txl.Cast(seq, "int64") * txl.int64(HV) + hv64) * txl.int64(D) + x64
+                ) * txl.int64(D) + txl.Cast(wg * 64, "int64")
                 for m8 in range(8):
                     txl.ptx["st.global.L1::no_allocate.v8.f32"](
                         dh0.ptr_to([obase + txl.int64(8 * m8)]),
@@ -4435,7 +4435,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
             quad = txl.local_scalar("int32", init=wr & 3)
             x = txl.local_scalar("int32", init=quad * 32 + lane)
             row0 = txl.local_scalar("int32", init=wg * 32)
-            x64 = txl.Cast("int64", x)
+            x64 = txl.Cast(x, "int64")
             xs = txl.local_scalar("int32", init=x >> 6)
             xr = txl.local_scalar("int32", init=x & 63)
             phalf = txl.local_scalar("int32", init=x & 1)
@@ -4446,7 +4446,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
             cyc = txl.local_scalar("int32", init=txl.int32(0))
 
             def tmem_at(col):
-                return txl.Cast("uint32", tm[0] + col + (quad << 21))
+                return txl.Cast(tm[0] + col + (quad << 21), "uint32")
 
             def ld32(regs, col, base=0):
                 txl.ptx[TC_LD32](*(regs[base + i] for i in range(32)), tmem_at(col))
@@ -4474,7 +4474,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                 txl.ptx.bar.sync(txl.uint32(1), txl.uint32(256))
 
             def bar_wg():
-                txl.ptx.bar.sync(txl.uint32(2) + txl.Cast("uint32", wg), txl.uint32(128))
+                txl.ptx.bar.sync(txl.uint32(2) + txl.Cast(wg, "uint32"), txl.uint32(128))
 
             def twait(nm):
                 TCG[nm].wait(0, cyc & txl.int32(1))
@@ -4553,20 +4553,20 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
             with txl.While(cur < total_work):
                 txl.assign(item, cur - num_streams)
                 c, hq, seq, n, bos, rows, nch_i = item_coords(item)
-                hq64 = txl.Cast("int64", hq)
-                tok0 = txl.local_scalar("int64", init=bos + txl.Cast("int64", n * txl.int32(CHUNK)))
+                hq64 = txl.Cast(hq, "int64")
+                tok0 = txl.local_scalar("int64", init=bos + txl.Cast(n * txl.int32(CHUNK), "int64"))
                 last = txl.local_scalar("int32", init=rows - txl.int32(1))
                 xq_base = txl.local_scalar(
                     "int64",
-                    init=(tok0 + txl.Cast("int64", row0)) * HQK64 + hq64 * txl.int64(D) + x64,
+                    init=(tok0 + txl.Cast(row0, "int64")) * HQK64 + hq64 * txl.int64(D) + x64,
                 )
                 with txl.serial(G) as gi:
                     hv = txl.local_scalar("int32", init=hq * txl.int32(G) + gi)
-                    hv64 = txl.Cast("int64", hv)
+                    hv64 = txl.Cast(hv, "int64")
                     par = cyc & txl.int32(1)
                     x_base = txl.local_scalar(
                         "int64",
-                        init=(tok0 + txl.Cast("int64", row0)) * HVK64 + hv64 * txl.int64(D) + x64,
+                        init=(tok0 + txl.Cast(row0, "int64")) * HVK64 + hv64 * txl.int64(D) + x64,
                     )
 
                     gn = txl.local_scalar("float32", init=txl.float32(0.0))
@@ -4581,7 +4581,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                                     gi_value,
                                     g.ptr_to(
                                         [
-                                            (tok0 + txl.Cast("int64", ti)) * HVK64
+                                            (tok0 + txl.Cast(ti, "int64")) * HVK64
                                             + hv64 * txl.int64(D)
                                             + x64
                                         ]
@@ -4634,7 +4634,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                             gn,
                             g.ptr_to(
                                 [
-                                    (tok0 + txl.Cast("int64", last)) * HVK64
+                                    (tok0 + txl.Cast(last, "int64")) * HVK64
                                     + hv64 * txl.int64(D)
                                     + x64
                                 ]
@@ -4737,11 +4737,11 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                             values = txl.alloc_local([2], "float32")
                             for e in range(2):
                                 ti0 = row0 + 2 * pi + e
-                                token = tok0 + txl.Cast("int64", txl.min(ti0, last))
+                                token = tok0 + txl.Cast(txl.min(ti0, last), "int64")
                                 gate = _load_gate(g, token, hv, x, HV * D)
                                 kval = _load_bf16_f32(
                                     k.ptr_to(
-                                        [token * txl.int64(HQ * D) + txl.Cast("int64", hq * D + x)]
+                                        [token * txl.int64(HQ * D) + txl.Cast(hq * D + x, "int64")]
                                     )
                                 )
                                 decay = txl.local_scalar("float32")
@@ -4960,12 +4960,12 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                                     with txl.If(row0 + txl.int32(i) < rows), txl.Then():
                                         txl.ptx["st.global.L1::no_allocate.b16"](
                                             dv.ptr_to([x_base + txl.int64(i * HVK)]),
-                                            txl.Cast("uint16", pa_word),
+                                            txl.Cast(pa_word, "uint16"),
                                         )
                                     with txl.If(row0 + txl.int32(i + 1) < rows), txl.Then():
                                         txl.ptx["st.global.L1::no_allocate.b16"](
                                             dv.ptr_to([x_base + txl.int64((i + 1) * HVK)]),
-                                            txl.Cast("uint16", pa_word >> txl.uint32(16)),
+                                            txl.Cast(pa_word >> txl.uint32(16), "uint16"),
                                         )
                             for e in range(8):
                                 i = 8 * b + e
@@ -5037,7 +5037,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                             precise_end,
                             g.ptr_to(
                                 [
-                                    (tok0 + txl.Cast("int64", last)) * HVK64
+                                    (tok0 + txl.Cast(last, "int64")) * HVK64
                                     + hv64 * txl.int64(D)
                                     + x64
                                 ]
@@ -5054,7 +5054,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                                     precise_log,
                                     g.ptr_to(
                                         [
-                                            (tok0 + txl.Cast("int64", precise_token)) * HVK64
+                                            (tok0 + txl.Cast(precise_token, "int64")) * HVK64
                                             + hv64 * txl.int64(D)
                                             + x64
                                         ]
@@ -5344,7 +5344,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                         twait("chunk_done")
                         with txl.If(strong), txl.Then():
                             with txl.serial(32) as i:
-                                token = tok0 + txl.Cast("int64", txl.min(row0 + i, last))
+                                token = tok0 + txl.Cast(txl.min(row0 + i, last), "int64")
                                 gate = _load_gate(g, token, hv, x, HV * D)
                                 previous_gate = _load_gate(
                                     g, txl.max(tok0, token - txl.int64(1)), hv, x, HV * D
@@ -5352,12 +5352,12 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                                 txl.ptx.ex2.approx.ftz.f32(gate, gate - previous_gate)
                                 q_value = _load_bf16_f32(
                                     q.ptr_to(
-                                        [token * txl.int64(HQ * D) + txl.Cast("int64", hq * D + x)]
+                                        [token * txl.int64(HQ * D) + txl.Cast(hq * D + x, "int64")]
                                     )
                                 )
                                 k_value = _load_bf16_f32(
                                     k.ptr_to(
-                                        [token * txl.int64(HQ * D) + txl.Cast("int64", hq * D + x)]
+                                        [token * txl.int64(HQ * D) + txl.Cast(hq * D + x, "int64")]
                                     )
                                 )
                                 word = txl.local_scalar("uint32")
@@ -5387,7 +5387,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                                             cooperative_channel,
                                             txl.Select(
                                                 (lane // 8) == group,
-                                                txl.Cast("int32", cooperative_bit & txl.uint32(31)),
+                                                txl.Cast(cooperative_bit & txl.uint32(31), "int32"),
                                                 cooperative_channel,
                                             ),
                                         )
@@ -6016,17 +6016,17 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                         r = txl.local_scalar("uint32")
                         txl.ptx.shfl_sync.bfly.b32(
                             r,
-                            txl.reinterpret("uint32", dsum),
+                            txl.reinterpret(dsum, ty="uint32"),
                             txl.uint32(s),
                             txl.uint32(0x1F),
                             txl.uint32(0xFFFFFFFF),
                         )
-                        txl.assign(dsum, dsum + txl.reinterpret("float32", r))
+                        txl.assign(dsum, dsum + txl.reinterpret(r, ty="float32"))
                     if not item_only:
                         with txl.If((tq == txl.int32(0)) & (row0 + ti < rows)), txl.Then():
                             txl.ptx["st.global.L1::no_allocate.f32"](
                                 db.ptr_to(
-                                    [(tok0 + txl.Cast("int64", row0 + ti)) * txl.int64(HV) + hv64]
+                                    [(tok0 + txl.Cast(row0 + ti, "int64")) * txl.int64(HV) + hv64]
                                 ),
                                 dsum,
                             )
@@ -6133,7 +6133,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                         for src, dst in ((op_kraw, TM_KT), (op_vraw, TM_VT)):
                             for j in range(4):
                                 txl.ptx[MMA_SS](
-                                    txl.Cast("uint32", tm[0] + dst + 16 * j),
+                                    txl.Cast(tm[0] + dst + 16 * j, "uint32"),
                                     src.desc(j),
                                     bdI1[0],
                                     txl.uint32(ID_T1),
@@ -6159,7 +6159,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                         for src, dst in ((op_qraw, TM_QT), (op_kraw_b, TM_KTB)):
                             for j in range(4):
                                 txl.ptx[MMA_SS](
-                                    txl.Cast("uint32", tm[0] + dst + 16 * j),
+                                    txl.Cast(tm[0] + dst + 16 * j, "uint32"),
                                     src.desc(j),
                                     bdI1[0],
                                     txl.uint32(ID_T1),
@@ -6185,12 +6185,12 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                             with txl.serial(nch) as n:
                                 set_u = txl.local_scalar(
                                     "uint64",
-                                    init=txl.Cast("uint64", n & txl.int32(1))
+                                    init=txl.Cast(n & txl.int32(1), "uint64")
                                     * txl.uint64(SET_UNITS),
                                 )
                                 akk_u = txl.local_scalar(
                                     "uint64",
-                                    init=txl.Cast("uint64", st_akk.stage)
+                                    init=txl.Cast(st_akk.stage, "uint64")
                                     * txl.uint64(UNITS_PER_STAGE),
                                 )
                                 dW = (n & txl.int32(1)) * 64
@@ -6271,7 +6271,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                                 t1_col = TM_T1 + par * 32
                                 kb_col = TM_KB + par * 32
                                 do_u = txl.local_scalar(
-                                    "uint64", init=txl.Cast("uint64", par) * txl.uint64(DO2_UNITS)
+                                    "uint64", init=txl.Cast(par, "uint64") * txl.uint64(DO2_UNITS)
                                 )
                                 mphase("bmw-prep")
                                 MB["prep_ready"].wait(0, par)
@@ -6339,7 +6339,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                 lphase, lphase_end = make_phaser()
                 with txl.While(cur < num_streams):
                     is_fwd, seq, hv, hq, bos, seq_len, nch = stream_coords(cur)
-                    bos32 = txl.local_scalar("int32", init=txl.Cast("int32", bos))
+                    bos32 = txl.local_scalar("int32", init=txl.Cast(bos, "int32"))
                     with txl.If(is_fwd == txl.int32(1)):
                         with txl.Then():
                             with txl.serial(nch) as n:
@@ -6593,7 +6593,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                                     txl.ptx["fence.proxy.async.global"]()
                                     txl.ptx["st.release.gpu.global.s64"](
                                         flags.ptr_to([fidx_s]),
-                                        ep64 + txl.Cast("int64", n + txl.int32(1)),
+                                        ep64 + txl.Cast(n + txl.int32(1), "int64"),
                                     )
                                 st_hs.advance()
                         with txl.Else():
@@ -6619,7 +6619,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                                     txl.ptx["fence.proxy.async.global"]()
                                     txl.ptx["st.release.gpu.global.s64"](
                                         flags.ptr_to([num_chains + fidx_s]),
-                                        ep64 + txl.Cast("int64", rn + txl.int32(1)),
+                                        ep64 + txl.Cast(rn + txl.int32(1), "int64"),
                                     )
                                 txl.assign(bcyc, bcyc + txl.int32(1))
                     with txl.If(elected()), txl.Then():
@@ -6773,7 +6773,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                             swizzle=txl.SW128B.value,
                         )
                         akk_u = txl.local_scalar(
-                            "uint64", init=txl.Cast("uint64", par) * txl.uint64(UNITS_PER_STAGE)
+                            "uint64", init=txl.Cast(par, "uint64") * txl.uint64(UNITS_PER_STAGE)
                         )
                         mphase("mw-xT")
                         b_in_full.wait(0, par)
@@ -6786,7 +6786,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                             for src, dst in ((op_egT, S1), (op_vT, S2), (op_qT, S3), (op_kT, S4)):
                                 for j in range(4):
                                     txl.ptx[MMA_SS](
-                                        txl.Cast("uint32", tm[0] + dst + 16 * j),
+                                        txl.Cast(tm[0] + dst + 16 * j, "uint32"),
                                         src.desc(j),
                                         bdI[0],
                                         txl.uint32(ID_T),
@@ -6917,15 +6917,15 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
                 with txl.While(cur < total_work):
                     txl.assign(item, cur - num_streams)
                     c, hq, seq, n, bos, rows, nch_i = item_coords(item)
-                    bos32 = txl.local_scalar("int32", init=txl.Cast("int32", bos))
+                    bos32 = txl.local_scalar("int32", init=txl.Cast(bos, "int32"))
                     tok0 = txl.local_scalar("int32", init=bos32 + n * txl.int32(CHUNK))
 
                     lphase("lw-flags")
                     with txl.If(elected()), txl.Then():
                         tgt_f = txl.local_scalar(
-                            "int64", init=ep64 + txl.Cast("int64", n + txl.int32(1))
+                            "int64", init=ep64 + txl.Cast(n + txl.int32(1), "int64")
                         )
-                        tgt_b = txl.local_scalar("int64", init=ep64 + txl.Cast("int64", nch_i - n))
+                        tgt_b = txl.local_scalar("int64", init=ep64 + txl.Cast(nch_i - n, "int64"))
                         for gi_ in range(G):
                             fidx = seq * txl.int32(HV) + hq * txl.int32(G) + txl.int32(gi_)
                             flf = txl.local_scalar("int64", init=txl.int64(0))
@@ -7133,7 +7133,7 @@ def make_mega_kernel(HQ: int, HV: int, static_grid=None, item_only=False, *, bac
         with txl.If(txl.warp_id() == 8), txl.Then():
             txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"]()
             txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
-                txl.Cast("uint32", txl.local_scalar("int32", init=tmem_preamble()[0])),
+                txl.Cast(txl.local_scalar("int32", init=tmem_preamble()[0]), "uint32"),
                 txl.uint32(TMEM_COLS),
             )
 
@@ -7188,42 +7188,42 @@ def make_native_fused_kernel(
 
     @txl.kernel()
     def kda_bwd_native_fused(
-        q: txl.gptr[txl.bf16],
-        k: txl.gptr[txl.bf16],
-        v: txl.gptr[txl.bf16],
-        beta: txl.gptr[txl.bf16],
-        aqk: txl.gptr[txl.bf16],
-        akk: txl.gptr[txl.bf16],
-        g: txl.gptr[txl.f32],
-        egcache: txl.gptr[txl.bf16],
-        do: txl.gptr[txl.bf16],
-        dht: txl.gptr[txl.f32],
-        h0: txl.gptr[txl.f32],
-        hsnap: txl.gptr[txl.bf16],
-        cu_seqlens: txl.gptr[txl.i64],
-        flags: txl.gptr[txl.i32],
-        sched: txl.gptr[txl.i32],
-        dq: txl.gptr[txl.f32],
-        dk: txl.gptr[txl.f32],
-        dv: txl.gptr[txl.bf16],
-        db: txl.gptr[txl.f32],
-        dg: txl.gptr[txl.f32],
-        dh0: txl.gptr[txl.f32],
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        g_map: txl.TensorMap,
-        eg_map: txl.TensorMap,
-        beta_map: txl.TensorMap,
-        do_map: txl.TensorMap,
-        aqk_map: txl.TensorMap,
-        akk_map: txl.TensorMap,
-        h_map: txl.TensorMap,
+        q: txl.Tensor((txl.int64(),), txl.bf16),
+        k: txl.Tensor((txl.int64(),), txl.bf16),
+        v: txl.Tensor((txl.int64(),), txl.bf16),
+        beta: txl.Tensor((txl.int64(),), txl.bf16),
+        aqk: txl.Tensor((txl.int64(),), txl.bf16),
+        akk: txl.Tensor((txl.int64(),), txl.bf16),
+        g: txl.Tensor((txl.int64(),), txl.f32),
+        egcache: txl.Tensor((txl.int64(),), txl.bf16),
+        do: txl.Tensor((txl.int64(),), txl.bf16),
+        dht: txl.Tensor((txl.int64(),), txl.f32),
+        h0: txl.Tensor((txl.int64(),), txl.f32),
+        hsnap: txl.Tensor((txl.int64(),), txl.bf16),
+        cu_seqlens: txl.Tensor((txl.int64(),), txl.i64),
+        flags: txl.Tensor((txl.int64(),), txl.i32),
+        sched: txl.Tensor((txl.int64(),), txl.i32),
+        dq: txl.Tensor((txl.int64(),), txl.f32),
+        dk: txl.Tensor((txl.int64(),), txl.f32),
+        dv: txl.Tensor((txl.int64(),), txl.bf16),
+        db: txl.Tensor((txl.int64(),), txl.f32),
+        dg: txl.Tensor((txl.int64(),), txl.f32),
+        dh0: txl.Tensor((txl.int64(),), txl.f32),
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        g_map: txl.Ptr(txl.TensorMap),
+        eg_map: txl.Ptr(txl.TensorMap),
+        beta_map: txl.Ptr(txl.TensorMap),
+        do_map: txl.Ptr(txl.TensorMap),
+        aqk_map: txl.Ptr(txl.TensorMap),
+        akk_map: txl.Ptr(txl.TensorMap),
+        h_map: txl.Ptr(txl.TensorMap),
         scale: txl.f32,
         num_seqs: txl.i32,
         num_ctas: txl.i32,
         epoch: txl.i32,
-        range_flags: txl.gptr[txl.i32],
+        range_flags: txl.Tensor((txl.int64(),), txl.i32),
         range_entries: txl.i32,
     ):
         txl.device_entry(
@@ -7252,7 +7252,7 @@ def make_native_fused_kernel(
             txl.keep_alive(buf.data)
         num_work = num_seqs * txl.int32(H)
 
-        cta = txl.local_scalar("int32", init=txl.Cast("int32", txl.cta_id()))
+        cta = txl.local_scalar("int32", init=txl.Cast(txl.cta_id(), "int32"))
         sbase = txl.local_scalar("int32", init=cta * txl.int32(SCHED_STRIDE))
         n_p2 = txl.local_scalar("int32")
         txl.ptx.ld.global_.s32(n_p2, sched.ptr_to([sbase]))
@@ -7378,7 +7378,7 @@ def make_native_fused_kernel(
                         + (k_i & txl.int32(7))
                     ]
                 ),
-                txl.Cast("uint16", txl.Select(n_i == k_i, txl.int32(0x3F80), txl.int32(0))),
+                txl.Cast(txl.Select(n_i == k_i, txl.int32(0x3F80), txl.int32(0)), "uint16"),
             )
             txl.ptx[FENCE_ASYNC]()
         txl.cuda.cta_sync()
@@ -7421,7 +7421,7 @@ def make_native_fused_kernel(
             txl.ptx.ld.global_.s64(cs[0], cu_seqlens.ptr_to([seq]))
             txl.ptx.ld.global_.s64(cs[1], cu_seqlens.ptr_to([seq + txl.int32(1)]))
             bos = txl.local_scalar("int64", init=cs[0])
-            seq_len = txl.local_scalar("int32", init=txl.Cast("int32", cs[1] - cs[0]))
+            seq_len = txl.local_scalar("int32", init=txl.Cast(cs[1] - cs[0], "int32"))
             nch = txl.local_scalar("int32", init=(seq_len + txl.int32(CHUNK - 1)) >> 6)
             return seq, head, bos, seq_len, nch
 
@@ -7432,7 +7432,7 @@ def make_native_fused_kernel(
                 txl.ptx.ld.global_.s64(cs[0], cu_seqlens.ptr_to([i]))
                 txl.ptx.ld.global_.s64(cs[1], cu_seqlens.ptr_to([i + 1]))
                 txl.assign(
-                    cb, cb + ((txl.Cast("int32", cs[1] - cs[0]) + txl.int32(CHUNK - 1)) >> 6)
+                    cb, cb + ((txl.Cast(cs[1] - cs[0], "int32") + txl.int32(CHUNK - 1)) >> 6)
                 )
             return cb
 
@@ -7442,7 +7442,7 @@ def make_native_fused_kernel(
         TM_KT, TM_VT = 256, 320
 
         def bf16_bits_to_f32(u16val):
-            return txl.reinterpret("float32", txl.Cast("uint32", u16val) << txl.uint32(16))
+            return txl.reinterpret(txl.Cast(u16val, "uint32") << txl.uint32(16), ty="float32")
 
         def p1_compute():
             tm = tmem_preamble()
@@ -7452,14 +7452,14 @@ def make_native_fused_kernel(
             quad = txl.local_scalar("int32", init=wr & 3)
             x = txl.local_scalar("int32", init=quad * 32 + lane)
             row0 = txl.local_scalar("int32", init=wg * 32)
-            x64 = txl.Cast("int64", x)
+            x64 = txl.Cast(x, "int64")
             xs = txl.local_scalar("int32", init=x >> 6)
             xr = txl.local_scalar("int32", init=x & 63)
             xg = txl.local_scalar("int32", init=x >> 5)
             xgc = txl.local_scalar("int32", init=(x & 31) * 2)
 
             def tmem_at(col):
-                return txl.Cast("uint32", tm[0] + col + (quad << 21))
+                return txl.Cast(tm[0] + col + (quad << 21), "uint32")
 
             st_kv = txl.PipelineState(2, phase=0)
             st_te = txl.PipelineState(1, phase=1)
@@ -7486,7 +7486,7 @@ def make_native_fused_kernel(
             with txl.serial(n_p1) as it:
                 chain = txl.local_scalar("int32", init=p1_chain(it))
                 seq, head, bos, seq_len, nch = work_coords(chain)
-                head64 = txl.Cast("int64", head)
+                head64 = txl.Cast(head, "int64")
                 gcol = txl.local_scalar("int64", init=head64 * txl.int64(D) + x64)
 
                 def h_c0():
@@ -7522,7 +7522,7 @@ def make_native_fused_kernel(
                 with txl.serial(nch) as n:
                     rows = txl.int32(CHUNK)
                     tok0 = txl.local_scalar(
-                        "int64", init=bos + txl.Cast("int64", n * txl.int32(CHUNK))
+                        "int64", init=bos + txl.Cast(n * txl.int32(CHUNK), "int64")
                     )
                     txl.ptx.ex2.approx.ftz.f32(egn, gn)
                     phase("hw-kv")
@@ -7559,7 +7559,7 @@ def make_native_fused_kernel(
                             txl.ptx.ex2.approx.ftz.f32(eg, gv[i])
                             txl.ptx.ex2.approx.ftz.f32(egng, gn - gv[i])
                             txl.ptx.cvt.rn.bf16.f32(bu, eg)
-                            egidx = (tok0 + txl.Cast("int64", row0 + txl.int32(i))) * HK64 + gcol
+                            egidx = (tok0 + txl.Cast(row0 + txl.int32(i), "int64")) * HK64 + gcol
                             txl.ptx["st.global.L1::no_allocate.b16"](egcache.ptr_to([egidx]), bu)
                             txl.assign(vals[e], kk[i] * egng)
                             txl.assign(vals[8 + e], kk[i] * bb[i] * eg)
@@ -7592,9 +7592,9 @@ def make_native_fused_kernel(
                     with txl.If(n == txl.int32(0)):
                         with txl.Then():
                             h0base = (
-                                (txl.Cast("int64", seq) * txl.int64(H) + head64) * txl.int64(D)
+                                (txl.Cast(seq, "int64") * txl.int64(H) + head64) * txl.int64(D)
                                 + x64
-                            ) * txl.int64(D) + txl.Cast("int64", hc0)
+                            ) * txl.int64(D) + txl.Cast(hc0, "int64")
                             for m in range(8):
                                 txl.ptx[
                                     "ld.global.nc.L1::no_allocate.L2::evict_normal.L2::256B.v8.f32"
@@ -7716,12 +7716,12 @@ def make_native_fused_kernel(
                 mphase("hm-kvT")
                 kv_u = txl.local_scalar(
                     "uint64",
-                    init=txl.Cast("uint64", st_kv1.stage) * txl.uint64(4 * UNITS_PER_STAGE),
+                    init=txl.Cast(st_kv1.stage, "uint64") * txl.uint64(4 * UNITS_PER_STAGE),
                 )
                 with txl.If(elected()), txl.Then():
                     for j in range(4):
                         txl.ptx[MMA_SS](
-                            txl.Cast("uint32", tm[0] + TM_KT + 16 * j),
+                            txl.Cast(tm[0] + TM_KT + 16 * j, "uint32"),
                             op_kraw.desc(j, kv_u),
                             bdI1[0],
                             txl.uint32(ID_T1),
@@ -7770,7 +7770,7 @@ def make_native_fused_kernel(
                     txl.ptx[TC_FENCE_AFTER]()
                     akk_u = txl.local_scalar(
                         "uint64",
-                        init=txl.Cast("uint64", st_akk.stage) * txl.uint64(UNITS_PER_STAGE),
+                        init=txl.Cast(st_akk.stage, "uint64") * txl.uint64(UNITS_PER_STAGE),
                     )
                     mphase("hm-WU")
                     with txl.If(elected()), txl.Then():
@@ -7790,7 +7790,7 @@ def make_native_fused_kernel(
                     txl.ptx[TC_FENCE_AFTER]()
                     hs_u = txl.local_scalar(
                         "uint64",
-                        init=txl.Cast("uint64", st_hs.stage) * txl.uint64(4 * UNITS_PER_STAGE),
+                        init=txl.Cast(st_hs.stage, "uint64") * txl.uint64(4 * UNITS_PER_STAGE),
                     )
                     mphase("hm-Vn")
                     with txl.If(elected()), txl.Then():
@@ -7815,7 +7815,7 @@ def make_native_fused_kernel(
             with txl.serial(n_p1) as it:
                 chain = txl.local_scalar("int32", init=p1_chain(it))
                 seq, head, bos, seq_len, nch = work_coords(chain)
-                bos32 = txl.local_scalar("int32", init=txl.Cast("int32", bos))
+                bos32 = txl.local_scalar("int32", init=txl.Cast(bos, "int32"))
                 head8 = txl.local_scalar("int32", init=head >> txl.int32(3))
                 with txl.serial(nch) as n:
                     tok0 = bos32 + n * txl.int32(CHUNK)
@@ -7934,7 +7934,7 @@ def make_native_fused_kernel(
             quad = txl.local_scalar("int32", init=wr & 3)
             x = txl.local_scalar("int32", init=quad * 32 + lane)
             row0 = txl.local_scalar("int32", init=wg * 32)
-            x64 = txl.Cast("int64", x)
+            x64 = txl.Cast(x, "int64")
             xs = txl.local_scalar("int32", init=x >> 6)
             xr = txl.local_scalar("int32", init=x & 63)
             tid_all = txl.local_scalar("int32", init=wr * 32 + lane)
@@ -7947,7 +7947,7 @@ def make_native_fused_kernel(
             cyc = txl.local_scalar("int32", init=txl.int32(0))
 
             def tmem_at(col):
-                return txl.Cast("uint32", tm[0] + col + (quad << 21))
+                return txl.Cast(tm[0] + col + (quad << 21), "uint32")
 
             def ld32(regs, col, base=0):
                 txl.ptx[TC_LD32](*(regs[base + i] for i in range(32)), tmem_at(col))
@@ -7985,7 +7985,7 @@ def make_native_fused_kernel(
                 txl.ptx.bar.sync(txl.uint32(1), txl.uint32(256))
 
             def bar_wg():
-                txl.ptx.bar.sync(txl.uint32(2) + txl.Cast("uint32", wg), txl.uint32(128))
+                txl.ptx.bar.sync(txl.uint32(2) + txl.Cast(wg, "uint32"), txl.uint32(128))
 
             def twait(nm):
                 TC[nm].wait(0, cyc & txl.int32(1))
@@ -7999,21 +7999,21 @@ def make_native_fused_kernel(
                 MB[nm].arrive(0)
 
             def lo(w):
-                return txl.reinterpret("float32", w << txl.uint32(16))
+                return txl.reinterpret(w << txl.uint32(16), ty="float32")
 
             def hi(w):
-                return txl.reinterpret("float32", w & txl.uint32(0xFFFF0000))
+                return txl.reinterpret(w & txl.uint32(0xFFFF0000), ty="float32")
 
             def shfl_xor1(val):
                 r = txl.local_scalar("uint32")
                 txl.ptx.shfl_sync.bfly.b32(
                     r,
-                    txl.reinterpret("uint32", val),
+                    txl.reinterpret(val, ty="uint32"),
                     txl.uint32(1),
                     txl.uint32(0x1F),
                     txl.uint32(0xFFFFFFFF),
                 )
-                return txl.reinterpret("float32", r)
+                return txl.reinterpret(r, ty="float32")
 
             def q_ptr(c, col):
                 return TT[ST_Q + (col >> 6)].ptr_to(c, col & 63)
@@ -8105,7 +8105,7 @@ def make_native_fused_kernel(
 
             def gcol_ptr(tensor, i):
                 """Global pointer to row (row0+i) of this thread's column (clamped to the last valid row)."""
-                tokc = tok0 + txl.Cast("int64", txl.min(row0 + txl.int32(i), rows - txl.int32(1)))
+                tokc = tok0 + txl.Cast(txl.min(row0 + txl.int32(i), rows - txl.int32(1)), "int64")
                 return tensor.ptr_to([tokc * HK64 + gcol])
 
             def s_beta_row(c):
@@ -8121,7 +8121,7 @@ def make_native_fused_kernel(
             with txl.serial(n_p2) as i2:
                 work = txl.local_scalar("int32", init=p2_chain(i2))
                 seq, head, bos, seq_len, nch = work_coords(work)
-                head64 = txl.Cast("int64", head)
+                head64 = txl.Cast(head, "int64")
                 gcol = txl.local_scalar("int64", init=head64 * txl.int64(D) + x64)
                 with txl.serial(nch) as rn:
                     n = nch - txl.int32(1) - rn
@@ -8130,10 +8130,10 @@ def make_native_fused_kernel(
                     rows = txl.int32(CHUNK)
                     last = txl.int32(CHUNK - 1)
                     tok0 = txl.local_scalar(
-                        "int64", init=bos + txl.Cast("int64", n * txl.int32(CHUNK))
+                        "int64", init=bos + txl.Cast(n * txl.int32(CHUNK), "int64")
                     )
                     x_base = txl.local_scalar(
-                        "int64", init=(tok0 + txl.Cast("int64", row0)) * HK64 + gcol
+                        "int64", init=(tok0 + txl.Cast(row0, "int64")) * HK64 + gcol
                     )
 
                     phase("w-in")
@@ -8146,7 +8146,7 @@ def make_native_fused_kernel(
                         btok = wr * txl.int32(8) + lane
                         txl.ptx.ld.shared.u16(u16, s_beta_in.ptr_to([btok, head & txl.int32(7)]))
                         txl.ptx.st.shared.f32(
-                            txl.address_of(s_beta[btok]), lo(txl.Cast("uint32", u16))
+                            txl.address_of(s_beta[btok]), lo(txl.Cast(u16, "uint32"))
                         )
 
                     egf = txl.alloc_local([32], "float32")
@@ -8248,8 +8248,8 @@ def make_native_fused_kernel(
                     )
                     hst = txl.local_scalar("int32", init=wg * 2 + xs)
                     dbase = (
-                        (txl.Cast("int64", seq) * txl.int64(H) + head64) * txl.int64(D) + x64
-                    ) * txl.int64(D) + txl.Cast("int64", wg * 64)
+                        (txl.Cast(seq, "int64") * txl.int64(H) + head64) * txl.int64(D) + x64
+                    ) * txl.int64(D) + txl.Cast(wg * 64, "int64")
                     with txl.If(rn == txl.int32(0)):
                         with txl.Then():
                             for m in range(8):
@@ -8458,11 +8458,11 @@ def make_native_fused_kernel(
                                 )
                                 txl.ptx["st.global.L1::no_allocate.b16"](
                                     dv.ptr_to([x_base + txl.int64(i * HK)]),
-                                    txl.Cast("uint16", pa_word),
+                                    txl.Cast(pa_word, "uint16"),
                                 )
                                 txl.ptx["st.global.L1::no_allocate.b16"](
                                     dv.ptr_to([x_base + txl.int64((i + 1) * HK)]),
-                                    txl.Cast("uint16", pa_word >> txl.uint32(16)),
+                                    txl.Cast(pa_word >> txl.uint32(16), "uint16"),
                                 )
 
                             for e in range(8):
@@ -8689,16 +8689,16 @@ def make_native_fused_kernel(
                             r = txl.local_scalar("uint32")
                             txl.ptx.shfl_sync.bfly.b32(
                                 r,
-                                txl.reinterpret("uint32", dsum),
+                                txl.reinterpret(dsum, ty="uint32"),
                                 txl.uint32(s),
                                 txl.uint32(0x1F),
                                 txl.uint32(0xFFFFFFFF),
                             )
-                            txl.assign(dsum, dsum + txl.reinterpret("float32", r))
+                            txl.assign(dsum, dsum + txl.reinterpret(r, ty="float32"))
                         with txl.If(tq == txl.int32(0)), txl.Then():
                             txl.ptx["st.global.L1::no_allocate.f32"](
                                 db.ptr_to(
-                                    [(tok0 + txl.Cast("int64", row0 + ti)) * txl.int64(H) + head64]
+                                    [(tok0 + txl.Cast(row0 + ti, "int64")) * txl.int64(H) + head64]
                                 ),
                                 dsum,
                             )
@@ -8732,8 +8732,8 @@ def make_native_fused_kernel(
                 ld32(acc, TM_DH + wg * 64 + 32, 32)
                 txl.ptx[WAIT_LD]()
                 obase = (
-                    (txl.Cast("int64", seq) * txl.int64(H) + head64) * txl.int64(D) + x64
-                ) * txl.int64(D) + txl.Cast("int64", wg * 64)
+                    (txl.Cast(seq, "int64") * txl.int64(H) + head64) * txl.int64(D) + x64
+                ) * txl.int64(D) + txl.Cast(wg * 64, "int64")
                 for m in range(8):
                     txl.ptx["st.global.L1::no_allocate.v8.f32"](
                         dh0.ptr_to([obase + txl.int64(8 * m)]), *(acc[8 * m + i] for i in range(8))
@@ -8820,7 +8820,7 @@ def make_native_fused_kernel(
                             swizzle=txl.SW128B.value,
                         )
                         akk_u = txl.local_scalar(
-                            "uint64", init=txl.Cast("uint64", par) * txl.uint64(UNITS_PER_STAGE)
+                            "uint64", init=txl.Cast(par, "uint64") * txl.uint64(UNITS_PER_STAGE)
                         )
                         mphase("mw-xT")
                         b_in_full.wait(0, par)
@@ -8833,7 +8833,7 @@ def make_native_fused_kernel(
                             for src, dst in ((op_egT, S1), (op_vT, S2), (op_qT, S3), (op_kT, S4)):
                                 for j in range(4):
                                     txl.ptx[MMA_SS](
-                                        txl.Cast("uint32", tm[0] + dst + 16 * j),
+                                        txl.Cast(tm[0] + dst + 16 * j, "uint32"),
                                         src.desc(j),
                                         bdI[0],
                                         txl.uint32(ID_T),
@@ -8966,7 +8966,7 @@ def make_native_fused_kernel(
                 with txl.serial(n_p2) as i2:
                     work = txl.local_scalar("int32", init=p2_chain(i2))
                     seq, head, bos, seq_len, nch = work_coords(work)
-                    bos32 = txl.local_scalar("int32", init=txl.Cast("int32", bos))
+                    bos32 = txl.local_scalar("int32", init=txl.Cast(bos, "int32"))
                     cb = chunk_base(seq)
                     head8 = txl.local_scalar("int32", init=head >> txl.int32(3))
 
@@ -9093,7 +9093,7 @@ def make_native_fused_kernel(
                                 with txl.If(i2 + txl.int32(1) < n_p2), txl.Then():
                                     nxt = p2_chain(i2 + txl.int32(1))
                                     seq2, head2, bos2, seq_len2, nch2 = work_coords(nxt)
-                                    tokn = txl.Cast("int32", bos2) + (
+                                    tokn = txl.Cast(bos2, "int32") + (
                                         nch2 - txl.int32(1)
                                     ) * txl.int32(CHUNK)
                                     hidn = (chunk_base(seq2) + nch2 - txl.int32(1)) * txl.int32(
@@ -9197,7 +9197,7 @@ def make_native_fused_kernel(
         with txl.If(txl.warp_id() == 8), txl.Then():
             txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"]()
             txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
-                txl.Cast("uint32", txl.local_scalar("int32", init=tmem_preamble()[0])),
+                txl.Cast(txl.local_scalar("int32", init=tmem_preamble()[0]), "uint32"),
                 txl.uint32(512),
             )
 
@@ -9229,42 +9229,42 @@ def make_fused_kernel(
 
     @txl.kernel()
     def kda_bwd_fused(
-        q: txl.gptr[txl.bf16],
-        k: txl.gptr[txl.bf16],
-        v: txl.gptr[txl.bf16],
-        beta: txl.gptr[txl.bf16],
-        aqk: txl.gptr[txl.bf16],
-        akk: txl.gptr[txl.bf16],
-        g: txl.gptr[txl.f32],
-        egcache: txl.gptr[txl.bf16],
-        do: txl.gptr[txl.bf16],
-        dht: txl.gptr[txl.f32],
-        h0: txl.gptr[txl.f32],
-        hsnap: txl.gptr[txl.bf16],
-        cu_seqlens: txl.gptr[txl.i64],
-        flags: txl.gptr[txl.i32],
-        sched: txl.gptr[txl.i32],
-        dq: txl.gptr[txl.f32],
-        dk: txl.gptr[txl.f32],
-        dv: txl.gptr[txl.bf16],
-        db: txl.gptr[txl.f32],
-        dg: txl.gptr[txl.f32],
-        dh0: txl.gptr[txl.f32],
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        g_map: txl.TensorMap,
-        eg_map: txl.TensorMap,
-        beta_map: txl.TensorMap,
-        do_map: txl.TensorMap,
-        aqk_map: txl.TensorMap,
-        akk_map: txl.TensorMap,
-        h_map: txl.TensorMap,
+        q: txl.Tensor((txl.int64(),), txl.bf16),
+        k: txl.Tensor((txl.int64(),), txl.bf16),
+        v: txl.Tensor((txl.int64(),), txl.bf16),
+        beta: txl.Tensor((txl.int64(),), txl.bf16),
+        aqk: txl.Tensor((txl.int64(),), txl.bf16),
+        akk: txl.Tensor((txl.int64(),), txl.bf16),
+        g: txl.Tensor((txl.int64(),), txl.f32),
+        egcache: txl.Tensor((txl.int64(),), txl.bf16),
+        do: txl.Tensor((txl.int64(),), txl.bf16),
+        dht: txl.Tensor((txl.int64(),), txl.f32),
+        h0: txl.Tensor((txl.int64(),), txl.f32),
+        hsnap: txl.Tensor((txl.int64(),), txl.bf16),
+        cu_seqlens: txl.Tensor((txl.int64(),), txl.i64),
+        flags: txl.Tensor((txl.int64(),), txl.i32),
+        sched: txl.Tensor((txl.int64(),), txl.i32),
+        dq: txl.Tensor((txl.int64(),), txl.f32),
+        dk: txl.Tensor((txl.int64(),), txl.f32),
+        dv: txl.Tensor((txl.int64(),), txl.bf16),
+        db: txl.Tensor((txl.int64(),), txl.f32),
+        dg: txl.Tensor((txl.int64(),), txl.f32),
+        dh0: txl.Tensor((txl.int64(),), txl.f32),
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        g_map: txl.Ptr(txl.TensorMap),
+        eg_map: txl.Ptr(txl.TensorMap),
+        beta_map: txl.Ptr(txl.TensorMap),
+        do_map: txl.Ptr(txl.TensorMap),
+        aqk_map: txl.Ptr(txl.TensorMap),
+        akk_map: txl.Ptr(txl.TensorMap),
+        h_map: txl.Ptr(txl.TensorMap),
         scale: txl.f32,
         num_seqs: txl.i32,
         num_ctas: txl.i32,
         epoch: txl.i32,
-        range_flags: txl.gptr[txl.i32],
+        range_flags: txl.Tensor((txl.int64(),), txl.i32),
         range_allowed: txl.i32,
         range_entries: txl.i32,
     ):
@@ -9303,7 +9303,7 @@ def make_fused_kernel(
             txl.keep_alive(buf.data)
         num_work = num_seqs * txl.int32(H)
 
-        cta = txl.local_scalar("int32", init=txl.Cast("int32", txl.cta_id()))
+        cta = txl.local_scalar("int32", init=txl.Cast(txl.cta_id(), "int32"))
         sbase = txl.local_scalar("int32", init=cta * txl.int32(SCHED_STRIDE))
         n_p2 = txl.local_scalar("int32")
         txl.ptx.ld.global_.s32(n_p2, sched.ptr_to([sbase]))
@@ -9433,7 +9433,7 @@ def make_fused_kernel(
                         + (k_i & txl.int32(7))
                     ]
                 ),
-                txl.Cast("uint16", txl.Select(n_i == k_i, txl.int32(0x3F80), txl.int32(0))),
+                txl.Cast(txl.Select(n_i == k_i, txl.int32(0x3F80), txl.int32(0)), "uint16"),
             )
             txl.ptx[FENCE_ASYNC]()
         txl.cuda.cta_sync()
@@ -9476,7 +9476,7 @@ def make_fused_kernel(
             txl.ptx.ld.global_.s64(cs[0], cu_seqlens.ptr_to([seq]))
             txl.ptx.ld.global_.s64(cs[1], cu_seqlens.ptr_to([seq + txl.int32(1)]))
             bos = txl.local_scalar("int64", init=cs[0])
-            seq_len = txl.local_scalar("int32", init=txl.Cast("int32", cs[1] - cs[0]))
+            seq_len = txl.local_scalar("int32", init=txl.Cast(cs[1] - cs[0], "int32"))
             nch = txl.local_scalar("int32", init=(seq_len + txl.int32(CHUNK - 1)) >> 6)
             return seq, head, bos, seq_len, nch
 
@@ -9487,7 +9487,7 @@ def make_fused_kernel(
                 txl.ptx.ld.global_.s64(cs[0], cu_seqlens.ptr_to([i]))
                 txl.ptx.ld.global_.s64(cs[1], cu_seqlens.ptr_to([i + 1]))
                 txl.assign(
-                    cb, cb + ((txl.Cast("int32", cs[1] - cs[0]) + txl.int32(CHUNK - 1)) >> 6)
+                    cb, cb + ((txl.Cast(cs[1] - cs[0], "int32") + txl.int32(CHUNK - 1)) >> 6)
                 )
             return cb
 
@@ -9497,7 +9497,7 @@ def make_fused_kernel(
         TM_KT, TM_VT = 256, 320
 
         def bf16_bits_to_f32(u16val):
-            return txl.reinterpret("float32", txl.Cast("uint32", u16val) << txl.uint32(16))
+            return txl.reinterpret(txl.Cast(u16val, "uint32") << txl.uint32(16), ty="float32")
 
         def p1_compute():
             tm = tmem_preamble()
@@ -9507,14 +9507,14 @@ def make_fused_kernel(
             quad = txl.local_scalar("int32", init=wr & 3)
             x = txl.local_scalar("int32", init=quad * 32 + lane)
             row0 = txl.local_scalar("int32", init=wg * 32)
-            x64 = txl.Cast("int64", x)
+            x64 = txl.Cast(x, "int64")
             xs = txl.local_scalar("int32", init=x >> 6)
             xr = txl.local_scalar("int32", init=x & 63)
             xg = txl.local_scalar("int32", init=x >> 5)
             xgc = txl.local_scalar("int32", init=(x & 31) * 2)
 
             def tmem_at(col):
-                return txl.Cast("uint32", tm[0] + col + (quad << 21))
+                return txl.Cast(tm[0] + col + (quad << 21), "uint32")
 
             st_kv = txl.PipelineState(2, phase=0)
             st_te = txl.PipelineState(1, phase=1)
@@ -9541,7 +9541,7 @@ def make_fused_kernel(
             with txl.serial(n_p1) as it:
                 chain = txl.local_scalar("int32", init=p1_chain(it))
                 seq, head, bos, seq_len, nch = work_coords(chain)
-                head64 = txl.Cast("int64", head)
+                head64 = txl.Cast(head, "int64")
                 gcol = txl.local_scalar("int64", init=head64 * txl.int64(D) + x64)
 
                 def h_c0():
@@ -9577,7 +9577,7 @@ def make_fused_kernel(
                 with txl.serial(nch) as n:
                     rows = txl.int32(CHUNK)
                     tok0 = txl.local_scalar(
-                        "int64", init=bos + txl.Cast("int64", n * txl.int32(CHUNK))
+                        "int64", init=bos + txl.Cast(n * txl.int32(CHUNK), "int64")
                     )
                     txl.ptx.ex2.approx.ftz.f32(egn, gn)
                     phase("hw-kv")
@@ -9614,7 +9614,7 @@ def make_fused_kernel(
                             txl.ptx.ex2.approx.ftz.f32(eg, gv[i])
                             txl.ptx.ex2.approx.ftz.f32(egng, gn - gv[i])
                             txl.ptx.cvt.rn.bf16.f32(bu, eg)
-                            egidx = (tok0 + txl.Cast("int64", row0 + txl.int32(i))) * HK64 + gcol
+                            egidx = (tok0 + txl.Cast(row0 + txl.int32(i), "int64")) * HK64 + gcol
                             txl.ptx["st.global.L1::no_allocate.b16"](egcache.ptr_to([egidx]), bu)
                             txl.assign(vals[e], kk[i] * egng)
                             txl.assign(vals[8 + e], kk[i] * bb[i] * eg)
@@ -9647,9 +9647,9 @@ def make_fused_kernel(
                     with txl.If(n == txl.int32(0)):
                         with txl.Then():
                             h0base = (
-                                (txl.Cast("int64", seq) * txl.int64(H) + head64) * txl.int64(D)
+                                (txl.Cast(seq, "int64") * txl.int64(H) + head64) * txl.int64(D)
                                 + x64
-                            ) * txl.int64(D) + txl.Cast("int64", hc0)
+                            ) * txl.int64(D) + txl.Cast(hc0, "int64")
                             for m in range(8):
                                 txl.ptx[
                                     "ld.global.nc.L1::no_allocate.L2::evict_normal.L2::256B.v8.f32"
@@ -9771,12 +9771,12 @@ def make_fused_kernel(
                 mphase("hm-kvT")
                 kv_u = txl.local_scalar(
                     "uint64",
-                    init=txl.Cast("uint64", st_kv1.stage) * txl.uint64(4 * UNITS_PER_STAGE),
+                    init=txl.Cast(st_kv1.stage, "uint64") * txl.uint64(4 * UNITS_PER_STAGE),
                 )
                 with txl.If(elected()), txl.Then():
                     for j in range(4):
                         txl.ptx[MMA_SS](
-                            txl.Cast("uint32", tm[0] + TM_KT + 16 * j),
+                            txl.Cast(tm[0] + TM_KT + 16 * j, "uint32"),
                             op_kraw.desc(j, kv_u),
                             bdI1[0],
                             txl.uint32(ID_T1),
@@ -9825,7 +9825,7 @@ def make_fused_kernel(
                     txl.ptx[TC_FENCE_AFTER]()
                     akk_u = txl.local_scalar(
                         "uint64",
-                        init=txl.Cast("uint64", st_akk.stage) * txl.uint64(UNITS_PER_STAGE),
+                        init=txl.Cast(st_akk.stage, "uint64") * txl.uint64(UNITS_PER_STAGE),
                     )
                     mphase("hm-WU")
                     with txl.If(elected()), txl.Then():
@@ -9845,7 +9845,7 @@ def make_fused_kernel(
                     txl.ptx[TC_FENCE_AFTER]()
                     hs_u = txl.local_scalar(
                         "uint64",
-                        init=txl.Cast("uint64", st_hs.stage) * txl.uint64(4 * UNITS_PER_STAGE),
+                        init=txl.Cast(st_hs.stage, "uint64") * txl.uint64(4 * UNITS_PER_STAGE),
                     )
                     mphase("hm-Vn")
                     with txl.If(elected()), txl.Then():
@@ -9870,7 +9870,7 @@ def make_fused_kernel(
             with txl.serial(n_p1) as it:
                 chain = txl.local_scalar("int32", init=p1_chain(it))
                 seq, head, bos, seq_len, nch = work_coords(chain)
-                bos32 = txl.local_scalar("int32", init=txl.Cast("int32", bos))
+                bos32 = txl.local_scalar("int32", init=txl.Cast(bos, "int32"))
                 head8 = txl.local_scalar("int32", init=head >> txl.int32(3))
                 with txl.serial(nch) as n:
                     tok0 = bos32 + n * txl.int32(CHUNK)
@@ -9989,7 +9989,7 @@ def make_fused_kernel(
             quad = txl.local_scalar("int32", init=wr & 3)
             x = txl.local_scalar("int32", init=quad * 32 + lane)
             row0 = txl.local_scalar("int32", init=wg * 32)
-            x64 = txl.Cast("int64", x)
+            x64 = txl.Cast(x, "int64")
             xs = txl.local_scalar("int32", init=x >> 6)
             xr = txl.local_scalar("int32", init=x & 63)
             tid_all = txl.local_scalar("int32", init=wr * 32 + lane)
@@ -10002,7 +10002,7 @@ def make_fused_kernel(
             cyc = txl.local_scalar("int32", init=txl.int32(0))
 
             def tmem_at(col):
-                return txl.Cast("uint32", tm[0] + col + (quad << 21))
+                return txl.Cast(tm[0] + col + (quad << 21), "uint32")
 
             def ld32(regs, col, base=0):
                 txl.ptx[TC_LD32](*(regs[base + i] for i in range(32)), tmem_at(col))
@@ -10040,7 +10040,7 @@ def make_fused_kernel(
                 txl.ptx.bar.sync(txl.uint32(1), txl.uint32(256))
 
             def bar_wg():
-                txl.ptx.bar.sync(txl.uint32(2) + txl.Cast("uint32", wg), txl.uint32(128))
+                txl.ptx.bar.sync(txl.uint32(2) + txl.Cast(wg, "uint32"), txl.uint32(128))
 
             def twait(nm):
                 TC[nm].wait(0, cyc & txl.int32(1))
@@ -10054,21 +10054,21 @@ def make_fused_kernel(
                 MB[nm].arrive(0)
 
             def lo(w):
-                return txl.reinterpret("float32", w << txl.uint32(16))
+                return txl.reinterpret(w << txl.uint32(16), ty="float32")
 
             def hi(w):
-                return txl.reinterpret("float32", w & txl.uint32(0xFFFF0000))
+                return txl.reinterpret(w & txl.uint32(0xFFFF0000), ty="float32")
 
             def shfl_xor1(val):
                 r = txl.local_scalar("uint32")
                 txl.ptx.shfl_sync.bfly.b32(
                     r,
-                    txl.reinterpret("uint32", val),
+                    txl.reinterpret(val, ty="uint32"),
                     txl.uint32(1),
                     txl.uint32(0x1F),
                     txl.uint32(0xFFFFFFFF),
                 )
-                return txl.reinterpret("float32", r)
+                return txl.reinterpret(r, ty="float32")
 
             def q_ptr(c, col):
                 return TT[ST_Q + (col >> 6)].ptr_to(c, col & 63)
@@ -10161,7 +10161,7 @@ def make_fused_kernel(
 
             def gcol_ptr(tensor, i):
                 """Global pointer to row (row0+i) of this thread's column (clamped to the last valid row)."""
-                tokc = tok0 + txl.Cast("int64", txl.min(row0 + txl.int32(i), rows - txl.int32(1)))
+                tokc = tok0 + txl.Cast(txl.min(row0 + txl.int32(i), rows - txl.int32(1)), "int64")
                 return tensor.ptr_to([tokc * HK64 + gcol])
 
             def s_beta_row(c):
@@ -10177,7 +10177,7 @@ def make_fused_kernel(
             with txl.serial(n_p2) as i2:
                 work = txl.local_scalar("int32", init=p2_chain(i2))
                 seq, head, bos, seq_len, nch = work_coords(work)
-                head64 = txl.Cast("int64", head)
+                head64 = txl.Cast(head, "int64")
                 gcol = txl.local_scalar("int64", init=head64 * txl.int64(D) + x64)
                 with txl.serial(nch) as rn:
                     n = nch - txl.int32(1) - rn
@@ -10186,10 +10186,10 @@ def make_fused_kernel(
                     rows = txl.int32(CHUNK)
                     last = txl.int32(CHUNK - 1)
                     tok0 = txl.local_scalar(
-                        "int64", init=bos + txl.Cast("int64", n * txl.int32(CHUNK))
+                        "int64", init=bos + txl.Cast(n * txl.int32(CHUNK), "int64")
                     )
                     x_base = txl.local_scalar(
-                        "int64", init=(tok0 + txl.Cast("int64", row0)) * HK64 + gcol
+                        "int64", init=(tok0 + txl.Cast(row0, "int64")) * HK64 + gcol
                     )
 
                     gn = txl.local_scalar("float32", init=txl.float32(0.0))
@@ -10202,7 +10202,7 @@ def make_fused_kernel(
                                 ti = txl.min(row0 + txl.int32(i), last)
                                 txl.ptx.ld.global_.nc.f32(
                                     gi_value,
-                                    g.ptr_to([(tok0 + txl.Cast("int64", ti)) * HK64 + gcol]),
+                                    g.ptr_to([(tok0 + txl.Cast(ti, "int64")) * HK64 + gcol]),
                                 )
                                 txl.ptx.ex2.approx.ftz.f32(dst, gn - gi_value)
                             with txl.Else():
@@ -10220,7 +10220,7 @@ def make_fused_kernel(
                         btok = wr * txl.int32(8) + lane
                         txl.ptx.ld.shared.u16(u16, s_beta_in.ptr_to([btok, head & txl.int32(7)]))
                         txl.ptx.st.shared.f32(
-                            txl.address_of(s_beta[btok]), lo(txl.Cast("uint32", u16))
+                            txl.address_of(s_beta[btok]), lo(txl.Cast(u16, "uint32"))
                         )
 
                     egf = txl.alloc_local([32], "float32")
@@ -10262,7 +10262,7 @@ def make_fused_kernel(
                     txl.assign(egn, t4[3])
                     txl.assign(state_strong, egn < txl.float32(0.0625))
                     txl.ptx.ld.global_.nc.f32(
-                        gn, g.ptr_to([(tok0 + txl.Cast("int64", last)) * HK64 + gcol])
+                        gn, g.ptr_to([(tok0 + txl.Cast(last, "int64")) * HK64 + gcol])
                     )
                     with txl.If(state_strong), txl.Then():
                         txl.ptx.ex2.approx.ftz.f32(egn, gn)
@@ -10324,7 +10324,7 @@ def make_fused_kernel(
                             values = txl.alloc_local([2], "float32")
                             for e in range(2):
                                 ti0 = row0 + 2 * pi + e
-                                token = tok0 + txl.Cast("int64", txl.min(ti0, last))
+                                token = tok0 + txl.Cast(txl.min(ti0, last), "int64")
                                 gate = _load_gate(g, token, head, x, H * D)
                                 # Identity-transposed K is already live in kc for output math.
                                 # Static indices avoid reloading these same token/channel pairs.
@@ -10351,8 +10351,8 @@ def make_fused_kernel(
                     )
                     hst = txl.local_scalar("int32", init=wg * 2 + xs)
                     dbase = (
-                        (txl.Cast("int64", seq) * txl.int64(H) + head64) * txl.int64(D) + x64
-                    ) * txl.int64(D) + txl.Cast("int64", wg * 64)
+                        (txl.Cast(seq, "int64") * txl.int64(H) + head64) * txl.int64(D) + x64
+                    ) * txl.int64(D) + txl.Cast(wg * 64, "int64")
                     with txl.If(rn == txl.int32(0)):
                         with txl.Then():
                             for m in range(8):
@@ -10582,11 +10582,11 @@ def make_fused_kernel(
                                 )
                                 txl.ptx["st.global.L1::no_allocate.b16"](
                                     dv.ptr_to([x_base + txl.int64(i * HK)]),
-                                    txl.Cast("uint16", pa_word),
+                                    txl.Cast(pa_word, "uint16"),
                                 )
                                 txl.ptx["st.global.L1::no_allocate.b16"](
                                     dv.ptr_to([x_base + txl.int64((i + 1) * HK)]),
-                                    txl.Cast("uint16", pa_word >> txl.uint32(16)),
+                                    txl.Cast(pa_word >> txl.uint32(16), "uint16"),
                                 )
 
                             for e in range(8):
@@ -10642,7 +10642,7 @@ def make_fused_kernel(
                     with txl.If(range_safe & diagonal_needed & txl.Not(strong)), txl.Then():
                         precise_end = txl.local_scalar("float32")
                         txl.ptx.ld.global_.nc.f32(
-                            precise_end, g.ptr_to([(tok0 + txl.Cast("int64", last)) * HK64 + gcol])
+                            precise_end, g.ptr_to([(tok0 + txl.Cast(last, "int64")) * HK64 + gcol])
                         )
                         for precise_pair in range(16):
                             precise_values = txl.alloc_local([2], "float32")
@@ -10654,7 +10654,7 @@ def make_fused_kernel(
                                 txl.ptx.ld.global_.nc.f32(
                                     precise_log,
                                     g.ptr_to(
-                                        [(tok0 + txl.Cast("int64", precise_token)) * HK64 + gcol]
+                                        [(tok0 + txl.Cast(precise_token, "int64")) * HK64 + gcol]
                                     ),
                                 )
                                 txl.ptx.ex2.approx.ftz.f32(
@@ -10942,7 +10942,7 @@ def make_fused_kernel(
                         twait("chunk_done")
                         with txl.If(strong), txl.Then():
                             with txl.serial(32) as i:
-                                token = tok0 + txl.Cast("int64", txl.min(row0 + i, last))
+                                token = tok0 + txl.Cast(txl.min(row0 + i, last), "int64")
                                 gate = _load_gate(g, token, head, x, H * D)
                                 previous_gate = _load_gate(
                                     g, txl.max(tok0, token - txl.int64(1)), head, x, H * D
@@ -10950,12 +10950,12 @@ def make_fused_kernel(
                                 txl.ptx.ex2.approx.ftz.f32(gate, gate - previous_gate)
                                 q_value = _load_bf16_f32(
                                     q.ptr_to(
-                                        [token * txl.int64(H * D) + txl.Cast("int64", head * D + x)]
+                                        [token * txl.int64(H * D) + txl.Cast(head * D + x, "int64")]
                                     )
                                 )
                                 k_value = _load_bf16_f32(
                                     k.ptr_to(
-                                        [token * txl.int64(H * D) + txl.Cast("int64", head * D + x)]
+                                        [token * txl.int64(H * D) + txl.Cast(head * D + x, "int64")]
                                     )
                                 )
                                 word = txl.local_scalar("uint32")
@@ -10985,7 +10985,7 @@ def make_fused_kernel(
                                             cooperative_channel,
                                             txl.Select(
                                                 (lane // 8) == group,
-                                                txl.Cast("int32", cooperative_bit & txl.uint32(31)),
+                                                txl.Cast(cooperative_bit & txl.uint32(31), "int32"),
                                                 cooperative_channel,
                                             ),
                                         )
@@ -11612,16 +11612,16 @@ def make_fused_kernel(
                         r = txl.local_scalar("uint32")
                         txl.ptx.shfl_sync.bfly.b32(
                             r,
-                            txl.reinterpret("uint32", dsum),
+                            txl.reinterpret(dsum, ty="uint32"),
                             txl.uint32(s),
                             txl.uint32(0x1F),
                             txl.uint32(0xFFFFFFFF),
                         )
-                        txl.assign(dsum, dsum + txl.reinterpret("float32", r))
+                        txl.assign(dsum, dsum + txl.reinterpret(r, ty="float32"))
                     with txl.If(tq == txl.int32(0)), txl.Then():
                         txl.ptx["st.global.L1::no_allocate.f32"](
                             db.ptr_to(
-                                [(tok0 + txl.Cast("int64", row0 + ti)) * txl.int64(H) + head64]
+                                [(tok0 + txl.Cast(row0 + ti, "int64")) * txl.int64(H) + head64]
                             ),
                             dsum,
                         )
@@ -11654,8 +11654,8 @@ def make_fused_kernel(
                 ld32(acc, TM_DH + wg * 64 + 32, 32)
                 txl.ptx[WAIT_LD]()
                 obase = (
-                    (txl.Cast("int64", seq) * txl.int64(H) + head64) * txl.int64(D) + x64
-                ) * txl.int64(D) + txl.Cast("int64", wg * 64)
+                    (txl.Cast(seq, "int64") * txl.int64(H) + head64) * txl.int64(D) + x64
+                ) * txl.int64(D) + txl.Cast(wg * 64, "int64")
                 for m in range(8):
                     txl.ptx["st.global.L1::no_allocate.v8.f32"](
                         dh0.ptr_to([obase + txl.int64(8 * m)]), *(acc[8 * m + i] for i in range(8))
@@ -11745,7 +11745,7 @@ def make_fused_kernel(
                             swizzle=txl.SW128B.value,
                         )
                         akk_u = txl.local_scalar(
-                            "uint64", init=txl.Cast("uint64", par) * txl.uint64(UNITS_PER_STAGE)
+                            "uint64", init=txl.Cast(par, "uint64") * txl.uint64(UNITS_PER_STAGE)
                         )
                         mphase("mw-xT")
                         b_in_full.wait(0, par)
@@ -11758,7 +11758,7 @@ def make_fused_kernel(
                             for src, dst in ((op_egT, S1), (op_vT, S2), (op_qT, S3), (op_kT, S4)):
                                 for j in range(4):
                                     txl.ptx[MMA_SS](
-                                        txl.Cast("uint32", tm[0] + dst + 16 * j),
+                                        txl.Cast(tm[0] + dst + 16 * j, "uint32"),
                                         src.desc(j),
                                         bdI[0],
                                         txl.uint32(ID_T),
@@ -11893,7 +11893,7 @@ def make_fused_kernel(
                 with txl.serial(n_p2) as i2:
                     work = txl.local_scalar("int32", init=p2_chain(i2))
                     seq, head, bos, seq_len, nch = work_coords(work)
-                    bos32 = txl.local_scalar("int32", init=txl.Cast("int32", bos))
+                    bos32 = txl.local_scalar("int32", init=txl.Cast(bos, "int32"))
                     cb = chunk_base(seq)
                     head8 = txl.local_scalar("int32", init=head >> txl.int32(3))
 
@@ -12022,7 +12022,7 @@ def make_fused_kernel(
                                 with txl.If(i2 + txl.int32(1) < n_p2), txl.Then():
                                     nxt = p2_chain(i2 + txl.int32(1))
                                     seq2, head2, bos2, seq_len2, nch2 = work_coords(nxt)
-                                    tokn = txl.Cast("int32", bos2) + (
+                                    tokn = txl.Cast(bos2, "int32") + (
                                         nch2 - txl.int32(1)
                                     ) * txl.int32(CHUNK)
                                     hidn = (chunk_base(seq2) + nch2 - txl.int32(1)) * txl.int32(
@@ -12126,7 +12126,7 @@ def make_fused_kernel(
         with txl.If(txl.warp_id() == 8), txl.Then():
             txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"]()
             txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
-                txl.Cast("uint32", txl.local_scalar("int32", init=tmem_preamble()[0])),
+                txl.Cast(txl.local_scalar("int32", init=tmem_preamble()[0]), "uint32"),
                 txl.uint32(512),
             )
 

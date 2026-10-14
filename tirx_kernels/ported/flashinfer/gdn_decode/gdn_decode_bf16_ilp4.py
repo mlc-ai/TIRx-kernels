@@ -59,12 +59,12 @@ def _shfl_bfly_f32(value, lane_xor):
     shfl_bfly = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         shfl_bfly,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.cast(lane_xor, "uint32"),
         txl.uint32(31),
         txl.uint32(4294967295),
     )
-    return txl.reinterpret("float32", shfl_bfly)
+    return txl.reinterpret(shfl_bfly, ty="float32")
 
 
 def _local_scalar(dtype: str, value):
@@ -76,16 +76,22 @@ def _local_scalar(dtype: str, value):
 def _global_store_u16x4(buffer, index, values):
     base = buffer.ptr_to([index])
     txl.ptx.st.global_.b16(base, values[0])
-    txl.ptx.st.global_.b16(txl.ptr_byte_offset(base, 2, "bfloat16"), values[1])
-    txl.ptx.st.global_.b16(txl.ptr_byte_offset(base, 4, "bfloat16"), values[2])
-    txl.ptx.st.global_.b16(txl.ptr_byte_offset(base, 6, "bfloat16"), values[3])
+    txl.ptx.st.global_.b16(
+        txl.ptr_byte_offset(base, 2, ty=txl.Ptr("bfloat16", (base).ty.scope)), values[1]
+    )
+    txl.ptx.st.global_.b16(
+        txl.ptr_byte_offset(base, 4, ty=txl.Ptr("bfloat16", (base).ty.scope)), values[2]
+    )
+    txl.ptx.st.global_.b16(
+        txl.ptr_byte_offset(base, 6, ty=txl.Ptr("bfloat16", (base).ty.scope)), values[3]
+    )
 
 
 def _shared_load_f32x2(buffer, index, values):
     words = txl.alloc_local((2,), "uint32", align=8)
     txl.ptx.ld.shared.v2.b32(words[0], words[1], buffer.ptr_to([index]))
-    txl.ptx.mov.b32(values[0], txl.reinterpret("float32", words[0]))
-    txl.ptx.mov.b32(values[1], txl.reinterpret("float32", words[1]))
+    txl.ptx.mov.b32(values[0], txl.reinterpret(words[0], ty="float32"))
+    txl.ptx.mov.b32(values[1], txl.reinterpret(words[1], ty="float32"))
 
 
 def _shared_load_f32x4(buffer, index, values):
@@ -348,20 +354,20 @@ def _make_gdn_decode_bf16_ilp4(
 ):
     @txl.kernel()
     def gdn_decode_bf16_ilp4(
-        state: txl.gptr[txl.bf16],
-        intermediate: txl.gptr[txl.bf16],
-        A_log: txl.gptr[txl.f32],
-        a: txl.gptr[txl.bf16],
-        dt_bias: txl.gptr[txl.f32],
-        q: txl.gptr[txl.bf16],
-        k: txl.gptr[txl.bf16],
-        v: txl.gptr[txl.bf16],
-        b_gate: txl.gptr[txl.bf16],
-        output: txl.gptr[txl.bf16],
-        read_indices: txl.gptr[txl.i32],
-        write_indices: txl.gptr[txl.i32],
-        accepted_steps: txl.gptr[txl.i32],
-        ssm_state_indices: txl.gptr[txl.i32],
+        state: txl.Tensor((txl.int64(),), txl.bf16),
+        intermediate: txl.Tensor((txl.int64(),), txl.bf16),
+        A_log: txl.Tensor((txl.int64(),), txl.f32),
+        a: txl.Tensor((txl.int64(),), txl.bf16),
+        dt_bias: txl.Tensor((txl.int64(),), txl.f32),
+        q: txl.Tensor((txl.int64(),), txl.bf16),
+        k: txl.Tensor((txl.int64(),), txl.bf16),
+        v: txl.Tensor((txl.int64(),), txl.bf16),
+        b_gate: txl.Tensor((txl.int64(),), txl.bf16),
+        output: txl.Tensor((txl.int64(),), txl.bf16),
+        read_indices: txl.Tensor((txl.int64(),), txl.i32),
+        write_indices: txl.Tensor((txl.int64(),), txl.i32),
+        accepted_steps: txl.Tensor((txl.int64(),), txl.i32),
+        ssm_state_indices: txl.Tensor((txl.int64(),), txl.i32),
         state_slot_stride: txl.i64,
         q_batch_stride: txl.i64,
         k_batch_stride: txl.i64,
@@ -509,12 +515,12 @@ def _make_gdn_decode_bf16_ilp4(
                         for elem in range(ELEMS_PER_LANE):
                             txl.ptx.st.shared.b32(
                                 s_q.ptr_to([shared_base[0] + elem]),
-                                txl.reinterpret("uint32", r_q_pre[elem]),
+                                txl.reinterpret(r_q_pre[elem], ty="uint32"),
                             )
                     for elem in range(ELEMS_PER_LANE):
                         txl.ptx.st.shared.b32(
                             s_k.ptr_to([shared_base[0] + elem]),
-                            txl.reinterpret("uint32", r_k_pre[elem]),
+                            txl.reinterpret(r_k_pre[elem], ty="uint32"),
                         )
                     if SEQ_LEN > 2:
                         gate = _local_scalar(
@@ -530,8 +536,8 @@ def _make_gdn_decode_bf16_ilp4(
                         with txl.If(lane[0] == 0), txl.Then():
                             txl.ptx.st.shared.v2.b32(
                                 s_gb.ptr_to([t_pre[0] * 2]),
-                                txl.reinterpret("uint32", txl.cuda.float2_x(gate[0])),
-                                txl.reinterpret("uint32", txl.cuda.float2_y(gate[0])),
+                                txl.reinterpret(txl.cuda.float2_x(gate[0]), ty="uint32"),
+                                txl.reinterpret(txl.cuda.float2_y(gate[0]), ty="uint32"),
                             )
                 txl.cuda.cta_sync()
         for iter_index in range(ITERS_PER_GROUP):

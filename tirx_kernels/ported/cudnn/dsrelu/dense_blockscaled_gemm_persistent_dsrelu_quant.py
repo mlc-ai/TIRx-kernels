@@ -164,8 +164,8 @@ def _unpack_input(values, words, dtype, bits):
                 high_bits = txl.local_scalar("uint32")
                 txl.ptx.shl.b32(low_bits, words[word], txl.uint32(16))
                 txl.ptx.and_.b32(high_bits, words[word], txl.uint32(0xFFFF0000))
-                txl.assign(values[2 * word], txl.reinterpret("float32", low_bits))
-                txl.assign(values[2 * word + 1], txl.reinterpret("float32", high_bits))
+                txl.assign(values[2 * word], txl.reinterpret(low_bits, ty="float32"))
+                txl.assign(values[2 * word + 1], txl.reinterpret(high_bits, ty="float32"))
             return
         for word in range(16):
             low = txl.local_scalar("uint16")
@@ -1944,7 +1944,9 @@ def _make_kernel(
                                 txl.ptx.max.f32(block_amax, block_amax, next_amax)
                             atomic_old = txl.local_scalar("int32")
                             txl.ptx.atom.global_.max.s32(
-                                atomic_old, amax.ptr_to([0]), txl.reinterpret("int32", block_amax)
+                                atomic_old,
+                                amax.ptr_to([0]),
+                                txl.reinterpret(block_amax, ty="int32"),
                             )
 
                 with txl.If(global_row < M):
@@ -1993,15 +1995,19 @@ def _make_kernel(
             txl.ptx.cp.async_.bulk.wait_group.read(0)
 
     kernel.__annotations__ = {
-        "a": txl.gptr[txl.u8, (M * K_dim * L * ab_bits // 8,)],
-        "b": txl.gptr[txl.u8, (N * K_dim * L * ab_bits // 8,)],
-        "sfa": txl.gptr[txl.u8, (L * _ceil_div(M, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)],
-        "sfb": txl.gptr[txl.u8, (L * _ceil_div(N, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)],
-        "c": txl.gptr[txl.u8, (M * N * L * c_bits // 8,)],
-        "d": txl.gptr[txl.u8, (M * N * L * d_bits // 8,)],
-        "prob": txl.gptr[txl.f32, (m_tiles * cta_m * L,)],
-        "dprob": txl.gptr[txl.f32, (M * L,)],
-        "amax": txl.gptr[txl.f32, (1,)],
+        "a": txl.Tensor((M * K_dim * L * ab_bits // 8,), txl.u8),
+        "b": txl.Tensor((N * K_dim * L * ab_bits // 8,), txl.u8),
+        "sfa": txl.Tensor(
+            (L * _ceil_div(M, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,), txl.u8
+        ),
+        "sfb": txl.Tensor(
+            (L * _ceil_div(N, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,), txl.u8
+        ),
+        "c": txl.Tensor((M * N * L * c_bits // 8,), txl.u8),
+        "d": txl.Tensor((M * N * L * d_bits // 8,), txl.u8),
+        "prob": txl.Tensor((m_tiles * cta_m * L,), txl.f32),
+        "dprob": txl.Tensor((M * L,), txl.f32),
+        "amax": txl.Tensor((1,), txl.f32),
         "alpha": txl.f32,
     }
     return txl.kernel()(kernel)

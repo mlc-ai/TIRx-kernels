@@ -537,20 +537,20 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
 
     @txl.kernel(allowed_func_calls=_NVSHMEM_RUNTIME_FUNC_CALLS)
     def test_mma_ss_tma_2sm_persistent(
-        A: txl.gptr[txl.f16, (M, K_LOCAL)],
-        B: txl.gptr[txl.f16, (N, K_LOCAL)],
-        gemm_out: txl.gptr[txl.f16, (M, N)],
-        semaphore: txl.gptr[txl.u64, (LOCAL_M // TILE_M, N // TILE_N)],
-        out: txl.gptr[txl.f16, (LOCAL_M, N)],
-        gemm_task_types: txl.gptr[txl.i32, (CAPACITY,)],
-        gemm_task_idxs: txl.gptr[txl.i32, (CAPACITY, 2)],
-        gemm_head: txl.gptr[txl.i32, (1,)],
-        gemm_tail: txl.gptr[txl.i32, (1,)],
-        rs_task_types: txl.gptr[txl.i32, (CAPACITY,)],
-        rs_task_idxs: txl.gptr[txl.i32, (CAPACITY, 2)],
-        rs_head: txl.gptr[txl.i32, (1,)],
-        rs_tail: txl.gptr[txl.i32, (1,)],
-        exit_barrier: txl.gptr[txl.u32, (2,)],
+        A: txl.Tensor((M, K_LOCAL), txl.f16),
+        B: txl.Tensor((N, K_LOCAL), txl.f16),
+        gemm_out: txl.Tensor((M, N), txl.f16),
+        semaphore: txl.Tensor((LOCAL_M // TILE_M, N // TILE_N), txl.u64),
+        out: txl.Tensor((LOCAL_M, N), txl.f16),
+        gemm_task_types: txl.Tensor((CAPACITY,), txl.i32),
+        gemm_task_idxs: txl.Tensor((CAPACITY, 2), txl.i32),
+        gemm_head: txl.Tensor((1,), txl.i32),
+        gemm_tail: txl.Tensor((1,), txl.i32),
+        rs_task_types: txl.Tensor((CAPACITY,), txl.i32),
+        rs_task_idxs: txl.Tensor((CAPACITY, 2), txl.i32),
+        rs_head: txl.Tensor((1,), txl.i32),
+        rs_tail: txl.Tensor((1,), txl.i32),
+        exit_barrier: txl.Tensor((2,), txl.u32),
     ):
         host = prepare_host(
             {
@@ -658,7 +658,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
         )
 
         packed_ptr = txl.reinterpret(
-            PtrType(PrimType("uint32")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)
+            _mapa_u64_tx(packed_buf.ptr_to([0]), 0), ty=PtrType(PrimType("uint32"))
         )
         packed_value = txl.decl_tensor((4,), "uint32", data=packed_ptr, scope="shared")
         tile_scheduler = MixedDynamicTileScheduler(gemm_queue, rs_queue, packed_value, sch_pipe)

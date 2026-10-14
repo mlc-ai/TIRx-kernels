@@ -129,7 +129,7 @@ def shfl_up_u32(value, delta):
 #   (bits & 0x80000000) ? ~bits : (bits ^ 0x80000000)
 # nvcc lowers this to setp.gt.s32 + selp.b32(0x80000000, -1) + xor.b32.
 def to_ordered_u32(bits):
-    signed = txl.reinterpret("int32", bits)
+    signed = txl.reinterpret(bits, ty="int32")
     # txl.Select, not txl.if_then_else: the latter lowers to an if/else statement in
     # generated CUDA, which becomes a real branch with BSSY reconvergence. The
     # source's ternary is a predicated `selp.b32`, which is what the sketch names.
@@ -140,21 +140,21 @@ def to_ordered_u32(bits):
 # RadixTopKTraits<float>::FromOrdered (topk_common.cuh:41-44)
 #   (ordered & 0x80000000) ? (ordered ^ 0x80000000) : ~ordered
 def from_ordered_u32(ordered):
-    signed = txl.reinterpret("int32", ordered)
+    signed = txl.reinterpret(ordered, ty="int32")
     mask = txl.Select(signed > txl.int32(-1), txl.uint32(0xFFFFFFFF), txl.uint32(0x80000000))
     return txl.bitwise_xor(mask, ordered)
 
 
 # RadixTopKTraits<half|nv_bfloat16>::ToOrdered (topk_common.cuh:61-64, :87-90)
 def to_ordered_u16(bits):
-    signed = txl.reinterpret("int16", bits)
+    signed = txl.reinterpret(bits, ty="int16")
     mask = txl.Select(signed > txl.int16(-1), txl.uint16(0x8000), txl.uint16(0xFFFF))
     return txl.bitwise_xor(mask, bits)
 
 
 # RadixTopKTraits<half|nv_bfloat16>::FromOrdered (topk_common.cuh:66-69, :92-95)
 def from_ordered_u16(ordered):
-    signed = txl.reinterpret("int16", ordered)
+    signed = txl.reinterpret(ordered, ty="int16")
     mask = txl.Select(signed > txl.int16(-1), txl.uint16(0xFFFF), txl.uint16(0x8000))
     return txl.bitwise_xor(mask, ordered)
 
@@ -321,7 +321,9 @@ def stage_vector(buf, s_ordered, row_in, i, vec, load_bytes, is32, to_ordered, s
             lo = to_ordered(txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16"))
             hi = to_ordered(txl.cast(txl.shift_right(word, txl.uint32(16)), "uint16"))
             keys.append(
-                txl.bitwise_or(txl.cast(lo, "uint32"), txl.shift_left(txl.cast(hi, "uint32"), txl.uint32(16)))
+                txl.bitwise_or(
+                    txl.cast(lo, "uint32"), txl.shift_left(txl.cast(hi, "uint32"), txl.uint32(16))
+                )
             )
     if len(keys) == 4:
         st_shared_quad_u32(s_ordered, i, keys[0], keys[1], keys[2], keys[3])
@@ -335,12 +337,12 @@ def emit_selected(out_idx, out_val, row_out, i, key, pos, offset, basic, ragged,
     """The mode epilogue the collect passes call per selected element (:1339-1375)."""
     slot = row_out + txl.cast(pos, "int64")
     if basic:
-        st_global_u32(out_idx, slot, txl.reinterpret("uint32", i))
+        st_global_u32(out_idx, slot, txl.reinterpret(i, ty="uint32"))
         if is32:
             st_global_u32(out_val, slot, from_ordered_u32(key))
         else:
             st_global_u16(out_val, slot, from_ordered_u16(txl.cast(key, "uint16")))
     elif ragged:
-        st_global_u32(out_idx, slot, txl.reinterpret("uint32", i + offset))
+        st_global_u32(out_idx, slot, txl.reinterpret(i + offset, ty="uint32"))
     else:
-        st_global_u32(out_idx, slot, txl.reinterpret("uint32", i))
+        st_global_u32(out_idx, slot, txl.reinterpret(i, ty="uint32"))

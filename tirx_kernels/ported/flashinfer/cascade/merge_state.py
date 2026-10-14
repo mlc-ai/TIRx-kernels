@@ -113,12 +113,12 @@ def get_kernel(
 
     @txl.kernel()
     def merge_state(
-        v_a: txl.gptr[dtype],
-        s_a: txl.gptr[txl.f32],
-        v_b: txl.gptr[dtype],
-        s_b: txl.gptr[txl.f32],
-        v_merged: txl.gptr[dtype],
-        s_merged: txl.gptr[txl.f32],
+        v_a: txl.Tensor((txl.int64(),), dtype),
+        s_a: txl.Tensor((txl.int64(),), txl.f32),
+        v_b: txl.Tensor((txl.int64(),), dtype),
+        s_b: txl.Tensor((txl.int64(),), txl.f32),
+        v_merged: txl.Tensor((txl.int64(),), dtype),
+        s_merged: txl.Tensor((txl.int64(),), txl.f32),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=seq_len, block=warps * 32),
@@ -126,7 +126,7 @@ def get_kernel(
         )
 
         pos = txl.cta_id()  # blockIdx.x
-        index_pos = txl.Cast("int64", pos) if index_dtype == "int64" else pos
+        index_pos = txl.Cast(pos, "int64") if index_dtype == "int64" else pos
         tid = txl.thread_id()
         # The source launches a (bdx, bdy) block and reads threadIdx.x / threadIdx.y.
         # tirx-lite owns one flat thread axis of the same order (tid = ty * bdx + tx).
@@ -147,7 +147,7 @@ def get_kernel(
                 )
             else:
                 row = txl.local_scalar(index_dtype, init=index_pos * num_heads + ty)
-            row64 = txl.Cast("int64", row)
+            row64 = txl.Cast(row, "int64")
             s_a_val = txl.local_scalar("float32")
             s_b_val = txl.local_scalar("float32")
             txl.ptx.ld.global_.nc.b32(s_a_val, s_a.ptr_to([row64]))
@@ -188,7 +188,7 @@ def get_kernel(
                 )
             else:
                 slice_ = txl.local_scalar(index_dtype, init=vector_index)
-            slice64 = txl.Cast("int64", slice_)
+            slice64 = txl.Cast(slice_, "int64")
 
             a_bits = txl.alloc_local([nwords], "uint32")
             a_vec = txl.alloc_local([vec], "float32")

@@ -329,35 +329,35 @@ def get_kernel_2cta(*, backend_config=None, **config):
 
     @txl.kernel()
     def bwd(
-        q_map: txl.TensorMap,
-        qt_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        kt_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        do_map: txl.TensorMap,
-        dot_map: txl.TensorMap,
-        dv_map: txl.TensorMap,
-        dk_map: txl.TensorMap,
-        dk_output: txl.gptr[elem_type],
-        dv_output: txl.gptr[elem_type],
-        cu_q: txl.gptr[txl.i32],
-        cu_k: txl.gptr[txl.i32],
-        partial_count: txl.gptr[txl.i32],
-        partial_index: txl.gptr[txl.i32],
-        full_count: txl.gptr[txl.i32],
-        full_index: txl.gptr[txl.i32],
-        cu_k_blocks: txl.gptr[txl.i32],
-        dq_write_order: txl.gptr[txl.i32],
-        dq_write_order_full: txl.gptr[txl.i32],
-        partial_offset: txl.gptr[txl.i32],
-        full_offset: txl.gptr[txl.i32],
-        packed_mask: txl.gptr[txl.u32],
-        sequence_desc: txl.gptr[txl.i32],
-        work_desc: txl.gptr[txl.i32],
-        dq_semaphore: txl.gptr[txl.i32],
-        dk_semaphore: txl.gptr[txl.i32],
-        dv_semaphore: txl.gptr[txl.i32],
-        workspace: txl.gptr[txl.f32],
+        q_map: txl.Ptr(txl.TensorMap),
+        qt_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        kt_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        do_map: txl.Ptr(txl.TensorMap),
+        dot_map: txl.Ptr(txl.TensorMap),
+        dv_map: txl.Ptr(txl.TensorMap),
+        dk_map: txl.Ptr(txl.TensorMap),
+        dk_output: txl.Tensor((txl.int64(),), elem_type),
+        dv_output: txl.Tensor((txl.int64(),), elem_type),
+        cu_q: txl.Tensor((txl.int64(),), txl.i32),
+        cu_k: txl.Tensor((txl.int64(),), txl.i32),
+        partial_count: txl.Tensor((txl.int64(),), txl.i32),
+        partial_index: txl.Tensor((txl.int64(),), txl.i32),
+        full_count: txl.Tensor((txl.int64(),), txl.i32),
+        full_index: txl.Tensor((txl.int64(),), txl.i32),
+        cu_k_blocks: txl.Tensor((txl.int64(),), txl.i32),
+        dq_write_order: txl.Tensor((txl.int64(),), txl.i32),
+        dq_write_order_full: txl.Tensor((txl.int64(),), txl.i32),
+        partial_offset: txl.Tensor((txl.int64(),), txl.i32),
+        full_offset: txl.Tensor((txl.int64(),), txl.i32),
+        packed_mask: txl.Tensor((txl.int64(),), txl.u32),
+        sequence_desc: txl.Tensor((txl.int64(),), txl.i32),
+        work_desc: txl.Tensor((txl.int64(),), txl.i32),
+        dq_semaphore: txl.Tensor((txl.int64(),), txl.i32),
+        dk_semaphore: txl.Tensor((txl.int64(),), txl.i32),
+        dv_semaphore: txl.Tensor((txl.int64(),), txl.i32),
+        workspace: txl.Tensor((txl.int64(),), txl.f32),
         softmax_scale: txl.f32,
     ):
         # The source materializes ``block_idx_in_cluster`` with
@@ -1313,14 +1313,14 @@ def get_kernel_2cta(*, backend_config=None, **config):
                                 txl.shift_right(mask_words[j // 32], txl.uint32(j % 32)),
                                 txl.uint32(1),
                             )
-                            score_bits = txl.reinterpret(txl.u32, scores[j])
+                            score_bits = txl.reinterpret(scores[j], ty=txl.u32)
                             drop = txl.local_scalar("uint32")
                             txl.ptx.setp.eq.u32(drop, keep, txl.uint32(0))
                             masked_bits = txl.local_scalar("uint32")
                             txl.ptx.selp.b32(
                                 masked_bits, txl.uint32(0xFF800000), score_bits, txl.ptx.pred(drop)
                             )
-                            txl.assign(scores[j], txl.reinterpret(txl.f32, masked_bits))
+                            txl.assign(scores[j], txl.reinterpret(masked_bits, ty=txl.f32))
                     for rep in range(2):
                         for pair in range(16):
                             j = rep * 32 + pair * 2

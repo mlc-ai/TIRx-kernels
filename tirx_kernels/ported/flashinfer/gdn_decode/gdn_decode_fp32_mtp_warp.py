@@ -58,12 +58,12 @@ def _shfl_bfly_f32(value, lane_xor):
     shfl_bfly = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         shfl_bfly,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.cast(lane_xor, "uint32"),
         txl.uint32(31),
         txl.uint32(4294967295),
     )
-    return txl.reinterpret("float32", shfl_bfly)
+    return txl.reinterpret(shfl_bfly, ty="float32")
 
 
 def _local_scalar(dtype: str, value):
@@ -75,7 +75,9 @@ def _local_scalar(dtype: str, value):
 def _global_load_u16_ptr_offset(ptr, byte_offset: int, native_offset: bool = True):
     out = txl.local_scalar("uint16")
     if not native_offset:
-        txl.ptx.ld.global_.b16(out, txl.ptr_byte_offset(ptr, byte_offset, "bfloat16"))
+        txl.ptx.ld.global_.b16(
+            out, txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("bfloat16", (ptr).ty.scope))
+        )
         return out
     txl.ptx.ld.global_.b16(out, txl.ptx.addr(ptr, byte_offset))
     return out
@@ -84,24 +86,29 @@ def _global_load_u16_ptr_offset(ptr, byte_offset: int, native_offset: bool = Tru
 def _shared_store_f32_ptr_offset(ptr, byte_offset: int, value, native_offset: bool = True):
     if not native_offset:
         txl.ptx.st.shared.b32(
-            txl.ptr_byte_offset(ptr, byte_offset, "float32"), txl.reinterpret("uint32", value)
+            txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope)),
+            txl.reinterpret(value, ty="uint32"),
         )
         return
-    txl.ptx.st.shared.b32(txl.ptx.addr(ptr, byte_offset), txl.reinterpret("uint32", value))
+    txl.ptx.st.shared.b32(txl.ptx.addr(ptr, byte_offset), txl.reinterpret(value, ty="uint32"))
 
 
 def _shared_load_f32_ptr_offset(ptr, byte_offset: int, native_offset: bool = True):
     word = txl.local_scalar("uint32")
     if not native_offset:
-        txl.ptx.ld.shared.b32(word, txl.ptr_byte_offset(ptr, byte_offset, "float32"))
-        return txl.reinterpret("float32", word)
+        txl.ptx.ld.shared.b32(
+            word, txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope))
+        )
+        return txl.reinterpret(word, ty="float32")
     txl.ptx.ld.shared.b32(word, txl.ptx.addr(ptr, byte_offset))
-    return txl.reinterpret("float32", word)
+    return txl.reinterpret(word, ty="float32")
 
 
 def _shared_store_u16_ptr_offset(ptr, byte_offset: int, value, native_offset: bool = True):
     if not native_offset:
-        txl.ptx.st.shared.b16(txl.ptr_byte_offset(ptr, byte_offset, "bfloat16"), value)
+        txl.ptx.st.shared.b16(
+            txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("bfloat16", (ptr).ty.scope)), value
+        )
         return
     txl.ptx.st.shared.b16(txl.ptx.addr(ptr, byte_offset), value)
 
@@ -109,7 +116,9 @@ def _shared_store_u16_ptr_offset(ptr, byte_offset: int, value, native_offset: bo
 def _shared_load_u16_ptr_offset(ptr, byte_offset: int, native_offset: bool = True):
     out = txl.local_scalar("uint16")
     if not native_offset:
-        txl.ptx.ld.shared.b16(out, txl.ptr_byte_offset(ptr, byte_offset, "bfloat16"))
+        txl.ptx.ld.shared.b16(
+            out, txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("bfloat16", (ptr).ty.scope))
+        )
         return out
     txl.ptx.ld.shared.b16(out, txl.ptx.addr(ptr, byte_offset))
     return out
@@ -119,20 +128,22 @@ def _shared_load_f32x4_ptr(ptr, values):
     words = txl.alloc_local((4,), "uint32", align=16)
     txl.ptx.ld.shared.v4.b32(words[0], words[1], words[2], words[3], ptr)
     with txl.unroll(4) as i:
-        txl.ptx.mov.b32(values[i], txl.reinterpret("float32", words[i]))
+        txl.ptx.mov.b32(values[i], txl.reinterpret(words[i], ty="float32"))
 
 
 def _shared_load_f32x4_ptr_offset(ptr, byte_offset: txl.int32, values, native_offset: bool = True):
     with txl.If(txl.Not(native_offset)):
         with txl.Then():
-            _shared_load_f32x4_ptr(txl.ptr_byte_offset(ptr, byte_offset, "float32"), values)
+            _shared_load_f32x4_ptr(
+                txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope)), values
+            )
         with txl.Else():
             words = txl.alloc_local((4,), "uint32", align=16)
             txl.ptx.ld.shared.v4.b32(
                 words[0], words[1], words[2], words[3], txl.ptx.addr(ptr, byte_offset)
             )
             with txl.unroll(4) as i:
-                txl.ptx.mov.b32(values[i], txl.reinterpret("float32", words[i]))
+                txl.ptx.mov.b32(values[i], txl.reinterpret(words[i], ty="float32"))
 
 
 def _shared_load_f32x4_b64_ptr(ptr, values):
@@ -149,7 +160,9 @@ def _shared_load_f32x4_b64_ptr_offset(
 ):
     with txl.If(txl.Not(native_offset)):
         with txl.Then():
-            _shared_load_f32x4_b64_ptr(txl.ptr_byte_offset(ptr, byte_offset, "float32"), values)
+            _shared_load_f32x4_b64_ptr(
+                txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope)), values
+            )
         with txl.Else():
             pairs = txl.alloc_local((2,), "uint64", align=16)
             txl.ptx.ld.shared.v2.b64(pairs[0], pairs[1], txl.ptx.addr(ptr, byte_offset))
@@ -163,7 +176,7 @@ def _global_load_f32x4_ptr(ptr, values, value_offset: txl.int32):
     words = txl.alloc_local((4,), "uint32", align=16)
     txl.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], ptr)
     with txl.unroll(4) as i:
-        txl.ptx.mov.b32(values[value_offset + i], txl.reinterpret("float32", words[i]))
+        txl.ptx.mov.b32(values[value_offset + i], txl.reinterpret(words[i], ty="float32"))
 
 
 def _global_load_f32x4_ptr_offset(
@@ -172,7 +185,9 @@ def _global_load_f32x4_ptr_offset(
     with txl.If(txl.Not(native_offset)):
         with txl.Then():
             _global_load_f32x4_ptr(
-                txl.ptr_byte_offset(ptr, byte_offset, "float32"), values, value_offset
+                txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope)),
+                values,
+                value_offset,
             )
         with txl.Else():
             words = txl.alloc_local((4,), "uint32", align=16)
@@ -180,7 +195,7 @@ def _global_load_f32x4_ptr_offset(
                 words[0], words[1], words[2], words[3], txl.ptx.addr(ptr, byte_offset)
             )
             with txl.unroll(4) as i:
-                txl.ptx.mov.b32(values[value_offset + i], txl.reinterpret("float32", words[i]))
+                txl.ptx.mov.b32(values[value_offset + i], txl.reinterpret(words[i], ty="float32"))
 
 
 def _global_load_f32x4_b64_ptr(ptr, values, value_offset: txl.int32):
@@ -198,7 +213,9 @@ def _global_load_f32x4_b64_ptr_offset(
     with txl.If(txl.Not(native_offset)):
         with txl.Then():
             _global_load_f32x4_b64_ptr(
-                txl.ptr_byte_offset(ptr, byte_offset, "float32"), values, value_offset
+                txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope)),
+                values,
+                value_offset,
             )
         with txl.Else():
             pairs = txl.alloc_local((2,), "uint64", align=16)
@@ -215,19 +232,19 @@ def _global_store_f32x4_ptr_offset(
     with txl.If(txl.Not(native_offset)):
         with txl.Then():
             txl.ptx.st.global_.v4.b32(
-                txl.ptr_byte_offset(ptr, byte_offset, "float32"),
-                txl.reinterpret("uint32", values[value_offset]),
-                txl.reinterpret("uint32", values[value_offset + 1]),
-                txl.reinterpret("uint32", values[value_offset + 2]),
-                txl.reinterpret("uint32", values[value_offset + 3]),
+                txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope)),
+                txl.reinterpret(values[value_offset], ty="uint32"),
+                txl.reinterpret(values[value_offset + 1], ty="uint32"),
+                txl.reinterpret(values[value_offset + 2], ty="uint32"),
+                txl.reinterpret(values[value_offset + 3], ty="uint32"),
             )
         with txl.Else():
             txl.ptx.st.global_.v4.b32(
                 txl.ptx.addr(ptr, byte_offset),
-                txl.reinterpret("uint32", values[value_offset]),
-                txl.reinterpret("uint32", values[value_offset + 1]),
-                txl.reinterpret("uint32", values[value_offset + 2]),
-                txl.reinterpret("uint32", values[value_offset + 3]),
+                txl.reinterpret(values[value_offset], ty="uint32"),
+                txl.reinterpret(values[value_offset + 1], ty="uint32"),
+                txl.reinterpret(values[value_offset + 2], ty="uint32"),
+                txl.reinterpret(values[value_offset + 3], ty="uint32"),
             )
 
 
@@ -245,7 +262,9 @@ def _global_store_f32x4_b64_ptr_offset(
     with txl.If(txl.Not(native_offset)):
         with txl.Then():
             _global_store_f32x4_b64_ptr(
-                txl.ptr_byte_offset(ptr, byte_offset, "float32"), values, value_offset
+                txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope)),
+                values,
+                value_offset,
             )
         with txl.Else():
             txl.ptx.st.global_.v2.b64(
@@ -257,21 +276,27 @@ def _global_store_f32x4_b64_ptr_offset(
 
 def _global_store_u16_ptr_offset(ptr, byte_offset: int, value, native_offset: bool = True):
     if not native_offset:
-        txl.ptx.st.global_.b16(txl.ptr_byte_offset(ptr, byte_offset, "bfloat16"), value)
+        txl.ptx.st.global_.b16(
+            txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("bfloat16", (ptr).ty.scope)), value
+        )
         return
     txl.ptx.st.global_.b16(txl.ptx.addr(ptr, byte_offset), value)
 
 
 def _global_store_u32_ptr_offset(ptr, byte_offset: int, value, native_offset: bool = True):
     if not native_offset:
-        txl.ptx.st.global_.b32(txl.ptr_byte_offset(ptr, byte_offset, "bfloat16"), value)
+        txl.ptx.st.global_.b32(
+            txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("bfloat16", (ptr).ty.scope)), value
+        )
         return
     txl.ptx.st.global_.b32(txl.ptx.addr(ptr, byte_offset), value)
 
 
 def _shared_store_u32_ptr_offset(ptr, byte_offset: int, value, native_offset: bool = True):
     if not native_offset:
-        txl.ptx.st.shared.b32(txl.ptr_byte_offset(ptr, byte_offset, "bfloat16"), value)
+        txl.ptx.st.shared.b32(
+            txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("bfloat16", (ptr).ty.scope)), value
+        )
         return
     txl.ptx.st.shared.b32(txl.ptx.addr(ptr, byte_offset), value)
 
@@ -531,19 +556,19 @@ def _make_gdn_decode_fp32_mtp_warp(
 ):
     @txl.kernel()
     def gdn_decode_fp32_mtp_warp(
-        state: txl.gptr[txl.f32],
-        intermediate: txl.gptr[txl.f32],
-        A_log: txl.gptr[txl.f32],
-        a: txl.gptr[txl.bf16],
-        dt_bias: txl.gptr[txl.f32],
-        q: txl.gptr[txl.bf16],
-        k: txl.gptr[txl.bf16],
-        v: txl.gptr[txl.bf16],
-        b_gate: txl.gptr[txl.bf16],
-        output: txl.gptr[txl.bf16],
-        read_indices: txl.gptr[txl.i32],
-        write_indices: txl.gptr[txl.i32],
-        ssm_state_indices: txl.gptr[txl.i32],
+        state: txl.Tensor((txl.int64(),), txl.f32),
+        intermediate: txl.Tensor((txl.int64(),), txl.f32),
+        A_log: txl.Tensor((txl.int64(),), txl.f32),
+        a: txl.Tensor((txl.int64(),), txl.bf16),
+        dt_bias: txl.Tensor((txl.int64(),), txl.f32),
+        q: txl.Tensor((txl.int64(),), txl.bf16),
+        k: txl.Tensor((txl.int64(),), txl.bf16),
+        v: txl.Tensor((txl.int64(),), txl.bf16),
+        b_gate: txl.Tensor((txl.int64(),), txl.bf16),
+        output: txl.Tensor((txl.int64(),), txl.bf16),
+        read_indices: txl.Tensor((txl.int64(),), txl.i32),
+        write_indices: txl.Tensor((txl.int64(),), txl.i32),
+        ssm_state_indices: txl.Tensor((txl.int64(),), txl.i32),
         state_slot_stride: txl.i64,
         state_head_stride: txl.i64,
         q_batch_stride: txl.i64,
@@ -727,7 +752,7 @@ def _make_gdn_decode_fp32_mtp_warp(
                     shared_g_ptr = s_g.ptr_to([t])
                     txl.ptx.st.shared.b32(
                         shared_g_ptr,
-                        txl.reinterpret("uint32", txl.cuda.float2_x(gate_pair_value[0])),
+                        txl.reinterpret(txl.cuda.float2_x(gate_pair_value[0]), ty="uint32"),
                     )
                     _shared_store_f32_ptr_offset(
                         shared_g_ptr,
@@ -748,7 +773,7 @@ def _make_gdn_decode_fp32_mtp_warp(
                             _f32 = txl.local_scalar("float32")
                             txl.ptx.cvt.f32.bf16(_f32, txl.cast(v_bits[0], "uint16"))
                             txl.ptx.st.shared.b32(
-                                s_v.ptr_to([t * TILE_V + tid]), txl.reinterpret("uint32", _f32)
+                                s_v.ptr_to([t * TILE_V + tid]), txl.reinterpret(_f32, ty="uint32")
                             )
             with workers:
                 if PREFETCH_ROWS > 0:
@@ -773,7 +798,7 @@ def _make_gdn_decode_fp32_mtp_warp(
                             _f32_2 = txl.local_scalar("float32")
                             txl.ptx.cvt.f32.bf16(_f32_2, txl.cast(v_bits[0], "uint16"))
                             txl.ptx.st.shared.b32(
-                                s_v.ptr_to([t * TILE_V + tid]), txl.reinterpret("uint32", _f32_2)
+                                s_v.ptr_to([t * TILE_V + tid]), txl.reinterpret(_f32_2, ty="uint32")
                             )
             txl.cuda.cta_sync()
             for iter_index in range(ITERS_PER_GROUP):
@@ -823,7 +848,7 @@ def _make_gdn_decode_fp32_mtp_warp(
                     shared_g_ptr = s_g.ptr_to([t])
                     _lds32 = txl.local_scalar("uint32")
                     txl.ptx.ld.shared.b32(_lds32, shared_g_ptr)
-                    g_value = _local_scalar("float32", txl.reinterpret("float32", _lds32))
+                    g_value = _local_scalar("float32", txl.reinterpret(_lds32, ty="float32"))
                     beta = _local_scalar(
                         "float32",
                         _shared_load_f32_ptr_offset(

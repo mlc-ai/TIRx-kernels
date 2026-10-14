@@ -510,7 +510,7 @@ def make_kernel(
         q_full = smem.alloc((B_H // 2, d_qk), "bfloat16", swizzle=txl.SW128B).buf
         q_cp_desc = txl.local_scalar("uint64")
         txl.cuda.tcgen05.encode_matrix_descriptor(
-            txl.address_of(q_cp_desc), txl.reinterpret(txl.handle().ty, txl.uint64(0)), 0, 64, 3
+            txl.address_of(q_cp_desc), txl.reinterpret(txl.uint64(0), ty=txl.handle().ty), 0, 64, 3
         )
         pool.move_base_to(u_base + (B_H // 2) * d_sq * BF16_BYTES)
         v_smem = smem.alloc((D_V // 2, B_TOPK), "bfloat16", swizzle=txl.SW128B).buf
@@ -658,10 +658,14 @@ def make_kernel(
                         pv_b_offset = mma_ki * 1024 + mma_ni * 64 + v_offset
                         if mma_smem_desc == "recompute":
                             pv_a_ptr = txl.ptr_byte_offset(
-                                s_smem_gemm.ptr_to([0, 0]), pv_a_offset // 8 * 16, "bfloat16"
+                                s_smem_gemm.ptr_to([0, 0]),
+                                pv_a_offset // 8 * 16,
+                                ty=txl.Ptr("bfloat16", (s_smem_gemm.ptr_to([0, 0])).ty.scope),
                             )
                             pv_b_ptr = txl.ptr_byte_offset(
-                                v_smem.ptr_to([0, 0]), pv_b_offset // 8 * 16, "bfloat16"
+                                v_smem.ptr_to([0, 0]),
+                                pv_b_offset // 8 * 16,
+                                ty=txl.Ptr("bfloat16", (v_smem.ptr_to([0, 0])).ty.scope),
                             )
                             _mma_f16(
                                 txl.cast(o_tmem_col + dest_offset + mma_ni * 128, "uint32"),
@@ -674,7 +678,9 @@ def make_kernel(
                             pv_a_encode = txl.SmemDescriptor()
                             pv_a_encode.init(
                                 txl.ptr_byte_offset(
-                                    s_smem_gemm.ptr_to([0, 0]), pv_a_offset // 8 * 16, "bfloat16"
+                                    s_smem_gemm.ptr_to([0, 0]),
+                                    pv_a_offset // 8 * 16,
+                                    ty=txl.Ptr("bfloat16", (s_smem_gemm.ptr_to([0, 0])).ty.scope),
                                 ),
                                 ldo=64,
                                 sdo=8,
@@ -683,7 +689,9 @@ def make_kernel(
                             pv_b_encode = txl.SmemDescriptor()
                             pv_b_encode.init(
                                 txl.ptr_byte_offset(
-                                    v_smem.ptr_to([0, 0]), pv_b_offset // 8 * 16, "bfloat16"
+                                    v_smem.ptr_to([0, 0]),
+                                    pv_b_offset // 8 * 16,
+                                    ty=txl.Ptr("bfloat16", (v_smem.ptr_to([0, 0])).ty.scope),
                                 ),
                                 ldo=1024,
                                 sdo=64,
@@ -826,7 +834,7 @@ def make_kernel(
                     s_ptr = txl.ptr_byte_offset(
                         s_smem_gemm.ptr_to([0, 0]),
                         (s_base + s_store_i * 512) * BF16_BYTES,
-                        "bfloat16",
+                        ty=txl.Ptr("bfloat16", (s_smem_gemm.ptr_to([0, 0])).ty.scope),
                     )
                     s_word = s_store_i * 4
                     txl.ptx.st.shared.v4.u32(
@@ -960,7 +968,9 @@ def make_kernel(
                         )
                     )
                     s_ptr = txl.ptr_byte_offset(
-                        o_smem.ptr_to([0, 0]), s_off * BF16_BYTES, "bfloat16"
+                        o_smem.ptr_to([0, 0]),
+                        s_off * BF16_BYTES,
+                        ty=txl.Ptr("bfloat16", (o_smem.ptr_to([0, 0])).ty.scope),
                     )
                     o_word = o_store_i * 4
                     txl.ptx.st.shared.v4.u32(
@@ -981,7 +991,11 @@ def make_kernel(
                             txl.cast(epi_k * B_EPI, "int32"),
                             txl.cast(cta_idx * (B_H // 2), "int32"),
                             txl.cast(s_q_idx, "int32"),
-                            txl.ptr_byte_offset(o_smem.ptr_to([0, 0]), o_part0_offset, "bfloat16"),
+                            txl.ptr_byte_offset(
+                                o_smem.ptr_to([0, 0]),
+                                o_part0_offset,
+                                ty=txl.Ptr("bfloat16", (o_smem.ptr_to([0, 0])).ty.scope),
+                            ),
                         )
                 with txl.If(warp_idx == 1), txl.Then():
                     with txl.If(txl.cuda.elect_sync()), txl.Then():
@@ -991,7 +1005,11 @@ def make_kernel(
                             txl.cast(epi_k * B_EPI + D_V // 2, "int32"),
                             txl.cast(cta_idx * (B_H // 2), "int32"),
                             txl.cast(s_q_idx, "int32"),
-                            txl.ptr_byte_offset(o_smem.ptr_to([0, 0]), o_part1_offset, "bfloat16"),
+                            txl.ptr_byte_offset(
+                                o_smem.ptr_to([0, 0]),
+                                o_part1_offset,
+                                ty=txl.Ptr("bfloat16", (o_smem.ptr_to([0, 0])).ty.scope),
+                            ),
                         )
 
             with txl.If(warp_idx == 0), txl.Then():
@@ -1051,7 +1069,11 @@ def make_kernel(
                                         ) * BF16_BYTES
                                         txl.ptx[_TMA_GATHER4_2D_CACHE](
                                             txl.ptr_byte_offset(
-                                                k_smem.ptr_to([0, 0]), k_gather_offset, "bfloat16"
+                                                k_smem.ptr_to([0, 0]),
+                                                k_gather_offset,
+                                                ty=txl.Ptr(
+                                                    "bfloat16", (k_smem.ptr_to([0, 0])).ty.scope
+                                                ),
                                             ),
                                             txl.address_of(tensormap),
                                             txl.cast((col_start + col_atom) * 64, "int32"),
@@ -1138,7 +1160,9 @@ def make_kernel(
                                 ) * BF16_BYTES
                                 txl.ptx[_TMA_GATHER4_2D_CACHE](
                                     txl.ptr_byte_offset(
-                                        v_smem.ptr_to([0, 0]), v_gather_offset, "bfloat16"
+                                        v_smem.ptr_to([0, 0]),
+                                        v_gather_offset,
+                                        ty=txl.Ptr("bfloat16", (v_smem.ptr_to([0, 0])).ty.scope),
                                     ),
                                     txl.address_of(tensormap),
                                     txl.cast(src0 + col_atom * 64, "int32"),
@@ -1183,7 +1207,7 @@ def make_kernel(
                             q_copy_src = txl.ptr_byte_offset(
                                 q_full.ptr_to([0, 0]),
                                 (d_sq * 8 + q_copy_flat % 6 * 512 + q_copy_flat // 6 % 8) * 16,
-                                "bfloat16",
+                                ty=txl.Ptr("bfloat16", (q_full.ptr_to([0, 0])).ty.scope),
                             )
                             txl.ptx[_TCGEN_CP_64X128](
                                 txl.cast(
@@ -1241,12 +1265,18 @@ def make_kernel(
                                                     qk_part0_a_ptr = txl.ptr_byte_offset(
                                                         q_full.ptr_to([0, 0]),
                                                         qk_part0_offset // 8 * 16,
-                                                        "bfloat16",
+                                                        ty=txl.Ptr(
+                                                            "bfloat16",
+                                                            (q_full.ptr_to([0, 0])).ty.scope,
+                                                        ),
                                                     )
                                                     qk_part0_b_ptr = txl.ptr_byte_offset(
                                                         k_smem.ptr_to([0, 0]),
                                                         qk_part0_offset // 8 * 16,
-                                                        "bfloat16",
+                                                        ty=txl.Ptr(
+                                                            "bfloat16",
+                                                            (k_smem.ptr_to([0, 0])).ty.scope,
+                                                        ),
                                                     )
                                                     _mma_f16(
                                                         txl.cast(
@@ -1270,7 +1300,10 @@ def make_kernel(
                                                         txl.ptr_byte_offset(
                                                             q_full.ptr_to([0, 0]),
                                                             qk_part0_offset // 8 * 16,
-                                                            "bfloat16",
+                                                            ty=txl.Ptr(
+                                                                "bfloat16",
+                                                                (q_full.ptr_to([0, 0])).ty.scope,
+                                                            ),
                                                         ),
                                                         ldo=512,
                                                         sdo=64,
@@ -1281,7 +1314,10 @@ def make_kernel(
                                                         txl.ptr_byte_offset(
                                                             k_smem.ptr_to([0, 0]),
                                                             qk_part0_offset // 8 * 16,
-                                                            "bfloat16",
+                                                            ty=txl.Ptr(
+                                                                "bfloat16",
+                                                                (k_smem.ptr_to([0, 0])).ty.scope,
+                                                            ),
                                                         ),
                                                         ldo=512,
                                                         sdo=64,
@@ -1361,7 +1397,9 @@ def make_kernel(
                                                 qk_part1_b_ptr = txl.ptr_byte_offset(
                                                     k_smem.ptr_to([0, 0]),
                                                     qk_part1_offset // 8 * 16,
-                                                    "bfloat16",
+                                                    ty=txl.Ptr(
+                                                        "bfloat16", (k_smem.ptr_to([0, 0])).ty.scope
+                                                    ),
                                                 )
                                                 _mma_f16(
                                                     txl.cast(tmem_p_col + mma_ni * 64, "uint32"),
@@ -1381,7 +1419,10 @@ def make_kernel(
                                                     txl.ptr_byte_offset(
                                                         k_smem.ptr_to([0, 0]),
                                                         qk_part1_offset // 8 * 16,
-                                                        "bfloat16",
+                                                        ty=txl.Ptr(
+                                                            "bfloat16",
+                                                            (k_smem.ptr_to([0, 0])).ty.scope,
+                                                        ),
                                                     ),
                                                     ldo=512,
                                                     sdo=64,
@@ -1513,7 +1554,7 @@ def make_kernel(
                             bar_k_valid_free.wait(valid_stage, valid_phase ^ 1)
                             txl.ptx.st.shared.b8(
                                 is_k_valid.ptr_to([valid_stage, lane_idx]),
-                                txl.reinterpret("uint8", is_ks_valid_mask),
+                                txl.reinterpret(is_ks_valid_mask, ty="uint8"),
                             )
                             bar_k_valid_ready.arrive(valid_stage)
                     txl.cuda.iket.range_end(valid_mask_token[0])
@@ -1539,14 +1580,14 @@ def make_kernel(
                 run_wg3_role(False)
 
     sparse_flashmla_prefill_head128_phase1_kernel.__annotations__ = {
-        "q": txl.gptr[txl.bf16, (s_q, h_q, d_qk)],
-        "kv": txl.gptr[txl.bf16, (s_kv * stride_kv_s_kv,)],
-        "indices": txl.gptr[txl.i32, (s_q * stride_indices_s_q,)],
-        "attn_sink": txl.gptr[txl.f32, (h_q,)],
-        "topk_length": txl.gptr[txl.i32, (s_q,)],
-        "out": txl.gptr[txl.bf16, (s_q, h_q, D_V)],
-        "max_logits": txl.gptr[txl.f32, (s_q, h_q)],
-        "lse": txl.gptr[txl.f32, (s_q, h_q)],
+        "q": txl.Tensor((s_q, h_q, d_qk), txl.bf16),
+        "kv": txl.Tensor((s_kv * stride_kv_s_kv,), txl.bf16),
+        "indices": txl.Tensor((s_q * stride_indices_s_q,), txl.i32),
+        "attn_sink": txl.Tensor((h_q,), txl.f32),
+        "topk_length": txl.Tensor((s_q,), txl.i32),
+        "out": txl.Tensor((s_q, h_q, D_V), txl.bf16),
+        "max_logits": txl.Tensor((s_q, h_q), txl.f32),
+        "lse": txl.Tensor((s_q, h_q), txl.f32),
     }
     return txl.kernel()(sparse_flashmla_prefill_head128_phase1_kernel)
 

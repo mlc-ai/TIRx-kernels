@@ -1830,7 +1830,7 @@ def _make_kernel(
                         txl.ptx.mov.b64(values[index], values[index + 1], packed)
                 if out_dtype == "float32":
                     for index in range(32):
-                        txl.assign(words[index], txl.reinterpret("uint32", values[index]))
+                        txl.assign(words[index], txl.reinterpret(values[index], ty="uint32"))
                 else:
                     for index in range(16):
                         if out_dtype == "float16":
@@ -2109,20 +2109,20 @@ def _make_kernel(
             publish_ready_signals(True)
 
     kernel.__annotations__ = {
-        "a": txl.gptr[txl.u8, (num_groups * kernel_m * K_dim * input_bits // 8,)],
-        "b": txl.gptr[txl.u8, (num_groups * kernel_n * K_dim * input_bits // 8,)],
-        "sfa": txl.gptr[
-            txl.u8,
+        "a": txl.Tensor((num_groups * kernel_m * K_dim * input_bits // 8,), txl.u8),
+        "b": txl.Tensor((num_groups * kernel_n * K_dim * input_bits // 8,), txl.u8),
+        "sfa": txl.Tensor(
             (num_groups * _ceil_div(kernel_m, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,),
-        ],
-        "sfb": txl.gptr[
             txl.u8,
+        ),
+        "sfb": txl.Tensor(
             (num_groups * _ceil_div(kernel_n, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,),
-        ],
-        "c": txl.gptr[txl.u8, (num_groups * kernel_m * kernel_n * c_element_bytes,)],
-        "masked_m": txl.gptr[txl.i32, (num_groups,)],
-        "alpha_ptr": txl.gptr[txl.f32, (num_groups,)],
-        "dst_signals": txl.gptr[txl.i32, (num_groups,)],
+            txl.u8,
+        ),
+        "c": txl.Tensor((num_groups * kernel_m * kernel_n * c_element_bytes,), txl.u8),
+        "masked_m": txl.Tensor((num_groups,), txl.i32),
+        "alpha_ptr": txl.Tensor((num_groups,), txl.f32),
+        "dst_signals": txl.Tensor((num_groups,), txl.i32),
     }
     return txl.kernel()(kernel)
 

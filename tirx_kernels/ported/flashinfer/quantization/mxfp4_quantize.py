@@ -232,7 +232,7 @@ def _float_to_ue8m0_nonnegative(value):
     explicit tiny-value select preserves its special subnormal threshold, and
     clamping the input bits to infinity preserves the source's NaN/Inf result.
     """
-    bits = txl.reinterpret("uint32", value)
+    bits = txl.reinterpret(value, ty="uint32")
     rounded = txl.shift_right(bits + txl.uint32(0x7FFFFF), txl.uint32(23))
     rounded = txl.min(rounded, txl.uint32(254))
     p_tiny = txl.local_scalar("uint32")
@@ -244,7 +244,7 @@ def _float_to_ue8m0_nonnegative(value):
 
 def _fp16_block_max_to_ue8m0(value):
     """Convert an exact FP16-derived nonnegative block max to its MXFP4 scale."""
-    bits = txl.reinterpret("uint32", value)
+    bits = txl.reinterpret(value, ty="uint32")
     rounded_exp = txl.shift_right(bits + txl.uint32(0x3FFFFF), txl.uint32(23))
     finite = txl.max(txl.cast(rounded_exp, "int32") - txl.int32(2), txl.int32(0))
     special = txl.local_scalar("uint32")
@@ -259,7 +259,7 @@ def _ue8m0_to_inv_scale_bounded(ue8m0_val):
     p_zero = txl.local_scalar("uint32")
     txl.ptx.setp.eq.u32(p_zero, ue8m0_val, txl.uint32(0))
     new_exp = txl.uint32(254) - ue8m0_val
-    inv = txl.reinterpret("float32", txl.shift_left(new_exp, txl.uint32(23)))
+    inv = txl.reinterpret(txl.shift_left(new_exp, txl.uint32(23)), ty="float32")
     out = txl.local_scalar("float32")
     txl.ptx.selp.f32(out, txl.float32(0.0), inv, txl.ptx.pred(p_zero))
     return out
@@ -519,7 +519,9 @@ def get_kernel(
 
         @txl.kernel()
         def mxfp4_quantize_linear(
-            in_global: txl.gptr[dtype], out_global: txl.gptr[txl.u8], sf_out: txl.gptr[txl.u8]
+            in_global: txl.Tensor((txl.int64(),), dtype),
+            out_global: txl.Tensor((txl.int64(),), txl.u8),
+            sf_out: txl.Tensor((txl.int64(),), txl.u8),
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
@@ -658,7 +660,9 @@ def get_kernel(
 
     @txl.kernel()
     def mxfp4_quantize_swizzled(
-        in_global: txl.gptr[dtype], out_global: txl.gptr[txl.u8], sf_out: txl.gptr[txl.u8]
+        in_global: txl.Tensor((txl.int64(),), dtype),
+        out_global: txl.Tensor((txl.int64(),), txl.u8),
+        sf_out: txl.Tensor((txl.int64(),), txl.u8),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),

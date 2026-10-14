@@ -133,24 +133,24 @@ def _shfl_bfly_f32(value, lane_mask):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         out,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(lane_mask),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", out)
+    return txl.reinterpret(out, ty="float32")
 
 
 def _shfl_bfly_i32(value, lane_mask):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         out,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(lane_mask),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("int32", out)
+    return txl.reinterpret(out, ty="int32")
 
 
 @cache_backend_config(maxsize=8)
@@ -166,10 +166,10 @@ def _make_kernel(log_max_splits, *, backend_config=None):
     smem_bytes = o_ring_offset + _STAGES * _TILE_M * _K_BLOCK * 4
 
     def kernel_body(
-        o_partial: txl.gptr[txl.f32],
-        lse_partial: txl.gptr[txl.f32],
-        out: txl.gptr[txl.bf16],
-        lse: txl.gptr[txl.f32],
+        o_partial: txl.Tensor((txl.int64(),), txl.f32),
+        lse_partial: txl.Tensor((txl.int64(),), txl.f32),
+        out: txl.Tensor((txl.int64(),), txl.bf16),
+        lse: txl.Tensor((txl.int64(),), txl.f32),
         batch: txl.i32,
         num_heads: txl.i32,
         seqlen_q: txl.i32,
@@ -215,16 +215,17 @@ def _make_kernel(log_max_splits, *, backend_config=None):
         def _decode_row(flat):
             q0 = txl.local_scalar("uint32")
             txl.ptx.mul.hi.u32(
-                q0, txl.reinterpret("uint32", flat), txl.reinterpret("uint32", seqlen_div_mul)
+                q0, txl.reinterpret(flat, ty="uint32"), txl.reinterpret(seqlen_div_mul, ty="uint32")
             )
-            delta = txl.local_scalar("uint32", init=txl.reinterpret("uint32", flat) - q0)
+            delta = txl.local_scalar("uint32", init=txl.reinterpret(flat, ty="uint32") - q0)
             mixed = txl.local_scalar(
-                "uint32", init=txl.shift_right(delta, txl.reinterpret("uint32", seqlen_div_s1)) + q0
+                "uint32",
+                init=txl.shift_right(delta, txl.reinterpret(seqlen_div_s1, ty="uint32")) + q0,
             )
             head = txl.local_scalar(
                 "int32",
                 init=txl.reinterpret(
-                    "int32", txl.shift_right(mixed, txl.reinterpret("uint32", seqlen_div_s2))
+                    txl.shift_right(mixed, txl.reinterpret(seqlen_div_s2, ty="uint32")), ty="int32"
                 ),
             )
             query = txl.local_scalar("int32", init=flat - head * seqlen_q)
@@ -342,7 +343,7 @@ def _make_kernel(log_max_splits, *, backend_config=None):
             txl.ptx.max.s32(reduced, local_last, peer)
             txl.assign(local_last, reduced)
 
-        neg_inf = txl.reinterpret("float32", txl.uint32(0xFF800000))
+        neg_inf = txl.reinterpret(txl.uint32(0xFF800000), ty="float32")
         is_neg_inf = txl.local_scalar("uint32")
         txl.ptx.setp.eq.f32(is_neg_inf, lse_max, neg_inf)
         safe_max = txl.local_scalar("float32")
@@ -394,12 +395,12 @@ def _make_kernel(log_max_splits, *, backend_config=None):
         with txl.unroll(slots) as slot:
             txl.ptx.st.shared.b32(
                 s_lse.ptr_to([_lse_index(stats_split0 + slot * 8, stats_row)]),
-                txl.reinterpret("uint32", lse_regs[slot]),
+                txl.reinterpret(lse_regs[slot], ty="uint32"),
             )
         with txl.If(stats_split0 == 0):
             with txl.Then():
                 txl.ptx.st.shared.b32(
-                    s_max_valid.ptr_to([stats_row]), txl.reinterpret("uint32", local_last)
+                    s_max_valid.ptr_to([stats_row]), txl.reinterpret(local_last, ty="uint32")
                 )
                 stats_flat = txl.local_scalar("int32", init=row_tile * _TILE_M + stats_row)
                 with txl.If((dim_tile == 0) & (stats_flat < row_extent)):
@@ -407,7 +408,7 @@ def _make_kernel(log_max_splits, *, backend_config=None):
                         head, query = _decode_row(stats_flat)
                         out_index = (batch_idx * seqlen_q + query) * num_heads + head
                         txl.ptx.st.global_.b32(
-                            lse.ptr_to([out_index]), txl.reinterpret("uint32", final_lse)
+                            lse.ptr_to([out_index]), txl.reinterpret(final_lse, ty="uint32")
                         )
 
         txl.ptx.bar.sync(txl.uint32(0))
@@ -418,7 +419,9 @@ def _make_kernel(log_max_splits, *, backend_config=None):
         txl.ptx.ld.shared.b32(max1_bits, s_max_valid.ptr_to([row1]))
         thread_max = txl.local_scalar("int32")
         txl.ptx.max.s32(
-            thread_max, txl.reinterpret("int32", max0_bits), txl.reinterpret("int32", max1_bits)
+            thread_max,
+            txl.reinterpret(max0_bits, ty="int32"),
+            txl.reinterpret(max1_bits, ty="int32"),
         )
 
         acc0 = txl.alloc_local((4,), "float32")
@@ -434,8 +437,8 @@ def _make_kernel(log_max_splits, *, backend_config=None):
             weight1_bits = txl.local_scalar("uint32")
             txl.ptx.ld.shared.b32(weight0_bits, s_lse.ptr_to([_lse_index(split, row0)]))
             txl.ptx.ld.shared.b32(weight1_bits, s_lse.ptr_to([_lse_index(split, row1)]))
-            weight0 = txl.reinterpret("float32", weight0_bits)
-            weight1 = txl.reinterpret("float32", weight1_bits)
+            weight0 = txl.reinterpret(weight0_bits, ty="float32")
+            weight1 = txl.reinterpret(weight1_bits, ty="float32")
 
             next_split = txl.local_scalar("int32", init=split + (_STAGES - 1))
             with txl.If(next_split <= thread_max):
@@ -504,10 +507,10 @@ def _make_kernel(log_max_splits, *, backend_config=None):
 
     @txl.kernel()
     def combine(
-        o_partial: txl.gptr[txl.f32],
-        lse_partial: txl.gptr[txl.f32],
-        out: txl.gptr[txl.bf16],
-        lse: txl.gptr[txl.f32],
+        o_partial: txl.Tensor((txl.int64(),), txl.f32),
+        lse_partial: txl.Tensor((txl.int64(),), txl.f32),
+        out: txl.Tensor((txl.int64(),), txl.bf16),
+        lse: txl.Tensor((txl.int64(),), txl.f32),
         batch: txl.i32,
         num_heads: txl.i32,
         seqlen_q: txl.i32,

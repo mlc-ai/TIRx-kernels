@@ -127,11 +127,11 @@ def _u32(v):
 
 
 def _bf16_lo(word):
-    return txl.reinterpret("float32", txl.shift_left(word, txl.uint32(16)))
+    return txl.reinterpret(txl.shift_left(word, txl.uint32(16)), ty="float32")
 
 
 def _bf16_hi(word):
-    return txl.reinterpret("float32", txl.bitwise_and(word, txl.uint32(0xFFFF0000)))
+    return txl.reinterpret(txl.bitwise_and(word, txl.uint32(0xFFFF0000)), ty="float32")
 
 
 def _load_route_weights(topk_w, base, rsf, topk):
@@ -231,19 +231,19 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
 
     @txl.kernel()
     def alphamoe_cluster(
-        topk_ids: txl.gptr[txl.i32],
-        topk_w: txl.gptr[txl.f32],
-        hidden: txl.gptr[txl.i32],
-        w1s: txl.gptr[txl.f32],
-        w2s: txl.gptr[txl.f32],
-        out: txl.gptr["uint64" if TAGGED else txl.u16],
-        final_out: txl.gptr[txl.u16],
-        sync_ctr: txl.gptr[txl.u32],
-        xq_g: txl.gptr[txl.u32],
-        xs_g: txl.gptr[txl.f32],
-        xflag_g: txl.gptr[txl.u32],
-        tm_w1h: txl.TensorMap,
-        tm_w2: txl.TensorMap,
+        topk_ids: txl.Tensor((txl.int64(),), txl.i32),
+        topk_w: txl.Tensor((txl.int64(),), txl.f32),
+        hidden: txl.Tensor((txl.int64(),), txl.i32),
+        w1s: txl.Tensor((txl.int64(),), txl.f32),
+        w2s: txl.Tensor((txl.int64(),), txl.f32),
+        out: txl.Tensor((txl.int64(),), "uint64" if TAGGED else txl.u16),
+        final_out: txl.Tensor((txl.int64(),), txl.u16),
+        sync_ctr: txl.Tensor((txl.int64(),), txl.u32),
+        xq_g: txl.Tensor((txl.int64(),), txl.u32),
+        xs_g: txl.Tensor((txl.int64(),), txl.f32),
+        xflag_g: txl.Tensor((txl.int64(),), txl.u32),
+        tm_w1h: txl.Ptr(txl.TensorMap),
+        tm_w2: txl.Ptr(txl.TensorMap),
         rsf: txl.f32,
         epoch: txl.u32,
     ):
@@ -1094,7 +1094,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     def mma_issue(bview):
                         a_desc, a_off = a_tile[sst.stage].encode(major="k", mma_k=32)
                         b_desc, b_off = bview.encode(major="k", mma_k=32)
-                        d_addr = tmem_base + txl.Cast("uint32", tst.stage) * txl.uint32(NT)
+                        d_addr = tmem_base + txl.Cast(tst.stage, "uint32") * txl.uint32(NT)
                         for ki in range(BK // 32):
                             txl.ptx[MMA](
                                 d_addr,
@@ -1112,7 +1112,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                         a_desc, a_off = a_tile[sst.stage].encode(major="k", mma_k=32)
                         b0_desc, b0_off = b_act[act_par * CS].encode(major="k", mma_k=32)
                         b1_desc, b1_off = b_act[act_par * CS + 1].encode(major="k", mma_k=32)
-                        d_addr = tmem_base + txl.Cast("uint32", tst.stage) * txl.uint32(NT)
+                        d_addr = tmem_base + txl.Cast(tst.stage, "uint32") * txl.uint32(NT)
                         for ki in range(CH // 32):
                             txl.ptx[MMA](
                                 d_addr,
@@ -1444,7 +1444,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 for _ in range(4):
                     tst.advance()
                 txl.ptx.tcgen05.fence__after_thread_sync()
-                taddr = tmem_base + txl.Cast("uint32", s0) * txl.uint32(NT)
+                taddr = tmem_base + txl.Cast(s0, "uint32") * txl.uint32(NT)
                 if nblk == NT:
                     txl.ptx[TMEM_LD64](*[pv[i] for i in range(4 * NT)], taddr)
                 else:
@@ -1941,15 +1941,15 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
 
     @txl.kernel()
     def alphamoe_wide_m1(
-        topk_ids: txl.gptr[txl.i32],
-        topk_w: txl.gptr[txl.f32],
-        hidden: txl.gptr[txl.i32],
-        w1s: txl.gptr[txl.f32],
-        w2s: txl.gptr[txl.f32],
-        out: txl.gptr["uint64"],
-        final_out: txl.gptr[txl.u16],
-        tm_w1: txl.TensorMap,
-        tm_w2: txl.TensorMap,
+        topk_ids: txl.Tensor((txl.int64(),), txl.i32),
+        topk_w: txl.Tensor((txl.int64(),), txl.f32),
+        hidden: txl.Tensor((txl.int64(),), txl.i32),
+        w1s: txl.Tensor((txl.int64(),), txl.f32),
+        w2s: txl.Tensor((txl.int64(),), txl.f32),
+        out: txl.Tensor((txl.int64(),), "uint64"),
+        final_out: txl.Tensor((txl.int64(),), txl.u16),
+        tm_w1: txl.Ptr(txl.TensorMap),
+        tm_w2: txl.Ptr(txl.TensorMap),
         rsf: txl.f32,
     ):
         txl.device_entry(
@@ -2274,10 +2274,10 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
                         r_bar = remote_u32(red_full.ptr_to([0]), p)
                         txl.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
                             r_dst,
-                            txl.reinterpret("uint32", part[0]),
-                            txl.reinterpret("uint32", part[1]),
-                            txl.reinterpret("uint32", g1),
-                            txl.reinterpret("uint32", u1),
+                            txl.reinterpret(part[0], ty="uint32"),
+                            txl.reinterpret(part[1], ty="uint32"),
+                            txl.reinterpret(g1, ty="uint32"),
+                            txl.reinterpret(u1, ty="uint32"),
                             r_bar,
                         )
             cluster_wait(red_full, 0, 0)
@@ -2347,7 +2347,7 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
             with txl.If(cl == TOPK - 1), txl.Then():
                 # One byte address lets the nine polls use constant offsets.
                 record_base = txl.local_scalar("uint64")
-                txl.assign(record_base, txl.reinterpret("uint64", out.ptr_to([rank * BM + tm])))
+                txl.assign(record_base, txl.reinterpret(out.ptr_to([rank * BM + tm]), ty="uint64"))
                 weights = txl.alloc_local((TOPK,), txl.f32)
                 for route in range(TOPK):
                     txl.ptx.ld.global_.nc.f32(weights[route], topk_w.ptr_to([route]))
@@ -3004,10 +3004,10 @@ def _check_route_rounding(packed_f32: bool, *, backend_config=None) -> None:
 
     @txl.kernel()
     def check(
-        expert: txl.gptr[txl.u32],
-        weight: txl.gptr[txl.f32],
-        scale: txl.gptr[txl.f32],
-        output: txl.gptr[txl.u32],
+        expert: txl.Tensor((txl.int64(),), txl.u32),
+        weight: txl.Tensor((txl.int64(),), txl.f32),
+        scale: txl.Tensor((txl.int64(),), txl.f32),
+        output: txl.Tensor((txl.int64(),), txl.u32),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=4, block=1 * 32), backend_config=backend_config

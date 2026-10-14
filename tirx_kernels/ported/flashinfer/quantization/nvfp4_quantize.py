@@ -228,12 +228,12 @@ def get_kernel(
 
         @txl.kernel()
         def nvfp4_quantize_linear(
-            in_global: txl.gptr[dtype],
-            out_global: txl.gptr[txl.u8],
-            sf_out: txl.gptr[txl.u8],
+            in_global: txl.Tensor((txl.int64(),), dtype),
+            out_global: txl.Tensor((txl.int64(),), txl.u8),
+            sf_out: txl.Tensor((txl.int64(),), txl.u8),
             m_rows: txl.i32,
             total_sf: txl.i32,
-            gs: txl.gptr[txl.f32],
+            gs: txl.Tensor((txl.int64(),), txl.f32),
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=grid_x, block=block_x // 32 * 32),
@@ -279,12 +279,12 @@ def get_kernel(
 
     @txl.kernel()
     def nvfp4_quantize_swizzled(
-        in_global: txl.gptr[dtype],
-        out_global: txl.gptr[txl.u8],
-        sf_out: txl.gptr[txl.u8],
+        in_global: txl.Tensor((txl.int64(),), dtype),
+        out_global: txl.Tensor((txl.int64(),), txl.u8),
+        sf_out: txl.Tensor((txl.int64(),), txl.u8),
         m_rows: txl.i32,
         padded_rows: txl.i32,
-        gs: txl.gptr[txl.f32],
+        gs: txl.Tensor((txl.int64(),), txl.f32),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),

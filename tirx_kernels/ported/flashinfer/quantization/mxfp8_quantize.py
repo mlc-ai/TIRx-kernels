@@ -246,9 +246,9 @@ def get_kernel(
 
         @txl.kernel()
         def mxfp8_quantize_linear(
-            in_global: txl.gptr[dtype],
-            out_global: txl.gptr[txl.u8],
-            sf_out: txl.gptr[txl.u8],
+            in_global: txl.Tensor((txl.int64(),), dtype),
+            out_global: txl.Tensor((txl.int64(),), txl.u8),
+            sf_out: txl.Tensor((txl.int64(),), txl.u8),
             total_sf: txl.i32,
         ):
             txl.device_entry(
@@ -300,9 +300,9 @@ def get_kernel(
 
     @txl.kernel()
     def mxfp8_quantize_swizzled(
-        in_global: txl.gptr[dtype],
-        out_global: txl.gptr[txl.u8],
-        sf_out: txl.gptr[txl.u8],
+        in_global: txl.Tensor((txl.int64(),), dtype),
+        out_global: txl.Tensor((txl.int64(),), txl.u8),
+        sf_out: txl.Tensor((txl.int64(),), txl.u8),
         m_rows: txl.i32,
         padded_rows: txl.i32,
     ):

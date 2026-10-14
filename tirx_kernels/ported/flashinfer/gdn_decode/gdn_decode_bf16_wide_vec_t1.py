@@ -61,12 +61,12 @@ def _shfl_bfly_f32(value, lane_xor):
     shfl_bfly = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         shfl_bfly,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.cast(lane_xor, "uint32"),
         txl.uint32(31),
         txl.uint32(4294967295),
     )
-    return txl.reinterpret("float32", shfl_bfly)
+    return txl.reinterpret(shfl_bfly, ty="float32")
 
 
 def _local_scalar(dtype: str, value):
@@ -250,18 +250,18 @@ def _make_gdn_decode_bf16_wide_vec_t1(
 ):
     @txl.kernel()
     def gdn_decode_bf16_wide_vec_t1(
-        state: txl.gptr[txl.bf16],
-        intermediate: txl.gptr[txl.bf16],
-        A_log: txl.gptr[txl.f32],
-        a: txl.gptr[txl.bf16],
-        dt_bias: txl.gptr[txl.f32],
-        q: txl.gptr[txl.bf16],
-        k: txl.gptr[txl.bf16],
-        v: txl.gptr[txl.bf16],
-        b_gate: txl.gptr[txl.bf16],
-        output: txl.gptr[txl.bf16],
-        read_indices: txl.gptr[txl.i32],
-        write_indices: txl.gptr[txl.i32],
+        state: txl.Tensor((txl.int64(),), txl.bf16),
+        intermediate: txl.Tensor((txl.int64(),), txl.bf16),
+        A_log: txl.Tensor((txl.int64(),), txl.f32),
+        a: txl.Tensor((txl.int64(),), txl.bf16),
+        dt_bias: txl.Tensor((txl.int64(),), txl.f32),
+        q: txl.Tensor((txl.int64(),), txl.bf16),
+        k: txl.Tensor((txl.int64(),), txl.bf16),
+        v: txl.Tensor((txl.int64(),), txl.bf16),
+        b_gate: txl.Tensor((txl.int64(),), txl.bf16),
+        output: txl.Tensor((txl.int64(),), txl.bf16),
+        read_indices: txl.Tensor((txl.int64(),), txl.i32),
+        write_indices: txl.Tensor((txl.int64(),), txl.i32),
         state_slot_stride: txl.i64,
         q_batch_stride: txl.i64,
         k_batch_stride: txl.i64,
@@ -365,7 +365,9 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                     txl.ptx["mul.f32"](r_q[i], r_q[i], txl.float32(SCALE))
 
             for i in range(ELEMS_PER_LANE):
-                txl.ptx.st.shared.b32(s_q.ptr_to([k_pre[0] + i]), txl.reinterpret("uint32", r_q[i]))
+                txl.ptx.st.shared.b32(
+                    s_q.ptr_to([k_pre[0] + i]), txl.reinterpret(r_q[i], ty="uint32")
+                )
 
         with txl.If(warp_raw[0] == 1), txl.Then():
             member_pre = _local_scalar("int32", lane_in_warp[0] % LANES_PER_GROUP)
@@ -400,7 +402,9 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                     txl.ptx["mul.f32"](r_k[i], r_k[i], k_factor[0])
 
             for i in range(ELEMS_PER_LANE):
-                txl.ptx.st.shared.b32(s_k.ptr_to([k_pre[0] + i]), txl.reinterpret("uint32", r_k[i]))
+                txl.ptx.st.shared.b32(
+                    s_k.ptr_to([k_pre[0] + i]), txl.reinterpret(r_k[i], ty="uint32")
+                )
 
         with txl.If(warp_raw[0] == 2), txl.Then():
             A_value = txl.local_scalar("float32")
@@ -456,7 +460,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                 _exp2_3 = txl.local_scalar("float32")
                 txl.ptx["ex2.approx.ftz.f32"](_exp2_3, _mul7)
                 g = _local_scalar("float32", _exp2_3)
-                txl.ptx.st.shared.b32(s_gb.ptr_to([0]), txl.reinterpret("uint32", g[0]))
+                txl.ptx.st.shared.b32(s_gb.ptr_to([0]), txl.reinterpret(g[0], ty="uint32"))
 
         with txl.If(warp_raw[0] == 3), txl.Then():
             with txl.If(lane_in_warp[0] == 0), txl.Then():
@@ -474,7 +478,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                 _rcp = txl.local_scalar("float32")
                 txl.ptx["rcp.rn.f32"](_rcp, _add4)
                 beta = _local_scalar("float32", _rcp)
-                txl.ptx.st.shared.b32(s_gb.ptr_to([1]), txl.reinterpret("uint32", beta[0]))
+                txl.ptx.st.shared.b32(s_gb.ptr_to([1]), txl.reinterpret(beta[0], ty="uint32"))
 
         txl.cuda.cta_sync()
 
@@ -485,19 +489,19 @@ def _make_gdn_decode_bf16_wide_vec_t1(
         # explicitly: inline PTX shared loads are opaque to nvcc's CSE.
         _lds32 = txl.local_scalar("uint32")
         txl.ptx.ld.shared.b32(_lds32, s_gb.ptr_to([0]))
-        g_value = _local_scalar("float32", txl.reinterpret("float32", _lds32))
+        g_value = _local_scalar("float32", txl.reinterpret(_lds32, ty="float32"))
         _lds32_2 = txl.local_scalar("uint32")
         txl.ptx.ld.shared.b32(_lds32_2, s_gb.ptr_to([1]))
-        beta_value = _local_scalar("float32", txl.reinterpret("float32", _lds32_2))
+        beta_value = _local_scalar("float32", txl.reinterpret(_lds32_2, ty="float32"))
         r_k_main = txl.alloc_local((ELEMS_PER_LANE,), "float32")
         r_q_main = txl.alloc_local((ELEMS_PER_LANE,), "float32")
         for i in range(ELEMS_PER_LANE):
             _lds32_3 = txl.local_scalar("uint32")
             txl.ptx.ld.shared.b32(_lds32_3, s_k.ptr_to([k_start[0] + i]))
-            txl.ptx.mov.b32(r_k_main[i], txl.reinterpret("float32", _lds32_3))
+            txl.ptx.mov.b32(r_k_main[i], txl.reinterpret(_lds32_3, ty="float32"))
             _lds32_4 = txl.local_scalar("uint32")
             txl.ptx.ld.shared.b32(_lds32_4, s_q.ptr_to([k_start[0] + i]))
-            txl.ptx.mov.b32(r_q_main[i], txl.reinterpret("float32", _lds32_4))
+            txl.ptx.mov.b32(r_q_main[i], txl.reinterpret(_lds32_4, ty="float32"))
 
         for iter_index in range(ITERS_PER_GROUP):
             v_base = _local_scalar(

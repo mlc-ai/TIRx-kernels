@@ -774,7 +774,7 @@ def _make_bmm_kernel(
             def pack_values() -> None:
                 if c_dtype == "float32":
                     for index in range(32):
-                        txl.assign(words[index], txl.reinterpret("uint32", values[index]))
+                        txl.assign(words[index], txl.reinterpret(values[index], ty="uint32"))
                 elif c_dtype == "float16":
                     for index in range(16):
                         txl.ptx.cvt.rn.f16x2.f32(
@@ -876,10 +876,10 @@ def _make_bmm_kernel(
                     )
 
     kernel.__annotations__ = {
-        "a": txl.gptr[txl.u8, (B * M * K_dim,)],
-        "b": txl.gptr[txl.u8, (B * K_dim * N,)],
-        "c": txl.gptr[txl.u8, (B * M * N * c_bits // 8,)],
-        "output_scale": txl.gptr[txl.f32, (1,)],
+        "a": txl.Tensor((B * M * K_dim,), txl.u8),
+        "b": txl.Tensor((B * K_dim * N,), txl.u8),
+        "c": txl.Tensor((B * M * N * c_bits // 8,), txl.u8),
+        "output_scale": txl.Tensor((1,), txl.f32),
     }
     return txl.kernel()(kernel)
 

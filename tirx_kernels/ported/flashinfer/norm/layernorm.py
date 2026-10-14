@@ -139,12 +139,12 @@ def _shfl_bfly_f32(value, lane_xor: int):
     out = txl.local_scalar(txl.u32)
     txl.ptx.shfl_sync.bfly.b32(
         out,
-        txl.reinterpret(txl.u32, value),
+        txl.reinterpret(value, ty=txl.u32),
         txl.uint32(lane_xor),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret(txl.f32, out)
+    return txl.reinterpret(out, ty=txl.f32)
 
 
 def _butterfly_sum_f32(value):
@@ -350,10 +350,10 @@ def get_kernel(
 
     @txl.kernel()
     def flashinfer_layernorm(
-        out: txl.gptr[txl.bf16],
-        x: txl.gptr[txl.bf16],
-        gamma: txl.gptr[txl.f32],
-        beta: txl.gptr[txl.f32],
+        out: txl.Tensor((txl.int64(),), txl.bf16),
+        x: txl.Tensor((txl.int64(),), txl.bf16),
+        gamma: txl.Tensor((txl.int64(),), txl.f32),
+        beta: txl.Tensor((txl.int64(),), txl.f32),
         runtime_M: txl.i64,
         runtime_eps: txl.f32,
         y_row_stride: txl.i64,
@@ -404,14 +404,14 @@ def get_kernel(
         if warps > 1:
             with txl.If(lane == 0), txl.Then():
                 txl.ptx.st.shared.b32(
-                    shared_raw.ptr_to([warp * 4]), txl.reinterpret(txl.u32, warp_sum)
+                    shared_raw.ptr_to([warp * 4]), txl.reinterpret(warp_sum, ty=txl.u32)
                 )
             txl.ptx.bar.sync(txl.uint32(0))
             block_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
             with txl.If(lane < warps), txl.Then():
                 sum_word = txl.local_scalar(txl.u32)
                 txl.ptx.ld.shared.b32(sum_word, shared_raw.ptr_to([lane * 4]))
-                txl.assign(block_sum, txl.reinterpret(txl.f32, sum_word))
+                txl.assign(block_sum, txl.reinterpret(sum_word, ty=txl.f32))
             sum_x = _butterfly_sum_f32(block_sum)
         else:
             sum_x = warp_sum
@@ -461,14 +461,14 @@ def get_kernel(
         if warps > 1:
             with txl.If(lane == 0), txl.Then():
                 txl.ptx.st.shared.b32(
-                    shared_raw.ptr_to([warps * 4 + warp * 4]), txl.reinterpret(txl.u32, warp_var)
+                    shared_raw.ptr_to([warps * 4 + warp * 4]), txl.reinterpret(warp_var, ty=txl.u32)
                 )
             txl.ptx.bar.sync(txl.uint32(0))
             block_var = txl.local_scalar(txl.f32, init=txl.float32(0.0))
             with txl.If(lane < warps), txl.Then():
                 var_word = txl.local_scalar(txl.u32)
                 txl.ptx.ld.shared.b32(var_word, shared_raw.ptr_to([warps * 4 + lane * 4]))
-                txl.assign(block_var, txl.reinterpret(txl.f32, var_word))
+                txl.assign(block_var, txl.reinterpret(var_word, ty=txl.f32))
             sum_diff_sq = _butterfly_sum_f32(block_var)
         else:
             sum_diff_sq = warp_var

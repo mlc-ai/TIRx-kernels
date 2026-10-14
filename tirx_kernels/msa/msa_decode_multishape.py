@@ -189,18 +189,18 @@ def make_kernel_kv(cfg, *, backend_config=None):
 
     @txl.kernel()
     def msa_decode_kvmajor(
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        out: txl.gptr[out_dt],
-        q2k: txl.gptr[txl.i32],
-        lens: txl.gptr[txl.i32],
-        ptab: txl.gptr[txl.i32],
-        qraw: txl.gptr[txl.i32],
-        sched: txl.gptr[txl.i32],
-        part_o: txl.gptr[txl.f32],
-        part_ml: txl.gptr[txl.f32],
-        part_ctr: txl.gptr[txl.i32],
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        out: txl.Tensor((txl.int64(),), out_dt),
+        q2k: txl.Tensor((txl.int64(),), txl.i32),
+        lens: txl.Tensor((txl.int64(),), txl.i32),
+        ptab: txl.Tensor((txl.int64(),), txl.i32),
+        qraw: txl.Tensor((txl.int64(),), txl.i32),
+        sched: txl.Tensor((txl.int64(),), txl.i32),
+        part_o: txl.Tensor((txl.int64(),), txl.f32),
+        part_ml: txl.Tensor((txl.int64(),), txl.f32),
+        part_ctr: txl.Tensor((txl.int64(),), txl.i32),
         scale_log2: txl.f32,
     ):
         txl.device_entry(
@@ -237,8 +237,8 @@ def make_kernel_kv(cfg, *, backend_config=None):
         def lo_uniform(desc):
             desc_lo = txl.alloc_local((1,), "uint32")
             desc_hi = txl.alloc_local((1,), "uint32")
-            txl.assign(desc_lo[0], txl.uniform(txl.Cast("uint32", desc.value)))
-            txl.assign(desc_hi[0], txl.Cast("uint32", txl.shift_right(desc.value, txl.uint64(32))))
+            txl.assign(desc_lo[0], txl.uniform(txl.Cast(desc.value, "uint32")))
+            txl.assign(desc_hi[0], txl.Cast(txl.shift_right(desc.value, txl.uint64(32)), "uint32"))
             return desc_lo, desc_hi
 
         def desc_at(desc, off16):
@@ -247,13 +247,13 @@ def make_kernel_kv(cfg, *, backend_config=None):
             low = (
                 lo[0]
                 if isinstance(off16, int) and off16 == 0
-                else lo[0] + txl.Cast("uint32", off16)
+                else lo[0] + txl.Cast(off16, "uint32")
             )
             txl.assign(
                 packed[0],
                 txl.bitwise_or(
-                    txl.shift_left(txl.Cast("uint64", hi[0]), txl.uint64(32)),
-                    txl.Cast("uint64", low),
+                    txl.shift_left(txl.Cast(hi[0], "uint64"), txl.uint64(32)),
+                    txl.Cast(low, "uint64"),
                 ),
             )
             return packed[0]
@@ -335,7 +335,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
             xor = 16
             while len(cur) > 1:
                 half = len(cur) // 2
-                bit = txl.bitwise_and(txl.Cast("uint32", lane), txl.uint32(xor)) != txl.uint32(0)
+                bit = txl.bitwise_and(txl.Cast(lane, "uint32"), txl.uint32(xor)) != txl.uint32(0)
                 nxt = []
                 for i in range(half):
                     a = cur[i]
@@ -403,7 +403,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
             txl.ptx.tcgen05.wait__st.sync.aligned()
 
         def lanemask_lt():
-            return txl.shift_left(txl.uint32(1), txl.Cast("uint32", lane)) - txl.uint32(1)
+            return txl.shift_left(txl.uint32(1), txl.Cast(lane, "uint32")) - txl.uint32(1)
 
         def iket_range(name, *, leader_only=False):
             token = txl.alloc_local([1], "uint32")
@@ -432,7 +432,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
             wq = warp & 3
             tid_wg = tid & 127
             col0 = wg * NQW
-            bar_id = txl.uint32(1) + txl.Cast("uint32", wg)
+            bar_id = txl.uint32(1) + txl.Cast(wg, "uint32")
             it = txl.local_scalar("int32", init=0)
             gj = txl.local_scalar("int32", init=0)
             par = txl.local_scalar("int32", init=0)
@@ -442,7 +442,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
             s = txl.alloc_local([NQW], "float32")
             o = txl.alloc_local([NQW], "float32")
             hbits = txl.local_scalar("uint16")
-            zero16 = txl.local_scalar("uint16", init=txl.Cast("uint16", txl.int32(0)))
+            zero16 = txl.local_scalar("uint16", init=txl.Cast(txl.int32(0), "uint16"))
             with txl.While(running != 0):
                 slot = it & 1
                 tk_wu = iket_range("sm-wait-union", leader_only=True)
@@ -488,8 +488,8 @@ def make_kernel_kv(cfg, *, backend_config=None):
                                             umask.ptr_to([slot * MAX_UNION + blk_off_s + j])
                                         )
                                     sb = gj & 1
-                                    sb_col = txl.Cast("uint32", sb) * txl.uint32(NQ_PAD) + txl.Cast(
-                                        "uint32", col0
+                                    sb_col = txl.Cast(sb, "uint32") * txl.uint32(NQ_PAD) + txl.Cast(
+                                        col0, "uint32"
                                     )
                                     kv_pos = blk * BLK + tid_wg
                                     need_causal = (blk * BLK + (BLK - 1)) > causal_off
@@ -505,7 +505,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
                                             return None
                                         t = group_token(gl)
                                         return txl.bitwise_and(
-                                            txl.shift_right(tmask, txl.Cast("uint32", t)),
+                                            txl.shift_right(tmask, txl.Cast(t, "uint32")),
                                             txl.uint32(1),
                                         ) != txl.uint32(0)
 
@@ -626,7 +626,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
                                                 tmem_load_cols(
                                                     o_ch,
                                                     txl.uint32(O_COL)
-                                                    + txl.Cast("uint32", col0)
+                                                    + txl.Cast(col0, "uint32")
                                                     + txl.uint32(c0),
                                                     RS,
                                                 )
@@ -639,7 +639,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
                                                 tmem_store_cols(
                                                     o_ch,
                                                     txl.uint32(O_COL)
-                                                    + txl.Cast("uint32", col0)
+                                                    + txl.Cast(col0, "uint32")
                                                     + txl.uint32(c0),
                                                     RS,
                                                 )
@@ -685,7 +685,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
                                 o_ready.wait(0, it & 1)
                                 iket_end(tk_wo)
                                 tk_epi = iket_range("sm-epi", leader_only=True)
-                                tmem_load_cols(o, txl.uint32(O_COL) + txl.Cast("uint32", col0), NQW)
+                                tmem_load_cols(o, txl.uint32(O_COL) + txl.Cast(col0, "uint32"), NQW)
                                 o_free.arrive(0)
                                 lt = txl.local_scalar("float32")
                                 for nl in range(NQW):
@@ -899,7 +899,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
                             tk_wsf = iket_range("mma-wait-sfree")
                             s_free.wait(sb, ((gj_m >> 1) + 1) & 1)
                             iket_end(tk_wsf)
-                            mma_qk(txl.Cast("uint32", sb) * txl.uint32(NQ_PAD), kstage, slot)
+                            mma_qk(txl.Cast(sb, "uint32") * txl.uint32(NQ_PAD), kstage, slot)
                             with txl.If(elected()), txl.Then():
                                 s_ready.arrive(sb)
                                 kv_load.empty.arrive(kstage)
@@ -933,7 +933,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
                             zero_v,
                             zero_v,
                             zero_v,
-                            True if ki != 0 else txl.Cast("bool", acc != 0),
+                            True if ki != 0 else txl.Cast(acc != 0, "bool"),
                         )
                 iket_end(tk)
 
@@ -1036,7 +1036,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
                                     )
                                     for i in range(8):
                                         txl.ptx.cvt.rn.satfinite.e4m3x2.bf16x2(
-                                            e4[i], txl.Cast("uint32", words8[i])
+                                            e4[i], txl.Cast(words8[i], "uint32")
                                         )
                                     for i in range(4):
                                         txl.ptx.mov.b32(packed4[i], e4[2 * i], e4[2 * i + 1])
@@ -1300,7 +1300,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
                                 txl.ptx.popc.b32(before, txl.bitwise_and(ballot, lanemask_lt()))
                                 total = txl.local_scalar("uint32")
                                 txl.ptx.popc.b32(total, ballot)
-                                rank = n_blocks + txl.Cast("int32", before)
+                                rank = n_blocks + txl.Cast(before, "int32")
                                 with txl.If(vflag != 0), txl.Then():
                                     txl.ptx.st.shared.b32(
                                         ulist.ptr_to([slot * MAX_UNION + rank]), idxs[r]
@@ -1310,7 +1310,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
                                         txl.ptx.st.shared.b32(
                                             uplist.ptr_to([slot * MAX_UNION + rank]), pg
                                         )
-                                txl.assign(n_blocks, n_blocks + txl.Cast("int32", total))
+                                txl.assign(n_blocks, n_blocks + txl.Cast(total, "int32"))
                         else:
                             nwords = (n_vis + 31) >> 5
                             wi = txl.local_scalar("int32", init=lane)
@@ -1323,7 +1323,7 @@ def make_kernel_kv(cfg, *, backend_config=None):
                                     txl.ptx.red.shared.or_.b32(
                                         words.ptr_to([idxs[r] >> 5]),
                                         txl.shift_left(
-                                            txl.uint32(1), txl.Cast("uint32", idxs[r] & 31)
+                                            txl.uint32(1), txl.Cast(idxs[r] & 31, "uint32")
                                         ),
                                     )
                             txl.cuda.warp_sync()
@@ -1352,18 +1352,18 @@ def make_kernel_kv(cfg, *, backend_config=None):
                                 )
                                 txl.assign(carry, carry + tot)
                                 txl.assign(wbase, wbase + 32)
-                            txl.assign(n_blocks, txl.Cast("int32", carry))
+                            txl.assign(n_blocks, txl.Cast(carry, "int32"))
                             txl.cuda.warp_sync()
                             with txl.serial(nwords, unroll=False) as w:
                                 wv = ld_smem_u32(words.ptr_to([w]))
                                 pw = ld_smem_u32(prefix.ptr_to([w]))
                                 mybit = txl.bitwise_and(
-                                    txl.shift_right(wv, txl.Cast("uint32", lane)), txl.uint32(1)
+                                    txl.shift_right(wv, txl.Cast(lane, "uint32")), txl.uint32(1)
                                 )
                                 with txl.If(mybit != txl.uint32(0)), txl.Then():
                                     below = txl.local_scalar("uint32")
                                     txl.ptx.popc.b32(below, txl.bitwise_and(wv, lanemask_lt()))
-                                    rank = txl.Cast("int32", pw + below)
+                                    rank = txl.Cast(pw + below, "int32")
                                     blkid = w * 32 + lane
                                     txl.ptx.st.shared.b32(
                                         ulist.ptr_to([slot * MAX_UNION + rank]), blkid
@@ -1389,16 +1389,16 @@ def make_kernel_kv(cfg, *, backend_config=None):
                                         txl.bitwise_and(
                                             wv,
                                             txl.shift_left(
-                                                txl.uint32(1), txl.Cast("uint32", idxs[r] & 31)
+                                                txl.uint32(1), txl.Cast(idxs[r] & 31, "uint32")
                                             )
                                             - txl.uint32(1),
                                         ),
                                     )
-                                    u = txl.Cast("int32", pw + below)
+                                    u = txl.Cast(pw + below, "int32")
                                     txl.ptx.red.shared.or_.b32(
                                         umask.ptr_to([slot * MAX_UNION + u]),
                                         txl.shift_left(
-                                            txl.uint32(1), txl.Cast("uint32", e // TOPK)
+                                            txl.uint32(1), txl.Cast(e // TOPK, "uint32")
                                         ),
                                     )
                         txl.cuda.warp_sync()
@@ -1497,18 +1497,18 @@ def make_kernel_qm(cfg, *, backend_config=None):
 
     @txl.kernel()
     def msa_decode_qmajor(
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        out: txl.gptr[out_dt],
-        q2k: txl.gptr[txl.i32],
-        lens: txl.gptr[txl.i32],
-        ptab: txl.gptr[txl.i32],
-        qraw: txl.gptr[txl.i32],
-        sched: txl.gptr[txl.i32],
-        part_o: txl.gptr[txl.f32],
-        part_ml: txl.gptr[txl.f32],
-        part_ctr: txl.gptr[txl.i32],
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        out: txl.Tensor((txl.int64(),), out_dt),
+        q2k: txl.Tensor((txl.int64(),), txl.i32),
+        lens: txl.Tensor((txl.int64(),), txl.i32),
+        ptab: txl.Tensor((txl.int64(),), txl.i32),
+        qraw: txl.Tensor((txl.int64(),), txl.i32),
+        sched: txl.Tensor((txl.int64(),), txl.i32),
+        part_o: txl.Tensor((txl.int64(),), txl.f32),
+        part_ml: txl.Tensor((txl.int64(),), txl.f32),
+        part_ctr: txl.Tensor((txl.int64(),), txl.i32),
         scale_log2: txl.f32,
     ):
         txl.device_entry(
@@ -1541,8 +1541,8 @@ def make_kernel_qm(cfg, *, backend_config=None):
         def lo_uniform(desc):
             desc_lo = txl.alloc_local((1,), "uint32")
             desc_hi = txl.alloc_local((1,), "uint32")
-            txl.assign(desc_lo[0], txl.uniform(txl.Cast("uint32", desc.value)))
-            txl.assign(desc_hi[0], txl.Cast("uint32", txl.shift_right(desc.value, txl.uint64(32))))
+            txl.assign(desc_lo[0], txl.uniform(txl.Cast(desc.value, "uint32")))
+            txl.assign(desc_hi[0], txl.Cast(txl.shift_right(desc.value, txl.uint64(32)), "uint32"))
             return desc_lo, desc_hi
 
         def desc_at(desc, off16):
@@ -1551,13 +1551,13 @@ def make_kernel_qm(cfg, *, backend_config=None):
             low = (
                 lo[0]
                 if isinstance(off16, int) and off16 == 0
-                else lo[0] + txl.Cast("uint32", off16)
+                else lo[0] + txl.Cast(off16, "uint32")
             )
             txl.assign(
                 packed[0],
                 txl.bitwise_or(
-                    txl.shift_left(txl.Cast("uint64", hi[0]), txl.uint64(32)),
-                    txl.Cast("uint64", low),
+                    txl.shift_left(txl.Cast(hi[0], "uint64"), txl.uint64(32)),
+                    txl.Cast(low, "uint64"),
                 ),
             )
             return packed[0]
@@ -1622,7 +1622,7 @@ def make_kernel_qm(cfg, *, backend_config=None):
             return value
 
         def lanemask_lt():
-            return txl.shift_left(txl.uint32(1), txl.Cast("uint32", lane)) - txl.uint32(1)
+            return txl.shift_left(txl.uint32(1), txl.Cast(lane, "uint32")) - txl.uint32(1)
 
         def iket_range(name, *, leader_only=False):
             token = txl.alloc_local([1], "uint32")
@@ -1713,7 +1713,7 @@ def make_kernel_qm(cfg, *, backend_config=None):
                                             init=txl.Select(
                                                 txl.bitwise_and(
                                                     txl.shift_right(
-                                                        tmask, txl.Cast("uint32", t_row)
+                                                        tmask, txl.Cast(t_row, "uint32")
                                                     ),
                                                     txl.uint32(1),
                                                 )
@@ -1731,9 +1731,9 @@ def make_kernel_qm(cfg, *, backend_config=None):
                                         )
                                     sb = gj & 1
                                     pb = gj & 1
-                                    s_col = txl.Cast("uint32", sb) * txl.uint32(S_COLS)
+                                    s_col = txl.Cast(sb, "uint32") * txl.uint32(S_COLS)
                                     p_col = txl.uint32(P_BASE) + txl.Cast(
-                                        "uint32", pb
+                                        pb, "uint32"
                                     ) * txl.uint32(P_COLS)
                                     need_causal = (blk * BLK + (BLK - 1)) > causal_off
                                     tk_ws = iket_range("sm-wait-s", leader_only=True)
@@ -2046,7 +2046,7 @@ def make_kernel_qm(cfg, *, backend_config=None):
 
                 def mma_qk(sb, kstage, qslot):
                     tk = iket_range("mma-qk")
-                    d_addr = tmem_base + txl.Cast("uint32", sb) * txl.uint32(S_COLS)
+                    d_addr = tmem_base + txl.Cast(sb, "uint32") * txl.uint32(S_COLS)
                     for ki in range(NK):
                         with txl.If(elected()), txl.Then():
                             txl.ptx[MMA](
@@ -2065,7 +2065,7 @@ def make_kernel_qm(cfg, *, backend_config=None):
                 def mma_pv(vstage, pb, acc):
                     tk = iket_range("mma-pv")
                     p_addr = (
-                        tmem_base + txl.uint32(P_BASE) + txl.Cast("uint32", pb) * txl.uint32(P_COLS)
+                        tmem_base + txl.uint32(P_BASE) + txl.Cast(pb, "uint32") * txl.uint32(P_COLS)
                     )
                     for ki in range(NK):
                         with txl.If(elected()), txl.Then():
@@ -2078,7 +2078,7 @@ def make_kernel_qm(cfg, *, backend_config=None):
                                 zero,
                                 zero,
                                 zero,
-                                True if ki != 0 else txl.Cast("bool", acc != 0),
+                                True if ki != 0 else txl.Cast(acc != 0, "bool"),
                             )
                     iket_end(tk)
 
@@ -2209,7 +2209,7 @@ def make_kernel_qm(cfg, *, backend_config=None):
                                         )
                                         for i in range(8):
                                             txl.ptx.cvt.rn.satfinite.e4m3x2.bf16x2(
-                                                e4[i], txl.Cast("uint32", words8[i])
+                                                e4[i], txl.Cast(words8[i], "uint32")
                                             )
                                         for i in range(4):
                                             txl.ptx.mov.b32(packed4[i], e4[2 * i], e4[2 * i + 1])
@@ -2375,7 +2375,7 @@ def make_kernel_qm(cfg, *, backend_config=None):
                                     txl.ptx.popc.b32(before, txl.bitwise_and(ballot, lanemask_lt()))
                                     total = txl.local_scalar("uint32")
                                     txl.ptx.popc.b32(total, ballot)
-                                    rank = n_blocks + txl.Cast("int32", before)
+                                    rank = n_blocks + txl.Cast(before, "int32")
                                     with txl.If(vflag != 0), txl.Then():
                                         txl.ptx.st.shared.b32(
                                             ulist.ptr_to([slot * MAX_UNION + rank]), idxs[r]
@@ -2387,7 +2387,7 @@ def make_kernel_qm(cfg, *, backend_config=None):
                                             txl.ptx.st.shared.b32(
                                                 uplist.ptr_to([slot * MAX_UNION + rank]), pg
                                             )
-                                    txl.assign(n_blocks, n_blocks + txl.Cast("int32", total))
+                                    txl.assign(n_blocks, n_blocks + txl.Cast(total, "int32"))
                             else:
                                 nwords = (n_vis + 31) >> 5
                                 wi = txl.local_scalar("int32", init=lane)
@@ -2400,7 +2400,7 @@ def make_kernel_qm(cfg, *, backend_config=None):
                                         txl.ptx.red.shared.or_.b32(
                                             words.ptr_to([idxs[r] >> 5]),
                                             txl.shift_left(
-                                                txl.uint32(1), txl.Cast("uint32", idxs[r] & 31)
+                                                txl.uint32(1), txl.Cast(idxs[r] & 31, "uint32")
                                             ),
                                         )
                                 txl.cuda.warp_sync()
@@ -2429,18 +2429,18 @@ def make_kernel_qm(cfg, *, backend_config=None):
                                     )
                                     txl.assign(carry, carry + tot)
                                     txl.assign(wbase, wbase + 32)
-                                txl.assign(n_blocks, txl.Cast("int32", carry))
+                                txl.assign(n_blocks, txl.Cast(carry, "int32"))
                                 txl.cuda.warp_sync()
                                 with txl.serial(nwords, unroll=False) as w:
                                     wv = ld_smem_u32(words.ptr_to([w]))
                                     pw = ld_smem_u32(prefix.ptr_to([w]))
                                     mybit = txl.bitwise_and(
-                                        txl.shift_right(wv, txl.Cast("uint32", lane)), txl.uint32(1)
+                                        txl.shift_right(wv, txl.Cast(lane, "uint32")), txl.uint32(1)
                                     )
                                     with txl.If(mybit != txl.uint32(0)), txl.Then():
                                         below = txl.local_scalar("uint32")
                                         txl.ptx.popc.b32(below, txl.bitwise_and(wv, lanemask_lt()))
-                                        rank = txl.Cast("int32", pw + below)
+                                        rank = txl.Cast(pw + below, "int32")
                                         blkid = w * 32 + lane
                                         txl.ptx.st.shared.b32(
                                             ulist.ptr_to([slot * MAX_UNION + rank]), blkid
@@ -2466,16 +2466,16 @@ def make_kernel_qm(cfg, *, backend_config=None):
                                             txl.bitwise_and(
                                                 wv,
                                                 txl.shift_left(
-                                                    txl.uint32(1), txl.Cast("uint32", idxs[r] & 31)
+                                                    txl.uint32(1), txl.Cast(idxs[r] & 31, "uint32")
                                                 )
                                                 - txl.uint32(1),
                                             ),
                                         )
-                                        u = txl.Cast("int32", pw + below)
+                                        u = txl.Cast(pw + below, "int32")
                                         txl.ptx.red.shared.or_.b32(
                                             umask.ptr_to([slot * MAX_UNION + u]),
                                             txl.shift_left(
-                                                txl.uint32(1), txl.Cast("uint32", e // TOPK)
+                                                txl.uint32(1), txl.Cast(e // TOPK, "uint32")
                                             ),
                                         )
                             txl.cuda.warp_sync()
@@ -3011,18 +3011,18 @@ def make_kernel_qm64(cfg, *, backend_config=None):
 
     @txl.kernel()
     def msa_decode_qmajor(
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        out: txl.gptr[out_dt],
-        q2k: txl.gptr[txl.i32],
-        lens: txl.gptr[txl.i32],
-        ptab: txl.gptr[txl.i32],
-        qraw: txl.gptr[txl.i32],
-        sched: txl.gptr[txl.i32],
-        part_o: txl.gptr[txl.f32],
-        part_ml: txl.gptr[txl.f32],
-        part_ctr: txl.gptr[txl.i32],
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        out: txl.Tensor((txl.int64(),), out_dt),
+        q2k: txl.Tensor((txl.int64(),), txl.i32),
+        lens: txl.Tensor((txl.int64(),), txl.i32),
+        ptab: txl.Tensor((txl.int64(),), txl.i32),
+        qraw: txl.Tensor((txl.int64(),), txl.i32),
+        sched: txl.Tensor((txl.int64(),), txl.i32),
+        part_o: txl.Tensor((txl.int64(),), txl.f32),
+        part_ml: txl.Tensor((txl.int64(),), txl.f32),
+        part_ctr: txl.Tensor((txl.int64(),), txl.i32),
         scale_log2: txl.f32,
     ):
         txl.device_entry(
@@ -3056,8 +3056,8 @@ def make_kernel_qm64(cfg, *, backend_config=None):
         def lo_uniform(desc):
             desc_lo = txl.alloc_local((1,), "uint32")
             desc_hi = txl.alloc_local((1,), "uint32")
-            txl.assign(desc_lo[0], txl.uniform(txl.Cast("uint32", desc.value)))
-            txl.assign(desc_hi[0], txl.Cast("uint32", txl.shift_right(desc.value, txl.uint64(32))))
+            txl.assign(desc_lo[0], txl.uniform(txl.Cast(desc.value, "uint32")))
+            txl.assign(desc_hi[0], txl.Cast(txl.shift_right(desc.value, txl.uint64(32)), "uint32"))
             return desc_lo, desc_hi
 
         def desc_at(desc, off16):
@@ -3066,13 +3066,13 @@ def make_kernel_qm64(cfg, *, backend_config=None):
             low = (
                 lo[0]
                 if isinstance(off16, int) and off16 == 0
-                else lo[0] + txl.Cast("uint32", off16)
+                else lo[0] + txl.Cast(off16, "uint32")
             )
             txl.assign(
                 packed[0],
                 txl.bitwise_or(
-                    txl.shift_left(txl.Cast("uint64", hi[0]), txl.uint64(32)),
-                    txl.Cast("uint64", low),
+                    txl.shift_left(txl.Cast(hi[0], "uint64"), txl.uint64(32)),
+                    txl.Cast(low, "uint64"),
                 ),
             )
             return packed[0]
@@ -3144,7 +3144,7 @@ def make_kernel_qm64(cfg, *, backend_config=None):
             return value
 
         def lanemask_lt():
-            return txl.shift_left(txl.uint32(1), txl.Cast("uint32", lane)) - txl.uint32(1)
+            return txl.shift_left(txl.uint32(1), txl.Cast(lane, "uint32")) - txl.uint32(1)
 
         def iket_range(name, *, leader_only=False):
             token = txl.alloc_local([1], "uint32")
@@ -3264,7 +3264,7 @@ def make_kernel_qm64(cfg, *, backend_config=None):
                                             init=txl.Select(
                                                 txl.bitwise_and(
                                                     txl.shift_right(
-                                                        tmask, txl.Cast("uint32", t_row)
+                                                        tmask, txl.Cast(t_row, "uint32")
                                                     ),
                                                     txl.uint32(1),
                                                 )
@@ -3281,9 +3281,9 @@ def make_kernel_qm64(cfg, *, backend_config=None):
                                             any_sel, txl.ptx.pred(sel), txl.uint32(0xFFFFFFFF)
                                         )
                                     sb = gj & 1
-                                    s_col = txl.Cast("uint32", sb) * txl.uint32(S_COLS)
+                                    s_col = txl.Cast(sb, "uint32") * txl.uint32(S_COLS)
                                     p_col = txl.uint32(P_BASE) + txl.Cast(
-                                        "uint32", sb
+                                        sb, "uint32"
                                     ) * txl.uint32(S_COLS)
                                     kv0 = blk * BLK + half * TILE_N
                                     need_causal = (kv0 + (TILE_N - 1)) > causal_off
@@ -3303,7 +3303,7 @@ def make_kernel_qm64(cfg, *, backend_config=None):
                                         with txl.If(j + 1 < n_tiles), txl.Then():
                                             gj1 = gj + 1
                                             sb1 = gj1 & 1
-                                            s_col1 = txl.Cast("uint32", sb1) * txl.uint32(S_COLS)
+                                            s_col1 = txl.Cast(sb1, "uint32") * txl.uint32(S_COLS)
                                             tk_ws1 = iket_range("sm-wait-s", leader_only=True)
                                             s_ready.wait(sb1, (gj1 >> 1) & 1)
                                             iket_end(tk_ws1)
@@ -3650,7 +3650,7 @@ def make_kernel_qm64(cfg, *, backend_config=None):
 
                 def mma_qk(sb, kstage, qslot):
                     tk = iket_range("mma-qk")
-                    d_addr = tmem_base + txl.Cast("uint32", sb) * txl.uint32(S_COLS)
+                    d_addr = tmem_base + txl.Cast(sb, "uint32") * txl.uint32(S_COLS)
                     for ki in range(NQK):
                         with txl.If(elected()), txl.Then():
                             txl.ptx[MMA](
@@ -3669,7 +3669,7 @@ def make_kernel_qm64(cfg, *, backend_config=None):
                 def mma_pv(vstage, pb, acc):
                     tk = iket_range("mma-pv")
                     p_addr = (
-                        tmem_base + txl.uint32(P_BASE) + txl.Cast("uint32", pb) * txl.uint32(S_COLS)
+                        tmem_base + txl.uint32(P_BASE) + txl.Cast(pb, "uint32") * txl.uint32(S_COLS)
                     )
                     for ki in range(NPV):
                         with txl.If(elected()), txl.Then():
@@ -3682,7 +3682,7 @@ def make_kernel_qm64(cfg, *, backend_config=None):
                                 zero,
                                 zero,
                                 zero,
-                                True if ki != 0 else txl.Cast("bool", acc != 0),
+                                True if ki != 0 else txl.Cast(acc != 0, "bool"),
                             )
 
                     for ki in range(NPV) if QM64_USE_LMMA else ():
@@ -3696,7 +3696,7 @@ def make_kernel_qm64(cfg, *, backend_config=None):
                                 zero,
                                 zero,
                                 zero,
-                                True if ki != 0 else txl.Cast("bool", acc != 0),
+                                True if ki != 0 else txl.Cast(acc != 0, "bool"),
                             )
                     iket_end(tk)
 
@@ -3911,7 +3911,7 @@ def make_kernel_qm64(cfg, *, backend_config=None):
                                             )
                                             for i in range(8):
                                                 txl.ptx.cvt.rn.satfinite.e4m3x2.bf16x2(
-                                                    e4[i], txl.Cast("uint32", words8[i])
+                                                    e4[i], txl.Cast(words8[i], "uint32")
                                                 )
                                             for i in range(4):
                                                 txl.ptx.mov.b32(
@@ -4030,7 +4030,7 @@ def make_kernel_qm64(cfg, *, backend_config=None):
                                     txl.ptx.popc.b32(before, txl.bitwise_and(ballot, lanemask_lt()))
                                     total = txl.local_scalar("uint32")
                                     txl.ptx.popc.b32(total, ballot)
-                                    rank = n_blocks + txl.Cast("int32", before)
+                                    rank = n_blocks + txl.Cast(before, "int32")
                                     with txl.If(vflag != 0), txl.Then():
                                         txl.ptx.st.shared.b32(
                                             ulist.ptr_to([slot * MAX_UNION + rank]), idxs[r]
@@ -4042,7 +4042,7 @@ def make_kernel_qm64(cfg, *, backend_config=None):
                                             txl.ptx.st.shared.b32(
                                                 uplist.ptr_to([slot * MAX_UNION + rank]), pg
                                             )
-                                    txl.assign(n_blocks, n_blocks + txl.Cast("int32", total))
+                                    txl.assign(n_blocks, n_blocks + txl.Cast(total, "int32"))
                             else:
                                 nwords = (n_vis + 31) >> 5
                                 wi = txl.local_scalar("int32", init=lane)
@@ -4055,7 +4055,7 @@ def make_kernel_qm64(cfg, *, backend_config=None):
                                         txl.ptx.red.shared.or_.b32(
                                             words.ptr_to([idxs[r] >> 5]),
                                             txl.shift_left(
-                                                txl.uint32(1), txl.Cast("uint32", idxs[r] & 31)
+                                                txl.uint32(1), txl.Cast(idxs[r] & 31, "uint32")
                                             ),
                                         )
                                 txl.cuda.warp_sync()
@@ -4084,18 +4084,18 @@ def make_kernel_qm64(cfg, *, backend_config=None):
                                     )
                                     txl.assign(carry, carry + tot)
                                     txl.assign(wbase, wbase + 32)
-                                txl.assign(n_blocks, txl.Cast("int32", carry))
+                                txl.assign(n_blocks, txl.Cast(carry, "int32"))
                                 txl.cuda.warp_sync()
                                 with txl.serial(nwords, unroll=False) as w:
                                     wv = ld_smem_u32(words.ptr_to([w]))
                                     pw = ld_smem_u32(prefix.ptr_to([w]))
                                     mybit = txl.bitwise_and(
-                                        txl.shift_right(wv, txl.Cast("uint32", lane)), txl.uint32(1)
+                                        txl.shift_right(wv, txl.Cast(lane, "uint32")), txl.uint32(1)
                                     )
                                     with txl.If(mybit != txl.uint32(0)), txl.Then():
                                         below = txl.local_scalar("uint32")
                                         txl.ptx.popc.b32(below, txl.bitwise_and(wv, lanemask_lt()))
-                                        rank = txl.Cast("int32", pw + below)
+                                        rank = txl.Cast(pw + below, "int32")
                                         blkid = w * 32 + lane
                                         txl.ptx.st.shared.b32(
                                             ulist.ptr_to([slot * MAX_UNION + rank]), blkid
@@ -4121,16 +4121,16 @@ def make_kernel_qm64(cfg, *, backend_config=None):
                                             txl.bitwise_and(
                                                 wv,
                                                 txl.shift_left(
-                                                    txl.uint32(1), txl.Cast("uint32", idxs[r] & 31)
+                                                    txl.uint32(1), txl.Cast(idxs[r] & 31, "uint32")
                                                 )
                                                 - txl.uint32(1),
                                             ),
                                         )
-                                        u = txl.Cast("int32", pw + below)
+                                        u = txl.Cast(pw + below, "int32")
                                         txl.ptx.red.shared.or_.b32(
                                             umask.ptr_to([slot * MAX_UNION + u]),
                                             txl.shift_left(
-                                                txl.uint32(1), txl.Cast("uint32", e // TOPK)
+                                                txl.uint32(1), txl.Cast(e // TOPK, "uint32")
                                             ),
                                         )
                             txl.cuda.warp_sync()
@@ -4423,16 +4423,16 @@ def _build_q16_twotile_factory(*, backend_config=None):
 
         @txl.kernel()
         def msa_decode_qmajor_union(
-            q_map: txl.TensorMap,
-            k_map: txl.TensorMap,
-            v_map: txl.TensorMap,
-            out: txl.gptr[txl.bf16],
-            q2k: txl.gptr[txl.i32],
-            cu_k: txl.gptr[txl.i32],
-            sched: txl.gptr[txl.i32],
-            mrg_o: txl.gptr[txl.f32],
-            mrg_ml: txl.gptr[txl.f32],
-            mrg_ctl: txl.gptr[txl.i32],
+            q_map: txl.Ptr(txl.TensorMap),
+            k_map: txl.Ptr(txl.TensorMap),
+            v_map: txl.Ptr(txl.TensorMap),
+            out: txl.Tensor((txl.int64(),), txl.bf16),
+            q2k: txl.Tensor((txl.int64(),), txl.i32),
+            cu_k: txl.Tensor((txl.int64(),), txl.i32),
+            sched: txl.Tensor((txl.int64(),), txl.i32),
+            mrg_o: txl.Tensor((txl.int64(),), txl.f32),
+            mrg_ml: txl.Tensor((txl.int64(),), txl.f32),
+            mrg_ctl: txl.Tensor((txl.int64(),), txl.i32),
             scale_log2: txl.f32,
         ):
             txl.device_entry(
@@ -4464,9 +4464,9 @@ def _build_q16_twotile_factory(*, backend_config=None):
             def lo_uniform(desc):
                 desc_lo = txl.alloc_local((1,), "uint32")
                 desc_hi = txl.alloc_local((1,), "uint32")
-                txl.assign(desc_lo[0], txl.uniform(txl.Cast("uint32", desc.value)))
+                txl.assign(desc_lo[0], txl.uniform(txl.Cast(desc.value, "uint32")))
                 txl.assign(
-                    desc_hi[0], txl.Cast("uint32", txl.shift_right(desc.value, txl.uint64(32)))
+                    desc_hi[0], txl.Cast(txl.shift_right(desc.value, txl.uint64(32)), "uint32")
                 )
                 return desc_lo, desc_hi
 
@@ -4476,13 +4476,13 @@ def _build_q16_twotile_factory(*, backend_config=None):
                 low = (
                     lo[0]
                     if isinstance(off16, int) and off16 == 0
-                    else lo[0] + txl.Cast("uint32", off16)
+                    else lo[0] + txl.Cast(off16, "uint32")
                 )
                 txl.assign(
                     packed[0],
                     txl.bitwise_or(
-                        txl.shift_left(txl.Cast("uint64", hi[0]), txl.uint64(32)),
-                        txl.Cast("uint64", low),
+                        txl.shift_left(txl.Cast(hi[0], "uint64"), txl.uint64(32)),
+                        txl.Cast(low, "uint64"),
                     ),
                 )
                 return packed[0]
@@ -4726,7 +4726,7 @@ def _build_q16_twotile_factory(*, backend_config=None):
                                     bit = txl.Select(
                                         txl.And(idxs[s] >= 0, idxs[s] < MAX_BLOCKS),
                                         txl.shift_left(
-                                            txl.uint32(1), txl.Cast("uint32", txl.max(idxs[s], 0))
+                                            txl.uint32(1), txl.Cast(txl.max(idxs[s], 0), "uint32")
                                         ),
                                         txl.uint32(0),
                                     )
@@ -4755,7 +4755,7 @@ def _build_q16_twotile_factory(*, backend_config=None):
                                 with txl.If(b_max < MAX_BLOCKS - 1), txl.Then():
                                     txl.assign(
                                         vis_mask,
-                                        txl.shift_left(txl.uint32(1), txl.Cast("uint32", b_max + 1))
+                                        txl.shift_left(txl.uint32(1), txl.Cast(b_max + 1, "uint32"))
                                         - txl.uint32(1),
                                     )
                                 with txl.If(b_max < 0), txl.Then():
@@ -4765,7 +4765,7 @@ def _build_q16_twotile_factory(*, backend_config=None):
                                 with txl.If(b_min < MAX_BLOCKS), txl.Then():
                                     txl.assign(
                                         lo_mask,
-                                        txl.shift_left(txl.uint32(1), txl.Cast("uint32", b_min))
+                                        txl.shift_left(txl.uint32(1), txl.Cast(b_min, "uint32"))
                                         - txl.uint32(1),
                                     )
                                 count = txl.local_scalar("uint32")
@@ -4804,7 +4804,7 @@ def _build_q16_twotile_factory(*, backend_config=None):
                                                                 txl.uint32(0),
                                                             ),
                                                         )
-                                                        txl.assign(lo_h, txl.Cast("int32", nh))
+                                                        txl.assign(lo_h, txl.Cast(nh, "int32"))
                                                     with txl.Else():
                                                         txl.assign(cnt_h, txl.uint32(1))
                                                         txl.assign(nm_h, txl.uint32(1))
@@ -4822,10 +4822,10 @@ def _build_q16_twotile_factory(*, backend_config=None):
                                     txl.assign(blk_hi, 0)
                                 with txl.If(lane == 0), txl.Then():
                                     txl.ptx.st.shared.b32(
-                                        union_meta.ptr_to([slot * 8]), txl.Cast("int32", cnt_h)
+                                        union_meta.ptr_to([slot * 8]), txl.Cast(cnt_h, "int32")
                                     )
                                     txl.ptx.st.shared.b32(
-                                        union_meta.ptr_to([slot * 8 + 1]), txl.Cast("int32", nm_h)
+                                        union_meta.ptr_to([slot * 8 + 1]), txl.Cast(nm_h, "int32")
                                     )
                                     # Encode the logical half as 1/2 (zero means unsplit).
                                     # The merge must not depend on which CTA reaches an
@@ -4849,8 +4849,8 @@ def _build_q16_twotile_factory(*, backend_config=None):
                                 blk = txl.local_scalar(
                                     "uint32",
                                     init=txl.Select(
-                                        txl.Cast("uint32", lane) < cnt_h,
-                                        txl.Cast("uint32", blk_hi - lane),
+                                        txl.Cast(lane, "uint32") < cnt_h,
+                                        txl.Cast(blk_hi - lane, "uint32"),
                                         txl.uint32(0),
                                     ),
                                 )
@@ -4883,7 +4883,7 @@ def _build_q16_twotile_factory(*, backend_config=None):
 
                                 for i_q in range(N_TILES):
                                     q_load.empty.wait(i_q, q_epoch.phase)
-                                with txl.If(txl.Cast("uint32", lane) < cnt_h), txl.Then():
+                                with txl.If(txl.Cast(lane, "uint32") < cnt_h), txl.Then():
                                     for i_q in range(N_TILES):
                                         for pair in range(4):
                                             tok_lo = i_q * TOK_PER_TILE + 2 * pair
@@ -4917,8 +4917,8 @@ def _build_q16_twotile_factory(*, backend_config=None):
                                             q_smem[i_q].ptr_to(0, 0),
                                             txl.address_of(q_map),
                                             txl.int32(0),
-                                            txl.Cast("int32", kv_head * GQA),
-                                            txl.Cast("int32", tok_base + i_q * TOK_PER_TILE),
+                                            txl.Cast(kv_head * GQA, "int32"),
+                                            txl.Cast(tok_base + i_q * TOK_PER_TILE, "int32"),
                                             txl.int32(0),
                                             txl.cuda.cvta_generic_to_shared(
                                                 q_load.full.ptr_to([i_q])
@@ -4940,8 +4940,8 @@ def _build_q16_twotile_factory(*, backend_config=None):
                                             ),
                                             txl.address_of(tensor_map),
                                             txl.int32(0),
-                                            txl.Cast("int32", kv_s + blk_ * BLK_N),
-                                            txl.Cast("int32", kv_head * 2),
+                                            txl.Cast(kv_s + blk_ * BLK_N, "int32"),
+                                            txl.Cast(kv_head * 2, "int32"),
                                             txl.cuda.cvta_generic_to_shared(
                                                 kv_load.full.ptr_to([kv_pipe.stage])
                                             ),
@@ -4953,8 +4953,8 @@ def _build_q16_twotile_factory(*, backend_config=None):
 
                                 blk_cur = txl.local_scalar("int32", init=blk_hi)
                                 load_kv(blk_cur, k_map, False)
-                                with txl.serial(txl.Cast("int32", cnt_h), unroll=False) as _k:
-                                    with txl.If(_k + 1 < txl.Cast("int32", cnt_h)):
+                                with txl.serial(txl.Cast(cnt_h, "int32"), unroll=False) as _k:
+                                    with txl.If(_k + 1 < txl.Cast(cnt_h, "int32")):
                                         with txl.Then():
                                             blk_nxt = txl.local_scalar("int32", init=blk_cur - 1)
                                             load_kv(blk_nxt, k_map, False)
@@ -5015,7 +5015,7 @@ def _build_q16_twotile_factory(*, backend_config=None):
                                     disabled[1],
                                     disabled[2],
                                     disabled[3],
-                                    True if ki != 0 else txl.Cast("bool", should_accumulate),
+                                    True if ki != 0 else txl.Cast(should_accumulate, "bool"),
                                 )
 
                     def gemm_pv_part2(i_q, kv_stage, disabled):
@@ -5149,7 +5149,7 @@ def _build_q16_twotile_factory(*, backend_config=None):
                         mask_inv = txl.local_scalar("uint32")
                         txl.assign(
                             mask_inv,
-                            shl_u32_clamp(txl.uint32(0xFFFFFFFF), txl.Cast("uint32", k_keep)),
+                            shl_u32_clamp(txl.uint32(0xFFFFFFFF), txl.Cast(k_keep, "uint32")),
                         )
                         for i in range(CHUNK_SIZE):
                             if i < ncol - s_ * CHUNK_SIZE:
@@ -5161,7 +5161,7 @@ def _build_q16_twotile_factory(*, backend_config=None):
                                 txl.ptx.mov.b32(
                                     s_chunk[c],
                                     txl.Select(
-                                        txl.Cast("bool", in_bound), s_chunk[c], txl.float32(NEG_INF)
+                                        txl.Cast(in_bound, "bool"), s_chunk[c], txl.float32(NEG_INF)
                                     ),
                                 )
 
@@ -5187,10 +5187,10 @@ def _build_q16_twotile_factory(*, backend_config=None):
                     selected = txl.local_scalar(
                         "int32",
                         init=txl.Cast(
-                            "int32",
                             txl.bitwise_and(
-                                txl.shift_right(sel_mask, txl.Cast("uint32", blk_)), txl.uint32(1)
+                                txl.shift_right(sel_mask, txl.Cast(blk_, "uint32")), txl.uint32(1)
                             ),
+                            "int32",
                         ),
                     )
 
@@ -5398,7 +5398,7 @@ def _build_q16_twotile_factory(*, backend_config=None):
                         txl.ptx.shfl_sync.idx.b32(
                             sel_mask,
                             mask_lane,
-                            txl.bitwise_and(txl.Cast("uint32", lane), txl.uint32(0xFFFFFFF0)),
+                            txl.bitwise_and(txl.Cast(lane, "uint32"), txl.uint32(0xFFFFFFF0)),
                             txl.uint32(31),
                             txl.uint32(0xFFFFFFFF),
                         )
@@ -5469,7 +5469,7 @@ def _build_q16_twotile_factory(*, backend_config=None):
                                                 o_row_f32[4 * i + 3],
                                             )
                                         txl.ptx.bar.sync(
-                                            txl.Cast("uint32", 1 + wg_id), txl.uint32(128)
+                                            txl.Cast(1 + wg_id, "uint32"), txl.uint32(128)
                                         )
                                         with txl.If(tid_in_wg == 0), txl.Then():
                                             txl.ptx.fence.acq_rel.gpu()
@@ -5796,15 +5796,15 @@ def make_kernel_q1d(cfg, *, backend_config=None):
 
     @txl.kernel()
     def msa_decode_q1d(
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        out: txl.gptr[out_dt],
-        q2k: txl.gptr[txl.i32],
-        lens: txl.gptr[txl.i32],
-        ptab: txl.gptr[txl.i32],
-        qraw: txl.gptr[txl.i32],
-        sched: txl.gptr[txl.i32],
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        out: txl.Tensor((txl.int64(),), out_dt),
+        q2k: txl.Tensor((txl.int64(),), txl.i32),
+        lens: txl.Tensor((txl.int64(),), txl.i32),
+        ptab: txl.Tensor((txl.int64(),), txl.i32),
+        qraw: txl.Tensor((txl.int64(),), txl.i32),
+        sched: txl.Tensor((txl.int64(),), txl.i32),
         scale_log2: txl.f32,
     ):
         txl.device_entry(
@@ -5916,7 +5916,7 @@ def make_kernel_q1d(cfg, *, backend_config=None):
                     for i in range(8):
                         txl.ptx.mul.rn.bf16x2(
                             scaled[i],
-                            txl.Cast("uint32", qw[8 * r + i]),
+                            txl.Cast(qw[8 * r + i], "uint32"),
                             txl.uint32(FP8_Q_SCALE_BF16X2),
                         )
                         txl.ptx.cvt.rn.satfinite.e4m3x2.bf16x2(e4[i], scaled[i])
@@ -6027,7 +6027,7 @@ def make_kernel_q1d(cfg, *, backend_config=None):
             xor = 16
             while len(cur) > 1:
                 half = len(cur) // 2
-                bit = txl.bitwise_and(txl.Cast("uint32", lane), txl.uint32(xor)) != txl.uint32(0)
+                bit = txl.bitwise_and(txl.Cast(lane, "uint32"), txl.uint32(xor)) != txl.uint32(0)
                 nxt = []
                 for i in range(half):
                     a = cur[i]
@@ -6099,10 +6099,10 @@ def make_kernel_q1d(cfg, *, backend_config=None):
                 hi = txl.local_scalar("float32")
                 if kind == "f16":
                     txl.ptx.cvt.f32.f16(
-                        lo, txl.Cast("uint16", txl.bitwise_and(words[i // 2], txl.uint32(0xFFFF)))
+                        lo, txl.Cast(txl.bitwise_and(words[i // 2], txl.uint32(0xFFFF)), "uint16")
                     )
                     txl.ptx.cvt.f32.f16(
-                        hi, txl.Cast("uint16", txl.shift_right(words[i // 2], txl.uint32(16)))
+                        hi, txl.Cast(txl.shift_right(words[i // 2], txl.uint32(16)), "uint16")
                     )
                 else:
                     txl.ptx.mov.b32(lo, txl.shift_left(words[i // 2], txl.uint32(16)))
@@ -6163,7 +6163,7 @@ def make_kernel_q1d(cfg, *, backend_config=None):
                     )
                     for i in range(8):
                         txl.ptx.mul.rn.bf16x2(
-                            scaled[i], txl.Cast("uint32", words8[i]), txl.uint32(FP8_Q_SCALE_BF16X2)
+                            scaled[i], txl.Cast(words8[i], "uint32"), txl.uint32(FP8_Q_SCALE_BF16X2)
                         )
                         txl.ptx.cvt.rn.satfinite.e4m3x2.bf16x2(e4[i], scaled[i])
                     for i in range(4):
@@ -6186,7 +6186,7 @@ def make_kernel_q1d(cfg, *, backend_config=None):
             """P^T columns NQ..NP-1 are never written by the softmax; zero them once so
             the PV MMA's padding columns read defined data."""
             zero = txl.local_scalar("uint32", init=txl.uint32(0))
-            zero16 = txl.local_scalar("uint16", init=txl.Cast("uint16", txl.int32(0)))
+            zero16 = txl.local_scalar("uint16", init=txl.Cast(txl.int32(0), "uint16"))
             for pb in range(NP_SLOTS):
                 col = NQ
                 while col < NP:
@@ -6255,7 +6255,7 @@ def make_kernel_q1d(cfg, *, backend_config=None):
             txl.ptx.tcgen05.wait__st.sync.aligned()
 
         def lanemask_lt():
-            return txl.shift_left(txl.uint32(1), txl.Cast("uint32", lane)) - txl.uint32(1)
+            return txl.shift_left(txl.uint32(1), txl.Cast(lane, "uint32")) - txl.uint32(1)
 
         def ring_pos(t):
             q = t // STAGES
@@ -6309,7 +6309,7 @@ def make_kernel_q1d(cfg, *, backend_config=None):
             dlog = txl.alloc_local([NQ], "float32")
             o = txl.alloc_local([NQ], "float32")
             hbits = txl.local_scalar("uint16")
-            zero16 = txl.local_scalar("uint16", init=txl.Cast("uint16", txl.int32(0)))
+            zero16 = txl.local_scalar("uint16", init=txl.Cast(txl.int32(0), "uint16"))
             with txl.While(running != 0):
                 slot = it & 1
                 tk_wu = iket_range("sm-wait-union", leader_only=True)
@@ -6351,11 +6351,11 @@ def make_kernel_q1d(cfg, *, backend_config=None):
                                         s_ready.wait(
                                             j,
                                             txl.Cast(
-                                                "int32",
                                                 txl.bitwise_and(
-                                                    txl.shift_right(ps, txl.Cast("uint32", j)),
+                                                    txl.shift_right(ps, txl.Cast(j, "uint32")),
                                                     txl.uint32(1),
                                                 ),
+                                                "int32",
                                             ),
                                         )
                                         txl.assign(
@@ -6363,7 +6363,7 @@ def make_kernel_q1d(cfg, *, backend_config=None):
                                             txl.bitwise_xor(
                                                 ps,
                                                 txl.shift_left(
-                                                    txl.uint32(1), txl.Cast("uint32", j)
+                                                    txl.uint32(1), txl.Cast(j, "uint32")
                                                 ),
                                             ),
                                         )
@@ -6371,7 +6371,7 @@ def make_kernel_q1d(cfg, *, backend_config=None):
                                         iket_end(tk_ws)
                                         tk_p1 = iket_range("sm-max", leader_only=True)
                                         tmem_load_cols(
-                                            s, txl.Cast("uint32", j) * txl.uint32(NQ_PAD), NQ
+                                            s, txl.Cast(j, "uint32") * txl.uint32(NQ_PAD), NQ
                                         )
                                         for nl in range(NQ):
                                             txl.assign(
@@ -6471,14 +6471,14 @@ def make_kernel_q1d(cfg, *, backend_config=None):
                                             with txl.Then():
                                                 tmem_issue_cols(
                                                     s2n,
-                                                    txl.Cast("uint32", j0 + 2) * txl.uint32(NQ_PAD),
+                                                    txl.Cast(j0 + 2, "uint32") * txl.uint32(NQ_PAD),
                                                     2 * NQ_PAD,
                                                 )
                                             with txl.Else():
                                                 with txl.If(j0 + 2 < nb), txl.Then():
                                                     tmem_issue_cols(
                                                         sc,
-                                                        txl.Cast("uint32", j0 + 2)
+                                                        txl.Cast(j0 + 2, "uint32")
                                                         * txl.uint32(NQ_PAD),
                                                         NQ,
                                                     )
@@ -6635,17 +6635,17 @@ def make_kernel_q1d(cfg, *, backend_config=None):
                                 kv_full_k.wait(
                                     kst,
                                     txl.Cast(
-                                        "int32",
                                         txl.bitwise_and(
-                                            txl.shift_right(pk, txl.Cast("uint32", kst)),
+                                            txl.shift_right(pk, txl.Cast(kst, "uint32")),
                                             txl.uint32(1),
                                         ),
+                                        "int32",
                                     ),
                                 )
                                 txl.assign(
                                     pk,
                                     txl.bitwise_xor(
-                                        pk, txl.shift_left(txl.uint32(1), txl.Cast("uint32", kst))
+                                        pk, txl.shift_left(txl.uint32(1), txl.Cast(kst, "uint32"))
                                     ),
                                 )
                                 iket_end(tk_wk)
@@ -6653,26 +6653,26 @@ def make_kernel_q1d(cfg, *, backend_config=None):
                                 s_free.wait(
                                     j,
                                     txl.Cast(
-                                        "int32",
                                         txl.bitwise_xor(
                                             txl.bitwise_and(
-                                                txl.shift_right(pf, txl.Cast("uint32", j)),
+                                                txl.shift_right(pf, txl.Cast(j, "uint32")),
                                                 txl.uint32(1),
                                             ),
                                             txl.uint32(1),
                                         ),
+                                        "int32",
                                     ),
                                 )
                                 txl.assign(
                                     pf,
                                     txl.bitwise_xor(
-                                        pf, txl.shift_left(txl.uint32(1), txl.Cast("uint32", j))
+                                        pf, txl.shift_left(txl.uint32(1), txl.Cast(j, "uint32"))
                                     ),
                                 )
                                 tc_fence_after()
                                 iket_end(tk_sf)
                                 tk_qk = iket_range("mma-qk")
-                                mma_qk(txl.Cast("uint32", j) * txl.uint32(NQ_PAD), kst, slot)
+                                mma_qk(txl.Cast(j, "uint32") * txl.uint32(NQ_PAD), kst, slot)
                                 with txl.If(elected()), txl.Then():
                                     s_ready.arrive(j)
                                     kv_empty.arrive(kst)
@@ -6716,7 +6716,7 @@ def make_kernel_q1d(cfg, *, backend_config=None):
                             zero_v,
                             zero_v,
                             zero_v,
-                            True if ki != 0 else txl.Cast("bool", acc != 0),
+                            True if ki != 0 else txl.Cast(acc != 0, "bool"),
                         )
 
             with txl.While(running_v != 0):
@@ -6749,17 +6749,17 @@ def make_kernel_q1d(cfg, *, backend_config=None):
                                 kv_full_v.wait(
                                     vst,
                                     txl.Cast(
-                                        "int32",
                                         txl.bitwise_and(
-                                            txl.shift_right(pv, txl.Cast("uint32", vst)),
+                                            txl.shift_right(pv, txl.Cast(vst, "uint32")),
                                             txl.uint32(1),
                                         ),
+                                        "int32",
                                     ),
                                 )
                                 txl.assign(
                                     pv,
                                     txl.bitwise_xor(
-                                        pv, txl.shift_left(txl.uint32(1), txl.Cast("uint32", vst))
+                                        pv, txl.shift_left(txl.uint32(1), txl.Cast(vst, "uint32"))
                                     ),
                                 )
                                 iket_end(tk_wv)
@@ -6965,10 +6965,10 @@ def make_kernel_q1d(cfg, *, backend_config=None):
                             txl.ptx.popc.b32(before, txl.bitwise_and(ballot, lanemask_lt()))
                             total = txl.local_scalar("uint32")
                             txl.ptx.popc.b32(total, ballot)
-                            rank = n_blocks + txl.Cast("int32", before)
+                            rank = n_blocks + txl.Cast(before, "int32")
                             if PAGED:
                                 pg = txl.local_scalar("int32")
-                                src_lane = txl.Cast("uint32", txl.max(idxs[r], 0) & 31)
+                                src_lane = txl.Cast(txl.max(idxs[r], 0) & 31, "uint32")
                                 txl.ptx.shfl_sync.idx.b32(
                                     pg, pt_lane, src_lane, txl.uint32(31), txl.uint32(0xFFFFFFFF)
                                 )
@@ -6982,7 +6982,7 @@ def make_kernel_q1d(cfg, *, backend_config=None):
                                 txl.ptx.st.shared.b32(ulist.ptr_to([slot * TOPK + rank]), idxs[r])
                                 if PAGED:
                                     txl.ptx.st.shared.b32(uplist.ptr_to([slot * TOPK + rank]), pg)
-                            txl.assign(n_blocks, n_blocks + txl.Cast("int32", total))
+                            txl.assign(n_blocks, n_blocks + txl.Cast(total, "int32"))
                         txl.cuda.warp_sync()
                         with txl.If(lane == 0), txl.Then():
                             txl.ptx.st.shared.b32(meta.ptr_to([slot * 16 + 0]), n_blocks)
@@ -7266,14 +7266,14 @@ def make_kernel_q4d(cfg, *, backend_config=None):
 
     @txl.kernel()
     def msa_decode_q4d(
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        out: txl.gptr[out_dt],
-        q2k: txl.gptr[txl.i32],
-        lens: txl.gptr[txl.i32],
-        ptab: txl.gptr[txl.i32],
-        sched: txl.gptr[txl.i32],
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        out: txl.Tensor((txl.int64(),), out_dt),
+        q2k: txl.Tensor((txl.int64(),), txl.i32),
+        lens: txl.Tensor((txl.int64(),), txl.i32),
+        ptab: txl.Tensor((txl.int64(),), txl.i32),
+        sched: txl.Tensor((txl.int64(),), txl.i32),
         scale_log2: txl.f32,
     ):
         txl.device_entry(
@@ -7408,7 +7408,7 @@ def make_kernel_q4d(cfg, *, backend_config=None):
             xor = 16
             while len(cur) > 1:
                 half = len(cur) // 2
-                bit = txl.bitwise_and(txl.Cast("uint32", lane), txl.uint32(xor)) != txl.uint32(0)
+                bit = txl.bitwise_and(txl.Cast(lane, "uint32"), txl.uint32(xor)) != txl.uint32(0)
                 nxt = []
                 for i in range(half):
                     a = cur[i]
@@ -7462,10 +7462,10 @@ def make_kernel_q4d(cfg, *, backend_config=None):
                 hi = txl.local_scalar("float32")
                 if kind == "f16":
                     txl.ptx.cvt.f32.f16(
-                        lo, txl.Cast("uint16", txl.bitwise_and(words[i // 2], txl.uint32(0xFFFF)))
+                        lo, txl.Cast(txl.bitwise_and(words[i // 2], txl.uint32(0xFFFF)), "uint16")
                     )
                     txl.ptx.cvt.f32.f16(
-                        hi, txl.Cast("uint16", txl.shift_right(words[i // 2], txl.uint32(16)))
+                        hi, txl.Cast(txl.shift_right(words[i // 2], txl.uint32(16)), "uint16")
                     )
                 else:
                     txl.ptx.mov.b32(lo, txl.shift_left(words[i // 2], txl.uint32(16)))
@@ -7506,7 +7506,7 @@ def make_kernel_q4d(cfg, *, backend_config=None):
             txl.ptx.tcgen05.wait__st.sync.aligned()
 
         def lanemask_lt():
-            return txl.shift_left(txl.uint32(1), txl.Cast("uint32", lane)) - txl.uint32(1)
+            return txl.shift_left(txl.uint32(1), txl.Cast(lane, "uint32")) - txl.uint32(1)
 
         def ring_pos(t):
             q = t // STAGES
@@ -7541,7 +7541,7 @@ def make_kernel_q4d(cfg, *, backend_config=None):
             wq = warp & 3
             tid_wg = tid & 127
             col0 = wg * NQW
-            bar_id = txl.uint32(BAR_WG) + txl.Cast("uint32", wg)
+            bar_id = txl.uint32(BAR_WG) + txl.Cast(wg, "uint32")
             it = txl.local_scalar("int32", init=0)
             gj = txl.local_scalar("int32", init=0)
             gc = txl.local_scalar("int32", init=0)
@@ -7557,7 +7557,7 @@ def make_kernel_q4d(cfg, *, backend_config=None):
             pw = txl.alloc_local([NQW // 2], "uint32")
             o = txl.alloc_local([NQW], "float32")
             hbits = txl.local_scalar("uint16")
-            zero16 = txl.local_scalar("uint16", init=txl.Cast("uint16", txl.int32(0)))
+            zero16 = txl.local_scalar("uint16", init=txl.Cast(txl.int32(0), "uint16"))
             with txl.While(running != 0):
                 slot = it & 1
                 tk_wu = iket_range("sm-wait-union", leader_only=True)
@@ -7587,7 +7587,7 @@ def make_kernel_q4d(cfg, *, backend_config=None):
                             """Did query token gl of this warpgroup select the block? (uniform over the warpgroup)"""
                             t = group_token(gl)
                             return txl.bitwise_and(
-                                txl.shift_right(tmask, txl.Cast("uint32", t)), txl.uint32(1)
+                                txl.shift_right(tmask, txl.Cast(t, "uint32")), txl.uint32(1)
                             ) != txl.uint32(0)
 
                         def group_causal(gl, kv_pos):
@@ -7625,11 +7625,11 @@ def make_kernel_q4d(cfg, *, backend_config=None):
                                         s_ready.wait(
                                             j,
                                             txl.Cast(
-                                                "int32",
                                                 txl.bitwise_and(
-                                                    txl.shift_right(ps, txl.Cast("uint32", j)),
+                                                    txl.shift_right(ps, txl.Cast(j, "uint32")),
                                                     txl.uint32(1),
                                                 ),
+                                                "int32",
                                             ),
                                         )
                                         txl.assign(
@@ -7637,7 +7637,7 @@ def make_kernel_q4d(cfg, *, backend_config=None):
                                             txl.bitwise_xor(
                                                 ps,
                                                 txl.shift_left(
-                                                    txl.uint32(1), txl.Cast("uint32", j)
+                                                    txl.uint32(1), txl.Cast(j, "uint32")
                                                 ),
                                             ),
                                         )
@@ -7646,7 +7646,7 @@ def make_kernel_q4d(cfg, *, backend_config=None):
                                         tk_p1 = iket_range("sm-max", leader_only=True)
                                         tmem_load_cols(
                                             s,
-                                            txl.Cast("uint32", j) * txl.uint32(NQ_PAD)
+                                            txl.Cast(j, "uint32") * txl.uint32(NQ_PAD)
                                             + txl.uint32(col0),
                                             NQW,
                                         )
@@ -7772,7 +7772,7 @@ def make_kernel_q4d(cfg, *, backend_config=None):
                                         tk_ex = iket_range("sm-exp", leader_only=True)
                                         tmem_load_cols(
                                             s,
-                                            txl.Cast("uint32", j) * txl.uint32(NQ_PAD)
+                                            txl.Cast(j, "uint32") * txl.uint32(NQ_PAD)
                                             + txl.uint32(col0),
                                             NQW,
                                         )
@@ -7930,17 +7930,17 @@ def make_kernel_q4d(cfg, *, backend_config=None):
                                 kv_full_k.wait(
                                     kst,
                                     txl.Cast(
-                                        "int32",
                                         txl.bitwise_and(
-                                            txl.shift_right(pk, txl.Cast("uint32", kst)),
+                                            txl.shift_right(pk, txl.Cast(kst, "uint32")),
                                             txl.uint32(1),
                                         ),
+                                        "int32",
                                     ),
                                 )
                                 txl.assign(
                                     pk,
                                     txl.bitwise_xor(
-                                        pk, txl.shift_left(txl.uint32(1), txl.Cast("uint32", kst))
+                                        pk, txl.shift_left(txl.uint32(1), txl.Cast(kst, "uint32"))
                                     ),
                                 )
                                 iket_end(tk_wk)
@@ -7948,26 +7948,26 @@ def make_kernel_q4d(cfg, *, backend_config=None):
                                 s_free.wait(
                                     j,
                                     txl.Cast(
-                                        "int32",
                                         txl.bitwise_xor(
                                             txl.bitwise_and(
-                                                txl.shift_right(pf, txl.Cast("uint32", j)),
+                                                txl.shift_right(pf, txl.Cast(j, "uint32")),
                                                 txl.uint32(1),
                                             ),
                                             txl.uint32(1),
                                         ),
+                                        "int32",
                                     ),
                                 )
                                 txl.assign(
                                     pf,
                                     txl.bitwise_xor(
-                                        pf, txl.shift_left(txl.uint32(1), txl.Cast("uint32", j))
+                                        pf, txl.shift_left(txl.uint32(1), txl.Cast(j, "uint32"))
                                     ),
                                 )
                                 txl.ptx.tcgen05.fence__after_thread_sync()
                                 iket_end(tk_sf)
                                 tk_qk = iket_range("mma-qk")
-                                mma_qk(txl.Cast("uint32", j) * txl.uint32(NQ_PAD), kst)
+                                mma_qk(txl.Cast(j, "uint32") * txl.uint32(NQ_PAD), kst)
                                 with txl.If(elected()), txl.Then():
                                     s_ready.arrive(j)
                                     kv_empty.arrive(kst)
@@ -8008,7 +8008,7 @@ def make_kernel_q4d(cfg, *, backend_config=None):
                             zero_v,
                             zero_v,
                             zero_v,
-                            True if ki != 0 else txl.Cast("bool", acc != 0),
+                            True if ki != 0 else txl.Cast(acc != 0, "bool"),
                         )
 
             with txl.While(running_v != 0):
@@ -8049,17 +8049,17 @@ def make_kernel_q4d(cfg, *, backend_config=None):
                                 kv_full_v.wait(
                                     vst,
                                     txl.Cast(
-                                        "int32",
                                         txl.bitwise_and(
-                                            txl.shift_right(pv, txl.Cast("uint32", vst)),
+                                            txl.shift_right(pv, txl.Cast(vst, "uint32")),
                                             txl.uint32(1),
                                         ),
+                                        "int32",
                                     ),
                                 )
                                 txl.assign(
                                     pv,
                                     txl.bitwise_xor(
-                                        pv, txl.shift_left(txl.uint32(1), txl.Cast("uint32", vst))
+                                        pv, txl.shift_left(txl.uint32(1), txl.Cast(vst, "uint32"))
                                     ),
                                 )
                                 iket_end(tk_wv)
@@ -8241,7 +8241,7 @@ def make_kernel_q4d(cfg, *, backend_config=None):
                             with txl.If(valid(r)), txl.Then():
                                 txl.ptx.red.shared.or_.b32(
                                     words.ptr_to([idxs[r] >> 5]),
-                                    txl.shift_left(txl.uint32(1), txl.Cast("uint32", idxs[r] & 31)),
+                                    txl.shift_left(txl.uint32(1), txl.Cast(idxs[r] & 31, "uint32")),
                                 )
                         txl.cuda.warp_sync()
                         carry = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -8263,18 +8263,18 @@ def make_kernel_q4d(cfg, *, backend_config=None):
                             )
                             txl.assign(carry, carry + tot)
                             txl.assign(wbase, wbase + 32)
-                        n_blocks = txl.local_scalar("int32", init=txl.Cast("int32", carry))
+                        n_blocks = txl.local_scalar("int32", init=txl.Cast(carry, "int32"))
                         txl.cuda.warp_sync()
                         with txl.serial(nwords, unroll=False) as w:
                             wv = ld_smem_u32(words.ptr_to([w]))
                             pw_ = ld_smem_u32(prefix.ptr_to([w]))
                             mybit = txl.bitwise_and(
-                                txl.shift_right(wv, txl.Cast("uint32", lane)), txl.uint32(1)
+                                txl.shift_right(wv, txl.Cast(lane, "uint32")), txl.uint32(1)
                             )
                             with txl.If(mybit != txl.uint32(0)), txl.Then():
                                 below = txl.local_scalar("uint32")
                                 txl.ptx.popc.b32(below, txl.bitwise_and(wv, lanemask_lt()))
-                                rank = txl.Cast("int32", pw_ + below)
+                                rank = txl.Cast(pw_ + below, "int32")
                                 blkid = w * 32 + lane
                                 txl.ptx.st.shared.b32(
                                     ulist.ptr_to([slot * MAX_UNION + rank]), blkid
@@ -8300,15 +8300,15 @@ def make_kernel_q4d(cfg, *, backend_config=None):
                                     txl.bitwise_and(
                                         wv,
                                         txl.shift_left(
-                                            txl.uint32(1), txl.Cast("uint32", idxs[r] & 31)
+                                            txl.uint32(1), txl.Cast(idxs[r] & 31, "uint32")
                                         )
                                         - txl.uint32(1),
                                     ),
                                 )
-                                u = txl.Cast("int32", pw_ + below)
+                                u = txl.Cast(pw_ + below, "int32")
                                 txl.ptx.red.shared.or_.b32(
                                     umask.ptr_to([slot * MAX_UNION + u]),
-                                    txl.shift_left(txl.uint32(1), txl.Cast("uint32", e // TOPK)),
+                                    txl.shift_left(txl.uint32(1), txl.Cast(e // TOPK, "uint32")),
                                 )
                         txl.cuda.warp_sync()
                         with txl.If(lane == 0), txl.Then():
@@ -8547,12 +8547,12 @@ def make_kernel_q4r(cfg, *, backend_config=None):
 
     @txl.kernel()
     def msa_decode_q4r(
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        out: txl.gptr[txl.bf16],
-        q2k: txl.gptr[txl.i32],
-        lens: txl.gptr[txl.i32],
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        out: txl.Tensor((txl.int64(),), txl.bf16),
+        q2k: txl.Tensor((txl.int64(),), txl.i32),
+        lens: txl.Tensor((txl.int64(),), txl.i32),
         scale_log2: txl.f32,
     ):
         txl.device_entry(
@@ -8719,7 +8719,7 @@ def make_kernel_q4r(cfg, *, backend_config=None):
                 with txl.If(txl.And(idxs[r] >= 0, idxs[r] < n_vis)), txl.Then():
                     txl.ptx.red.shared.or_.b32(
                         words.ptr_to([idxs[r] >> 5]),
-                        txl.shift_left(txl.uint32(1), txl.Cast("uint32", idxs[r] & 31)),
+                        txl.shift_left(txl.uint32(1), txl.Cast(idxs[r] & 31, "uint32")),
                     )
             txl.cuda.warp_sync()
             carry = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -8741,17 +8741,17 @@ def make_kernel_q4r(cfg, *, backend_config=None):
                 )
                 txl.assign(carry, carry + total)
                 txl.assign(wbase, wbase + 32)
-            n_blocks = txl.local_scalar("int32", init=txl.Cast("int32", carry))
+            n_blocks = txl.local_scalar("int32", init=txl.Cast(carry, "int32"))
             txl.cuda.warp_sync()
-            lanemask = txl.shift_left(txl.uint32(1), txl.Cast("uint32", lane)) - txl.uint32(1)
+            lanemask = txl.shift_left(txl.uint32(1), txl.Cast(lane, "uint32")) - txl.uint32(1)
             with txl.serial(nwords, unroll=False) as w:
                 wv = ld_shared_u32(words.ptr_to([w]))
                 pref = ld_shared_u32(prefix.ptr_to([w]))
-                bit = txl.bitwise_and(txl.shift_right(wv, txl.Cast("uint32", lane)), txl.uint32(1))
+                bit = txl.bitwise_and(txl.shift_right(wv, txl.Cast(lane, "uint32")), txl.uint32(1))
                 with txl.If(bit != txl.uint32(0)), txl.Then():
                     below = txl.local_scalar("uint32")
                     txl.ptx.popc.b32(below, txl.bitwise_and(wv, lanemask))
-                    rank = txl.Cast("int32", pref + below)
+                    rank = txl.Cast(pref + below, "int32")
                     txl.ptx.st.shared.b32(ulist.ptr_to([rank]), w * 32 + lane)
                     txl.ptx.st.shared.b32(umask.ptr_to([rank]), txl.uint32(0))
             txl.cuda.warp_sync()
@@ -8766,14 +8766,14 @@ def make_kernel_q4r(cfg, *, backend_config=None):
                         below,
                         txl.bitwise_and(
                             wv,
-                            txl.shift_left(txl.uint32(1), txl.Cast("uint32", idxs[r] & 31))
+                            txl.shift_left(txl.uint32(1), txl.Cast(idxs[r] & 31, "uint32"))
                             - txl.uint32(1),
                         ),
                     )
-                    rank = txl.Cast("int32", pref + below)
+                    rank = txl.Cast(pref + below, "int32")
                     txl.ptx.red.shared.or_.b32(
                         umask.ptr_to([rank]),
-                        txl.shift_left(txl.uint32(1), txl.Cast("uint32", e // TOPK)),
+                        txl.shift_left(txl.uint32(1), txl.Cast(e // TOPK, "uint32")),
                     )
             txl.cuda.warp_sync()
             with txl.If(lane == 0), txl.Then():
@@ -8860,7 +8860,7 @@ def make_kernel_q4r(cfg, *, backend_config=None):
                             zero,
                             zero,
                             zero,
-                            True if ki != 0 else txl.Cast("bool", first == 0),
+                            True if ki != 0 else txl.Cast(first == 0, "bool"),
                         )
                 txl.assign(first, 0)
                 with txl.If(elected()), txl.Then():
@@ -8879,7 +8879,7 @@ def make_kernel_q4r(cfg, *, backend_config=None):
             my_row = warp_local * 16 + (lane & 15)
             col_half = lane >> 4
             token = my_row >> 4
-            row_origin = txl.shift_left(txl.Cast("uint32", warp_local * 32), txl.uint32(16))
+            row_origin = txl.shift_left(txl.Cast(warp_local * 32, "uint32"), txl.uint32(16))
             score_addr = tmem_base + row_origin + txl.uint32(S_COL)
             p_addr = score_addr + txl.uint32(P_COL)
             scores = txl.alloc_local([64], "float32")
@@ -8894,7 +8894,7 @@ def make_kernel_q4r(cfg, *, backend_config=None):
                 blk = ld_shared_i32(ulist.ptr_to([ub]))
                 tmask = ld_shared_u32(umask.ptr_to([ub]))
                 selected = txl.bitwise_and(
-                    txl.shift_right(tmask, txl.Cast("uint32", token)), txl.uint32(1)
+                    txl.shift_right(tmask, txl.Cast(token, "uint32")), txl.uint32(1)
                 ) != txl.uint32(0)
                 valid_cols = txl.local_scalar(
                     "int32", init=txl.Select(selected, kv_len - T + token - blk * BLK + 1, 0)
@@ -8985,7 +8985,7 @@ def make_kernel_q4r(cfg, *, backend_config=None):
             warp_local = warp - 4
             my_row = warp_local * 16 + (lane & 15)
             col_half = lane >> 4
-            row_origin = txl.shift_left(txl.Cast("uint32", warp_local * 32), txl.uint32(16))
+            row_origin = txl.shift_left(txl.Cast(warp_local * 32, "uint32"), txl.uint32(16))
             o_addr = tmem_base + row_origin + txl.uint32(O_COL)
             o_frag = txl.alloc_local([64], "float32")
             corr_token = iket_range("q4r-correction")

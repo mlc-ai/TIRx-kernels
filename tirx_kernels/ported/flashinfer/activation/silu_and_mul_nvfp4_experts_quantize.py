@@ -167,14 +167,15 @@ def _hmax(dtype):
 
 def _unpack_lo_f32(word, dtype):
     return txl.cast(
-        txl.reinterpret(dtype, txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")),
+        txl.reinterpret(txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16"), ty=dtype),
         "float32",
     )
 
 
 def _unpack_hi_f32(word, dtype):
     return txl.cast(
-        txl.reinterpret(dtype, txl.cast(txl.shift_right(word, txl.uint32(16)), "uint16")), "float32"
+        txl.reinterpret(txl.cast(txl.shift_right(word, txl.uint32(16)), "uint16"), ty=dtype),
+        "float32",
     )
 
 
@@ -199,11 +200,11 @@ def get_kernel(
 
     @txl.kernel()
     def silu_and_mul_nvfp4_experts_quantize(
-        input_global: txl.gptr[dtype],
-        sf_scale: txl.gptr[txl.f32],
-        out_global: txl.gptr[txl.u64],
-        sf_out: txl.gptr[txl.u8],
-        mask: txl.gptr[txl.i32],
+        input_global: txl.Tensor((txl.int64(),), dtype),
+        sf_scale: txl.Tensor((txl.int64(),), txl.f32),
+        out_global: txl.Tensor((txl.int64(),), txl.u64),
+        sf_out: txl.Tensor((txl.int64(),), txl.u8),
+        mask: txl.Tensor((txl.int64(),), txl.i32),
         num_rows: txl.i32,
         num_cols: txl.i32,
         num_experts: txl.i32,
@@ -250,7 +251,7 @@ def get_kernel(
         cols_per_row = txl.local_scalar(
             "int32", init=txl.truncdiv(num_cols, txl.int32(ELTS_PER_THREAD))
         )
-        use_mask = txl.reinterpret("uint64", txl.address_of(mask[0])) != txl.uint64(0)
+        use_mask = txl.reinterpret(txl.address_of(mask[0]), ty="uint64") != txl.uint64(0)
         actual_cols = txl.local_scalar("int32", init=cols_per_row)
         with txl.If(use_silu_and_mul != 0), txl.Then():
             txl.assign(actual_cols, cols_per_row * 2)
@@ -346,7 +347,9 @@ def get_kernel(
                 # SFScale select (branch-lowered in the source).
                 sfscale_val = txl.local_scalar("float32", init=txl.float32(1.0))
                 with (
-                    txl.If(txl.reinterpret("uint64", txl.address_of(sf_scale[0])) != txl.uint64(0)),
+                    txl.If(
+                        txl.reinterpret(txl.address_of(sf_scale[0]), ty="uint64") != txl.uint64(0)
+                    ),
                     txl.Then(),
                 ):
                     txl.ptx.ld.global_.f32(sfscale_val, sf_scale.ptr_to([expert_idx]))
@@ -376,7 +379,7 @@ def get_kernel(
                     txl.assign(lm, hmax2(lm, habs2(xw[i + 1])))
                 lm_lo = txl.cast(txl.bitwise_and(lm, txl.uint32(0xFFFF)), "uint16")
                 lm_hi = txl.cast(txl.shift_right(lm, txl.uint32(16)), "uint16")
-                vec_max = txl.cast(txl.reinterpret(dtype, hmax(lm_lo, lm_hi)), "float32")
+                vec_max = txl.cast(txl.reinterpret(hmax(lm_lo, lm_hi), ty=dtype), "float32")
 
                 # SF computation (default env: fast-math rcp, E4M3).
                 txl.ptx.rcp.approx.ftz.f32(r_tmp, txl.float32(6.0))
@@ -393,7 +396,9 @@ def get_kernel(
 
                 # SF byte store (STG.8, per thread).
                 with (
-                    txl.If(txl.reinterpret("uint64", txl.address_of(sf_out[0])) != txl.uint64(0)),
+                    txl.If(
+                        txl.reinterpret(txl.address_of(sf_out[0]), ty="uint64") != txl.uint64(0)
+                    ),
                     txl.Then(),
                 ):
                     txl.ptx.st.global_.b8(txl.address_of(sf_out[sf_byte]), sf_b8)

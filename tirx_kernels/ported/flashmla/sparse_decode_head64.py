@@ -317,27 +317,27 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
 
     @txl.kernel()
     def sparse_flashmla_decode_head64_main(
-        q: txl.gptr[txl.bf16],
-        kv: txl.gptr[txl.bf16],
-        indices: txl.gptr[txl.i32],
-        topk_length: txl.gptr[txl.i32],
-        attn_sink: txl.gptr[txl.f32],
-        lse: txl.gptr[txl.f32],
-        out: txl.gptr[txl.bf16],
-        lse_accum: txl.gptr[txl.f32],
-        o_accum: txl.gptr[txl.f32],
-        tile_scheduler_metadata: txl.gptr[txl.i32],
-        num_splits: txl.gptr[txl.i32],
-        extra_kv: txl.gptr[txl.bf16],
-        extra_indices: txl.gptr[txl.i32],
-        extra_topk_length: txl.gptr[txl.i32],
-        kv_rope_tensormap: txl.TensorMap,
-        kv_nope_tensormap: txl.TensorMap,
-        extra_kv_rope_tensormap: txl.TensorMap,
-        extra_kv_nope_tensormap: txl.TensorMap,
-        q_strided_tensormap: txl.TensorMap,
-        q_tail_tensormap: txl.TensorMap,
-        out_tensormap: txl.TensorMap,
+        q: txl.Tensor((txl.int64(),), txl.bf16),
+        kv: txl.Tensor((txl.int64(),), txl.bf16),
+        indices: txl.Tensor((txl.int64(),), txl.i32),
+        topk_length: txl.Tensor((txl.int64(),), txl.i32),
+        attn_sink: txl.Tensor((txl.int64(),), txl.f32),
+        lse: txl.Tensor((txl.int64(),), txl.f32),
+        out: txl.Tensor((txl.int64(),), txl.bf16),
+        lse_accum: txl.Tensor((txl.int64(),), txl.f32),
+        o_accum: txl.Tensor((txl.int64(),), txl.f32),
+        tile_scheduler_metadata: txl.Tensor((txl.int64(),), txl.i32),
+        num_splits: txl.Tensor((txl.int64(),), txl.i32),
+        extra_kv: txl.Tensor((txl.int64(),), txl.bf16),
+        extra_indices: txl.Tensor((txl.int64(),), txl.i32),
+        extra_topk_length: txl.Tensor((txl.int64(),), txl.i32),
+        kv_rope_tensormap: txl.Ptr(txl.TensorMap),
+        kv_nope_tensormap: txl.Ptr(txl.TensorMap),
+        extra_kv_rope_tensormap: txl.Ptr(txl.TensorMap),
+        extra_kv_nope_tensormap: txl.Ptr(txl.TensorMap),
+        q_strided_tensormap: txl.Ptr(txl.TensorMap),
+        q_tail_tensormap: txl.Ptr(txl.TensorMap),
+        out_tensormap: txl.Ptr(txl.TensorMap),
         sm_scale_div_log2: txl.f32,
         stride_q_b: txl.i32,
         stride_q_s_q: txl.i32,
@@ -439,7 +439,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
         q_main_cp_desc = txl.local_scalar("uint64")
         txl.cuda.tcgen05.encode_matrix_descriptor(
             txl.address_of(q_main_cp_desc),
-            txl.reinterpret(txl.handle().ty, txl.uint64(0)),
+            txl.reinterpret(txl.uint64(0), ty=txl.handle().ty),
             1,
             64,
             3,
@@ -448,7 +448,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
             q_tail_cp_desc = txl.local_scalar("uint64")
             txl.cuda.tcgen05.encode_matrix_descriptor(
                 txl.address_of(q_tail_cp_desc),
-                txl.reinterpret(txl.handle().ty, txl.uint64(0)),
+                txl.reinterpret(txl.uint64(0), ty=txl.handle().ty),
                 1,
                 32,
                 2,
@@ -511,18 +511,18 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
             return topk_len, extra_topk_len, orig_topk_padded, start_block, end_block
 
         def dequant_st128(smem_addr, raw, scale_bits):
-            scale = txl.reinterpret("bfloat16", scale_bits)
+            scale = txl.reinterpret(scale_bits, ty="bfloat16")
             packed = txl.alloc_local((4,), "uint32")
             with txl.unroll(4) as pair_i:
                 raw_pair = txl.cast(txl.shift_right(raw, txl.cast(pair_i * 16, "uint64")), "uint16")
                 rounded_bits = txl.local_scalar("uint32")
                 txl.ptx.cvt.rn.bf16x2.e4m3x2(rounded_bits, raw_pair)
-                rounded = txl.reinterpret("bfloat16x2", rounded_bits)
+                rounded = txl.reinterpret(rounded_bits, ty="bfloat16x2")
                 scaled_lo = txl.Shuffle([rounded], [0]) * scale
                 scaled_hi = txl.Shuffle([rounded], [1]) * scale
                 txl.ptx.mov.b32(
                     packed[pair_i],
-                    txl.reinterpret("uint32", txl.Shuffle([scaled_lo, scaled_hi], [0, 1])),
+                    txl.reinterpret(txl.Shuffle([scaled_lo, scaled_hi], [0, 1]), ty="uint32"),
                 )
             # One 128-bit store: the four packed words are read through a b128 view.
             txl.ptx.st.weak.shared__cta.b128(smem_addr, packed.view("uint128")[0])
@@ -799,7 +799,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                             s_ptr = txl.ptr_byte_offset(
                                 s_smem_gemm.ptr_to([0, 0]),
                                 (s_base + s_store_i * 512) * BF16_BYTES,
-                                "bfloat16",
+                                ty=txl.Ptr("bfloat16", (s_smem_gemm.ptr_to([0, 0])).ty.scope),
                             )
                             s_word = s_store_i * 4
                             txl.ptx.st.shared.v4.u32(
@@ -944,7 +944,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                     o_smem_ptr = txl.ptr_byte_offset(
                                         o_smem.ptr_to([0, 0]),
                                         o_smem_offset * BF16_BYTES,
-                                        "bfloat16",
+                                        ty=txl.Ptr("bfloat16", (o_smem.ptr_to([0, 0])).ty.scope),
                                     )
                                     o_word = o_store_i * 4
                                     txl.ptx.st.shared.v4.u32(
@@ -968,7 +968,9 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                                 txl.ptr_byte_offset(
                                                     o_smem.ptr_to([0, 0]),
                                                     col_base * B_H * BF16_BYTES,
-                                                    "bfloat16",
+                                                    ty=txl.Ptr(
+                                                        "bfloat16", (o_smem.ptr_to([0, 0])).ty.scope
+                                                    ),
                                                 )
                                             ),
                                         )
@@ -985,7 +987,9 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                                 txl.ptr_byte_offset(
                                                     o_smem.ptr_to([0, 0]),
                                                     warp1_col_base * B_H * BF16_BYTES,
-                                                    "bfloat16",
+                                                    ty=txl.Ptr(
+                                                        "bfloat16", (o_smem.ptr_to([0, 0])).ty.scope
+                                                    ),
                                                 )
                                             ),
                                         )
@@ -1082,19 +1086,18 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                 if role == 7:
                     tma_coords_step_per_token = (656 if is_v32 else 576) // tma_k_stride
                     k_scales_ptr_u64 = txl.reinterpret(
-                        "uint64",
                         (
                             kv.ptr_to([d_nope // BF16_BYTES])
                             if is_v32
                             else kv.ptr_to([page_block_size * (tma_k_stride // BF16_BYTES)])
                         ),
+                        ty="uint64",
                     )
                     extra_k_scales_ptr_u64 = txl.local_scalar("uint64", init=txl.uint64(0))
                     with txl.If(have_extra_kv), txl.Then():
                         txl.assign(
                             extra_k_scales_ptr_u64,
                             txl.reinterpret(
-                                "uint64",
                                 (
                                     extra_kv.ptr_to([d_nope // BF16_BYTES])
                                     if is_v32
@@ -1102,6 +1105,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                         [extra_page_block_size * (tma_k_stride // BF16_BYTES)]
                                     )
                                 ),
+                                ty="uint64",
                             ),
                         )
                 # kernel.cuh:77-118, expanded once for all WG1 threads.  Non-elected
@@ -1139,7 +1143,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                     txl.ptr_byte_offset(
                                         q_sw128.ptr_to([0, 0]),
                                         q_tile * B_H * 64 * BF16_BYTES,
-                                        "bfloat16",
+                                        ty=txl.Ptr("bfloat16", (q_sw128.ptr_to([0, 0])).ty.scope),
                                     ),
                                     txl.address_of(q_strided_tensormap),
                                     txl.cast(q_tile * 64, "int32"),
@@ -1169,7 +1173,9 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                 q_main_src = txl.ptr_byte_offset(
                                     q_main_cp_view.ptr_to([0, 0, 0, 0]),
                                     (q_main_flat % 4 * 1024 + q_main_flat // 4 % 4 * 2) * 16,
-                                    "bfloat16",
+                                    ty=txl.Ptr(
+                                        "bfloat16", (q_main_cp_view.ptr_to([0, 0, 0, 0])).ty.scope
+                                    ),
                                 )
                                 txl.ptx[_TCGEN_CP_128X256](
                                     txl.cast(
@@ -1181,7 +1187,9 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                             if is_v32:
                                 with txl.unroll(2) as q_tail_flat:
                                     q_tail_src = txl.ptr_byte_offset(
-                                        q_sw64.ptr_to([0, 0]), q_tail_flat % 2 * 2 * 16, "bfloat16"
+                                        q_sw64.ptr_to([0, 0]),
+                                        q_tail_flat % 2 * 2 * 16,
+                                        ty=txl.Ptr("bfloat16", (q_sw64.ptr_to([0, 0])).ty.scope),
                                     )
                                     txl.ptx[_TCGEN_CP_128X256](
                                         txl.cast(384 + q_tail_flat % 2 * 8, "uint32"),
@@ -1208,7 +1216,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                             txl.cast(384 + qk_rope_ki * 8, "uint32"),
                                             _desc_add_16B_offset(qk_rope_desc.desc, qk_rope_offset),
                                             txl.uint32(69207184),
-                                            txl.ptx.pred(txl.Cast("bool", qk_rope_ki != 0)),
+                                            txl.ptx.pred(txl.Cast(qk_rope_ki != 0, "bool")),
                                             txl.uint64(0),
                                         )
                                     bar_nope_ready.wait(rs_buf.stage, rs_buf.phase)
@@ -1233,13 +1241,13 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                         txl.uint32(69207184),
                                         txl.ptx.pred(
                                             txl.Cast(
-                                                "bool",
                                                 txl.Or(
                                                     qk_nope_ki != 0,
                                                     txl.cast(
                                                         txl.uint32(1 if is_v32 else 0), "bool"
                                                     ),
                                                 ),
+                                                "bool",
                                             )
                                         ),
                                         txl.uint64(0),
@@ -1265,8 +1273,8 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                         txl.uint32(71369872),
                                         txl.ptx.pred(
                                             txl.Cast(
-                                                "bool",
                                                 txl.Or(pv_ki != 0, txl.cast(mma_o_accum, "bool")),
+                                                "bool",
                                             )
                                         ),
                                         txl.uint64(0),
@@ -1286,8 +1294,8 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                         txl.uint32(71369872),
                                         txl.ptx.pred(
                                             txl.Cast(
-                                                "bool",
                                                 txl.Or(pv_ki != 0, txl.cast(mma_o_accum, "bool")),
+                                                "bool",
                                             )
                                         ),
                                         txl.uint64(0),
@@ -1329,7 +1337,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                     selected_nope_tensormap = txl.local_scalar(
                                         "uint64",
                                         init=txl.reinterpret(
-                                            "uint64", txl.address_of(kv_nope_tensormap)
+                                            txl.address_of(kv_nope_tensormap), ty="uint64"
                                         ),
                                     )
                                     with txl.If(have_extra_kv), txl.Then():
@@ -1339,18 +1347,21 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                                 txl.if_then_else(
                                                     block_idx >= num_orig_blocks,
                                                     txl.reinterpret(
-                                                        "uint64",
                                                         txl.address_of(extra_kv_nope_tensormap),
+                                                        ty="uint64",
                                                     ),
                                                     txl.reinterpret(
-                                                        "uint64", txl.address_of(kv_nope_tensormap)
+                                                        txl.address_of(kv_nope_tensormap),
+                                                        ty="uint64",
                                                     ),
                                                 )
                                             ),
                                         )
                                     txl.ptx[_TMA_GATHER4_2D_CACHE](
                                         raw_nope.ptr_to([rs_buf.stage, row, 0]),
-                                        txl.reinterpret(txl.handle().ty, selected_nope_tensormap),
+                                        txl.reinterpret(
+                                            selected_nope_tensormap, ty=txl.handle().ty
+                                        ),
                                         txl.int32(0),
                                         cur_indices[0],
                                         cur_indices[1],
@@ -1414,7 +1425,9 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                                     + row * rope_tile
                                                 )
                                                 * BF16_BYTES,
-                                                "bfloat16",
+                                                ty=txl.Ptr(
+                                                    "bfloat16", (k_union.ptr_to([0, 0, 0])).ty.scope
+                                                ),
                                             )
                                         else:
                                             rope_tma_dst = txl.ptr_byte_offset(
@@ -1425,13 +1438,15 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                                     + row * 64
                                                 )
                                                 * BF16_BYTES,
-                                                "bfloat16",
+                                                ty=txl.Ptr(
+                                                    "bfloat16", (k_full.ptr_to([0, 0, 0])).ty.scope
+                                                ),
                                             )
                                         selected_rope_tensormap = txl.local_scalar(
                                             "uint64",
                                             init=(
                                                 txl.reinterpret(
-                                                    "uint64", txl.address_of(kv_rope_tensormap)
+                                                    txl.address_of(kv_rope_tensormap), ty="uint64"
                                                 )
                                             ),
                                         )
@@ -1441,18 +1456,19 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                                 txl.if_then_else(
                                                     block_idx >= num_orig_blocks,
                                                     txl.reinterpret(
-                                                        "uint64",
                                                         txl.address_of(extra_kv_rope_tensormap),
+                                                        ty="uint64",
                                                     ),
                                                     txl.reinterpret(
-                                                        "uint64", txl.address_of(kv_rope_tensormap)
+                                                        txl.address_of(kv_rope_tensormap),
+                                                        ty="uint64",
                                                     ),
                                                 ),
                                             )
                                         txl.ptx[_TMA_GATHER4_2D_CACHE](
                                             rope_tma_dst,
                                             txl.reinterpret(
-                                                txl.handle().ty, selected_rope_tensormap
+                                                selected_rope_tensormap, ty=txl.handle().ty
                                             ),
                                             txl.cast(rope_part * rope_tile, "int32"),
                                             cur_indices[0],
@@ -1556,7 +1572,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                             byte_offsets[pair_i],
                                             (
                                                 txl.if_then_else(
-                                                    txl.Cast("bool", token_valid),
+                                                    txl.Cast(token_valid, "bool"),
                                                     txl.cast(cache_block, "uint64")
                                                     * txl.cast(block_stride, "int64")
                                                     + txl.cast(index_in_block, "uint64")
@@ -1571,8 +1587,8 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                             values[pair_i, 2],
                                             values[pair_i, 3],
                                             txl.reinterpret(
-                                                PtrType(PrimType("float32")),
                                                 scales_ptr_u64 + byte_offsets[pair_i],
+                                                ty=PtrType(PrimType("float32")),
                                             ),
                                         )
                                     else:
@@ -1587,13 +1603,13 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                         # The offset is unguarded here (unlike the
                                         # V32 arm, which zeroes it), so the load stays
                                         # inside the validity branch.
-                                        with txl.If(txl.Cast("bool", token_valid)):
+                                        with txl.If(txl.Cast(token_valid, "bool")):
                                             with txl.Then():
                                                 txl.ptx.ld.global_.nc.u64(
                                                     words[pair_i],
                                                     txl.reinterpret(
-                                                        PtrType(PrimType("uint64")),
                                                         scales_ptr_u64 + byte_offsets[pair_i],
+                                                        ty=PtrType(PrimType("uint64")),
                                                     ),
                                                 )
                                             with txl.Else():
@@ -1614,7 +1630,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                         pair_indices[pair_i] != -1, abs_pos + pair_i < cur_length
                                     )
                                     txl.ptx.mov.pred(
-                                        pair_token_valid[pair_i], txl.Cast("bool", token_valid)
+                                        pair_token_valid[pair_i], txl.Cast(token_valid, "bool")
                                     )
                                     txl.assign(
                                         valid_mask,
@@ -1632,7 +1648,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                     txl.ptx.mov.b32(
                                         coords[pair_i],
                                         txl.if_then_else(
-                                            txl.Cast("bool", pair_token_valid[pair_i]),
+                                            txl.Cast(pair_token_valid[pair_i], "bool"),
                                             txl.cast(cache_blocks[pair_i], "int32")
                                             * cur_tma_coords_step_per_block
                                             + txl.cast(indices_in_block[pair_i], "int32")
@@ -1673,7 +1689,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                             scale_words[pair_i],
                                             (
                                                 txl.if_then_else(
-                                                    txl.Cast("bool", pair_token_valid[pair_i]),
+                                                    txl.Cast(pair_token_valid[pair_i], "bool"),
                                                     txl.cast(packed_scale, "uint64"),
                                                     txl.uint64(0),
                                                 )
@@ -1754,7 +1770,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                 with txl.If(lane_idx % 4 == 0), txl.Then():
                                     txl.ptx.st.shared.b8(
                                         is_token_valid.ptr_to([rs_index.stage, lane_idx // 4]),
-                                        txl.reinterpret("uint8", valid_mask),
+                                        txl.reinterpret(valid_mask, ty="uint8"),
                                     )
                                 bar_valid_ready.arrive(rs_index.stage)
                                 rs_buf.advance()
@@ -1803,16 +1819,16 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
             # per-thread bases live across the scheduler loop.  The source
             # selects one pointer from each pair once per block.
             nope0_base_u64 = txl.reinterpret(
-                "uint64", k_full.ptr_to([0, group_idx, idx_in_group * 8])
+                k_full.ptr_to([0, group_idx, idx_in_group * 8]), ty="uint64"
             )
             nope1_base_u64 = txl.reinterpret(
-                "uint64", k_full.ptr_to([1, group_idx, idx_in_group * 8])
+                k_full.ptr_to([1, group_idx, idx_in_group * 8]), ty="uint64"
             )
             raw_nope0_base_u64 = txl.reinterpret(
-                "uint64", raw_nope.ptr_to([0, group_idx, idx_in_group])
+                raw_nope.ptr_to([0, group_idx, idx_in_group]), ty="uint64"
             )
             raw_nope1_base_u64 = txl.reinterpret(
-                "uint64", raw_nope.ptr_to([1, group_idx, idx_in_group])
+                raw_nope.ptr_to([1, group_idx, idx_in_group]), ty="uint64"
             )
 
             # kernel.cuh:77-118 expanded for WG2, preserving scheduler loads
@@ -1853,10 +1869,10 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                             rs_buf.stage == 0, raw_nope0_base_u64, raw_nope1_base_u64
                         )
                         cur_nope_base_uint_addr = txl.cuda.cvta_generic_to_shared(
-                            txl.reinterpret(PtrType(PrimType("bfloat16")), cur_nope_base_u64)
+                            txl.reinterpret(cur_nope_base_u64, ty=PtrType(PrimType("bfloat16")))
                         )
                         cur_raw_nope_base_uint_addr = txl.cuda.cvta_generic_to_shared(
-                            txl.reinterpret(PtrType(PrimType("uint64")), cur_raw_nope_base_u64)
+                            txl.reinterpret(cur_raw_nope_base_u64, ty=PtrType(PrimType("uint64")))
                         )
                         with txl.unroll(rows_per_group) as local_row:
                             row_idx = local_row * (128 // 8) + group_idx
@@ -1999,12 +2015,12 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
 def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False, *, backend_config=None):
     @txl.kernel()
     def sparse_decode_head64_combine(
-        lse: txl.gptr[txl.f32],
-        out: txl.gptr[txl.bf16],
-        lse_accum: txl.gptr[txl.f32],
-        o_accum: txl.gptr[txl.f32],
-        num_splits: txl.gptr[txl.i32],
-        attn_sink: txl.gptr[txl.f32],
+        lse: txl.Tensor((txl.int64(),), txl.f32),
+        out: txl.Tensor((txl.int64(),), txl.bf16),
+        lse_accum: txl.Tensor((txl.int64(),), txl.f32),
+        o_accum: txl.Tensor((txl.int64(),), txl.f32),
+        num_splits: txl.Tensor((txl.int64(),), txl.i32),
+        attn_sink: txl.Tensor((txl.int64(),), txl.f32),
         stride_lse_b: txl.i32,
         stride_lse_s_q: txl.i32,
         stride_o_b: txl.i32,

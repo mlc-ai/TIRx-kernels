@@ -627,16 +627,16 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
 
     @txl.kernel()
     def sm100_fp8_fp4_gemm_1d1d(
-        grouped_layout: txl.gptr[txl.i32],
+        grouped_layout: txl.Tensor((txl.int64(),), txl.i32),
         grouped_len: txl.i32,
         shape_m: txl.i32,
         shape_n: txl.i32,
         shape_k: txl.i32,
-        tensor_map_a: txl.TensorMap,
-        tensor_map_b: txl.TensorMap,
-        tensor_map_sfa: txl.TensorMap,
-        tensor_map_sfb: txl.TensorMap,
-        tensor_map_cd: txl.TensorMap,
+        tensor_map_a: txl.Ptr(txl.TensorMap),
+        tensor_map_b: txl.Ptr(txl.TensorMap),
+        tensor_map_sfa: txl.Ptr(txl.TensorMap),
+        tensor_map_sfb: txl.Ptr(txl.TensorMap),
+        tensor_map_cd: txl.Ptr(txl.TensorMap),
     ):
         # ---- role ids -------------------------------------------------------
         txl.device_entry(
@@ -700,7 +700,9 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
             )
         smem.commit(spec.smem_size)
 
-        smem_cd_word_data = txl.reinterpret(PtrType(PrimType("uint32")), smem_cd.ptr_to([0, 0, 0]))
+        smem_cd_word_data = txl.reinterpret(
+            smem_cd.ptr_to([0, 0, 0]), ty=PtrType(PrimType("uint32"))
+        )
         smem_cd_u32 = txl.decl_tensor(
             (NUM_TMA_STORE_STAGES * cd_stage_bytes // 4,),
             "uint32",
@@ -1584,8 +1586,10 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                                 # replaces -- hence the swap.
                                                 txl.ptx.cvt.rn.bf16x2.f32(
                                                     packed[j],
-                                                    txl.reinterpret("float32", values[2 * j + 1]),
-                                                    txl.reinterpret("float32", values[2 * j]),
+                                                    txl.reinterpret(
+                                                        values[2 * j + 1], ty="float32"
+                                                    ),
+                                                    txl.reinterpret(values[2 * j], ty="float32"),
                                                 )
                                             row_s = txl.local_scalar("int32")
                                             col_s = txl.local_scalar("int32")
@@ -1723,8 +1727,10 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                                 # replaces -- hence the swap.
                                                 txl.ptx.cvt.rn.bf16x2.f32(
                                                     packed[j],
-                                                    txl.reinterpret("float32", values[2 * j + 1]),
-                                                    txl.reinterpret("float32", values[2 * j]),
+                                                    txl.reinterpret(
+                                                        values[2 * j + 1], ty="float32"
+                                                    ),
+                                                    txl.reinterpret(values[2 * j], ty="float32"),
                                                 )
                                             txl.ptx.st.shared.v4.u32(
                                                 smem_cd_u32.ptr_to([cd_word]),

@@ -90,13 +90,13 @@ Q_IDX_MASK = (1 << SLOT_SHIFT) - 1
 # ---------------------------------------------------------------------------
 @txl.kernel()
 def _kernel(
-    k2q_row_ptr: txl.gptr[txl.i32],
-    k2q_q_indices: txl.gptr[txl.i32],
-    scheduler_metadata: txl.gptr[txl.i32],
-    work_count: txl.gptr[txl.i32],
-    k2q_qsplit_indices: txl.gptr[txl.i32],
-    split_counts: txl.gptr[txl.i32],
-    cu_seqlens_q: txl.gptr[txl.i32],
+    k2q_row_ptr: txl.Tensor((txl.int64(),), txl.i32),
+    k2q_q_indices: txl.Tensor((txl.int64(),), txl.i32),
+    scheduler_metadata: txl.Tensor((txl.int64(),), txl.i32),
+    work_count: txl.Tensor((txl.int64(),), txl.i32),
+    k2q_qsplit_indices: txl.Tensor((txl.int64(),), txl.i32),
+    split_counts: txl.Tensor((txl.int64(),), txl.i32),
+    cu_seqlens_q: txl.Tensor((txl.int64(),), txl.i32),
     total_rows: txl.i32,
     num_batches: txl.i32,
     work_capacity: txl.i32,

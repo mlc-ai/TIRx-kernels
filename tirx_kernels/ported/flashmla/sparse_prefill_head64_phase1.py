@@ -396,14 +396,14 @@ def make_kernel(
 
     @txl.kernel()
     def sparse_flashmla_prefill_head64_phase1_kernel(
-        q: txl.gptr[txl.bf16, (s_q, h_q, d_qk)],
-        kv: txl.gptr[txl.bf16, (s_kv * stride_kv_s_kv,)],
-        indices: txl.gptr[txl.i32, (s_q * stride_indices_s_q,)],
-        attn_sink: txl.gptr[txl.f32, (h_q,)],
-        topk_length: txl.gptr[txl.i32, (s_q,)],
-        out: txl.gptr[txl.bf16, (s_q, h_q, D_V)],
-        max_logits: txl.gptr[txl.f32, (s_q, h_q)],
-        lse: txl.gptr[txl.f32, (s_q, h_q)],
+        q: txl.Tensor((s_q, h_q, d_qk), txl.bf16),
+        kv: txl.Tensor((s_kv * stride_kv_s_kv,), txl.bf16),
+        indices: txl.Tensor((s_q * stride_indices_s_q,), txl.i32),
+        attn_sink: txl.Tensor((h_q,), txl.f32),
+        topk_length: txl.Tensor((s_q,), txl.i32),
+        out: txl.Tensor((s_q, h_q, D_V), txl.bf16),
+        max_logits: txl.Tensor((s_q, h_q), txl.f32),
+        lse: txl.Tensor((s_q, h_q), txl.f32),
     ):
         host = prepare_host(
             {
@@ -514,7 +514,7 @@ def make_kernel(
             q_rope_cp_desc = txl.local_scalar("uint64")
             txl.cuda.tcgen05.encode_matrix_descriptor(
                 txl.address_of(q_rope_cp_desc),
-                txl.reinterpret(txl.handle().ty, txl.uint64(0)),
+                txl.reinterpret(txl.uint64(0), ty=txl.handle().ty),
                 1,
                 32,
                 2,
@@ -881,7 +881,7 @@ def make_kernel(
                     s_ptr = txl.ptr_byte_offset(
                         s_smem_gemm.ptr_to([0, 0]),
                         (s_base + s_store_i * 512) * BF16_BYTES,
-                        "bfloat16",
+                        ty=txl.Ptr("bfloat16", (s_smem_gemm.ptr_to([0, 0])).ty.scope),
                     )
                     s_word = s_store_i * 4
                     txl.ptx.st.shared.v4.u32(
@@ -1025,7 +1025,9 @@ def make_kernel(
                             )
                         )
                         s_ptr = txl.ptr_byte_offset(
-                            o_smem.ptr_to([0, 0]), s_off * BF16_BYTES, "bfloat16"
+                            o_smem.ptr_to([0, 0]),
+                            s_off * BF16_BYTES,
+                            ty=txl.Ptr("bfloat16", (o_smem.ptr_to([0, 0])).ty.scope),
                         )
                         o_word = o_store_i * 4
                         txl.ptx.st.shared.v4.u32(
@@ -1047,7 +1049,7 @@ def make_kernel(
                                 txl.ptr_byte_offset(
                                     o_smem.ptr_to([0, 0]),
                                     (epi_c * 256 + epi_k * 64) * B_H * BF16_BYTES,
-                                    "bfloat16",
+                                    ty=txl.Ptr("bfloat16", (o_smem.ptr_to([0, 0])).ty.scope),
                                 ),
                             )
                     with txl.If(warp_idx == 1), txl.Then():
@@ -1060,7 +1062,7 @@ def make_kernel(
                                 txl.ptr_byte_offset(
                                     o_smem.ptr_to([0, 0]),
                                     (epi_c * 256 + epi_k * 64 + 128) * B_H * BF16_BYTES,
-                                    "bfloat16",
+                                    ty=txl.Ptr("bfloat16", (o_smem.ptr_to([0, 0])).ty.scope),
                                 ),
                             )
 
@@ -1126,7 +1128,11 @@ def make_kernel(
                                     ) * BF16_BYTES
                                     txl.ptx[TMA_GATHER4_2D_CACHE](
                                         txl.ptr_byte_offset(
-                                            k_nope.ptr_to([0, 0, 0]), dst_part0_offset, "bfloat16"
+                                            k_nope.ptr_to([0, 0, 0]),
+                                            dst_part0_offset,
+                                            ty=txl.Ptr(
+                                                "bfloat16", (k_nope.ptr_to([0, 0, 0])).ty.scope
+                                            ),
                                         ),
                                         txl.address_of(kv_part0_tensormap),
                                         txl.cast(col_atom * 64, "int32"),
@@ -1148,7 +1154,11 @@ def make_kernel(
                                     ) * BF16_BYTES
                                     txl.ptx[TMA_GATHER4_2D_CACHE](
                                         txl.ptr_byte_offset(
-                                            k_nope.ptr_to([0, 0, 0]), dst_part1_offset, "bfloat16"
+                                            k_nope.ptr_to([0, 0, 0]),
+                                            dst_part1_offset,
+                                            ty=txl.Ptr(
+                                                "bfloat16", (k_nope.ptr_to([0, 0, 0])).ty.scope
+                                            ),
                                         ),
                                         txl.address_of(kv_part1_tensormap),
                                         txl.cast(col_atom * 64, "int32"),
@@ -1192,7 +1202,9 @@ def make_kernel(
                     txl.ptx.tcgen05.fence__after_thread_sync()
                     for q_rope_flat in range(2):
                         q_rope_src = txl.ptr_byte_offset(
-                            q_rope.ptr_to([0, 0]), q_rope_flat % 2 * 2 * 16, "bfloat16"
+                            q_rope.ptr_to([0, 0]),
+                            q_rope_flat % 2 * 2 * 16,
+                            ty=txl.Ptr("bfloat16", (q_rope.ptr_to([0, 0])).ty.scope),
                         )
                         txl.ptx[TCGEN_CP_128X256](
                             txl.cast(q_rope_tmem_col + q_rope_flat % 2 * 8, "uint32"),
@@ -1206,7 +1218,7 @@ def make_kernel(
                 q_nope_cp_desc = txl.local_scalar("uint64")
                 txl.cuda.tcgen05.encode_matrix_descriptor(
                     txl.address_of(q_nope_cp_desc),
-                    txl.reinterpret(txl.handle().ty, txl.uint64(0)),
+                    txl.reinterpret(txl.uint64(0), ty=txl.handle().ty),
                     1,
                     64,
                     3,
@@ -1215,7 +1227,7 @@ def make_kernel(
                     q_nope_src = txl.ptr_byte_offset(
                         q_nope.ptr_to([0, 0]),
                         (q_nope_flat % 4 * 1024 + q_nope_flat // 4 % 4 * 2) * 16,
-                        "bfloat16",
+                        ty=txl.Ptr("bfloat16", (q_nope.ptr_to([0, 0])).ty.scope),
                     )
                     txl.ptx[TCGEN_CP_128X256](
                         txl.cast(
@@ -1425,7 +1437,7 @@ def make_kernel(
                     bar_k_valid_free.wait(cur_buf, txl.bitwise_xor(cur_phase, txl.int32(1)))
                     txl.ptx.st.shared.b8(
                         is_k_valid.ptr_to([cur_buf, lane_idx]),
-                        txl.reinterpret("uint8", is_ks_valid_mask),
+                        txl.reinterpret(is_ks_valid_mask, ty="uint8"),
                     )
                     bar_k_valid_ready.arrive(cur_buf)
             txl.cuda.iket.range_end(valid_mask_token[0])
