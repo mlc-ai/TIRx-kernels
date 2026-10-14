@@ -307,7 +307,7 @@ def kernel(*, allowed_func_calls: tuple[str, ...] = (), check_ir: bool = True, *
                             args.append(value)
                     context = _TraceContext(fn.__name__, params, ib)
                     _TLS.trace = context
-                    with tracer, I.void_auto_emit():
+                    with tracer:
                         try:
                             fn(*args, **kwargs)
                         except BaseException:

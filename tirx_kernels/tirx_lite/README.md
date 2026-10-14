@@ -83,10 +83,10 @@ ty=txl.uint32)`, `txl.Cast(value, "int32")`, and
 `txl.tensor_store(tensor, indices, value)`. Byte offsets specify their result
 pointer type: `txl.ptr_byte_offset(ptr, offset, ty=txl.Ptr(txl.uint32, ptr.ty.scope))`.
 
-The kernel decorator uses `IRBuilder.line_trace_scope` and `T.void_auto_emit`.
-Void instruction calls are inserted at the call site; non-void expressions
-remain values. Emission and source locations also work for helpers using the
-native `T` namespace. Instruction policies specific to lite remain in lite.
+The kernel decorator uses `IRBuilder.line_trace_scope` for source locations.
+Native script APIs automatically insert void calls whenever an IRBuilder is
+active, independently of line tracing; non-void expressions remain values.
+Emission and source locations also work for helpers using the native `T` namespace. Instruction policies specific to lite remain in lite.
 Ordinary Python control flow still executes while constructing the kernel;
 `with txl.serial(...)` and `with txl.If(...)` construct runtime control flow.
 
