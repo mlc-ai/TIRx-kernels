@@ -848,7 +848,7 @@ def _run_worker(
             return {"status": "OK"}
 
         # mode == "bench"
-        from tvm.tirx.bench import bench
+        from tvm_tirx.tirx.bench import bench
 
         def build_reference():
             def launch() -> None:
@@ -971,7 +971,7 @@ def prepare_bench(*, backend_config=None, **config: Any):
 
     Completes every CUDA-free step the suite requires before READY: SM-count
     resolution (no CUDA-initializing calls), TIRx specialization, and
-    tvm.compile + export. Ranks start CUDA later in `_run_bench_gpu`.
+    tvm_tirx.tirx.compile + export. Ranks start CUDA later in `_run_bench_gpu`.
     """
 
     import tempfile

@@ -45,11 +45,11 @@ class _AlignedTensorMap:
 def _encode_tensormap(tensor, dtype, global_dims, global_strides, box_dims):
     import ctypes
 
-    import tvm
+    import tvm_tirx
 
     rank = len(global_dims)
     descriptor = _AlignedTensorMap()
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
         descriptor.ptr,
         dtype,
         rank,

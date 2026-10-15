@@ -17,7 +17,7 @@ from typing import Any
 
 import check_radix_topk_single_cta_no_tile as no_tile
 
-import tvm
+import tvm_tirx
 from tirx_kernels.ported.flashinfer.topk import filtered_topk as target
 
 no_tile.target = target
@@ -38,7 +38,7 @@ def _bodies(kernel: Any) -> list[tuple[str, Any]]:
     """Yield every scannable function body, for a PrimFunc or an IRModule."""
     if kernel is None:
         return []
-    if isinstance(kernel, tvm.IRModule):
+    if isinstance(kernel, tvm_tirx.IRModule):
         return [
             (global_var.name_hint, function.body)
             for global_var, function in kernel.functions.items()

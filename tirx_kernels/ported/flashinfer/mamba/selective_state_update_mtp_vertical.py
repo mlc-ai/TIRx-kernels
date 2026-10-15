@@ -1064,7 +1064,7 @@ def _encode_tensor_map(
     box: tuple[int, int, int, int],
     name: str,
 ) -> _AlignedTensorMap:
-    import tvm
+    import tvm_tirx
 
     if int(tensor.data_ptr()) % 128:
         raise ValueError(f"vertical {name} TensorMap base must be 128-byte aligned")
@@ -1077,7 +1077,7 @@ def _encode_tensor_map(
                 f"vertical {name} TensorMap byte stride {axis} must be 16-byte aligned"
             )
     descriptor = _AlignedTensorMap()
-    encode = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
     encode(
         descriptor.ptr,
         dtype,

@@ -87,7 +87,7 @@ def _make_base(*, backend_config=None):
     import torch
 
     import tirx_kernels.tirx_lite as txl
-    import tvm
+    import tvm_tirx
 
     D = 128
     LOG2E = 1.4426950408889634
@@ -1105,7 +1105,7 @@ def _make_base(*, backend_config=None):
             kernel = build_kernel(**kw, backend_config=backend_config)
             target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
+                exe = tvm_tirx.tirx.compile(kernel.mod, target=target, pipeline="tirx")
             _COMPILED[(cache_config, key)] = exe
         return exe
 
@@ -1241,7 +1241,7 @@ def _make_defer(*, backend_config=None):
     import torch
 
     import tirx_kernels.tirx_lite as txl
-    import tvm
+    import tvm_tirx
 
     D = 128
     LOG2E = 1.4426950408889634
@@ -2290,7 +2290,7 @@ def _make_defer(*, backend_config=None):
             kernel = build_kernel(**kw, backend_config=backend_config)
             target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
+                exe = tvm_tirx.tirx.compile(kernel.mod, target=target, pipeline="tirx")
             _COMPILED[(cache_config, key)] = exe
         return exe
 
@@ -2416,7 +2416,7 @@ def _make_dyn(*, backend_config=None):
     import torch
 
     import tirx_kernels.tirx_lite as txl
-    import tvm
+    import tvm_tirx
 
     D = 128
     LOG2E = 1.4426950408889634
@@ -3439,7 +3439,7 @@ def _make_dyn(*, backend_config=None):
             kernel = build_kernel(**kw, backend_config=backend_config)
             target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
+                exe = tvm_tirx.tirx.compile(kernel.mod, target=target, pipeline="tirx")
             _COMPILED[(cache_config, key)] = exe
         return exe
 
@@ -3613,7 +3613,7 @@ def _make_split(*, backend_config=None):
     import torch
 
     import tirx_kernels.tirx_lite as txl
-    import tvm
+    import tvm_tirx
 
     D = 128
     LOG2E = 1.4426950408889634
@@ -4786,7 +4786,7 @@ def _make_split(*, backend_config=None):
             kernel = build_kernel(**kw, backend_config=backend_config)
             target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
+                exe = tvm_tirx.tirx.compile(kernel.mod, target=target, pipeline="tirx")
             _COMPILED[(cache_config, key)] = exe
         return exe
 
@@ -4928,7 +4928,7 @@ def _make_clc(*, backend_config=None):
     import torch
 
     import tirx_kernels.tirx_lite as txl
-    import tvm
+    import tvm_tirx
 
     D = 128
     LOG2E = 1.4426950408889634
@@ -5949,7 +5949,7 @@ def _make_clc(*, backend_config=None):
             kernel = build_kernel(**kw, backend_config=backend_config)
             target = cuda_target(backend_config=backend_config)
             with target:
-                exe = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
+                exe = tvm_tirx.tirx.compile(kernel.mod, target=target, pipeline="tirx")
             _COMPILED[(cache_config, key)] = exe
         return exe
 

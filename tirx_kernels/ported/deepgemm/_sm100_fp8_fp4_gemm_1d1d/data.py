@@ -469,7 +469,7 @@ def prepare_m_grouped_masked(
 # Each builder performs every piece of one-off work -- global alignment state, a
 # warm-up call that triggers DeepGEMM's JIT compile, and output allocation --
 # and then returns a no-argument closure that issues exactly one GEMM.  That is
-# what `tvm.tirx.bench.bench` expects from a `references={...}` entry, and it
+# what `tvm_tirx.tirx.bench.bench` expects from a `references={...}` entry, and it
 # keeps compilation and setup out of the timed region on both sides.
 
 

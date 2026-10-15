@@ -816,7 +816,7 @@ def _encode_2d(
     """`make_tma_2d_desc` (runtime_utils.hpp:113)."""
     import ctypes
 
-    import tvm
+    import tvm_tirx
 
     elem_size = tensor.element_size()
     if swizzle_mode != 0:
@@ -851,7 +851,7 @@ def _encode_2d(
             raise RuntimeError(f"cuTensorMapEncodeTiled failed with {status}")
         return desc
 
-    encode = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
     encode(
         desc.ptr,
         _tvm_dtype_name(tensor),
@@ -892,14 +892,14 @@ def _encode_3d(
     """
     import ctypes
 
-    import tvm
+    import tvm_tirx
 
     elem_size = tensor.element_size()
     if swizzle_mode != 0:
         smem_inner = swizzle_mode // elem_size
 
     desc = AlignedTensorMap()
-    encode = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
     encode(
         desc.ptr,
         _tvm_dtype_name(tensor),
@@ -1093,7 +1093,7 @@ __all__ += [
 @cache_backend_config
 def _compile_spec_cached(spec: GemmSpec, *, backend_config=None):
     """Compile one specialization.  `GemmSpec` is frozen, so it keys the cache."""
-    import tvm
+    import tvm_tirx
     from tirx_kernels.runner import cuda_target
 
     from .kernel import build_kernel
@@ -1103,10 +1103,10 @@ def _compile_spec_cached(spec: GemmSpec, *, backend_config=None):
         tags.append("clusterCtaIdx.x")
     tags += ["threadIdx.x", "tirx.use_dyn_shared_memory"]
     func = build_kernel(spec, backend_config=backend_config)
-    return tvm.compile(
-        tvm.IRModule({"main": func}),
+    return tvm_tirx.tirx.compile(
+        tvm_tirx.IRModule({"main": func}),
         target=cuda_target(backend_config=backend_config),
-        tir_pipeline="tirx",
+        pipeline="tirx",
     )
 
 

@@ -27,7 +27,7 @@ ring
     ``PipelineState`` would change lowering or semantics.
 
 The remaining instruction and expression surface resolves through to
-``tvm.script.tirx``. Parser entry points and raw builder forwarding are not
+``tvm_tirx.script.tirx``. Parser entry points and raw builder forwarding are not
 part of the kernel-author API.
 
 ``txl.idioms`` is a *library*, not a fourth primitive family: plain functions over
@@ -39,11 +39,11 @@ instruction or a shape.
 
 from __future__ import annotations
 
-import tvm
-from tvm.backend.cuda.layout import SwizzleMode
-from tvm.script import tirx as _T
-from tvm.script.ir_builder import IRBuilder
-from tvm.tirx.script import ir_builder as _I
+import tvm_tirx
+from tvm_tirx.backend.cuda.layout import SwizzleMode
+from tvm_tirx.script import tirx as _T
+from tvm_tirx.script.ir_builder import IRBuilder
+from tvm_tirx.tirx.script import ir_builder as _I
 
 from . import idioms
 from .entry import Kernel, cta_id, device_entry, kernel, lane_id, thread_id, warp_id
@@ -383,13 +383,13 @@ def stack_alloca(kind, size=1):
 
 def assign(dst, value):
     """Store into one writable scalar element of a local register tensor."""
-    if not isinstance(dst, tvm.ir.TensorLoad):
+    if not isinstance(dst, tvm_tirx.ir.TensorLoad):
         raise TypeError(
             f"txl.assign destination must be a writable scalar, got {type(dst).__name__}"
         )
-    if not tvm.tirx.is_tensor_var(dst.source) or dst.source.scope() != tvm.runtime.MemoryScope(
-        "local"
-    ):
+    if not tvm_tirx.tirx.is_tensor_var(
+        dst.source
+    ) or dst.source.scope() != tvm_tirx.runtime.MemoryScope("local"):
         raise TypeError("txl.assign destination must be a local scalar element")
     return _I.assign(dst, value)
 

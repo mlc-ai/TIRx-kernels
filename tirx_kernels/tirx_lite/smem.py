@@ -23,14 +23,14 @@ from __future__ import annotations
 
 import warnings
 
-from tvm import DataType
-from tvm.backend.cuda.lang import SMEMPool
-from tvm.backend.cuda.lang.alloc_pool import _validate_mma_alloc_shape
-from tvm.backend.cuda.layout import SwizzleMode, mma_shared_layout
-from tvm.script import tirx as T
-from tvm.tirx.analysis import undefined_vars
-from tvm.tirx.layout import ComposeLayout, S, TileLayout
-from tvm.tirx.script import ir_builder as _I
+from tvm_tirx import DataType
+from tvm_tirx.backend.cuda.lang import SMEMPool
+from tvm_tirx.backend.cuda.lang.alloc_pool import _validate_mma_alloc_shape
+from tvm_tirx.backend.cuda.layout import SwizzleMode, mma_shared_layout
+from tvm_tirx.script import tirx as T
+from tvm_tirx.tirx.analysis import undefined_vars
+from tvm_tirx.tirx.layout import ComposeLayout, S, TileLayout
+from tvm_tirx.tirx.script import ir_builder as _I
 
 from . import entry as _entry
 
@@ -160,8 +160,8 @@ def _lint_invariant_encode(stage):
     the diagnostic is a warning the author can act on rather than a rewrite.
     """
     try:
-        from tvm.script.ir_builder import IRBuilder
-        from tvm.tirx.script.ir_builder.frame import ForFrame
+        from tvm_tirx.script.ir_builder import IRBuilder
+        from tvm_tirx.tirx.script.ir_builder.frame import ForFrame
 
         builder = IRBuilder.current()
     except Exception:  # pylint: disable=broad-except

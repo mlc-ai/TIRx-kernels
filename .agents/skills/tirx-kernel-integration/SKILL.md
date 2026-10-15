@@ -23,7 +23,7 @@ Before editing a kernel, inspect the current versions of:
 - `tests/lint/check_license_headers.py` and the license hook in
   `.pre-commit-config.yaml`
 - the `license` and `license-files` fields in `pyproject.toml`
-- `tvm.tirx.bench.bench` in the paired TVM worktree
+- `tvm_tirx.tirx.bench.bench` in the paired TVM worktree
 - tests covering the affected CLI or protocol
 - one recently maintained module with similar runtime and reference behavior
 
@@ -291,12 +291,12 @@ python -m tirx_kernels.bench_suite --check-imports
 
 ## 7. Benchmark Entry Point
 
-Use the paired TVM worktree's `tvm.tirx.bench.bench` as the standard timing API.
+Use the paired TVM worktree's `tvm_tirx.tirx.bench.bench` as the standard timing API.
 The local benchmark API takes our no-argument launch closures and optional lazy
 reference builders:
 
 ```python
-from tvm.tirx.bench import bench
+from tvm_tirx.tirx.bench import bench
 
 
 def run_bench(
@@ -376,7 +376,7 @@ Distributed timing:
 - Auxiliary streams must synchronize correctly with the context's timing stream.
 
 `megamoe` is a specialized CLI/module protocol for the DeepGEMM MegaMoE path, not
-a general `tvm.tirx.bench.bench` timer. It fixes its own schedule; do not pass
+a general `tvm_tirx.tirx.bench.bench` timer. It fixes its own schedule; do not pass
 `warmup` or `repeat` overrides to it.
 
 Do not mix values from different timers in one unlabeled comparison. Do not claim

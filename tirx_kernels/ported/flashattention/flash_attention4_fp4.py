@@ -1893,12 +1893,12 @@ def _encode_tensor_map(tensor, dtype, dims, strides, box, swizzle_bytes):
     """cuTensorMapEncodeTiled: dims/box innermost first, strides in bytes for dims[1:]."""
     import ctypes
 
-    import tvm
+    import tvm_tirx
 
     rank = len(dims)
     assert len(strides) == rank - 1 and len(box) == rank
     desc = _AlignedTensorMap()
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
         desc.ptr,
         dtype,
         rank,

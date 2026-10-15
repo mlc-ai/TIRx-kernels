@@ -7,8 +7,8 @@ import pytest
 from tvm_ffi import structural_walk
 
 import tirx_kernels.tirx_lite as txl
-from tvm import ir
-from tvm.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
+from tvm_tirx import ir
+from tvm_tirx.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
 
 
 @pytest.mark.parametrize("constructor", ["raw", "mma_desc", "encode"])

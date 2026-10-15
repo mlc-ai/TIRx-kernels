@@ -5,11 +5,11 @@
 from __future__ import annotations
 
 import tirx_kernels.tirx_lite as txl
-from tvm.backend.cuda.lang.pipeline import MBarrier as _MBarrier
-from tvm.backend.cuda.lang.pipeline import Pipeline as _Pipeline
-from tvm.backend.cuda.lang.pipeline import PipelineState as _PipelineState
-from tvm.backend.cuda.lang.pipeline import TMABar as _TMABar
-from tvm.backend.cuda.lang.pipeline import _tcgen05_commit_is_unicast
+from tvm_tirx.backend.cuda.lang.pipeline import MBarrier as _MBarrier
+from tvm_tirx.backend.cuda.lang.pipeline import Pipeline as _Pipeline
+from tvm_tirx.backend.cuda.lang.pipeline import PipelineState as _PipelineState
+from tvm_tirx.backend.cuda.lang.pipeline import TMABar as _TMABar
+from tvm_tirx.backend.cuda.lang.pipeline import _tcgen05_commit_is_unicast
 
 
 class PipelineState(_PipelineState):

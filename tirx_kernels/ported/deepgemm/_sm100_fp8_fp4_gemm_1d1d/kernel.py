@@ -27,7 +27,7 @@ scheduler/gemm.cuh.
 """
 
 import tirx_kernels.tirx_lite as txl
-from tvm.backend.cuda.cpp.descriptors import (
+from tvm_tirx.backend.cuda.cpp.descriptors import (
     encode_instr_descriptor_block_scaled_uint32,
     encode_smem_descriptor_base_uint64,
 )
@@ -339,7 +339,7 @@ class _PersistentScheduler:
 
 def build_kernel(spec: GemmSpec, *, backend_config=None):
     """Build the TIRx `PrimFunc` for one `sm100_fp8_fp4_gemm_1d1d_impl` instantiation."""
-    from tvm.ir.type import PrimType, PtrType
+    from tvm_tirx.ir.type import PrimType, PtrType
 
     _validate(spec)
 

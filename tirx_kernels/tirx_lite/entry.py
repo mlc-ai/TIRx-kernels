@@ -14,9 +14,9 @@ import sys
 import threading
 from pathlib import Path
 
-import tvm
-from tvm.script.ir_builder import IRBuilder
-from tvm.tirx.script import ir_builder as I
+import tvm_tirx
+from tvm_tirx.script.ir_builder import IRBuilder
+from tvm_tirx.tirx.script import ir_builder as I
 
 # Registers the hardware hands the entry when ptxas pins the allocation with
 # __launch_bounds__(nthreads, min_blocks_per_sm). setmaxnreg's direction is
@@ -140,13 +140,13 @@ class Kernel:
 
     @property
     def mod(self):
-        return tvm.IRModule({"main": self.func})
+        return tvm_tirx.IRModule({"main": self.func})
 
     def compile(self, target=None):
         """Compile with Target defaults overridden by the device entry settings."""
         if target is None:
-            target = tvm.target.Target.current() or "cuda"
-        return tvm.compile(self.mod, target=target, tir_pipeline="tirx")
+            target = tvm_tirx.target.Target.current() or "cuda"
+        return tvm_tirx.tirx.compile(self.mod, target=target, pipeline="tirx")
 
     def source(self, target=None):
         """Return the CUDA source generated for the supplied compile settings."""
@@ -159,7 +159,7 @@ class Kernel:
 def _declare_param(name, annotation):
     """Bind an ordinary native type or shared symbolic Var as an entry parameter."""
     if isinstance(annotation, str):
-        annotation = tvm.ir.PrimType(annotation)
+        annotation = tvm_tirx.ir.PrimType(annotation)
     return I.arg_(name, annotation)
 
 
@@ -178,8 +178,8 @@ class _DeviceEntry:
     """One native region, closed by a with block or by the kernel decorator."""
 
     def __init__(self, context, launch, kernel_attrs, backend_config):
-        from tvm.backend.cuda.launch import KernelAttributes, LaunchConfig
-        from tvm.backend.cuda.launch._impl import _integer
+        from tvm_tirx.backend.cuda.launch import KernelAttributes, LaunchConfig
+        from tvm_tirx.backend.cuda.launch._impl import _integer
 
         if not isinstance(launch, LaunchConfig):
             raise TypeError("device_entry launch must be a CUDA LaunchConfig")
@@ -211,7 +211,7 @@ class _DeviceEntry:
         _TLS.session = self.session
 
         def index(name, value):
-            return I.bind(value, var=tvm.ir.Var(name, value.ty))
+            return I.bind(value, var=tvm_tirx.ir.Var(name, value.ty))
 
         cta_ids = [index("b" + axis, I.cuda.block_idx(axis)) for axis in "xyz"[: len(launch.grid)]]
         if len(cta_ids) == 1:

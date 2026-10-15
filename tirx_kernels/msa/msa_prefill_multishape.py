@@ -57,7 +57,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import backend_config_key, resolve_backend_config
 
 SPIN_WAITS = os.environ.get("MSA_SPIN_WAITS", "0") == "1"
@@ -494,7 +494,7 @@ def make_union_kernel(
         with txl.If(warp_cta == 12), txl.Then():
             txl.ptx[TMEM_ALLOC](txl.address_of(tmem_addr[0]), txl.uint32(N_COLS_TMEM))
             txl.cuda.warp_sync()
-        with txl.If(tvm.tirx.all(wg_id == 3, warp_id == 0)), txl.Then():
+        with txl.If(tvm_tirx.tirx.all(wg_id == 3, warp_id == 0)), txl.Then():
             allocated = txl.local_scalar("uint32")
             txl.ptx.ld.shared.u32(allocated, tmem_addr.ptr_to([0]))
             txl.cuda.trap_when_assert_failed(allocated == txl.uint32(0))
@@ -1386,7 +1386,7 @@ def make_union_kernel(
                     o_ready.wait(wg_id, it_x & 1)
                     txl.cuda.iket.range_end(epi_wait_token[0])
                     epi_token = iket_range("epi-store", leader_only=True)
-                    acc_O_row_is_zero_or_nan = tvm.tirx.any(
+                    acc_O_row_is_zero_or_nan = tvm_tirx.tirx.any(
                         row_sum[0] == txl.float32(0.0), row_sum[0] != row_sum[0]
                     )
                     norm_scale = txl.local_scalar("float32")
@@ -1450,7 +1450,7 @@ def make_union_kernel(
             with txl.If(done == num_ctas - 1), txl.Then():
                 txl.ptx.st.relaxed.gpu.global_.b32(sched.ptr_to([0]), txl.int32(0))
                 txl.ptx.st.relaxed.gpu.global_.b32(sched.ptr_to([1]), txl.int32(0))
-        with txl.If(tvm.tirx.all(wg_id == 0, warp_id == 0)), txl.Then():
+        with txl.If(tvm_tirx.tirx.all(wg_id == 0, warp_id == 0)), txl.Then():
             dealloc = txl.local_scalar("uint32")
             txl.ptx.ld.shared.u32(dealloc, tmem_addr.ptr_to([0]))
             txl.ptx[TMEM_RELINQUISH]()
@@ -3052,7 +3052,7 @@ def make_main_kernel(
             with txl.If(tid_all == 0), txl.Then():
                 txl.ptx.st.relaxed.gpu.global_.b32(sched.ptr_to([0]), txl.int32(0))
                 txl.ptx.st.relaxed.gpu.global_.b32(sched.ptr_to([1]), txl.int32(0))
-        with txl.If(tvm.tirx.all(wg_id == 0, warp_id == 0)), txl.Then():
+        with txl.If(tvm_tirx.tirx.all(wg_id == 0, warp_id == 0)), txl.Then():
             dealloc = txl.local_scalar("uint32")
             txl.ptx.ld.shared.u32(dealloc, tmem_addr.ptr_to([0]))
             txl.ptx[TMEM_RELINQUISH]()
@@ -3532,7 +3532,7 @@ def _encode(tensor, dtype_name, dims, strides, box):
     desc = _AlignedTensorMap()
     rank = len(dims)
     assert len(strides) == rank - 1 and len(box) == rank
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
         desc.ptr,
         dtype_name,
         rank,

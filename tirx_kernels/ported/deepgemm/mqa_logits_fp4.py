@@ -16,7 +16,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import cache_backend_config, resolve_backend_config
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
@@ -33,7 +33,7 @@ class _AlignedTensorMap:
 
 def _encode_tensor_map(dtype, rank, tensor, dims, strides, box, swizzle):
     descriptor = _AlignedTensorMap()
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
         descriptor.ptr,
         dtype,
         rank,
@@ -871,7 +871,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                     txl.cuda.get_tmem_addr(
                                         sfq_tmem_col, sf_linear % 128 // 4, sf_linear // 128
                                     ),
-                                    txl.ptx.pred(tvm.tirx.const(ki != 0, "bool")),
+                                    txl.ptx.pred(tvm_tirx.tirx.const(ki != 0, "bool")),
                                 )
                             tmem_pipe.full.arrive(tmem_state.stage)
                             txl.assign(has_tmem_issue, txl.uint32(1))
@@ -1010,7 +1010,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                 # for this kernel (unlike fp8's clamp-to-padding variant).
                                 with (
                                     txl.If(
-                                        tvm.tirx.all(
+                                        tvm_tirx.tirx.all(
                                             row_k_start <= kv_offset, kv_offset < row_k_end
                                         )
                                     ),
@@ -1056,7 +1056,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
     # its PrimFunc is applied to the traced one here. `Kernel.func` is a plain
     # attribute (entry.py), and `Kernel.mod` reads it, so this reaches compile.
     main = sm100_fp4_mqa_logits.func
-    return tvm.IRModule({"main": main})
+    return tvm_tirx.IRModule({"main": main})
 
 
 def _compile_tirx_mqa_for_config(
@@ -1072,7 +1072,7 @@ def _compile_tirx_mqa_for_config(
     logits_stride_override: int | None,
     backend_config=None,
 ) -> Any:
-    import tvm
+    import tvm_tirx
     from tirx_kernels.runner import cuda_target
 
     target = cuda_target(backend_config=backend_config)
@@ -1112,8 +1112,8 @@ def _compile_tirx_mqa_for_config(
                 }
             },
         )
-        return tvm.compile(
-            mod, target=cuda_target(backend_config=backend_config), tir_pipeline="tirx"
+        return tvm_tirx.tirx.compile(
+            mod, target=cuda_target(backend_config=backend_config), pipeline="tirx"
         )
 
 

@@ -10,8 +10,8 @@ requires but nothing else verifies.
 
 from __future__ import annotations
 
-import tvm
-from tvm.script import tirx as T
+import tvm_tirx
+from tvm_tirx.script import tirx as T
 
 try:
     from tvm_ffi import structural_map
@@ -79,7 +79,7 @@ class WarpGroup:
         if self.owner.active is not None or self.owner.active_group is not None:
             raise RuntimeError(f"warpgroup {self.name!r} cannot nest inside another role scope")
         warp_id = self.owner.session.warp_id()
-        cond = tvm.tirx.all(self.first_warp <= warp_id, warp_id <= self.warps[-1])
+        cond = tvm_tirx.tirx.all(self.first_warp <= warp_id, warp_id <= self.warps[-1])
         self._frames = [T.if_(cond), T.then_()]
         self.owner.dispatch.append((self._frames[0].condition, self))
         for frame in self._frames:
@@ -140,10 +140,12 @@ class Role:
             lo = self.first_warp - self.group.first_warp
             hi = self.warps[-1] - self.group.first_warp
         cond = (
-            role_warp_id == lo if lo == hi else tvm.tirx.all(lo <= role_warp_id, role_warp_id <= hi)
+            role_warp_id == lo
+            if lo == hi
+            else tvm_tirx.tirx.all(lo <= role_warp_id, role_warp_id <= hi)
         )
         if self.when is not None:
-            cond = tvm.tirx.all(cond, self.when)
+            cond = tvm_tirx.tirx.all(cond, self.when)
         self._frames = [T.if_(cond), T.then_()]
         # Remember the exact condition *node* the frame will build the
         # IfThenElse from, so the finished body can be rewritten into an
@@ -333,7 +335,7 @@ class Specialize:
             read this arm as evidence that the case is handled; it is only
             evidence that it is refused.
             """
-            if not isinstance(stmt, tvm.ir.If) or stmt.else_case is not None:
+            if not isinstance(stmt, tvm_tirx.ir.If) or stmt.else_case is not None:
                 return None
             for cond, role in self.dispatch:
                 if stmt.condition.same_as(cond):
@@ -354,7 +356,7 @@ class Specialize:
             """
             chained = None
             for stmt in reversed(run):
-                chained = tvm.ir.If(stmt.condition, stmt.then_case, chained, stmt.loc)
+                chained = tvm_tirx.ir.If(stmt.condition, stmt.then_case, chained, stmt.loc)
             return chained
 
         def rewrite(seq):
@@ -382,12 +384,14 @@ class Specialize:
             new = rewrite(list(stmt.seq))
             if new is None:
                 return stmt
-            return new[0] if len(new) == 1 else tvm.ir.SeqStmt(new, stmt.loc)
+            return new[0] if len(new) == 1 else tvm_tirx.ir.SeqStmt(new, stmt.loc)
 
         if structural_map is not None:
-            body = structural_map(func.body, (tvm.ir.SeqStmt, postorder))
+            body = structural_map(func.body, (tvm_tirx.ir.SeqStmt, postorder))
         else:
-            body = tvm.tirx.stmt_functor.ir_transform(func.body, None, postorder, ["ir.SeqStmt"])
+            body = tvm_tirx.tirx.stmt_functor.ir_transform(
+                func.body, None, postorder, ["ir.SeqStmt"]
+            )
         return func.with_body(body)
 
     def finalize(self):

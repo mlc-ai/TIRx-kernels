@@ -22,7 +22,7 @@ import math
 import os
 
 import tirx_kernels.tirx_lite as txl
-from tvm.ir.type import PrimType, PtrType
+from tvm_tirx.ir.type import PrimType, PtrType
 
 from .spec import (
     MegaMoeConfig,

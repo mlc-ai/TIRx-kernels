@@ -31,11 +31,11 @@ def _encode_tensormap(tensor, dtype, global_dims, global_strides, box_dims):
     """Encode the exact rank-4/rank-5 descriptors consumed by the producer."""
     import ctypes
 
-    import tvm
+    import tvm_tirx
 
     rank = len(global_dims)
     descriptor = _AlignedTensorMap()
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
         descriptor.ptr,
         dtype,
         rank,

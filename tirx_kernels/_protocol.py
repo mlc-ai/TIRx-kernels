@@ -39,7 +39,7 @@ get_kernel(*, backend_config=None, **cfg) -> PrimFunc | IRModule | nested functi
     their selected architecture on the device entry. ``prepare_bench`` and
     ``run_test`` accept and forward the same setting to compilation.
     Multi-kernel workloads may return an ``IRModule`` or a nested list,
-    tuple, or mapping containing ``tvm.tirx.PrimFunc`` objects.
+    tuple, or mapping containing ``tvm_tirx.tirx.PrimFunc`` objects.
 
 prepare_data(**cfg) -> dict[str, Any]
     Prepare input/output tensors.  Returns a dict mapping argument names

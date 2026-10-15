@@ -10,16 +10,16 @@ points, spelling those bodies directly with the public ``txl`` primitives.
 from __future__ import annotations
 
 import tirx_kernels.tirx_lite as txl
-from tvm.backend.cuda.lang.tile_scheduler import (
+from tvm_tirx.backend.cuda.lang.tile_scheduler import (
     ClusterLaunchControlScheduler as _ClusterLaunchControlScheduler,
 )
-from tvm.backend.cuda.lang.tile_scheduler import (
+from tvm_tirx.backend.cuda.lang.tile_scheduler import (
     ClusterPersistentScheduler2D as _ClusterPersistentScheduler2D,
 )
-from tvm.backend.cuda.lang.tile_scheduler import (
+from tvm_tirx.backend.cuda.lang.tile_scheduler import (
     FlashAttentionLinearScheduler as _FlashAttentionLinearScheduler,
 )
-from tvm.backend.cuda.lang.tile_scheduler import (
+from tvm_tirx.backend.cuda.lang.tile_scheduler import (
     FlashAttentionLPTScheduler as _FlashAttentionLPTScheduler,
 )
 
@@ -276,7 +276,10 @@ class ClusterLaunchControlScheduler(_ClusterLaunchControlScheduler):
                     txl.ptx[
                         "clusterlaunchcontrol.try_cancel.async.shared::cta"
                         ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
-                    ](txl.address_of(self.clc_handle[0]), txl.address_of(self.sched_arr.full.buf[0]))
+                    ](
+                        txl.address_of(self.clc_handle[0]),
+                        txl.address_of(self.sched_arr.full.buf[0]),
+                    )
                 self.sched_arr.full.arrive(0, 16)
                 self.sched_arr.full.wait(0, sa.phase)
                 sa.advance()

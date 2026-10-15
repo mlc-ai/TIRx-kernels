@@ -218,10 +218,10 @@ class AlignedTensorMap:
 
 def encode_tensor_map(tensor, dtype: str, dims, strides_bytes, box, swizzle=3, l2promo=2):
     """cuTensorMapEncodeTiled through TVM's runtime function (dims innermost first)."""
-    import tvm
+    import tvm_tirx
 
     desc = AlignedTensorMap()
-    encode = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
     rank = len(dims)
     assert len(strides_bytes) == rank - 1 and len(box) == rank
     encode(
@@ -12301,7 +12301,7 @@ def _compile(kind, *key_args, backend_config=None):
     cache_config = backend_config_key(backend_config)
     key = (kind, *key_args)
     if (cache_config, key) not in _KERNEL_CACHE:
-        import tvm
+        import tvm_tirx
 
         kernel = {
             "mega": make_mega_kernel,
@@ -12329,8 +12329,8 @@ def _compile(kind, *key_args, backend_config=None):
             },
         )
         with target:
-            _KERNEL_CACHE[(cache_config, key)] = tvm.compile(
-                kernel.mod, target=target, tir_pipeline="tirx"
+            _KERNEL_CACHE[(cache_config, key)] = tvm_tirx.tirx.compile(
+                kernel.mod, target=target, pipeline="tirx"
             )
     return _KERNEL_CACHE[(cache_config, key)]
 
@@ -13115,7 +13115,7 @@ def prepare_bench(*, backend_config=None, **kwargs: Any):
 
     ``setup`` compiles through this module's own ``_KERNEL_CACHE``, so priming
     that cache under the same key here is what keeps ``run_gpu`` free of
-    ``tvm.compile``.
+    ``tvm_tirx.tirx.compile``.
     """
     from tirx_kernels.runner import prepared_gpu_benchmark
 

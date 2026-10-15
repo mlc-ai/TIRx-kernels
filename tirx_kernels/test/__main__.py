@@ -48,7 +48,7 @@ def main():
         default=None,
         help="Run only configs requiring this many GPUs (world_size/num_processes, default 1)",
     )
-    from tvm.backend.config import add_backend_config_argument
+    from tvm_tirx.backend.config import add_backend_config_argument
 
     add_backend_config_argument(parser)
     args = parser.parse_args()

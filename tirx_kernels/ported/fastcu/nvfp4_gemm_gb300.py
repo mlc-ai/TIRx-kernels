@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import cache_backend_config, cuda_target, resolve_backend_config
 
 KERNEL_META = {
@@ -1051,7 +1051,7 @@ class _AlignedTensorMap:
 
 def _encode_tiled(dtype, tensor, *, dims, strides_bytes, box, swizzle):
     descriptor = _AlignedTensorMap()
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
         descriptor.ptr,
         dtype,
         len(dims),

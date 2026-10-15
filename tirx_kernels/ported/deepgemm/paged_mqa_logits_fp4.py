@@ -1492,7 +1492,7 @@ def _compile_tirx_paged_mqa_for_config(
     indices_pair_stride: int,
     backend_config=None,
 ) -> Any:
-    import tvm
+    import tvm_tirx
     from tirx_kernels.runner import cuda_target
 
     target = cuda_target(backend_config=backend_config)
@@ -1511,9 +1511,9 @@ def _compile_tirx_paged_mqa_for_config(
         indices_pair_stride=indices_pair_stride,
         backend_config=backend_config,
     )
-    previous_postproc = tvm.get_global_func("tvm_callback_cuda_postproc", allow_missing=True)
+    previous_postproc = tvm_tirx.get_global_func("tvm_callback_cuda_postproc", allow_missing=True)
 
-    @tvm.register_global_func("tvm_callback_cuda_postproc", override=True)
+    @tvm_tirx.register_global_func("tvm_callback_cuda_postproc", override=True)
     def _postproc(code: str, target: Any) -> str:
         if previous_postproc is not None:
             code = previous_postproc(code, target)
@@ -1521,13 +1521,15 @@ def _compile_tirx_paged_mqa_for_config(
 
     try:
         with target:
-            mod = tvm.IRModule({"main": kernel})
-            return tvm.compile(mod, target=target, tir_pipeline="tirx")
+            mod = tvm_tirx.IRModule({"main": kernel})
+            return tvm_tirx.tirx.compile(mod, target=target, pipeline="tirx")
     finally:
         if previous_postproc is not None:
-            tvm.register_global_func("tvm_callback_cuda_postproc", previous_postproc, override=True)
+            tvm_tirx.register_global_func(
+                "tvm_callback_cuda_postproc", previous_postproc, override=True
+            )
         else:
-            tvm.register_global_func(
+            tvm_tirx.register_global_func(
                 "tvm_callback_cuda_postproc", lambda code, target: code, override=True
             )
 
@@ -1669,14 +1671,14 @@ def _encode_fp4_packed_smem_tma_3d_desc(
 
 
 def _build_tirx_tensor_maps(data: dict[str, Any]) -> dict[str, Any]:
-    import tvm
+    import tvm_tirx
     from tirx_kernels.ported.deepgemm._sm100_fp8_fp4_mega_moe.spec import _encode_tma_2d_desc
 
     config: PagedMQALogitsFP4Config = data["config"]
     q_fp4, sf_q = data["q_in"]
     fused = data["fused_kv_cache"]
     weights = data["weights"]
-    encode_tensormap = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode_tensormap = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
     kv_flat = fused.view(torch.uint8).view(
         config.num_pages, config.page_size * (config.head_dim // 2 + 4)
     )

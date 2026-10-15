@@ -60,9 +60,9 @@ import numpy as np
 import torch
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import backend_config_key, cuda_target, resolve_backend_config
-from tvm.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
+from tvm_tirx.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
 
 BK = 128
 BM = 128
@@ -2405,7 +2405,7 @@ class _TensorMap:
 
 
 def _encode_2d(tensor, dtype_name, inner, outer, stride_bytes, box_inner, box_outer, swizzle):
-    enc = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    enc = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
     tm = _TensorMap()
     enc(
         tm.ptr,
@@ -2429,7 +2429,7 @@ def _encode_2d(tensor, dtype_name, inner, outer, stride_bytes, box_inner, box_ou
 
 def _encode_3d(tensor, dtype_name, dims, strides_bytes, box, swizzle):
     tm = _TensorMap()
-    enc = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    enc = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
     enc(
         tm.ptr,
         dtype_name,

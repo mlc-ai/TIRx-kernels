@@ -13,8 +13,8 @@ import torch
 import torch.distributed as dist
 
 import tirx_kernels.tirx_lite as txl
-import tvm
-from tvm.ir.type import PrimType, PtrType
+import tvm_tirx
+from tvm_tirx.ir.type import PrimType, PtrType
 
 from .utils._baselines import create_baseline_suite
 from .utils._baselines import ratios as baseline_ratios
@@ -262,10 +262,10 @@ class MPMCQueue:
     def __init__(
         self,
         capacity: int,
-        task_types: tvm.ir.Var,
-        task_idxs: tvm.ir.Var,
-        head: tvm.ir.Var,
-        tail: tvm.ir.Var,
+        task_types: tvm_tirx.ir.Var,
+        task_idxs: tvm_tirx.ir.Var,
+        head: tvm_tirx.ir.Var,
+        tail: tvm_tirx.ir.Var,
         num_tot_tasks: int,
     ):
         if capacity & capacity - 1:
@@ -296,9 +296,9 @@ class MPMCQueue:
 class GEMMMPMCQueue(MPMCQueue):
     def dequeue(
         self,
-        fetched_task_type: tvm.ir.Var,
-        fetched_task_idx0: tvm.ir.Var,
-        fetched_task_idx1: tvm.ir.Var,
+        fetched_task_type: tvm_tirx.ir.Var,
+        fetched_task_idx0: tvm_tirx.ir.Var,
+        fetched_task_idx1: tvm_tirx.ir.Var,
     ):
         txl.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), txl.int32(1))
         with txl.If(self.head_r[0] < self.num_tot_tasks):
@@ -330,10 +330,10 @@ class GEMMMPMCQueue(MPMCQueue):
 class RSMPMCQueue(MPMCQueue):
     def dequeue(
         self,
-        fetched_task_type: tvm.ir.Var,
-        fetched_task_idx0: tvm.ir.Var,
-        fetched_task_idx1: tvm.ir.Var,
-        rs_rem: tvm.ir.Var,
+        fetched_task_type: tvm_tirx.ir.Var,
+        fetched_task_idx0: tvm_tirx.ir.Var,
+        fetched_task_idx1: tvm_tirx.ir.Var,
+        rs_rem: tvm_tirx.ir.Var,
     ):
         with txl.If(rs_rem[0] >= 0):
             with txl.Then():
@@ -369,7 +369,7 @@ class MixedDynamicTileScheduler:
         self,
         gemm_queue: GEMMMPMCQueue,
         rs_queue: RSMPMCQueue,
-        packed_value: tvm.ir.Var,
+        packed_value: tvm_tirx.ir.Var,
         sch_pipe: SchedulerPipeline,
     ):
         self.gemm_queue = gemm_queue
@@ -428,7 +428,7 @@ class MixedDynamicTileScheduler:
         txl.assign(self.rs_rem[0], -1)
 
     def valid(self):
-        return tvm.tirx.any(self.fetched_task_type[0] >= 0, self.rs_rem[0] >= 0)
+        return tvm_tirx.tirx.any(self.fetched_task_type[0] >= 0, self.rs_rem[0] >= 0)
 
 
 class Semaphore:
@@ -988,7 +988,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
     return test_mma_ss_tma_2sm_persistent
 
 
-def build_kernel(config: GemmRSConfig | None = None, *, backend_config=None) -> tvm.IRModule:
+def build_kernel(config: GemmRSConfig | None = None, *, backend_config=None) -> tvm_tirx.IRModule:
     config = config or derive_config()
     requested = (config.M, config.N, config.total_k, config.world_size)
     active = (M, N, TOTAL_K, WORLD_SIZE)
@@ -1007,7 +1007,7 @@ def build_kernel(config: GemmRSConfig | None = None, *, backend_config=None) -> 
         )
         return specialized.build_kernel(backend_config=backend_config)
     device = _make_device_kernel(config, backend_config=backend_config)
-    return tvm.IRModule({FUSED_DEVICE_ENTRYPOINT: device.func})
+    return tvm_tirx.IRModule({FUSED_DEVICE_ENTRYPOINT: device.func})
 
 
 KERNEL_META = {"name": "gemm_reduce_scatter", "category": "gemm", "runtime_cuda_archs": ["sm_100a"]}
@@ -1032,7 +1032,7 @@ def get_kernel(
     *,
     backend_config=None,
     **_kwargs: Any,
-) -> tvm.IRModule:
+) -> tvm_tirx.IRModule:
     """Build the hand-transcribed fused kernel directly, without the megakernel DSL."""
 
     config = _config(M, N, K, world_size, dtype, scheduler)
@@ -1048,7 +1048,7 @@ def _get_benchmark_kernel(
     scheduler: str = "dynamic",
     *,
     backend_config=None,
-) -> tvm.IRModule:
+) -> tvm_tirx.IRModule:
     return get_kernel(
         M, N, K, world_size, dtype, scheduler=scheduler, backend_config=backend_config
     )

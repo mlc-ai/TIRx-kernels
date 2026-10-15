@@ -280,7 +280,7 @@ def _instr_desc(operand_dtype: str, trans_b: bool = False) -> int:
     operand's major-ness -- False for QK, where both operands are K-major, and
     True for PV, whose B tile is MN-major.
     """
-    from tvm.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
+    from tvm_tirx.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
 
     torch_name = {"bfloat16": "bfloat16", "float16": "float16", "float8_e4m3": "float8_e4m3fn"}[
         operand_dtype

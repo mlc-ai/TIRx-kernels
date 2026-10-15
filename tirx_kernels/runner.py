@@ -25,8 +25,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Protocol, runtime_checkable
 
-import tvm
-from tvm.backend.config import copy_backend_config, merge_backend_configs
+import tvm_tirx
+from tvm_tirx.backend.config import copy_backend_config, merge_backend_configs
 
 DEFAULT_BENCH_ROUNDS = 5
 DEFAULT_BENCH_COOLDOWN_S = 0.0
@@ -345,11 +345,11 @@ def resolve_backend_config(backend_config=None, *, defaults=None, target=None):
     Factories must select their Python implementation before tracing. Only the
     architecture and explicitly supplied settings become entry overrides.
     """
-    from tvm.backend.cuda.backend_config import resolve_backend_config as resolve_cuda
+    from tvm_tirx.backend.cuda.backend_config import resolve_backend_config as resolve_cuda
 
     config = merge_backend_configs(defaults, backend_config)
     if target is None:
-        target = tvm.target.Target.current()
+        target = tvm_tirx.target.Target.current()
     resolved = resolve_cuda(config.get("cuda"), target)
     config.setdefault("cuda", {})["arch"] = resolved["arch"]
     return config
@@ -361,8 +361,8 @@ def backend_config_key(backend_config=None):
     Presence matters: an explicit native argument list may override a factory's
     own defaults, even when it equals the backend default list.
     """
-    from tvm.backend.config import backend_config_json
-    from tvm.backend.cuda.backend_config import resolve_backend_config as resolve_cuda
+    from tvm_tirx.backend.config import backend_config_json
+    from tvm_tirx.backend.cuda.backend_config import resolve_backend_config as resolve_cuda
 
     config = resolve_backend_config(backend_config)
     return backend_config_json(config), backend_config_json({"cuda": resolve_cuda(config["cuda"])})
@@ -373,7 +373,7 @@ def cache_backend_config(function=None, *, maxsize=None):
     from functools import lru_cache, wraps
     from inspect import signature
 
-    from tvm.backend.config import backend_config_json, parse_backend_config
+    from tvm_tirx.backend.config import backend_config_json, parse_backend_config
 
     def decorate(func):
         sig = signature(func)
@@ -405,11 +405,11 @@ def cache_backend_config(function=None, *, maxsize=None):
 def cuda_target(*, backend_config=None):
     """Construct a CUDA Target from explicit settings, detecting online if absent."""
     config = resolve_backend_config(backend_config)
-    active = tvm.target.Target.current()
+    active = tvm_tirx.target.Target.current()
     attrs = dict(active.export()) if active is not None else {"kind": "cuda"}
     attrs["arch"] = config["cuda"]["arch"]
     attrs["backend_config"] = merge_backend_configs(attrs.get("backend_config"), config)
-    return tvm.target.Target(attrs)
+    return tvm_tirx.target.Target(attrs)
 
 
 def physical_cuda_uuids(device_indices: Sequence[int]) -> tuple[str, ...]:
@@ -583,7 +583,7 @@ def defer_gpu_interrupts():
 
 def bench(*args: Any, references: Mapping[str, Any] | None = None, **kwargs: Any):
     """Run the canonical timer, admitting references only in explicit diagnostic mode."""
-    from tvm.tirx.bench import bench as canonical_bench
+    from tvm_tirx.tirx.bench import bench as canonical_bench
 
     if _CUDA_ASSIGNMENT is not None:
         validate_current_cuda_assignment("before benchmark setup", restore=True)
@@ -656,17 +656,17 @@ def gpu_stage_compile_guard():
 
     def reject_compile(*_args: Any, **_kwargs: Any):
         raise RuntimeError(
-            "GPU stage attempted tvm.compile; all TIRx specialization and compilation "
+            "GPU stage attempted tvm_tirx.tirx.compile; all TIRx specialization and compilation "
             "must be completed before READY"
         )
 
     with _PREPARE_COMPILE_LOCK:
-        previous_compile = tvm.compile
-        tvm.compile = reject_compile
+        previous_compile = tvm_tirx.tirx.compile
+        tvm_tirx.tirx.compile = reject_compile
         try:
             yield
         finally:
-            tvm.compile = previous_compile
+            tvm_tirx.tirx.compile = previous_compile
 
 
 @contextmanager
@@ -685,10 +685,10 @@ def cuda_initialization_guard(*, require_uninitialized: bool = False):
 
 def compile_kernel(func, *, backend_config: dict[str, Any] | None = None):
     """Compile a TIRx function with explicit CUDA compilation settings."""
-    return tvm.compile(
-        tvm.IRModule({"main": func}),
+    return tvm_tirx.tirx.compile(
+        tvm_tirx.IRModule({"main": func}),
         target=cuda_target(backend_config=backend_config),
-        tir_pipeline="tirx",
+        pipeline="tirx",
     )
 
 
@@ -732,7 +732,7 @@ def run_kernel_bench(
     Delegates to ``mod.run_bench(**params, ...)`` if available, otherwise runs
     ``run_test`` without timing. warmup/repeat are only forwarded when explicitly
     provided (CLI ``--warmup/--repeat`` or a per-workload override); otherwise each
-    timer uses its own Triton-aligned default inside ``tvm.tirx.bench.bench``.
+    timer uses its own Triton-aligned default inside ``tvm_tirx.tirx.bench.bench``.
     """
     mod = None if registry is None else registry[kernel_name]
     if mod is None:

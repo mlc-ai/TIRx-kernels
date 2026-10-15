@@ -176,7 +176,7 @@ def _device_info() -> dict:
 
 def _versions() -> dict:
     versions: dict = {}
-    for name in ("torch", "tvm", "tvm_ffi", "triton", "flashinfer", "cutlass"):
+    for name in ("torch", "tvm_tirx", "tvm_ffi", "triton", "flashinfer", "cutlass"):
         try:
             module = importlib.import_module(name)
             versions[name] = getattr(module, "__version__", None)

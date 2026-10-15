@@ -58,7 +58,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import backend_config_key, cuda_target, resolve_backend_config
 
 D = 512
@@ -1599,7 +1599,7 @@ def _compile(cfg, *, backend_config=None):
         kernel = make_kernel(**dict(zip(keys, cfg)), backend_config=backend_config)
         target = cuda_target(backend_config=backend_config)
         with target:
-            compiled_kernel = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
+            compiled_kernel = tvm_tirx.tirx.compile(kernel.mod, target=target, pipeline="tirx")
         _KERNELS[(cache_config, cfg)] = compiled_kernel
     return compiled_kernel
 
