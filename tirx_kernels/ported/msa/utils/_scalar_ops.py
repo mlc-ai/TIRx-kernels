@@ -46,7 +46,7 @@ def atom_add_global_i32(buffer, index, value):
     """
     out = txl.local_scalar(txl.u32)
     txl.ptx.atom.global_.add.u32(out, buffer.ptr_to([index]), value)
-    return txl.reinterpret(txl.i32, out)
+    return txl.reinterpret(out, ty=txl.i32)
 
 
 # --- shared memory ----------------------------------------------------------
@@ -72,9 +72,13 @@ def shfl_idx_i32(value, source_lane):
     """``shfl.sync.idx.b32 d, a, src, 31, -1``; a full-warp broadcast."""
     out = txl.local_scalar(txl.u32)
     txl.ptx.shfl_sync.idx.b32(
-        out, txl.reinterpret(txl.u32, value), txl.uint32(source_lane), txl.uint32(31), txl.uint32(0xFFFFFFFF)
+        out,
+        txl.reinterpret(value, ty=txl.u32),
+        txl.uint32(source_lane),
+        txl.uint32(31),
+        txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret(txl.i32, out)
+    return txl.reinterpret(out, ty=txl.i32)
 
 
 # --- integer division -------------------------------------------------------

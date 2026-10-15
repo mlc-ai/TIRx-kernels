@@ -214,7 +214,7 @@ def _st_idx(buf, index, value, i64: bool):
     elif i64:
         txl.ptx.st.global_.b64(buf.ptr_to([index]), txl.cast(txl.cast(value, "int64"), "uint64"))
     else:
-        R.st_global_u32(buf, index, txl.reinterpret("uint32", txl.cast(value, "int32")))
+        R.st_global_u32(buf, index, txl.reinterpret(txl.cast(value, "int32"), ty="uint32"))
 
 
 def _ld_i32(buf, index):
@@ -307,11 +307,11 @@ def get_kernel(
             # Each shuffle is materialized BEFORE its lane guard, so the
             # collective stays convergent across the whole warp.
             for delta, keep in ((1, 31), (2, 30), (4, 28), (8, 24), (16, 16)):
-                peer = R.shfl_down_u32(txl.reinterpret("uint32", v), delta)
+                peer = R.shfl_down_u32(txl.reinterpret(v, ty="uint32"), delta)
                 with txl.If(lane < keep), txl.Then():
                     txl.assign(v, v + txl.cast(peer, "int32"))
             with txl.If(lane == 0), txl.Then():
-                R.st_shared_u32(scal, CUM0 + warp, txl.reinterpret("uint32", v))
+                R.st_shared_u32(scal, CUM0 + warp, txl.reinterpret(v, ty="uint32"))
         txl.tvm_storage_sync("shared")
 
         with txl.If(warp == 0), txl.Then():
@@ -319,7 +319,7 @@ def get_kernel(
             with txl.If(lane < 8), txl.Then():
                 txl.assign(w, txl.cast(R.ld_shared_u32(scal, CUM0 + lane), "int32"))
             for delta, keep in ((1, 7), (2, 6), (4, 4)):
-                peer = R.shfl_down_u32(txl.reinterpret("uint32", w), delta)
+                peer = R.shfl_down_u32(txl.reinterpret(w, ty="uint32"), delta)
                 with txl.If(lane < keep), txl.Then():
                     txl.assign(w, w + txl.cast(peer, "int32"))
             # `__syncwarp` sits BETWEEN the scan and the write-back into the same
@@ -329,7 +329,7 @@ def get_kernel(
             # k_remaining_counter 32 B later, so an unguarded 32-lane store puts
             # 128 B where 32 are allocated (:49-51).
             with txl.If(lane < 8), txl.Then():
-                R.st_shared_u32(scal, CUM0 + lane, txl.reinterpret("uint32", w))
+                R.st_shared_u32(scal, CUM0 + lane, txl.reinterpret(w, ty="uint32"))
         txl.tvm_storage_sync("shared")
         with txl.If(warp < 7), txl.Then():
             txl.assign(v, v + txl.cast(R.ld_shared_u32(scal, CUM0 + warp + 1), "int32"))
@@ -338,7 +338,7 @@ def get_kernel(
         if nc > 1 and sum_across:
             with txl.If(tid < RADIX), txl.Then():
                 # This IS the DSMEM publication: peers read the PING-PONG bank.
-                R.st_shared_u32(hist, bank * RADIX + tid, txl.reinterpret("uint32", v))
+                R.st_shared_u32(hist, bank * RADIX + tid, txl.reinterpret(v, ty="uint32"))
             txl.ptx.barrier.cluster.arrive()
             txl.ptx.barrier.cluster.wait()
             with txl.If(tid < RADIX), txl.Then():
@@ -352,10 +352,10 @@ def get_kernel(
                     got = txl.local_scalar("uint32")
                     txl.ptx.ld.shared__cluster.b32(got, peer[0])
                     txl.assign(v, v + txl.cast(got, "int32"))
-                R.st_shared_u32(hist, 2 * RADIX + tid, txl.reinterpret("uint32", v))
+                R.st_shared_u32(hist, 2 * RADIX + tid, txl.reinterpret(v, ty="uint32"))
         else:
             with txl.If(tid < RADIX), txl.Then():
-                R.st_shared_u32(hist, 2 * RADIX + tid, txl.reinterpret("uint32", v))
+                R.st_shared_u32(hist, 2 * RADIX + tid, txl.reinterpret(v, ty="uint32"))
         txl.tvm_storage_sync("shared")
 
         # --- pick the crossing bin (:142-152) --------------------------------
@@ -364,7 +364,7 @@ def get_kernel(
             txl.assign(nxt, txl.cast(R.ld_shared_u32(hist, 2 * RADIX + tid + 1), "int32"))
         with txl.If(tid < RADIX), txl.Then():
             with txl.If(txl.And(v > k_rem, nxt <= k_rem)), txl.Then():
-                R.st_shared_u32(scal, THR, txl.reinterpret("uint32", tid))
+                R.st_shared_u32(scal, THR, txl.reinterpret(tid, ty="uint32"))
         txl.tvm_storage_sync("shared")
         bin_ = txl.local_scalar("int32", init=txl.cast(R.ld_shared_u32(scal, THR), "int32"))
         with txl.If(bin_ < RADIX - 1), txl.Then():
@@ -411,7 +411,7 @@ def get_kernel(
                 # bounds the global store. Reproduce, do not repair.
                 slot = R.atom_shared_add_u32(scal, FINAL, txl.uint32(1))
                 R.st_shared_u32(
-                    topk_inds, txl.cast(slot, "int32"), txl.reinterpret("uint32", index)
+                    topk_inds, txl.cast(slot, "int32"), txl.reinterpret(index, ty="uint32")
                 )
             with txl.Else():
                 with txl.If(d == bin_), txl.Then():
@@ -431,7 +431,7 @@ def get_kernel(
                                 R.st_shared_u32(
                                     cidx,
                                     phase * num_cached + slot,
-                                    txl.reinterpret("uint32", index),
+                                    txl.reinterpret(index, ty="uint32"),
                                 )
                                 R.st_shared_u32(
                                     cbits, phase * num_cached + slot, txl.cast(bits, "uint32")
@@ -446,7 +446,7 @@ def get_kernel(
                                         )
                                         R.st_global_u32(ovf, off, txl.cast(bits, "uint32"))
                                         R.st_global_u32(
-                                            ovf, off + 1, txl.reinterpret("uint32", index)
+                                            ovf, off + 1, txl.reinterpret(index, ty="uint32")
                                         )
                                     with txl.Else():
                                         # ring full: dropped (:210-214)
@@ -490,7 +490,7 @@ def get_kernel(
                                     R.st_shared_u32(
                                         topk_inds,
                                         txl.cast(slot, "int32"),
-                                        txl.reinterpret("uint32", index),
+                                        txl.reinterpret(index, ty="uint32"),
                                     )
                                 with txl.Else():
                                     txl.assign(exceeded, txl.int32(1))
@@ -836,7 +836,7 @@ def get_kernel(
                             )
                             old = txl.local_scalar("uint32")
                             txl.ptx.atom.shared__cluster.add.u32(
-                                old, peer, txl.reinterpret("uint32", my_num)
+                                old, peer, txl.reinterpret(my_num, ty="uint32")
                             )
                             R.st_shared_u32(scal, FINAL, old)  # broadcast (:392)
                         txl.tvm_storage_sync("shared")
@@ -869,10 +869,10 @@ def get_kernel(
 
         @txl.kernel()
         def fast_topk_clusters_kernel(
-            logits: txl.gptr[val_t, (batch * seq_len,)],
-            indices: txl.gptr[idx_t, (batch * k,)],
-            values: txl.gptr[val_t, (batch * k,)],
-            overflow: txl.gptr[txl.i32, (batch * 4 * ovf_stride * nc,)],
+            logits: txl.Tensor((batch * seq_len,), val_t),
+            indices: txl.Tensor((batch * k,), idx_t),
+            values: txl.Tensor((batch * k,), val_t),
+            overflow: txl.Tensor((batch * 4 * ovf_stride * nc,), txl.i32),
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(
@@ -887,11 +887,11 @@ def get_kernel(
 
         @txl.kernel()
         def fast_topk_clusters_kernel(
-            logits: txl.gptr[val_t, (batch * seq_len,)],
-            indices: txl.gptr[idx_t, (batch * k,)],
-            seq_lens: txl.gptr[txl.i32, (batch,)],
-            aux: txl.gptr[txl.i32, (batch * seq_len if pt else batch,)],
-            overflow: txl.gptr[txl.i32, (batch * 4 * ovf_stride * nc,)],
+            logits: txl.Tensor((batch * seq_len,), val_t),
+            indices: txl.Tensor((batch * k,), idx_t),
+            seq_lens: txl.Tensor((batch,), txl.i32),
+            aux: txl.Tensor((batch * seq_len if pt else batch,), txl.i32),
+            overflow: txl.Tensor((batch * 4 * ovf_stride * nc,), txl.i32),
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(

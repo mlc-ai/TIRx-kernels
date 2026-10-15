@@ -72,7 +72,7 @@ class TCGen05Bar(MBarrier):
             txl.ptx[
                 f"tcgen05.commit.cta_group::{cta_group}"
                 ".mbarrier::arrive::one.shared::cluster.multicast::cluster.b64"
-            ](self.buf.ptr_to([stage]), txl.Cast("uint16", cta_mask), pred=pred)
+            ](self.buf.ptr_to([stage]), txl.Cast(cta_mask, "uint16"), pred=pred)
 
 
 _BAR_KINDS = {"tma": TMABar, "tcgen05": TCGen05Bar, "mbar": MBarrier}

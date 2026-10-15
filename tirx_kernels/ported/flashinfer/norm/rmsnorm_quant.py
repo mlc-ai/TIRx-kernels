@@ -230,12 +230,12 @@ def _shfl_bfly_f32(value, lane_xor: int):
     out = txl.alloc_local((1,), "uint32")
     txl.ptx.shfl_sync.bfly.b32(
         out[0],
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(lane_xor),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", out[0])
+    return txl.reinterpret(out[0], ty="float32")
 
 
 def _butterfly_sum_f32(value, lane_xors: tuple[int, ...]):
@@ -700,7 +700,7 @@ def get_kernel(
         scale_bits = txl.alloc_local((1,), "uint32")
         txl.ptx.ld.global_.b32(scale_bits[0], scale_buffer.ptr_to([0]))
         scale_value = txl.local_scalar(
-            txl.f32, init=txl.reinterpret("float32", scale_bits[0]), name="scale_value"
+            txl.f32, init=txl.reinterpret(scale_bits[0], ty="float32"), name="scale_value"
         )
         inv_scale = txl.local_scalar(txl.f32, init=_rcp_approx_ftz(scale_value), name="inv_scale")
 
@@ -985,7 +985,7 @@ def get_kernel(
                 )
                 txl.ptx.st.shared.b32(
                     shared_raw.ptr_to([reduce_base + reduce_index * 4]),
-                    txl.reinterpret("uint32", warp_sum),
+                    txl.reinterpret(warp_sum, ty="uint32"),
                 )
             txl.ptx.bar.sync(txl.uint32(0))
             final_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0), name="final_sum")
@@ -997,7 +997,7 @@ def get_kernel(
                 txl.ptx.ld.shared.b32(
                     reduce_word[0], shared_raw.ptr_to([reduce_base + reduce_index * 4])
                 )
-                txl.assign(final_sum, txl.reinterpret("float32", reduce_word[0]))
+                txl.assign(final_sum, txl.reinterpret(reduce_word[0], ty="float32"))
             txl.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
             sum_sq = txl.local_scalar(txl.f32, init=final_sum, name="sum_sq")
         elif cluster_n > 1:
@@ -1048,7 +1048,8 @@ def get_kernel(
                         reduce_word[0], shared_raw.ptr_to([reduce_base + reduce_index * 4])
                     )
                     txl.assign(
-                        final_sum, _add_f32(final_sum, txl.reinterpret("float32", reduce_word[0]))
+                        final_sum,
+                        _add_f32(final_sum, txl.reinterpret(reduce_word[0], ty="float32")),
                     )
             txl.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
             sum_sq = txl.local_scalar(txl.f32, init=final_sum, name="sum_sq")
@@ -1357,11 +1358,11 @@ def get_kernel(
 
         @txl.kernel()
         def flashinfer_rmsnorm_quant_compact(
-            x: txl.gptr[input_dtype],
-            weight: txl.gptr[input_dtype, (H,)],
-            out: txl.gptr[output_dtype],
+            x: txl.Tensor((txl.int64(),), input_dtype),
+            weight: txl.Tensor((H,), input_dtype),
+            out: txl.Tensor((txl.int64(),), output_dtype),
             runtime_M: txl.i64,
-            scale_buffer: txl.gptr[txl.f32, (1,)],
+            scale_buffer: txl.Tensor((1,), txl.f32),
             runtime_eps: txl.f32,
         ):
             txl.device_entry(
@@ -1390,11 +1391,11 @@ def get_kernel(
 
         @txl.kernel()
         def flashinfer_rmsnorm_quant_strided(
-            x: txl.gptr[input_dtype],
-            weight: txl.gptr[input_dtype, (H,)],
-            out: txl.gptr[output_dtype],
+            x: txl.Tensor((txl.int64(),), input_dtype),
+            weight: txl.Tensor((H,), input_dtype),
+            out: txl.Tensor((txl.int64(),), output_dtype),
             runtime_M: txl.i64,
-            scale_buffer: txl.gptr[txl.f32, (1,)],
+            scale_buffer: txl.Tensor((1,), txl.f32),
             runtime_eps: txl.f32,
             runtime_x_row_stride: txl.i64,
             runtime_y_row_stride: txl.i64,

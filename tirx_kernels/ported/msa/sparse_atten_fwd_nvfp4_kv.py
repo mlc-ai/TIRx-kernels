@@ -478,7 +478,7 @@ def _combine_int_frac_ex2(x_rounded, frac_ex2):
     txl.ptx.mov.b32(fi[0], frac_ex2)
     txl.ptx.shl.b32(xi[0], xi[0], txl.uint32(23))
     txl.ptx.add.s32(out[0], xi[0], fi[0])
-    return txl.reinterpret("float32", out[0])
+    return txl.reinterpret(out[0], ty="float32")
 
 
 def _ex2_emulation_2(regs, i, j):
@@ -635,11 +635,13 @@ def _load_scale_bf16x2(scale, offset, out):
     masked = txl.alloc_local((1,), "uint32")
     txl.ptx.and_.b32(masked[0], txl.cast(byte[0], "uint32"), txl.uint32(0xFF))
     packed_i = txl.alloc_local((1,), "int32")
-    txl.ptx.mul.lo.s32(packed_i[0], txl.reinterpret("int32", masked[0]), txl.int32(0x01010101))
+    txl.ptx.mul.lo.s32(packed_i[0], txl.reinterpret(masked[0], ty="int32"), txl.int32(0x01010101))
     q = txl.alloc_local((1,), "uint32")
     mant = txl.alloc_local((1,), "uint32")
     acc = txl.alloc_local((1,), "uint32")
-    packed = txl.local_scalar(txl.u32, init=txl.reinterpret("uint32", packed_i[0]), name="packed")
+    packed = txl.local_scalar(
+        txl.u32, init=txl.reinterpret(packed_i[0], ty="uint32"), name="packed"
+    )
     txl.ptx.prmt.b32(q[0], packed, packed, txl.uint32(0x1302))
     txl.ptx.and_.b32(acc[0], q[0], txl.uint32(0x80008000))
     txl.ptx.and_.b32(mant[0], q[0], txl.uint32(0x7F007F00))
@@ -1696,17 +1698,17 @@ def _make_kernel(*, backend_config=None, **config):
             )
             txl.ptx.st.shared.v4.b32(
                 s_row_meta.ptr_to([0]),
-                txl.reinterpret("uint32", batch_idx[0]),
-                txl.reinterpret("uint32", kv_block_idx[0]),
-                txl.reinterpret("uint32", row_start),
-                txl.reinterpret("uint32", count_raw),
+                txl.reinterpret(batch_idx[0], ty="uint32"),
+                txl.reinterpret(kv_block_idx[0], ty="uint32"),
+                txl.reinterpret(row_start, ty="uint32"),
+                txl.reinterpret(count_raw, ty="uint32"),
             )
             txl.ptx.st.shared.v4.b32(
                 s_row_meta.ptr_to([4]),
-                txl.reinterpret("uint32", kv_valid_cols),
-                txl.reinterpret("uint32", q_batch_offset),
-                txl.reinterpret("uint32", k_batch_offset),
-                txl.reinterpret("uint32", causal_q_offset),
+                txl.reinterpret(kv_valid_cols, ty="uint32"),
+                txl.reinterpret(q_batch_offset, ty="uint32"),
+                txl.reinterpret(k_batch_offset, ty="uint32"),
+                txl.reinterpret(causal_q_offset, ty="uint32"),
             )
 
             # The causal diagonal split point: a 32-step binary search over the CSR
@@ -1918,7 +1920,7 @@ def _make_kernel(*, backend_config=None, **config):
                                                     slot * M_BLOCK * HEAD_DIM * q_bytes
                                                     + ks * M_BLOCK * q_load_tile * q_bytes
                                                     + tok * qheadperkv * q_load_tile * q_bytes,
-                                                    q_ty,
+                                                    ty=txl.Ptr(q_ty, (s_q.ptr_to([0, 0])).ty.scope),
                                                 ),
                                                 txl.address_of(q_map),
                                                 txl.int32(ks * q_load_tile),
@@ -2061,7 +2063,7 @@ def _make_kernel(*, backend_config=None, **config):
                                                 slot * M_BLOCK * HEAD_DIM * q_bytes
                                                 + ks * M_BLOCK * q_load_tile * q_bytes
                                                 + gather_idx * 4 * q_load_tile * q_bytes,
-                                                q_ty,
+                                                ty=txl.Ptr(q_ty, (s_q.ptr_to([0, 0])).ty.scope),
                                             ),
                                             txl.address_of(q_map),
                                             txl.int32(ks * q_load_tile),
@@ -3058,82 +3060,75 @@ def _make_kernel(*, backend_config=None, **config):
                 txl.ptx.setmaxnreg.inc.sync.aligned.u32(txl.uint32(num_regs_softmax))
                 softmax_warpgroup(1)
 
+    _shape_head_q = txl.Var("head_q", txl.i32)
+    _shape_nnz = txl.Var("nnz", txl.i32)
+    _shape_num_batches = txl.Var("num_batches", txl.i32)
+    _shape_num_heads_kv = txl.Var("num_heads_kv", txl.i32)
+    _shape_scale_numel = txl.Var("scale_numel", txl.i32)
+    _shape_topk = txl.Var("topk", txl.i32)
+    _shape_total_k = txl.Var("total_k", txl.i32)
+    _shape_total_q = txl.Var("total_q", txl.i32)
+    _shape_total_rows = txl.Var("total_rows", txl.i32)
+    _shape_work_capacity = txl.Var("work_capacity", txl.i32)
+
     parameters = [
         # K/V keep their three logical axes because the host-side TensorMap
         # encoding consumes that tensor ABI.  Paged storage is reshaped to the
         # same contiguous rank-3 view by tirx_args; no match_buffer is needed.
-        ("k", txl.gptr(txl.u8, shape=lambda p: (p["total_k"], p["num_heads_kv"], PACKED_HEAD_DIM))),
-        ("v", txl.gptr(txl.u8, shape=lambda p: (p["total_k"], p["num_heads_kv"], PACKED_HEAD_DIM))),
-        ("k_scale", txl.gptr(txl.u8, shape=lambda p: (p["scale_numel"],))),
-        ("v_scale", txl.gptr(txl.u8, shape=lambda p: (p["scale_numel"],))),
+        ("k", txl.Tensor((_shape_total_k, _shape_num_heads_kv, PACKED_HEAD_DIM), txl.u8)),
+        ("v", txl.Tensor((_shape_total_k, _shape_num_heads_kv, PACKED_HEAD_DIM), txl.u8)),
+        ("k_scale", txl.Tensor((_shape_scale_numel,), txl.u8)),
+        ("v_scale", txl.Tensor((_shape_scale_numel,), txl.u8)),
     ]
     if k_global:
-        parameters.append(("k_global_scale", txl.gptr[txl.f32, (1,)]))
+        parameters.append(("k_global_scale", txl.Tensor((1,), txl.f32)))
     parameters.extend(
         [
-            ("k2q_q_indices", txl.gptr(txl.i32, shape=lambda p: (p["num_heads_kv"] * p["nnz"],))),
-            (
-                "k2q_qsplit_indices",
-                txl.gptr(txl.i32, shape=lambda p: (p["num_heads_kv"] * p["nnz"],)),
-            ),
-            (
-                "k2q_row_ptr",
-                txl.gptr(txl.i32, shape=lambda p: (p["num_heads_kv"] * (p["total_rows"] + 1),)),
-            ),
-            (
-                "scheduler_metadata",
-                txl.gptr(txl.i32, shape=lambda p: (p["work_capacity"] * WORK_FIELDS,)),
-            ),
-            ("work_count", txl.gptr[txl.i32, (1,)]),
+            ("k2q_q_indices", txl.Tensor((_shape_num_heads_kv * _shape_nnz,), txl.i32)),
+            ("k2q_qsplit_indices", txl.Tensor((_shape_num_heads_kv * _shape_nnz,), txl.i32)),
+            ("k2q_row_ptr", txl.Tensor((_shape_num_heads_kv * (_shape_total_rows + 1),), txl.i32)),
+            ("scheduler_metadata", txl.Tensor((_shape_work_capacity * WORK_FIELDS,), txl.i32)),
+            ("work_count", txl.Tensor((1,), txl.i32)),
             (
                 "o_partial",
-                txl.gptr(
-                    partial_ty, shape=lambda p: (p["topk"] * p["total_q"] * p["head_q"] * HEAD_DIM,)
-                ),
+                txl.Tensor((_shape_topk * _shape_total_q * _shape_head_q * HEAD_DIM,), partial_ty),
             ),
-            (
-                "lse_partial",
-                txl.gptr(txl.f32, shape=lambda p: (p["topk"] * p["total_q"] * p["head_q"],)),
-            ),
+            ("lse_partial", txl.Tensor((_shape_topk * _shape_total_q * _shape_head_q,), txl.f32)),
         ]
     )
     if temperature:
         parameters.append(
             (
                 "lse_temperature_partial",
-                txl.gptr(txl.f32, shape=lambda p: (p["topk"] * p["total_q"] * p["head_q"],)),
+                txl.Tensor((_shape_topk * _shape_total_q * _shape_head_q,), txl.f32),
             )
         )
     # Q is flattened only across token/head; HEAD_DIM remains the descriptor's
     # contiguous axis, so the launch argument is a rank-2 tensor.
-    parameters.append(
-        ("q_flat", txl.gptr(q_ty, shape=lambda p: (p["total_q"] * p["head_q"], HEAD_DIM)))
-    )
+    parameters.append(("q_flat", txl.Tensor((_shape_total_q * _shape_head_q, HEAD_DIM), q_ty)))
     if paged:
-        parameters.append(
-            ("page_table", txl.gptr(txl.i32, shape=lambda p: (p["total_k"] // N_BLOCK,)))
-        )
+        parameters.append(("page_table", txl.Tensor((_shape_total_k // N_BLOCK,), txl.i32)))
     if seqused:
-        parameters.append(("seqused_k", txl.gptr(txl.i32, shape=lambda p: (p["num_batches"],))))
+        parameters.append(("seqused_k", txl.Tensor((_shape_num_batches,), txl.i32)))
     parameters.extend(
         [
-            ("cu_seqlens_q", txl.gptr(txl.i32, shape=lambda p: (p["num_batches"] + 1,))),
-            ("cu_seqlens_k", txl.gptr(txl.i32, shape=lambda p: (p["num_batches"] + 1,))),
+            ("cu_seqlens_q", txl.Tensor((_shape_num_batches + 1,), txl.i32)),
+            ("cu_seqlens_k", txl.Tensor((_shape_num_batches + 1,), txl.i32)),
             ("softmax_scale_log2", txl.f32),
             ("lse_temperature_scale_log2", txl.f32),
             ("lse_temperature_inv_scale", txl.f32),
             ("num_kv_blocks", txl.i32),
-            ("num_heads_kv", txl.i32),
+            ("num_heads_kv", _shape_num_heads_kv),
             ("seq_len_q", txl.i32),
-            ("work_capacity", txl.i32),
-            ("total_k", txl.i32),
-            ("total_q", txl.i32),
-            ("head_q", txl.i32),
-            ("nnz", txl.i32),
-            ("total_rows", txl.i32),
-            ("num_batches", txl.i32),
-            ("topk", txl.i32),
-            ("scale_numel", txl.i32),
+            ("work_capacity", _shape_work_capacity),
+            ("total_k", _shape_total_k),
+            ("total_q", _shape_total_q),
+            ("head_q", _shape_head_q),
+            ("nnz", _shape_nnz),
+            ("total_rows", _shape_total_rows),
+            ("num_batches", _shape_num_batches),
+            ("topk", _shape_topk),
+            ("scale_numel", _shape_scale_numel),
         ]
     )
     names = tuple(name for name, _ in parameters)

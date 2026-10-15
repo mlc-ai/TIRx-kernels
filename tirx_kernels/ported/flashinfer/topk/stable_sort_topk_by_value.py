@@ -139,7 +139,7 @@ def sort_key_u32(bits):
     not touch) moving in the opposite direction as an internal control.  Static
     instruction count is not the binding resource here; the form below stays.
     """
-    signed = txl.reinterpret("int32", bits)
+    signed = txl.reinterpret(bits, ty="int32")
     # txl.Select, not txl.if_then_else: the source's ternary is a predicated
     # `selp.b32`, and if_then_else would lower to a real branch.
     mask = txl.Select(signed < txl.int32(0), txl.uint32(0), txl.uint32(0x7FFFFFFF))
@@ -152,7 +152,7 @@ def sort_key_u16(bits):
     Same involution, in the dtype's own width (topk_common.cuh:61-64 forward,
     :67 for half and :93 for nv_bfloat16 on the way back).
     """
-    signed = txl.reinterpret("int16", bits)
+    signed = txl.reinterpret(bits, ty="int16")
     mask = txl.Select(signed < txl.int16(0), txl.uint16(0), txl.uint16(0x7FFF))
     return txl.bitwise_xor(mask, bits)
 
@@ -203,7 +203,7 @@ def get_kernel(
 
     @txl.kernel()
     def stable_sort_topk_by_value(
-        out_idx: txl.gptr[txl.i32, (num_rows * k,)], out_val: txl.gptr[dtype, (num_rows * k,)]
+        out_idx: txl.Tensor((num_rows * k,), txl.i32), out_val: txl.Tensor((num_rows * k,), dtype)
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_rows, block=block_threads // 32 * 32),

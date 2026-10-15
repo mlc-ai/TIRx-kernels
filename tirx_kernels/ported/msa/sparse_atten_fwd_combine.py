@@ -193,16 +193,16 @@ def make_kernel(
 
     @txl.kernel()
     def msa_sparse_atten_fwd_combine(
-        o_partial: txl.gptr[partial_ty],
-        lse_partial: txl.gptr[txl.f32],
-        o_out: txl.gptr[txl.bf16],
-        lse_out: txl.gptr[txl.f32],
-        lse_temperature_partial: txl.gptr[txl.f32],
-        lse_temperature_out: txl.gptr[txl.f32],
-        cu_seqlens: txl.gptr[txl.i32],
-        seqused_q: txl.gptr[txl.i32],
-        split_counts: txl.gptr[txl.i32],
-        output_scale_ptr: txl.gptr[txl.f32],
+        o_partial: txl.Tensor((txl.int64(),), partial_ty),
+        lse_partial: txl.Tensor((txl.int64(),), txl.f32),
+        o_out: txl.Tensor((txl.int64(),), txl.bf16),
+        lse_out: txl.Tensor((txl.int64(),), txl.f32),
+        lse_temperature_partial: txl.Tensor((txl.int64(),), txl.f32),
+        lse_temperature_out: txl.Tensor((txl.int64(),), txl.f32),
+        cu_seqlens: txl.Tensor((txl.int64(),), txl.i32),
+        seqused_q: txl.Tensor((txl.int64(),), txl.i32),
+        split_counts: txl.Tensor((txl.int64(),), txl.i32),
+        output_scale_ptr: txl.Tensor((txl.int64(),), txl.f32),
         stride_op_split: txl.i32,
         stride_op_q: txl.i32,
         stride_op_h: txl.i32,
@@ -288,7 +288,7 @@ def make_kernel(
             field it reads. The reinterpret is a bitcast and costs nothing."""
             raw = txl.local_scalar("uint32")
             txl.ptx.ld.global_.u32(raw, buf.ptr_to([index]))
-            return txl.reinterpret("int32", raw)
+            return txl.reinterpret(raw, ty="int32")
 
         # -------------------------------------------------------------------
         # Prologue: varlen bounds and the K1 dependency (combine.py:531-550).
@@ -318,17 +318,20 @@ def make_kernel(
                     """
                     q0 = txl.local_scalar("uint32")
                     txl.ptx.mul.hi.u32(
-                        q0, txl.reinterpret("uint32", idx), txl.reinterpret("uint32", head_div_mul)
+                        q0,
+                        txl.reinterpret(idx, ty="uint32"),
+                        txl.reinterpret(head_div_mul, ty="uint32"),
                     )
-                    t = txl.local_scalar("uint32", init=txl.reinterpret("uint32", idx) - q0)
+                    t = txl.local_scalar("uint32", init=txl.reinterpret(idx, ty="uint32") - q0)
                     t2 = txl.local_scalar(
                         "uint32",
-                        init=txl.shift_right(t, txl.reinterpret("uint32", head_div_s1)) + q0,
+                        init=txl.shift_right(t, txl.reinterpret(head_div_s1, ty="uint32")) + q0,
                     )
                     quot = txl.local_scalar(
                         "int32",
                         init=txl.reinterpret(
-                            "int32", txl.shift_right(t2, txl.reinterpret("uint32", head_div_s2))
+                            txl.shift_right(t2, txl.reinterpret(head_div_s2, ty="uint32")),
+                            ty="int32",
                         ),
                     )
                     rem = txl.local_scalar("int32", init=idx - quot * head_q)
@@ -349,7 +352,7 @@ def make_kernel(
                     )
                     return _ld_u32(split_counts, (q_offset + m_idx) * stride_sc_q + group)
 
-                NEG_INF = txl.reinterpret("float32", txl.uint32(0xFF800000))
+                NEG_INF = txl.reinterpret(txl.uint32(0xFF800000), ty="float32")
 
                 def _widen_words(dst, m, words):
                     """Widen a 128-bit staged partial to fp32 lanes.
@@ -415,7 +418,7 @@ def make_kernel(
                     txl.ptx.ld.shared.v4.b32(w[0], w[1], w[2], w[3], ptr)
                     if partial_dtype == "float32":
                         for v in range(4):
-                            txl.assign(dst[m * NUM_VALS + v], txl.reinterpret("float32", w[v]))
+                            txl.assign(dst[m * NUM_VALS + v], txl.reinterpret(w[v], ty="float32"))
                     else:
                         _widen_words(dst, m, w)
 
@@ -631,23 +634,23 @@ def make_kernel(
                     out = txl.local_scalar("uint32")
                     txl.ptx.shfl_sync.bfly.b32(
                         out,
-                        txl.reinterpret("uint32", value),
+                        txl.reinterpret(value, ty="uint32"),
                         txl.uint32(lane_mask),
                         txl.uint32(31),
                         txl.uint32(0xFFFFFFFF),
                     )
-                    return txl.reinterpret("float32", out)
+                    return txl.reinterpret(out, ty="float32")
 
                 def _shfl_bfly_i32(value, lane_mask):
                     out = txl.local_scalar("uint32")
                     txl.ptx.shfl_sync.bfly.b32(
                         out,
-                        txl.reinterpret("uint32", value),
+                        txl.reinterpret(value, ty="uint32"),
                         txl.uint32(lane_mask),
                         txl.uint32(31),
                         txl.uint32(0xFFFFFFFF),
                     )
-                    return txl.reinterpret("int32", out)
+                    return txl.reinterpret(out, ty="int32")
 
                 # The tree over the thread's four register values is NaN-propagating.
                 def _max_tree(vals):
@@ -814,7 +817,7 @@ def make_kernel(
                 with txl.If(s2r_split0 == 0):
                     with txl.Then():
                         txl.ptx.st.shared.u32(
-                            s_maxvalid.ptr_to([s2r_row]), txl.reinterpret("uint32", max_valid)
+                            s_maxvalid.ptr_to([s2r_row]), txl.reinterpret(max_valid, ty="uint32")
                         )
 
                 # -------------------------------------------------------------------
@@ -849,12 +852,12 @@ def make_kernel(
                 thr_max_valid = txl.local_scalar("int32")
                 first_mv = txl.local_scalar("uint32")
                 txl.ptx.ld.shared.u32(first_mv, s_maxvalid.ptr_to([o_row0]))
-                txl.assign(thr_max_valid, txl.reinterpret("int32", first_mv))
+                txl.assign(thr_max_valid, txl.reinterpret(first_mv, ty="int32"))
                 for m in range(1, NUM_ROWS):
                     mv = txl.local_scalar("uint32")
                     txl.ptx.ld.shared.u32(mv, s_maxvalid.ptr_to([o_row0 + m * O_ROW_STEP]))
                     nxt = txl.local_scalar("int32")
-                    txl.ptx["max.s32"](nxt, thr_max_valid, txl.reinterpret("int32", mv))
+                    txl.ptx["max.s32"](nxt, thr_max_valid, txl.reinterpret(mv, ty="int32"))
                     txl.assign(thr_max_valid, nxt)
 
                 # The accumulator is zeroed in the preheader, ahead of the zero-trip

@@ -125,12 +125,12 @@ def _shuffle_xor_f32(value, delta):
     shuffled = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         shuffled,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(delta),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", shuffled)
+    return txl.reinterpret(shuffled, ty="float32")
 
 
 def _config(label, tokens, w_out_in):
@@ -707,14 +707,14 @@ def _make_kernel(tokens, k_dim, num_heads, w_out_in, *, backend_config=None):
                     )
 
     kernel.__annotations__ = {
-        "x": txl.gptr[txl.bf16, (tokens * k_dim,)],
-        "w": txl.gptr[txl.bf16, (num_heads * _HEAD_DIM * k_dim,)],
-        "cos": txl.gptr[txl.bf16, (tokens * _QK_ROPE,)],
-        "sin": txl.gptr[txl.bf16, (tokens * _QK_ROPE,)],
-        "out_fp8_row": txl.gptr[txl.u8, (tokens * num_heads * _HEAD_DIM,)],
-        "out_scales_row": txl.gptr[txl.u8, (tokens * num_heads * (_HEAD_DIM // _BLOCK),)],
-        "out_fp8_col": txl.gptr[txl.u8, (tokens * num_heads * _HEAD_DIM,)],
-        "out_scales_col": txl.gptr[txl.u8, ((tokens // _BLOCK) * num_heads * _HEAD_DIM,)],
+        "x": txl.Tensor((tokens * k_dim,), txl.bf16),
+        "w": txl.Tensor((num_heads * _HEAD_DIM * k_dim,), txl.bf16),
+        "cos": txl.Tensor((tokens * _QK_ROPE,), txl.bf16),
+        "sin": txl.Tensor((tokens * _QK_ROPE,), txl.bf16),
+        "out_fp8_row": txl.Tensor((tokens * num_heads * _HEAD_DIM,), txl.u8),
+        "out_scales_row": txl.Tensor((tokens * num_heads * (_HEAD_DIM // _BLOCK),), txl.u8),
+        "out_fp8_col": txl.Tensor((tokens * num_heads * _HEAD_DIM,), txl.u8),
+        "out_scales_col": txl.Tensor(((tokens // _BLOCK) * num_heads * _HEAD_DIM,), txl.u8),
     }
     return txl.kernel()(kernel)
 

@@ -411,13 +411,13 @@ def _make_kernel(
         # A/B/D are never dereferenced by the device code -- every access goes
         # through a tensor map. They stay in the signature because the launch is
         # what keeps the tensors the maps point at alive.
-        a: txl.gptr[txl.bf16],
-        b: txl.gptr[txl.f32],
-        d: txl.gptr[txl.f32],
-        sqr_sum: txl.gptr[txl.f32],
-        a_map: txl.TensorMap,
-        b_map: txl.TensorMap,
-        d_map: txl.TensorMap,
+        a: txl.Tensor((txl.int64(),), txl.bf16),
+        b: txl.Tensor((txl.int64(),), txl.f32),
+        d: txl.Tensor((txl.int64(),), txl.f32),
+        sqr_sum: txl.Tensor((txl.int64(),), txl.f32),
+        a_map: txl.Ptr(txl.TensorMap),
+        b_map: txl.Ptr(txl.TensorMap),
+        d_map: txl.Ptr(txl.TensorMap),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -547,7 +547,7 @@ def _make_kernel(
                             txl.ptr_byte_offset(
                                 smem_a_mma[0].ptr_to(0, 0),
                                 stage_idx[0] * txl.uint32(block_m * block_k * 2),
-                                "bfloat16",
+                                ty=txl.Ptr("bfloat16", (smem_a_mma[0].ptr_to(0, 0)).ty.scope),
                             ),
                             txl.address_of(a_map),
                             txl.cast(k_idx0[0], "int32"),
@@ -563,7 +563,7 @@ def _make_kernel(
                                     + txl.cast(
                                         b_atom * (block_n * block_swizzled_bk * 4), "uint32"
                                     ),
-                                    "float32",
+                                    ty=txl.Ptr("float32", (smem_b_mma[0].ptr_to(0, 0)).ty.scope),
                                 ),
                                 txl.address_of(b_map),
                                 txl.cast(
@@ -664,7 +664,9 @@ def _make_kernel(
                     )
                     txl.ptx.st.shared.v4.u32(
                         txl.ptr_byte_offset(
-                            smem_cd_mma.ptr_to(0, 0), smem_cd_offset[0] * txl.uint32(4), "float32"
+                            smem_cd_mma.ptr_to(0, 0),
+                            smem_cd_offset[0] * txl.uint32(4),
+                            ty=txl.Ptr("float32", (smem_cd_mma.ptr_to(0, 0)).ty.scope),
                         ),
                         d_words[0],
                         d_words[1],
@@ -787,7 +789,9 @@ def _make_kernel(
                         a_bf16_words[reg_base[0] + 4],
                         a_bf16_words[reg_base[0] + 6],
                         txl.ptr_byte_offset(
-                            smem_a_mma[0].ptr_to(0, 0), smem_off[0] * 2, "bfloat16"
+                            smem_a_mma[0].ptr_to(0, 0),
+                            smem_off[0] * 2,
+                            ty=txl.Ptr("bfloat16", (smem_a_mma[0].ptr_to(0, 0)).ty.scope),
                         ),
                     )
                 cast_pipe.empty.wait(cast_stage_idx[0], txl.cast(cast_tmem_state.phase, "uint32"))

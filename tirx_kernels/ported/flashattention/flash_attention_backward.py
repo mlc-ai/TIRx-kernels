@@ -136,12 +136,12 @@ def build_preprocess(B, S, H, D, *, backend_config=None):
 
     @txl.kernel()
     def preprocess_kernel(
-        dO_g: txl.gptr[txl.f16],
-        O_g: txl.gptr[txl.f16],
-        LSE_g: txl.gptr[txl.f32],
-        dpsum_g: txl.gptr[txl.f32],
-        LSE_log2_g: txl.gptr[txl.f32],
-        dQ_accum_g: txl.gptr[txl.f32],
+        dO_g: txl.Tensor((txl.int64(),), txl.f16),
+        O_g: txl.Tensor((txl.int64(),), txl.f16),
+        LSE_g: txl.Tensor((txl.int64(),), txl.f32),
+        dpsum_g: txl.Tensor((txl.int64(),), txl.f32),
+        LSE_log2_g: txl.Tensor((txl.int64(),), txl.f32),
+        dQ_accum_g: txl.Tensor((txl.int64(),), txl.f32),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(nblk, H, B), block=PRE_BLOCK // 32 * 32),
@@ -254,7 +254,9 @@ def _build_cast_f32_to_f16_default(B, S, H, D, scale, *, backend_config=None):
     nblk = (num_groups + groups_per_block - 1) // groups_per_block
 
     @txl.kernel()
-    def cast_kernel(src: txl.gptr[txl.f32], dst: txl.gptr[txl.f16]):
+    def cast_kernel(
+        src: txl.Tensor((txl.int64(),), txl.f32), dst: txl.Tensor((txl.int64(),), txl.f16)
+    ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=nblk, block=CAST_BLOCK // 32 * 32),
             backend_config=resolve_backend_config(backend_config),
@@ -309,7 +311,9 @@ def _build_cast_f32_to_f16_thor(B, S, H, D, scale, *, backend_config=None):
     groups_per_tile = tile_elements // CAST_GROUP_WIDTH
 
     @txl.kernel()
-    def cast_kernel(src: txl.gptr[txl.f32], dst: txl.gptr[txl.f16]):
+    def cast_kernel(
+        src: txl.Tensor((txl.int64(),), txl.f32), dst: txl.Tensor((txl.int64(),), txl.f16)
+    ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(S // tile_rows, H, B), block=4 * 32),
             backend_config=resolve_backend_config(backend_config),
@@ -486,25 +490,25 @@ def build_kernel(
     # fmt: off
     @txl.kernel()
     def kernel(
-        Q_g: txl.gptr[txl.f16],
-        K_g: txl.gptr[txl.f16],
-        V_g: txl.gptr[txl.f16],
-        dO_g: txl.gptr[txl.f16],
-        LSE_g: txl.gptr[txl.f32],
-        dpsum_g: txl.gptr[txl.f32],
-        dK_g: txl.gptr[txl.f16],
-        dV_g: txl.gptr[txl.f16],
-        dQ_acc_g: txl.gptr[txl.f32],
-        q_row_map: txl.TensorMap,
-        q_col_map: txl.TensorMap,
-        k_row_map: txl.TensorMap,
-        k_col_map: txl.TensorMap,
-        v_row_map: txl.TensorMap,
-        do_row_map: txl.TensorMap,
-        do_col_map: txl.TensorMap,
-        dk_map: txl.TensorMap,
-        dv_map: txl.TensorMap,
-        dq_map: txl.TensorMap,
+        Q_g: txl.Tensor((txl.int64(),), txl.f16),
+        K_g: txl.Tensor((txl.int64(),), txl.f16),
+        V_g: txl.Tensor((txl.int64(),), txl.f16),
+        dO_g: txl.Tensor((txl.int64(),), txl.f16),
+        LSE_g: txl.Tensor((txl.int64(),), txl.f32),
+        dpsum_g: txl.Tensor((txl.int64(),), txl.f32),
+        dK_g: txl.Tensor((txl.int64(),), txl.f16),
+        dV_g: txl.Tensor((txl.int64(),), txl.f16),
+        dQ_acc_g: txl.Tensor((txl.int64(),), txl.f32),
+        q_row_map: txl.Ptr(txl.TensorMap),
+        q_col_map: txl.Ptr(txl.TensorMap),
+        k_row_map: txl.Ptr(txl.TensorMap),
+        k_col_map: txl.Ptr(txl.TensorMap),
+        v_row_map: txl.Ptr(txl.TensorMap),
+        do_row_map: txl.Ptr(txl.TensorMap),
+        do_col_map: txl.Ptr(txl.TensorMap),
+        dk_map: txl.Ptr(txl.TensorMap),
+        dv_map: txl.Ptr(txl.TensorMap),
+        dq_map: txl.Ptr(txl.TensorMap),
     ):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=(XN, NUM_HEADS), block=16 * 32, cluster=(CLUSTER_SIZE,), preferred_cluster=[CLUSTER_SIZE]), kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1), backend_config=resolve_backend_config(backend_config))
 
@@ -654,7 +658,7 @@ def build_kernel(
             txl.ptx[TMA_S2G.format(dim=dim)](txl.address_of(tensormap), *coords, src_ptr)
 
         def tcgen05_commit(mbar_ptr):
-            txl.ptx[TCGEN05_COMMIT](mbar_ptr, txl.Cast("uint16", pair_mask))
+            txl.ptx[TCGEN05_COMMIT](mbar_ptr, txl.Cast(pair_mask, "uint16"))
 
         def mma_chain2(d, *, a, b, idesc, accumulate, dol=MMA_KEEP_ALL_LANES):
             """Issue an unpredicated cta_group::2 chain inside ``elect_sync``.
@@ -1329,16 +1333,16 @@ def build_kernel(
                         out.view("uint128")[ni],
                     )
                 txl.ptx.fence.proxy.async_.shared__cta()
-                txl.ptx.bar.sync(txl.Cast("uint32", wg_bar), 128)
+                txl.ptx.bar.sync(txl.Cast(wg_bar, "uint32"), 128)
                 with txl.If((warp_id == 0) & (lane_id == 0)), txl.Then():
                     tma_s2g(
                         4, epi_tile[compute_wg].ptr_to(0, 0), tensormap,
                         compute_wg * EPI_N, n_st_cta, h_idx, b_idx,
                     )
                 with txl.If(warp_id == 0), txl.Then():
-                    txl.ptx.bar.arrive(txl.Cast("uint32", wg_bar), 160)
+                    txl.ptx.bar.arrive(txl.Cast(wg_bar, "uint32"), 160)
                 txl.ptx.fence.proxy.async_.shared__cta()
-                txl.ptx.bar.sync(txl.Cast("uint32", wg_bar), 160)
+                txl.ptx.bar.sync(txl.Cast(wg_bar, "uint32"), 160)
 
             epilogue_stage(dv_done, dv_done_ph, TMEM_OFF_B, dV_epi, dv_map)
             epilogue_stage(dk_done, dk_done_ph, TMEM_OFF_C, dK_epi, dk_map, softmax_scale)

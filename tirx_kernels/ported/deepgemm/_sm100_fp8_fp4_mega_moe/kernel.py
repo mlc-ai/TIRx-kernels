@@ -224,11 +224,11 @@ def stg128_symm(peer_base, byte_offset, r0, r1, r2, r3):
 
 
 def ptr_to_u64(ptr):
-    return txl.reinterpret("uint64", ptr)
+    return txl.reinterpret(ptr, ty="uint64")
 
 
 def peer_ptr(peer_base, byte_offset):
-    return txl.reinterpret("handle", peer_base + byte_offset)
+    return txl.reinterpret(peer_base + byte_offset, ty="handle")
 
 
 def peer_store_u32(peer_base, byte_offset, value):
@@ -875,9 +875,9 @@ def get_kernel(
     # ---- the kernel body ----
     @txl.kernel()
     def mega_moe(
-        y: txl.gptr[txl.bf16],
-        cumulative_local_expert_recv_stats: txl.gptr[txl.i32],
-        symm_buffer: txl.gptr[txl.i8],
+        y: txl.Tensor((txl.int64(),), txl.bf16),
+        cumulative_local_expert_recv_stats: txl.Tensor((txl.int64(),), txl.i32),
+        symm_buffer: txl.Tensor((txl.int64(),), txl.i8),
         symm_rank_offset_0: txl.i64,
         symm_rank_offset_1: txl.i64,
         symm_rank_offset_2: txl.i64,
@@ -950,28 +950,28 @@ def get_kernel(
         symm_rank_offset_69: txl.i64,
         symm_rank_offset_70: txl.i64,
         symm_rank_offset_71: txl.i64,
-        tensor_map_l1_acts: txl.TensorMap,
-        tensor_map_l1_acts_sf: txl.TensorMap,
-        tensor_map_l1_weights: txl.TensorMap,
-        tensor_map_l1_weights_sf: txl.TensorMap,
-        tensor_map_l1_output: txl.TensorMap,
-        tensor_map_l2_acts: txl.TensorMap,
-        tensor_map_l2_acts_sf: txl.TensorMap,
-        tensor_map_l2_weights: txl.TensorMap,
-        tensor_map_l2_weights_sf: txl.TensorMap,
+        tensor_map_l1_acts: txl.Ptr(txl.TensorMap),
+        tensor_map_l1_acts_sf: txl.Ptr(txl.TensorMap),
+        tensor_map_l1_weights: txl.Ptr(txl.TensorMap),
+        tensor_map_l1_weights_sf: txl.Ptr(txl.TensorMap),
+        tensor_map_l1_output: txl.Ptr(txl.TensorMap),
+        tensor_map_l2_acts: txl.Ptr(txl.TensorMap),
+        tensor_map_l2_acts_sf: txl.Ptr(txl.TensorMap),
+        tensor_map_l2_weights: txl.Ptr(txl.TensorMap),
+        tensor_map_l2_weights_sf: txl.Ptr(txl.TensorMap),
         # The nine shared-expert descriptors are always in the signature. At
         # `num_shared_experts == 0` the host binds the matching routed descriptor
         # into each slot as a dummy, mirroring the upstream launcher, so the ABI
         # is independent of S.
-        tensor_map_shared_l1_acts: txl.TensorMap,
-        tensor_map_shared_l1_acts_sf: txl.TensorMap,
-        tensor_map_shared_l1_weights: txl.TensorMap,
-        tensor_map_shared_l1_weights_sf: txl.TensorMap,
-        tensor_map_shared_l1_output: txl.TensorMap,
-        tensor_map_shared_l2_acts: txl.TensorMap,
-        tensor_map_shared_l2_acts_sf: txl.TensorMap,
-        tensor_map_shared_l2_weights: txl.TensorMap,
-        tensor_map_shared_l2_weights_sf: txl.TensorMap,
+        tensor_map_shared_l1_acts: txl.Ptr(txl.TensorMap),
+        tensor_map_shared_l1_acts_sf: txl.Ptr(txl.TensorMap),
+        tensor_map_shared_l1_weights: txl.Ptr(txl.TensorMap),
+        tensor_map_shared_l1_weights_sf: txl.Ptr(txl.TensorMap),
+        tensor_map_shared_l1_output: txl.Ptr(txl.TensorMap),
+        tensor_map_shared_l2_acts: txl.Ptr(txl.TensorMap),
+        tensor_map_shared_l2_acts_sf: txl.Ptr(txl.TensorMap),
+        tensor_map_shared_l2_weights: txl.Ptr(txl.TensorMap),
+        tensor_map_shared_l2_weights_sf: txl.Ptr(txl.TensorMap),
         num_tokens: txl.i32,
         rank_idx: txl.i32,
     ):
@@ -1087,8 +1087,8 @@ def get_kernel(
             (workspace_layout.num_max_tokens_per_rank, num_topk),
             "int64",
             data=txl.reinterpret(
-                PtrType(PrimType("int64")),
                 symm_buffer.ptr_to([symm_buffer_layout.input_topk_idx_offset]),
+                ty=PtrType(PrimType("int64")),
             ),
             scope="global",
             elem_offset=0,
@@ -1111,8 +1111,8 @@ def get_kernel(
             (num_experts,),
             "uint64",
             data=txl.reinterpret(
-                PtrType(PrimType("uint64")),
                 symm_buffer.ptr_to([workspace_layout.expert_send_count_offset]),
+                ty=PtrType(PrimType("uint64")),
             ),
             scope="global",
             elem_offset=0,
@@ -1121,7 +1121,8 @@ def get_kernel(
             (4,),
             "uint32",
             data=txl.reinterpret(
-                PtrType(PrimType("uint32")), symm_buffer.ptr_to([workspace_layout.barrier_offset])
+                symm_buffer.ptr_to([workspace_layout.barrier_offset]),
+                ty=PtrType(PrimType("uint32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1130,8 +1131,8 @@ def get_kernel(
             (1,),
             "uint32",
             data=txl.reinterpret(
-                PtrType(PrimType("uint32")),
                 symm_buffer.ptr_to([workspace_layout.barrier_offset + 16]),
+                ty=PtrType(PrimType("uint32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1140,8 +1141,8 @@ def get_kernel(
             (2,),
             "int32",
             data=txl.reinterpret(
-                PtrType(PrimType("int32")),
                 symm_buffer.ptr_to([workspace_layout.barrier_offset + 20]),
+                ty=PtrType(PrimType("int32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1150,8 +1151,8 @@ def get_kernel(
             (num_processes, num_experts_per_rank),
             "uint64",
             data=txl.reinterpret(
-                PtrType(PrimType("uint64")),
                 symm_buffer.ptr_to([workspace_layout.expert_recv_count_offset]),
+                ty=PtrType(PrimType("uint64")),
             ),
             scope="global",
             elem_offset=0,
@@ -1160,8 +1161,8 @@ def get_kernel(
             (num_experts_per_rank,),
             "uint64",
             data=txl.reinterpret(
-                PtrType(PrimType("uint64")),
                 symm_buffer.ptr_to([workspace_layout.expert_recv_count_sum_offset]),
+                ty=PtrType(PrimType("uint64")),
             ),
             scope="global",
             elem_offset=0,
@@ -1170,8 +1171,8 @@ def get_kernel(
             (num_experts_per_rank, num_processes, workspace_layout.num_max_recv_tokens_per_expert),
             "uint32",
             data=txl.reinterpret(
-                PtrType(PrimType("uint32")),
                 symm_buffer.ptr_to([workspace_layout.src_token_topk_idx_offset]),
+                ty=PtrType(PrimType("uint32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1180,8 +1181,8 @@ def get_kernel(
             (workspace_layout.num_max_pool_tokens, 3),
             "uint32",
             data=txl.reinterpret(
-                PtrType(PrimType("uint32")),
                 symm_buffer.ptr_to([workspace_layout.token_src_metadata_offset]),
+                ty=PtrType(PrimType("uint32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1190,8 +1191,8 @@ def get_kernel(
             (workspace_layout.num_ring_blocks,),
             "uint32",
             data=txl.reinterpret(
-                PtrType(PrimType("uint32")),
                 symm_buffer.ptr_to([workspace_layout.l1_full_count_offset]),
+                ty=PtrType(PrimType("uint32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1200,8 +1201,8 @@ def get_kernel(
             (workspace_layout.num_ring_blocks,),
             "uint32",
             data=txl.reinterpret(
-                PtrType(PrimType("uint32")),
                 symm_buffer.ptr_to([workspace_layout.l1_empty_count_offset]),
+                ty=PtrType(PrimType("uint32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1210,8 +1211,8 @@ def get_kernel(
             (workspace_layout.num_ring_blocks,),
             "uint32",
             data=txl.reinterpret(
-                PtrType(PrimType("uint32")),
                 symm_buffer.ptr_to([workspace_layout.l2_full_count_offset]),
+                ty=PtrType(PrimType("uint32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1220,8 +1221,8 @@ def get_kernel(
             (workspace_layout.num_ring_blocks,),
             "uint32",
             data=txl.reinterpret(
-                PtrType(PrimType("uint32")),
                 symm_buffer.ptr_to([workspace_layout.l2_empty_count_offset]),
+                ty=PtrType(PrimType("uint32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1230,8 +1231,8 @@ def get_kernel(
             (1,),
             "uint32",
             data=txl.reinterpret(
-                PtrType(PrimType("uint32")),
                 symm_buffer.ptr_to([workspace_layout.l1_task_count_offset]),
+                ty=PtrType(PrimType("uint32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1240,8 +1241,8 @@ def get_kernel(
             (1,),
             "uint32",
             data=txl.reinterpret(
-                PtrType(PrimType("uint32")),
                 symm_buffer.ptr_to([workspace_layout.l2_task_count_offset]),
+                ty=PtrType(PrimType("uint32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1250,8 +1251,8 @@ def get_kernel(
             (1,),
             "uint32",
             data=txl.reinterpret(
-                PtrType(PrimType("uint32")),
                 symm_buffer.ptr_to([workspace_layout.shared_l1_task_count_offset]),
+                ty=PtrType(PrimType("uint32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1260,8 +1261,8 @@ def get_kernel(
             (1,),
             "uint32",
             data=txl.reinterpret(
-                PtrType(PrimType("uint32")),
                 symm_buffer.ptr_to([workspace_layout.shared_l2_task_count_offset]),
+                ty=PtrType(PrimType("uint32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1270,8 +1271,8 @@ def get_kernel(
             (workspace_layout.num_shared_l2_pool_blocks,),
             "uint32",
             data=txl.reinterpret(
-                PtrType(PrimType("uint32")),
                 symm_buffer.ptr_to([workspace_layout.shared_l2_full_count_offset]),
+                ty=PtrType(PrimType("uint32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1280,8 +1281,8 @@ def get_kernel(
             (num_ring_tokens,),
             "float32",
             data=txl.reinterpret(
-                PtrType(PrimType("float32")),
                 symm_buffer.ptr_to([symm_buffer_layout.l1_topk_weights_offset]),
+                ty=PtrType(PrimType("float32")),
             ),
             scope="global",
             elem_offset=0,
@@ -1304,8 +1305,8 @@ def get_kernel(
             (num_combine_slots, workspace_layout.num_max_tokens_per_rank, hidden),
             "uint16",
             data=txl.reinterpret(
-                PtrType(PrimType("uint16")),
                 symm_buffer.ptr_to([symm_buffer_layout.combine_token_offset]),
+                ty=PtrType(PrimType("uint16")),
             ),
             scope="global",
             elem_offset=0,
@@ -1335,7 +1336,9 @@ def get_kernel(
         )
         smem_b = smem_b_tile.buf
         smem_sfa_i32 = smem.alloc((num_stages, sf_block_m, sf_smem_outer_dim), txl.i32, align=16)
-        smem_sfa_data = txl.reinterpret(PtrType(PrimType("uint32")), smem_sfa_i32.ptr_to([0, 0, 0]))
+        smem_sfa_data = txl.reinterpret(
+            smem_sfa_i32.ptr_to([0, 0, 0]), ty=PtrType(PrimType("uint32"))
+        )
         smem_sfa = txl.decl_tensor(
             (num_stages, sf_block_m * sf_smem_outer_dim),
             "uint32",
@@ -1347,7 +1350,9 @@ def get_kernel(
         smem_sfb_i32 = smem.alloc(
             (num_stages, kernel_config.block_n, sf_smem_outer_dim), txl.i32, align=16
         )
-        smem_sfb_data = txl.reinterpret(PtrType(PrimType("uint32")), smem_sfb_i32.ptr_to([0, 0, 0]))
+        smem_sfb_data = txl.reinterpret(
+            smem_sfb_i32.ptr_to([0, 0, 0]), ty=PtrType(PrimType("uint32"))
+        )
         smem_sfb = txl.decl_tensor(
             (num_stages, kernel_config.block_n * sf_smem_outer_dim),
             "uint32",
@@ -1375,7 +1380,7 @@ def get_kernel(
             # The single-rank specialization never reads this view. Keep the
             # original zero-byte ABI instead of reserving an unreachable slot.
             smem_symm_rank_bases_data = txl.reinterpret(
-                PtrType(PrimType("uint64")), tmem_ptr_in_smem.ptr_to([0])
+                tmem_ptr_in_smem.ptr_to([0]), ty=PtrType(PrimType("uint64"))
             )
             smem_symm_rank_bases = txl.decl_tensor(
                 (1,),

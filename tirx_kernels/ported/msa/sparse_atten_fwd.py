@@ -440,7 +440,7 @@ def _combine_int_frac_ex2(x_rounded, frac_ex2):
     txl.ptx.mov.b32(fi[0], frac_ex2)
     txl.ptx.shl.b32(xi[0], xi[0], txl.uint32(23))
     txl.ptx.add.s32(out[0], xi[0], fi[0])
-    return txl.reinterpret("float32", out[0])
+    return txl.reinterpret(out[0], ty="float32")
 
 
 def _ex2_emulation_2(regs, i, j):
@@ -1697,7 +1697,7 @@ def _make_kernel(*, backend_config=None, **config):
                                                     slot * M_BLOCK * HEAD_DIM * q_bytes
                                                     + ks * M_BLOCK * q_load_tile * q_bytes
                                                     + tok * qheadperkv * q_load_tile * q_bytes,
-                                                    q_ty,
+                                                    ty=txl.Ptr(q_ty, (s_q.ptr_to([0, 0])).ty.scope),
                                                 ),
                                                 txl.address_of(q_map),
                                                 txl.int32(ks * q_load_tile),
@@ -1801,7 +1801,7 @@ def _make_kernel(*, backend_config=None, **config):
                                                 slot * M_BLOCK * HEAD_DIM * q_bytes
                                                 + ks * M_BLOCK * q_load_tile * q_bytes
                                                 + gather_idx * 4 * q_load_tile * q_bytes,
-                                                q_ty,
+                                                ty=txl.Ptr(q_ty, (s_q.ptr_to([0, 0])).ty.scope),
                                             ),
                                             txl.address_of(q_map),
                                             txl.int32(ks * q_load_tile),
@@ -1865,7 +1865,12 @@ def _make_kernel(*, backend_config=None, **config):
                                         txl.ptr_byte_offset(
                                             (s_k_fp8 if k_stage_fp8 else s_k).ptr_to([0, 0]),
                                             sub * N_BLOCK * _swizzle_elems(k_bytes) * k_bytes,
-                                            k_ty,
+                                            ty=txl.Ptr(
+                                                k_ty,
+                                                (
+                                                    (s_k_fp8 if k_stage_fp8 else s_k).ptr_to([0, 0])
+                                                ).ty.scope,
+                                            ),
                                         ),
                                         txl.address_of(k_stage_map if k_stage_fp8 else k_map),
                                         txl.int32(sub * _swizzle_elems(k_bytes)),
@@ -1882,7 +1887,12 @@ def _make_kernel(*, backend_config=None, **config):
                                         txl.ptr_byte_offset(
                                             (s_k_fp8 if k_stage_fp8 else s_k).ptr_to([0, 0]),
                                             sub * N_BLOCK * _swizzle_elems(k_bytes) * k_bytes,
-                                            k_ty,
+                                            ty=txl.Ptr(
+                                                k_ty,
+                                                (
+                                                    (s_k_fp8 if k_stage_fp8 else s_k).ptr_to([0, 0])
+                                                ).ty.scope,
+                                            ),
                                         ),
                                         txl.address_of(k_stage_map if k_stage_fp8 else k_map),
                                         txl.int32(sub * _swizzle_elems(k_bytes)),
@@ -1910,7 +1920,12 @@ def _make_kernel(*, backend_config=None, **config):
                                         txl.ptr_byte_offset(
                                             (s_v_fp8 if v_stage_fp8 else s_v).ptr_to([0, 0]),
                                             sub * N_BLOCK * _swizzle_elems(v_bytes) * v_bytes,
-                                            v_ty,
+                                            ty=txl.Ptr(
+                                                v_ty,
+                                                (
+                                                    (s_v_fp8 if v_stage_fp8 else s_v).ptr_to([0, 0])
+                                                ).ty.scope,
+                                            ),
                                         ),
                                         txl.address_of(v_stage_map if v_stage_fp8 else v_map),
                                         txl.int32(sub * _swizzle_elems(v_bytes)),
@@ -1927,7 +1942,12 @@ def _make_kernel(*, backend_config=None, **config):
                                         txl.ptr_byte_offset(
                                             (s_v_fp8 if v_stage_fp8 else s_v).ptr_to([0, 0]),
                                             sub * N_BLOCK * _swizzle_elems(v_bytes) * v_bytes,
-                                            v_ty,
+                                            ty=txl.Ptr(
+                                                v_ty,
+                                                (
+                                                    (s_v_fp8 if v_stage_fp8 else s_v).ptr_to([0, 0])
+                                                ).ty.scope,
+                                            ),
                                         ),
                                         txl.address_of(v_stage_map if v_stage_fp8 else v_map),
                                         txl.int32(sub * _swizzle_elems(v_bytes)),
@@ -2397,7 +2417,7 @@ def _make_kernel(*, backend_config=None, **config):
                                 bits_reg[0], txl.uint32(0xFFFFFFFF), txl.cast(shift, "uint32")
                             )
                             bits = bits_reg[0]
-                            signed_bits = txl.reinterpret("int32", bits)
+                            signed_bits = txl.reinterpret(bits, ty="int32")
                             for i in range(MASK_R2P_CHUNK):
                                 # The same bit pattern as the reference's
                                 # `mask & (1 << i)`, spelled signed so bit 31 fits
@@ -2558,29 +2578,29 @@ def _make_kernel(*, backend_config=None, **config):
         # K/V keep their three logical axes because the host-side TensorMap
         # encoding consumes that tensor ABI.  The body still addresses them
         # through the descriptor/base pointer; this rank is not a buffer view.
-        ("k", txl.gptr[k_ty, 3]),
-        ("v", txl.gptr[v_ty, 3]),
-        ("k2q_q_indices", txl.gptr[txl.i32]),
-        ("k2q_qsplit_indices", txl.gptr[txl.i32]),
-        ("k2q_row_ptr", txl.gptr[txl.i32]),
-        ("scheduler_metadata", txl.gptr[txl.i32]),
-        ("work_count", txl.gptr[txl.i32]),
-        ("o_partial", txl.gptr[partial_ty]),
-        ("lse_partial", txl.gptr[txl.f32]),
+        ("k", txl.Tensor((txl.int64(), txl.int64(), txl.int64()), k_ty)),
+        ("v", txl.Tensor((txl.int64(), txl.int64(), txl.int64()), v_ty)),
+        ("k2q_q_indices", txl.Tensor((txl.int64(),), txl.i32)),
+        ("k2q_qsplit_indices", txl.Tensor((txl.int64(),), txl.i32)),
+        ("k2q_row_ptr", txl.Tensor((txl.int64(),), txl.i32)),
+        ("scheduler_metadata", txl.Tensor((txl.int64(),), txl.i32)),
+        ("work_count", txl.Tensor((txl.int64(),), txl.i32)),
+        ("o_partial", txl.Tensor((txl.int64(),), partial_ty)),
+        ("lse_partial", txl.Tensor((txl.int64(),), txl.f32)),
     ]
     if temperature:
-        parameters.append(("lse_temperature_partial", txl.gptr[txl.f32]))
+        parameters.append(("lse_temperature_partial", txl.Tensor((txl.int64(),), txl.f32)))
     # Q is flattened only across token/head; HEAD_DIM remains the descriptor's
     # contiguous axis, so the launch argument is a rank-2 tensor.
-    parameters.append(("q_flat", txl.gptr[q_ty, 2]))
+    parameters.append(("q_flat", txl.Tensor((txl.int64(), txl.int64()), q_ty)))
     if paged:
-        parameters.append(("page_table", txl.gptr[txl.i32]))
+        parameters.append(("page_table", txl.Tensor((txl.int64(),), txl.i32)))
     if seqused:
-        parameters.append(("seqused_k", txl.gptr[txl.i32]))
+        parameters.append(("seqused_k", txl.Tensor((txl.int64(),), txl.i32)))
     parameters.extend(
         [
-            ("cu_seqlens_q", txl.gptr[txl.i32]),
-            ("cu_seqlens_k", txl.gptr[txl.i32]),
+            ("cu_seqlens_q", txl.Tensor((txl.int64(),), txl.i32)),
+            ("cu_seqlens_k", txl.Tensor((txl.int64(),), txl.i32)),
             ("softmax_scale_log2", txl.f32),
             ("lse_temperature_scale_log2", txl.f32),
             ("lse_temperature_inv_scale", txl.f32),

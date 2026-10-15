@@ -2956,14 +2956,18 @@ def _make_kernel(
                         )
                         block_amax = txl.local_scalar("float32")
                         txl.ptx.max.f32(
-                            block_amax, txl.reinterpret("float32", amax_words[0]), txl.float32(0.0)
+                            block_amax,
+                            txl.reinterpret(amax_words[0], ty="float32"),
+                            txl.float32(0.0),
                         )
                         for slot in range(1, 4):
                             txl.ptx.max.f32(
-                                block_amax, block_amax, txl.reinterpret("float32", amax_words[slot])
+                                block_amax,
+                                block_amax,
+                                txl.reinterpret(amax_words[slot], ty="float32"),
                             )
                         txl.ptx["red.global.max.s32"](
-                            amax.ptr_to([0]), txl.reinterpret("int32", block_amax)
+                            amax.ptr_to([0]), txl.reinterpret(block_amax, ty="int32")
                         )
                 with txl.If(_elected()):
                     with txl.Then():
@@ -3005,14 +3009,18 @@ def _make_kernel(
             txl.ptx.cp.async_.bulk.wait_group.read(0)
 
     kernel.__annotations__ = {
-        "a": txl.gptr[txl.u8, (M * K_dim * L * ab_bits // 8,)],
-        "b": txl.gptr[txl.u8, (N * K_dim * L * ab_bits // 8,)],
-        "sfa": txl.gptr[txl.u8, (L * _ceil_div(M, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)],
-        "sfb": txl.gptr[txl.u8, (L * _ceil_div(N, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)],
-        "c": txl.gptr[txl.u8, (M * N * L * c_bits // 8,)],
-        "d": txl.gptr[txl.u8, (M * N * L * d_bits // 8,)],
-        "prob": txl.gptr[txl.f32, (m_tiles * cta_m * L,)],
-        "amax": txl.gptr[txl.f32, (1,)],
+        "a": txl.Tensor((M * K_dim * L * ab_bits // 8,), txl.u8),
+        "b": txl.Tensor((N * K_dim * L * ab_bits // 8,), txl.u8),
+        "sfa": txl.Tensor(
+            (L * _ceil_div(M, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,), txl.u8
+        ),
+        "sfb": txl.Tensor(
+            (L * _ceil_div(N, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,), txl.u8
+        ),
+        "c": txl.Tensor((M * N * L * c_bits // 8,), txl.u8),
+        "d": txl.Tensor((M * N * L * d_bits // 8,), txl.u8),
+        "prob": txl.Tensor((m_tiles * cta_m * L,), txl.f32),
+        "amax": txl.Tensor((1,), txl.f32),
         "alpha": txl.f32,
     }
     return txl.kernel()(kernel)

@@ -10,7 +10,7 @@ import tirx_kernels.tirx_lite as txl
 
 
 @txl.kernel()
-def zero(out: txl.gptr(txl.f32)):
+def zero(out: txl.Tensor((txl.int64(),), txl.f32)):
     txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32))
     txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 ```
@@ -26,7 +26,8 @@ def zero(out: txl.gptr(txl.f32)):
 
 - Kernel entries use `@txl.kernel`; parser entry points and raw TIRx builder
   forwarding are not part of the author-facing API.
-- `txl.gptr`, `txl.TensorMap`, and scalar dtype annotations define the entry ABI.
+- Native `txl.Tensor`, `txl.Ptr`, and scalar type annotations define the entry ABI.
+  TensorMap descriptors use `txl.Ptr(txl.TensorMap)`.
 - Ordinary tensors use `txl.alloc_tensor(...)` and `txl.decl_tensor(...)` with
   the default layout. `txl.alloc_local(...)` is the shorthand for
   `txl.alloc_tensor(..., scope="local")`; writable scalars use `txl.local_scalar`.
@@ -48,6 +49,47 @@ You can learn tirx-lite APIs and complete implementation patterns from the canon
 modules under `tirx_kernels/`. Do not copy API spellings from historical TIRx
 parser kernels.
 
+## Native types and tracing
+
+`txl.Tensor` and `txl.Ptr` are the native TIRx types. Tensor arguments accept
+PyTorch tensors directly. Their dtype, rank, and shape constraints are checked
+by the compiled host function, including when using the standalone CUDA host
+backend. No Python shape-checking or data-pointer extraction wrapper is added.
+Use `.data` for a tensor's base pointer and `.ptr_to(indices)` for an indexed
+pointer. `Ptr` parameters retain the native raw-pointer calling convention.
+
+Use distinct symbolic dimensions for independent extents. Reuse the same Var
+when tensors must agree or a dimension must equal a scalar argument:
+
+```python
+rows = txl.Var("rows", txl.int32)
+cols = txl.Var("cols", txl.int32)
+
+@txl.kernel()
+def zero_matrix(
+    out: txl.Tensor((rows, cols), txl.float32),
+    rows: rows,
+    cols: cols,
+):
+    txl.device_entry(launch=txl.cuda.LaunchConfig(grid=rows, block=32))
+    with txl.serial((cols + 31) // 32) as iteration:
+        col = iteration * 32 + txl.thread_id()
+        with txl.If(col < cols), txl.Then():
+            txl.ptx.st.global_.f32(out.ptr_to([txl.cta_id(), col]), txl.float32(0))
+```
+
+Primitive expressions follow the native signatures: `txl.reinterpret(value,
+ty=txl.uint32)`, `txl.Cast(value, "int32")`, and
+`txl.tensor_store(tensor, indices, value)`. Byte offsets specify their result
+pointer type: `txl.ptr_byte_offset(ptr, offset, ty=txl.Ptr(txl.uint32, ptr.ty.scope))`.
+
+The kernel decorator uses `IRBuilder.line_trace_scope` for source locations.
+Native script APIs automatically insert void calls whenever an IRBuilder is
+active, independently of line tracing; non-void expressions remain values.
+Emission and source locations also work for helpers using the native `T` namespace. Instruction policies specific to lite remain in lite.
+Ordinary Python control flow still executes while constructing the kernel;
+`with txl.serial(...)` and `with txl.If(...)` construct runtime control flow.
+
 ## Launch configuration
 
 Declare `txl.device_entry` inside the function with
@@ -61,7 +103,7 @@ Launch expressions refer directly to the function's bound ABI parameters:
 
 ```python
 @txl.kernel()
-def zero(out: txl.gptr(txl.f32), n: txl.i32):
+def zero(out: txl.Tensor((txl.int64(),), txl.f32), n: txl.i32):
     txl.device_entry(
         launch=txl.cuda.LaunchConfig(grid=(n + 127) // 128, block=128),
         kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
@@ -82,7 +124,7 @@ and encode TensorMap descriptors and return them to the function:
 
 ```python
 @txl.kernel()
-def kernel(a: txl.gptr(txl.bf16), num_ctas: txl.i32):
+def kernel(a: txl.Tensor((txl.int64(),), txl.bf16), num_ctas: txl.i32):
     descriptors = prepare_descriptors(a)
     with txl.device_entry(launch=txl.cuda.LaunchConfig(grid=num_ctas, block=384)):
         kernel_body(a, descriptors)

@@ -330,8 +330,8 @@ def _copy_tensormap(src_map, dst):
     the source kernel does.
     """
     payload = txl.alloc_local((4,), "uint64")
-    source = txl.reinterpret("uint64", src_map.ptr_to([0]))
-    target = txl.reinterpret("uint64", dst)
+    source = txl.reinterpret(src_map.ptr_to([0]), ty="uint64")
+    target = txl.reinterpret(dst, ty="uint64")
     for group in range(4):
         offset = txl.uint64(group * 32)
         txl.ptx.ld.global_.v4.b64(
@@ -339,18 +339,18 @@ def _copy_tensormap(src_map, dst):
             payload[1],
             payload[2],
             payload[3],
-            txl.reinterpret("handle", source + offset),
+            txl.reinterpret(source + offset, ty="handle"),
         )
         for word in range(4):
             txl.ptx.st.global_.b64(
-                txl.reinterpret("handle", target + txl.uint64((group * 4 + word) * 8)),
+                txl.reinterpret(target + txl.uint64((group * 4 + word) * 8), ty="handle"),
                 payload[word],
             )
 
 
 def _replace_tensormap_address(desc, address):
     txl.ptx.tensormap_replace.tile.global_address.global_.b1024.b64(
-        desc, txl.reinterpret("uint64", address)
+        desc, txl.reinterpret(address, ty="uint64")
     )
 
 
@@ -428,7 +428,7 @@ def _store_state_value(pointer, index, value, state_dtype):
         txl.ptx.st.global_.f32(pointer.ptr_to([index]), value)
     else:
         txl.ptx.st.global_.b16(
-            pointer.ptr_to([index]), txl.reinterpret("uint16", txl.cast(value, "bfloat16"))
+            pointer.ptr_to([index]), txl.reinterpret(txl.cast(value, "bfloat16"), ty="uint16")
         )
 
 
@@ -449,8 +449,8 @@ def _unpack_io_pair(packed, lo, hi, io_dtype):
     low = txl.cast(txl.bitwise_and(packed, txl.uint32(0xFFFF)), "uint16")
     high = txl.cast(txl.shift_right(packed, txl.uint32(16)), "uint16")
     if io_dtype == "float16":
-        txl.assign(lo, txl.cast(txl.reinterpret("float16", low), "float32"))
-        txl.assign(hi, txl.cast(txl.reinterpret("float16", high), "float32"))
+        txl.assign(lo, txl.cast(txl.reinterpret(low, ty="float16"), "float32"))
+        txl.assign(hi, txl.cast(txl.reinterpret(high, ty="float16"), "float32"))
     else:
         txl.ptx.cvt.f32.bf16(lo, low)
         txl.ptx.cvt.f32.bf16(hi, high)
@@ -552,12 +552,12 @@ def _shuffle_xor_f32(value, delta):
     shuffled = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         shuffled,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(delta),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", shuffled)
+    return txl.reinterpret(shuffled, ty="float32")
 
 
 def _exp2(value):
@@ -662,28 +662,28 @@ def _make_prologue(
 
     @txl.kernel()
     def prologue(
-        base_q: txl.gptr[txl.i64],
-        base_k: txl.gptr[txl.i64],
-        base_v: txl.gptr[txl.i64],
-        base_gate: txl.gptr[txl.i64],
-        base_beta: txl.gptr[txl.i64],
-        base_w: txl.gptr[txl.i64],
-        base_o: txl.gptr[txl.i64],
-        base_checkpoint: txl.gptr[txl.i64],
-        descriptor_workspace: txl.gptr[txl.i64],
-        cu_seqlens: txl.gptr[cu_t],
-        q: txl.gptr[txl.u8],
-        k: txl.gptr[txl.u8],
-        v: txl.gptr[txl.u8],
-        gate: txl.gptr[txl.u8],
-        beta: txl.gptr[txl.u8],
-        w: txl.gptr[txl.u8],
-        o: txl.gptr[txl.u8],
-        checkpoint: txl.gptr[txl.u8],
-        work_item_staging: txl.gptr[txl.i32],
-        work_count: txl.gptr[txl.i32],
-        work_items: txl.gptr[txl.i32],
-        scheduler: txl.gptr[txl.i32],
+        base_q: txl.Tensor((txl.int64(),), txl.i64),
+        base_k: txl.Tensor((txl.int64(),), txl.i64),
+        base_v: txl.Tensor((txl.int64(),), txl.i64),
+        base_gate: txl.Tensor((txl.int64(),), txl.i64),
+        base_beta: txl.Tensor((txl.int64(),), txl.i64),
+        base_w: txl.Tensor((txl.int64(),), txl.i64),
+        base_o: txl.Tensor((txl.int64(),), txl.i64),
+        base_checkpoint: txl.Tensor((txl.int64(),), txl.i64),
+        descriptor_workspace: txl.Tensor((txl.int64(),), txl.i64),
+        cu_seqlens: txl.Tensor((txl.int64(),), cu_t),
+        q: txl.Tensor((txl.int64(),), txl.u8),
+        k: txl.Tensor((txl.int64(),), txl.u8),
+        v: txl.Tensor((txl.int64(),), txl.u8),
+        gate: txl.Tensor((txl.int64(),), txl.u8),
+        beta: txl.Tensor((txl.int64(),), txl.u8),
+        w: txl.Tensor((txl.int64(),), txl.u8),
+        o: txl.Tensor((txl.int64(),), txl.u8),
+        checkpoint: txl.Tensor((txl.int64(),), txl.u8),
+        work_item_staging: txl.Tensor((txl.int64(),), txl.i32),
+        work_count: txl.Tensor((txl.int64(),), txl.i32),
+        work_items: txl.Tensor((txl.int64(),), txl.i32),
+        scheduler: txl.Tensor((txl.int64(),), txl.i32),
         n_batch: txl.i32,
         q_row_stride_bytes: txl.i32,
         k_row_stride_bytes: txl.i32,
@@ -956,23 +956,23 @@ def _make_main(
 
     @txl.kernel()
     def main(
-        descriptor_workspace: txl.gptr[txl.i64],
+        descriptor_workspace: txl.Tensor((txl.int64(),), txl.i64),
         n_desc: txl.i32,
-        q: txl.gptr[io_t],
-        k: txl.gptr[io_t],
-        v: txl.gptr[io_t],
-        gate: txl.gptr[txl.f32],
-        a_log: txl.gptr[txl.f32],
-        dt_bias: txl.gptr[txl.f32],
-        beta: txl.gptr[io_t],
-        w: txl.gptr[io_t],
-        cu_seqlens: txl.gptr[cu_t],
-        initial_state: txl.gptr[state_t],
-        o: txl.gptr[io_t],
-        final_state: txl.gptr[state_t],
-        work_items: txl.gptr[txl.i32],
-        work_count: txl.gptr[txl.i32],
-        scheduler: txl.gptr[txl.i32],
+        q: txl.Tensor((txl.int64(),), io_t),
+        k: txl.Tensor((txl.int64(),), io_t),
+        v: txl.Tensor((txl.int64(),), io_t),
+        gate: txl.Tensor((txl.int64(),), txl.f32),
+        a_log: txl.Tensor((txl.int64(),), txl.f32),
+        dt_bias: txl.Tensor((txl.int64(),), txl.f32),
+        beta: txl.Tensor((txl.int64(),), io_t),
+        w: txl.Tensor((txl.int64(),), io_t),
+        cu_seqlens: txl.Tensor((txl.int64(),), cu_t),
+        initial_state: txl.Tensor((txl.int64(),), state_t),
+        o: txl.Tensor((txl.int64(),), io_t),
+        final_state: txl.Tensor((txl.int64(),), state_t),
+        work_items: txl.Tensor((txl.int64(),), txl.i32),
+        work_count: txl.Tensor((txl.int64(),), txl.i32),
+        scheduler: txl.Tensor((txl.int64(),), txl.i32),
         scale: txl.f32,
         checkpoint_every_n: txl.i32,
     ):
@@ -1827,7 +1827,7 @@ def _make_main(
                     )
                     txl.ptx.st.shared.b16(
                         arena.ptr_to([diag_base + diag_stage * 4096 + diagonal_swizzled * 2]),
-                        txl.reinterpret("uint16", txl.cast(exp_last, io_dtype)),
+                        txl.reinterpret(txl.cast(exp_last, io_dtype), ty="uint16"),
                     )
                     txl.ptx.bar.sync(txl.cast(1 + group, "uint32"), txl.uint32(128))
 

@@ -114,9 +114,9 @@ def _mma_chain(dest, a_desc, b_desc, idesc, a_offsets, b_offsets, accumulate, pr
 def _shfl_bfly_f32(value, lane_xor, membermask):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out, txl.reinterpret(txl.u32, value), txl.uint32(lane_xor), txl.uint32(31), membermask
+        out, txl.reinterpret(value, ty=txl.u32), txl.uint32(lane_xor), txl.uint32(31), membermask
     )
-    return txl.reinterpret(txl.f32, out)
+    return txl.reinterpret(out, ty=txl.f32)
 
 
 def _butterfly_sum_f32(value):
@@ -226,10 +226,10 @@ def get_kernel(*, backend_config=None, **config):
 
     @txl.kernel()
     def sum_odo(
-        o: txl.gptr[txl.bf16],
-        do: txl.gptr[txl.bf16],
-        lse: txl.gptr[txl.f32],
-        workspace: txl.gptr[txl.f32],
+        o: txl.Tensor((txl.int64(),), txl.bf16),
+        do: txl.Tensor((txl.int64(),), txl.bf16),
+        lse: txl.Tensor((txl.int64(),), txl.f32),
+        workspace: txl.Tensor((txl.int64(),), txl.f32),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=((seqlen_q + 15) // 16, heads, batch), block=4 * 32),
@@ -283,15 +283,15 @@ def get_kernel(*, backend_config=None, **config):
 
     @txl.kernel()
     def bwd(
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        do_map: txl.TensorMap,
-        dq_map: txl.TensorMap,
-        bucketed_offsets: txl.gptr[txl.i32],
-        bucketed_indices: txl.gptr[txl.i32],
-        block_sizes: txl.gptr[txl.i32],
-        workspace: txl.gptr[txl.f32],
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        do_map: txl.Ptr(txl.TensorMap),
+        dq_map: txl.Ptr(txl.TensorMap),
+        bucketed_offsets: txl.Tensor((txl.int64(),), txl.i32),
+        bucketed_indices: txl.Tensor((txl.int64(),), txl.i32),
+        block_sizes: txl.Tensor((txl.int64(),), txl.i32),
+        workspace: txl.Tensor((txl.int64(),), txl.f32),
         edge_stride: txl.i64,
         softmax_scale: txl.f32,
     ):
@@ -738,11 +738,11 @@ def get_kernel(*, backend_config=None, **config):
                             bits = txl.local_scalar("uint32")
                             txl.ptx.selp.b32(
                                 bits,
-                                txl.reinterpret(txl.u32, scores[j]),
+                                txl.reinterpret(scores[j], ty=txl.u32),
                                 txl.uint32(0xFF800000),
                                 txl.ptx.pred(live),
                             )
-                            txl.assign(scores[j], txl.reinterpret(txl.f32, bits))
+                            txl.assign(scores[j], txl.reinterpret(bits, ty=txl.f32))
                     lse_value = txl.local_scalar("float32")
                     txl.ptx.ld.shared_.b32(
                         lse_value, arena.ptr_to([OFF_SLSE + crow * txl.int32(4)])
@@ -948,10 +948,10 @@ def get_kernel(*, backend_config=None, **config):
 
     @txl.kernel()
     def convert(
-        workspace: txl.gptr[txl.f32],
-        dq: txl.gptr[txl.bf16],
-        dk: txl.gptr[txl.bf16],
-        dv: txl.gptr[txl.bf16],
+        workspace: txl.Tensor((txl.int64(),), txl.f32),
+        dq: txl.Tensor((txl.int64(),), txl.bf16),
+        dk: txl.Tensor((txl.int64(),), txl.bf16),
+        dv: txl.Tensor((txl.int64(),), txl.bf16),
         softmax_scale: txl.f32,
     ):
         txl.device_entry(

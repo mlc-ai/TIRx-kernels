@@ -10,7 +10,7 @@ The protocol layer implements native traced classes (``Pipeline``,
 three primitive families — the things neither PTX nor ``lang`` has a word for:
 
 specialize
-    ``txl.kernel`` / ``txl.gptr`` / ``txl.TensorMap`` entry; ``txl.specialize`` +
+    ``txl.kernel`` with native ``Tensor`` / ``Ptr`` entry types; ``txl.specialize`` +
     ``role(name, warps=[ids], regs=N)``; entry coordinates ``txl.cta_id`` /
     ``txl.warp_id`` / ``txl.lane_id`` / ``txl.thread_id`` and role-relative
     ``txl.tid_in_role`` / ``txl.warp_id_in_role``.
@@ -46,18 +46,7 @@ from tvm.script.ir_builder import IRBuilder
 from tvm.tirx.script import ir_builder as _I
 
 from . import idioms
-from .entry import (
-    Kernel,
-    TensorMap,
-    cta_id,
-    device_entry,
-    gptr,
-    kernel,
-    lane_id,
-    thread_id,
-    warp_id,
-)
-from .entry import current as _current_session
+from .entry import Kernel, cta_id, device_entry, kernel, lane_id, thread_id, warp_id
 from .smem import (
     KDesc,
     KStep,
@@ -92,25 +81,8 @@ SW128B = SwizzleMode.SWIZZLE_128B_ATOM
 
 
 # ---------------------------------------------------------------------------
-# Statement semantics for instruction calls
+# Explicit statement helpers
 # ---------------------------------------------------------------------------
-#
-# A @txl.kernel body is *traced* with an IRBuilder, not parsed. The TVMScript
-# parser is what turns a bare expression statement into T.evaluate(...); under
-# tracing a bare `txl.ptx.barrier.sync.aligned(0, 128)` would build the Call and
-# drop it -- silently emitting nothing. These proxies restore statement
-# semantics using the engine's own contract ("a call is always a statement",
-# destinations are leading operands): a call whose type is void is emitted and
-# returns None, anything with a real dtype (T.cuda.elect_sync, get_tmem_addr,
-# cvta_generic_to_shared, ...) is passed through untouched.
-
-
-def _is_void_call(value):
-    return (
-        isinstance(value, tvm.ir.Expr)
-        and isinstance(value.ty, tvm.ir.PrimType)
-        and str(value.ty.dtype) == ""
-    )
 
 
 def keep_alive(value):
@@ -121,21 +93,6 @@ def keep_alive(value):
     the parameter is dead-code-eliminated and the launch ABI changes.
     """
     _I.evaluate(value)
-
-
-def reinterpret(dtype, value):
-    """Reinterpret the bits of a value as the requested scalar or vector type."""
-    return _T.reinterpret(value, ty=dtype)
-
-
-def ptr_byte_offset(data, byte_offset, dtype, *, ty=None, loc=tvm.ir.UNKNOWN_LOC):
-    """Apply a byte offset and select the result dtype, preserving pointer scope."""
-    if ty is None:
-        element_type = tvm.ir.PrimType(dtype) if isinstance(dtype, str) else dtype
-        data_type = getattr(data, "ty", None)
-        scope = data_type.storage_scope if isinstance(data_type, tvm.ir.PtrType) else "global"
-        ty = tvm.ir.PtrType(element_type, scope)
-    return _T.ptr_byte_offset(data, byte_offset, ty=ty, loc=loc)
 
 
 def call_packed(*args):
@@ -243,10 +200,10 @@ def _cp_async_needs_src_size(obj, args):
     return len(args) == 3
 
 
-class _StmtProxy:
-    """Attribute/index-chain proxy that emits void calls as statements.
+class _InstructionProxy:
+    """Apply lite instruction policy while native builders own emission.
 
-    Also the one place ``txl`` is stricter than the instruction table: see
+    The one place ``txl`` is stricter than the instruction table: see
     :func:`_cp_async_needs_src_size`. The table itself is untouched.
     """
 
@@ -256,28 +213,22 @@ class _StmtProxy:
         object.__setattr__(self, "_obj", obj)
 
     def __getattr__(self, name):
-        return _StmtProxy(getattr(object.__getattribute__(self, "_obj"), name))
+        return _InstructionProxy(getattr(object.__getattribute__(self, "_obj"), name))
 
     def __getitem__(self, key):
-        return _StmtProxy(object.__getattribute__(self, "_obj")[key])
+        return _InstructionProxy(object.__getattribute__(self, "_obj")[key])
 
     def __call__(self, *args, **kwargs):
         obj = object.__getattribute__(self, "_obj")
         if _cp_async_needs_src_size(obj, args):
             raise TypeError(f"{obj!r}: missing the trailing src-size operand.\n\n{_CP_ASYNC_HELP}")
-        result = obj(*args, **kwargs)
-        if isinstance(result, tvm.ir.Expr) and _current_session(required=False) is not None:
-            result = IRBuilder.current()._set_current_loc(result)
-        if _is_void_call(result):
-            _T.evaluate(result)
-            return None
-        return result
+        return obj(*args, **kwargs)
 
     def __repr__(self):
-        return f"<txl stmt-proxy {object.__getattribute__(self, '_obj')!r}>"
+        return f"<txl instruction-policy {object.__getattribute__(self, '_obj')!r}>"
 
 
-class _PTXProxy(_StmtProxy):
+class _PTXProxy(_InstructionProxy):
     def addr(self, ptr, byte_offset):
         """Preserve the pointer's element type while applying a byte offset."""
         return _T.ptr_byte_offset(ptr, byte_offset, ty=ptr.ty)
@@ -305,7 +256,7 @@ _RETIRED_CUDA_VALUE_MEMBERS = {
 }
 
 
-class _CUDAProxy(_StmtProxy):
+class _CUDAProxy(_InstructionProxy):
     """txl.cuda with the non-pure value intrinsics retired.
 
     A value-returning warp/memory intrinsic used lazily re-evaluates per
@@ -318,7 +269,7 @@ class _CUDAProxy(_StmtProxy):
     def func_call(self, func_name, *args, source_code, return_type="void"):
         """Preserve the kernel API while passing source as TVM's final operand."""
         ty = None if return_type == "void" else return_type
-        return _StmtProxy(_T.cuda.func_call)(func_name, *args, source_code, ty=ty)
+        return _InstructionProxy(_T.cuda.func_call)(func_name, *args, source_code, ty=ty)
 
     def __getattr__(self, name):
         if name in {
@@ -344,12 +295,12 @@ class _CUDAProxy(_StmtProxy):
 cuda = _CUDAProxy(_T.cuda)
 
 # Keep existing kernel spellings while using TVM's canonical operator names.
-tvm_warp_shuffle = _StmtProxy(_T.gpu_warp_shuffle)
-tvm_warp_shuffle_up = _StmtProxy(_T.gpu_warp_shuffle_up)
-tvm_warp_shuffle_down = _StmtProxy(_T.gpu_warp_shuffle_down)
-tvm_warp_shuffle_xor = _StmtProxy(_T.gpu_warp_shuffle_xor)
-tvm_warp_activemask = _StmtProxy(_T.gpu_warp_activemask)
-tvm_storage_sync = _StmtProxy(_T.gpu_storage_sync)
+tvm_warp_shuffle = _T.gpu_warp_shuffle
+tvm_warp_shuffle_up = _T.gpu_warp_shuffle_up
+tvm_warp_shuffle_down = _T.gpu_warp_shuffle_down
+tvm_warp_shuffle_xor = _T.gpu_warp_shuffle_xor
+tvm_warp_activemask = _T.gpu_warp_activemask
+tvm_storage_sync = _T.gpu_storage_sync
 
 
 # ---------------------------------------------------------------------------
@@ -418,21 +369,7 @@ def alloc_local(shape, dtype="float32", *, align=-1, annotations=None):
     return alloc_tensor(shape, dtype, scope="local", align=align, annotations=annotations)
 
 
-def local_scalar(dtype="float32", init=None, *, name=None):
-    """Allocate one local scalar with layout=None and return its writable element.
-
-    ``init`` performs one immediate ``txl.assign`` into the fresh element; the
-    emitted TIR is identical to the two-statement declare-then-assign form.
-    ``name`` supplies the source name that a parser would infer from the
-    assignment target; tracing cannot recover that name on its own.
-    """
-    tensor = alloc_local([1], dtype)
-    if name is not None:
-        IRBuilder.name(name, tensor)
-    element = tensor[0]
-    if init is not None:
-        assign(element, init)
-    return element
+local_scalar = _I.local_scalar
 
 
 def stack_alloca(kind, size=1):
@@ -442,11 +379,6 @@ def stack_alloca(kind, size=1):
     binding rather than re-evaluated per use.
     """
     return _I.bind(_T.stack_alloca(kind, size))
-
-
-def tensor_store(dest, value, indices):
-    """Emit a tensor store using tirx-lite's existing operand order."""
-    return _I.tensor_store(dest, indices, value)
 
 
 def assign(dst, value):
@@ -459,7 +391,7 @@ def assign(dst, value):
         "local"
     ):
         raise TypeError("txl.assign destination must be a local scalar element")
-    return _I.tensor_store(dst.source, list(dst.indices), value)
+    return _I.assign(dst, value)
 
 
 # ---------------------------------------------------------------------------
@@ -581,8 +513,6 @@ def __getattr__(name):
         value = getattr(_T, name)
     except AttributeError as err:
         raise AttributeError(f"module 'tirx_kernels.tirx_lite' has no attribute {name!r}") from err
-    if callable(value) and not isinstance(value, type):
-        return _StmtProxy(value)
     return value
 
 
@@ -621,7 +551,6 @@ __all__ = [
     "SwizzleMode",
     "TCGen05Bar",
     "TMABar",
-    "TensorMap",
     "alloc_local",
     "alloc_tensor",
     "bf16",
@@ -631,7 +560,6 @@ __all__ = [
     "device_entry",
     "f16",
     "f32",
-    "gptr",
     "i32",
     "i64",
     "idioms",

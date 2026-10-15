@@ -263,7 +263,7 @@ def _load_tensormap(payload, src_map):
     before the order pass hides their cold-memory latency, and one load
     serves every per-sequence slot of the array.
     """
-    source = txl.reinterpret("uint64", src_map.ptr_to([0]))
+    source = txl.reinterpret(src_map.ptr_to([0]), ty="uint64")
     for group in range(4):
         offset = txl.uint64(group * 32)
         txl.ptx.ld.global_.v4.b64(
@@ -271,21 +271,21 @@ def _load_tensormap(payload, src_map):
             payload[group * 4 + 1],
             payload[group * 4 + 2],
             payload[group * 4 + 3],
-            txl.reinterpret("handle", source + offset),
+            txl.reinterpret(source + offset, ty="handle"),
         )
 
 
 def _store_tensormap(dst, payload):
-    target = txl.reinterpret("uint64", dst)
+    target = txl.reinterpret(dst, ty="uint64")
     for word in range(16):
         txl.ptx.st.global_.b64(
-            txl.reinterpret("handle", target + txl.uint64(word * 8)), payload[word]
+            txl.reinterpret(target + txl.uint64(word * 8), ty="handle"), payload[word]
         )
 
 
 def _replace_tensormap_address(desc, address):
     txl.ptx.tensormap_replace.tile.global_address.global_.b1024.b64(
-        desc, txl.reinterpret("uint64", address)
+        desc, txl.reinterpret(address, ty="uint64")
     )
 
 
@@ -368,7 +368,7 @@ def _store_state_value(pointer, index, value, state_dtype):
         txl.ptx.st.global_.f32(pointer.ptr_to([index]), value)
     else:
         txl.ptx.st.global_.b16(
-            pointer.ptr_to([index]), txl.reinterpret("uint16", txl.cast(value, "bfloat16"))
+            pointer.ptr_to([index]), txl.reinterpret(txl.cast(value, "bfloat16"), ty="uint16")
         )
 
 
@@ -396,8 +396,8 @@ def _unpack_io_pair(packed, lo, hi, io_dtype):
         high_bits = txl.local_scalar("uint32")
         txl.ptx.mov.b32(low_bits, txl.uint16(0), halves[0])
         txl.ptx.mov.b32(high_bits, txl.uint16(0), halves[1])
-        txl.assign(lo, txl.reinterpret("float32", low_bits))
-        txl.assign(hi, txl.reinterpret("float32", high_bits))
+        txl.assign(lo, txl.reinterpret(low_bits, ty="float32"))
+        txl.assign(hi, txl.reinterpret(high_bits, ty="float32"))
 
 
 def _sub_io_pair(dst, lhs, rhs, io_dtype):
@@ -469,48 +469,48 @@ def _shfl_idx_f32(value, source_lane, clamp):
     shuffled = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.idx.b32(
         shuffled,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.cast(source_lane, "uint32"),
         txl.uint32(clamp),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", shuffled)
+    return txl.reinterpret(shuffled, ty="float32")
 
 
 def _shfl_up_f32(value, delta):
     shuffled = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.up.b32(
         shuffled,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(delta),
         txl.uint32(0),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", shuffled)
+    return txl.reinterpret(shuffled, ty="float32")
 
 
 def _shfl_down_f32(value, delta):
     shuffled = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.down.b32(
         shuffled,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(delta),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", shuffled)
+    return txl.reinterpret(shuffled, ty="float32")
 
 
 def _shfl_bfly_f32(value, lane_mask):
     shuffled = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         shuffled,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(lane_mask),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", shuffled)
+    return txl.reinterpret(shuffled, ty="float32")
 
 
 def _ffma2(a0, a1, b0, b1, c0, c1):
@@ -987,28 +987,28 @@ def _make_prologue(
 
     @txl.kernel()
     def prologue(
-        base_q: txl.gptr[txl.i64],
-        base_k: txl.gptr[txl.i64],
-        base_v: txl.gptr[txl.i64],
-        base_do: txl.gptr[txl.i64],
-        base_checkpoint: txl.gptr[txl.i64],
-        base_dq: txl.gptr[txl.i64],
-        base_dk: txl.gptr[txl.i64],
-        base_dv: txl.gptr[txl.i64],
-        descriptor_workspace: txl.gptr[txl.i64],
-        cu_seqlens: txl.gptr[cu_t],
-        q: txl.gptr[txl.u8],
-        k: txl.gptr[txl.u8],
-        v: txl.gptr[txl.u8],
-        do: txl.gptr[txl.u8],
-        checkpoint: txl.gptr[txl.u8],
-        dq: txl.gptr[txl.u8],
-        dk: txl.gptr[txl.u8],
-        dv: txl.gptr[txl.u8],
-        work_item_staging: txl.gptr[txl.i32],
-        work_count: txl.gptr[txl.i32],
-        work_items: txl.gptr[txl.i32],
-        scheduler_all: txl.gptr[txl.i32],
+        base_q: txl.Tensor((txl.int64(),), txl.i64),
+        base_k: txl.Tensor((txl.int64(),), txl.i64),
+        base_v: txl.Tensor((txl.int64(),), txl.i64),
+        base_do: txl.Tensor((txl.int64(),), txl.i64),
+        base_checkpoint: txl.Tensor((txl.int64(),), txl.i64),
+        base_dq: txl.Tensor((txl.int64(),), txl.i64),
+        base_dk: txl.Tensor((txl.int64(),), txl.i64),
+        base_dv: txl.Tensor((txl.int64(),), txl.i64),
+        descriptor_workspace: txl.Tensor((txl.int64(),), txl.i64),
+        cu_seqlens: txl.Tensor((txl.int64(),), cu_t),
+        q: txl.Tensor((txl.int64(),), txl.u8),
+        k: txl.Tensor((txl.int64(),), txl.u8),
+        v: txl.Tensor((txl.int64(),), txl.u8),
+        do: txl.Tensor((txl.int64(),), txl.u8),
+        checkpoint: txl.Tensor((txl.int64(),), txl.u8),
+        dq: txl.Tensor((txl.int64(),), txl.u8),
+        dk: txl.Tensor((txl.int64(),), txl.u8),
+        dv: txl.Tensor((txl.int64(),), txl.u8),
+        work_item_staging: txl.Tensor((txl.int64(),), txl.i32),
+        work_count: txl.Tensor((txl.int64(),), txl.i32),
+        work_items: txl.Tensor((txl.int64(),), txl.i32),
+        scheduler_all: txl.Tensor((txl.int64(),), txl.i32),
         n_batch: txl.i32,
         q_row_stride_bytes: txl.i32,
         k_row_stride_bytes: txl.i32,
@@ -1257,20 +1257,20 @@ def _make_main(
 
     @txl.kernel()
     def main(
-        descriptor_workspace: txl.gptr[txl.i64],
+        descriptor_workspace: txl.Tensor((txl.int64(),), txl.i64),
         n_desc: txl.i32,
-        gate: txl.gptr[txl.f32],
-        a_log: txl.gptr[txl.f32],
-        dt_bias: txl.gptr[txl.f32],
-        beta: txl.gptr[beta_t],
-        dgate: txl.gptr[txl.f32],
-        dbeta: txl.gptr[beta_t],
-        cu_seqlens: txl.gptr[cu_t],
-        dstate0: txl.gptr[txl.f32],
-        dstate_in: txl.gptr[txl.f32],
-        work_items: txl.gptr[txl.i32],
-        work_count: txl.gptr[txl.i32],
-        scheduler: txl.gptr[txl.i32],
+        gate: txl.Tensor((txl.int64(),), txl.f32),
+        a_log: txl.Tensor((txl.int64(),), txl.f32),
+        dt_bias: txl.Tensor((txl.int64(),), txl.f32),
+        beta: txl.Tensor((txl.int64(),), beta_t),
+        dgate: txl.Tensor((txl.int64(),), txl.f32),
+        dbeta: txl.Tensor((txl.int64(),), beta_t),
+        cu_seqlens: txl.Tensor((txl.int64(),), cu_t),
+        dstate0: txl.Tensor((txl.int64(),), txl.f32),
+        dstate_in: txl.Tensor((txl.int64(),), txl.f32),
+        work_items: txl.Tensor((txl.int64(),), txl.i32),
+        work_count: txl.Tensor((txl.int64(),), txl.i32),
+        scheduler: txl.Tensor((txl.int64(),), txl.i32),
         scale: txl.f32,
     ):
         txl.device_entry(
@@ -3594,7 +3594,8 @@ def _make_main(
                                 raw = txl.local_scalar("float32")
                                 if io_dtype == "float16":
                                     txl.assign(
-                                        raw, txl.cast(txl.reinterpret("float16", bits), "float32")
+                                        raw,
+                                        txl.cast(txl.reinterpret(bits, ty="float16"), "float32"),
                                     )
                                 else:
                                     txl.ptx.cvt.f32.bf16(raw, bits)
@@ -3679,7 +3680,7 @@ def _make_main(
                             if beta_sigmoid:
                                 txl.ptx.st.global_.b16(
                                     dbeta.ptr_to([txl.cast(token, "int64") * n_heads_out + head]),
-                                    txl.reinterpret("uint16", txl.cast(value, io_dtype)),
+                                    txl.reinterpret(txl.cast(value, io_dtype), ty="uint16"),
                                 )
                             else:
                                 txl.ptx.st.global_.f32(

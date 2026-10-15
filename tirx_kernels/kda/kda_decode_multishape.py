@@ -105,23 +105,23 @@ def _make_base(*, backend_config=None):
         out = txl.local_scalar("uint32")
         txl.ptx.shfl_sync.bfly.b32(
             out,
-            txl.reinterpret("uint32", val_f32),
+            txl.reinterpret(val_f32, ty="uint32"),
             txl.uint32(xor),
             txl.uint32(31),
             txl.uint32(FULL),
         )
-        return txl.reinterpret("float32", out)
+        return txl.reinterpret(out, ty="float32")
 
     def _shfl_idx(val_f32, src_lane):
         out = txl.local_scalar("uint32")
         txl.ptx.shfl_sync.idx.b32(
             out,
-            txl.reinterpret("uint32", val_f32),
+            txl.reinterpret(val_f32, ty="uint32"),
             txl.cast(src_lane, "uint32"),
             txl.uint32(31),
             txl.uint32(FULL),
         )
-        return txl.reinterpret("float32", out)
+        return txl.reinterpret(out, ty="float32")
 
     def _f2(a, b):
         return txl.cuda.make_float2(a, b)
@@ -187,18 +187,18 @@ def _make_base(*, backend_config=None):
 
         @txl.kernel()
         def kda_decode_persist(
-            q: txl.gptr[txl.bf16],
-            k: txl.gptr[txl.bf16],
-            v: txl.gptr[txl.bf16],
-            g: txl.gptr[txl.bf16],
-            beta: txl.gptr[txl.bf16],
-            a_log: txl.gptr[txl.f32],
-            dt_bias: txl.gptr[txl.f32],
-            state_in: txl.gptr[txl.bf16],
-            state_out: txl.gptr[txl.bf16],
-            output: txl.gptr[txl.bf16],
-            ssm_idx: txl.gptr[txl.i32],
-            num_accepted: txl.gptr[txl.i32],
+            q: txl.Tensor((txl.int64(),), txl.bf16),
+            k: txl.Tensor((txl.int64(),), txl.bf16),
+            v: txl.Tensor((txl.int64(),), txl.bf16),
+            g: txl.Tensor((txl.int64(),), txl.bf16),
+            beta: txl.Tensor((txl.int64(),), txl.bf16),
+            a_log: txl.Tensor((txl.int64(),), txl.f32),
+            dt_bias: txl.Tensor((txl.int64(),), txl.f32),
+            state_in: txl.Tensor((txl.int64(),), txl.bf16),
+            state_out: txl.Tensor((txl.int64(),), txl.bf16),
+            output: txl.Tensor((txl.int64(),), txl.bf16),
+            ssm_idx: txl.Tensor((txl.int64(),), txl.i32),
+            num_accepted: txl.Tensor((txl.int64(),), txl.i32),
             scale: txl.f32,
             lower_bound: txl.f32,
             num_slots: txl.i32,
@@ -476,13 +476,14 @@ def _make_base(*, backend_config=None):
                                         with txl.If(kk < MAXC), txl.Then():
                                             txl.ptx.st.shared.b32(
                                                 cpslots.ptr_to([kk]),
-                                                txl.reinterpret("uint32", slot),
+                                                txl.reinterpret(slot, ty="uint32"),
                                             )
                                         txl.assign(c0, c0 + hole_cnt)
                             else:
                                 with txl.If((want_rank >= 0) & (rank == want_rank)), txl.Then():
                                     txl.ptx.st.shared.b32(
-                                        cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot)
+                                        cpslots.ptr_to([dst_idx]),
+                                        txl.reinterpret(slot, ty="uint32"),
                                     )
                         txl.assign(cnt, cnt + txl.cast(txl.popcount(mask), "int32"))
 
@@ -500,7 +501,7 @@ def _make_base(*, backend_config=None):
                         txl.cuda.cta_sync()
                     with txl.If(tid == 0), txl.Then():
                         txl.ptx.st.shared.b32(
-                            cpslots.ptr_to([MAXC]), txl.reinterpret("uint32", cnt)
+                            cpslots.ptr_to([MAXC]), txl.reinterpret(cnt, ty="uint32")
                         )
                     txl.cuda.cta_sync()
                     ucnt = txl.local_scalar("int32")
@@ -577,7 +578,7 @@ def _make_base(*, backend_config=None):
                         alog = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(alog, raw.ptr_to([gb + 256 + (h % 4) * 2]))
                         txl.ptx["mul.f32"](
-                            tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E)
+                            tmp, txl.reinterpret(alog, ty="float32"), txl.float32(LOG2E)
                         )
                         txl.ptx["ex2.approx.ftz.f32"](ea, tmp)
                         bias = txl.alloc_local((4,), "uint32", align=16)
@@ -586,7 +587,7 @@ def _make_base(*, backend_config=None):
                         )
                         for e in range(4):
                             x = txl.local_scalar("float32")
-                            txl.ptx["add.f32"](x, gf[e], txl.reinterpret("float32", bias[e]))
+                            txl.ptx["add.f32"](x, gf[e], txl.reinterpret(bias[e], ty="float32"))
                             txl.ptx["mul.f32"](x, x, ea)
                             txl.ptx["mul.f32"](x, x, txl.float32(-LOG2E))
                             txl.ptx["ex2.approx.ftz.f32"](x, x)
@@ -604,35 +605,35 @@ def _make_base(*, backend_config=None):
                         ent = t * FST + pair * 8 + (pair >> 3) * 4
                         txl.ptx.st.shared.v2.b32(
                             ftab.ptr_to([ent + 2]),
-                            txl.reinterpret("uint32", gf[2 * pp]),
-                            txl.reinterpret("uint32", gf[2 * pp + 1]),
+                            txl.reinterpret(gf[2 * pp], ty="uint32"),
+                            txl.reinterpret(gf[2 * pp + 1], ty="uint32"),
                         )
                         txl.ptx.st.shared.v4.b32(
                             ftab.ptr_to([ent + 4]),
-                            txl.reinterpret("uint32", kf[2 * pp]),
-                            txl.reinterpret("uint32", kf[2 * pp + 1]),
-                            txl.reinterpret("uint32", qf[2 * pp]),
-                            txl.reinterpret("uint32", qf[2 * pp + 1]),
+                            txl.reinterpret(kf[2 * pp], ty="uint32"),
+                            txl.reinterpret(kf[2 * pp + 1], ty="uint32"),
+                            txl.reinterpret(qf[2 * pp], ty="uint32"),
+                            txl.reinterpret(qf[2 * pp + 1], ty="uint32"),
                         )
                         txl.ptx.st.shared.v2.b32(
                             ftab.ptr_to([ent + FST]),
-                            txl.reinterpret("uint32", kf[2 * pp]),
-                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                            txl.reinterpret(kf[2 * pp], ty="uint32"),
+                            txl.reinterpret(kf[2 * pp + 1], ty="uint32"),
                         )
                     txl.ptx.st.shared.v4.b32(
                         vtab.ptr_to([t * D + lane * 4]),
-                        txl.reinterpret("uint32", vf[0]),
-                        txl.reinterpret("uint32", vf[1]),
-                        txl.reinterpret("uint32", vf[2]),
-                        txl.reinterpret("uint32", vf[3]),
+                        txl.reinterpret(vf[0], ty="uint32"),
+                        txl.reinterpret(vf[1], ty="uint32"),
+                        txl.reinterpret(vf[2], ty="uint32"),
+                        txl.reinterpret(vf[3], ty="uint32"),
                     )
                     with txl.If(lane == 0), txl.Then():
                         bf = txl.local_scalar("float32")
                         txl.ptx.cvt.f32.bf16(bf, txl.cast(bbits, "uint16"))
                         txl.ptx.st.shared.v2.b32(
                             svec.ptr_to([2 * t]),
-                            txl.reinterpret("uint32", bf),
-                            txl.reinterpret("uint32", cpart),
+                            txl.reinterpret(bf, ty="uint32"),
+                            txl.reinterpret(cpart, ty="uint32"),
                         )
 
                 S = txl.alloc_local((J * 8,), "uint64", align=8)
@@ -650,8 +651,8 @@ def _make_base(*, backend_config=None):
                     """Reduce-scatter d1/d2 over the 8 k-slice lanes; lane owns R columns; broadcast u."""
                     bc = txl.alloc_local((2,), "uint32", align=8)
                     txl.ptx.ld.shared.v2.b32(bc[0], bc[1], svec.ptr_to([2 * t]))
-                    beta_t = txl.reinterpret("float32", bc[0])
-                    c_t = txl.reinterpret("float32", bc[1])
+                    beta_t = txl.reinterpret(bc[0], ty="float32")
+                    c_t = txl.reinterpret(bc[1], ty="float32")
                     vals = []
                     for j in range(J):
                         r = txl.local_scalar("float32")
@@ -672,7 +673,7 @@ def _make_base(*, backend_config=None):
                             vv = txl.local_scalar("uint32")
                             txl.ptx.ld.shared.b32(vv, vtab.ptr_to([t * D + row0 + col]))
                             diff = txl.local_scalar("float32")
-                            txl.ptx["sub.f32"](diff, txl.reinterpret("float32", vv), vals[j])
+                            txl.ptx["sub.f32"](diff, txl.reinterpret(vv, ty="float32"), vals[j])
                             txl.ptx["mul.f32"](ub[j], diff, beta_t)
                             o = txl.local_scalar("float32")
                             txl.ptx["fma.rn.f32"](o, c_t, ub[j], vals[J + j])
@@ -715,7 +716,7 @@ def _make_base(*, backend_config=None):
                         vv = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(vv, vtab.ptr_to([t * D + row0 + col]))
                         diff = txl.local_scalar("float32")
-                        txl.ptx["sub.f32"](diff, txl.reinterpret("float32", vv), dd1)
+                        txl.ptx["sub.f32"](diff, txl.reinterpret(vv, ty="float32"), dd1)
                         txl.ptx["mul.f32"](uloc[i], diff, beta_t)
                         o = txl.local_scalar("float32")
                         txl.ptx["fma.rn.f32"](o, c_t, uloc[i], dd2)
@@ -1259,23 +1260,23 @@ def _make_defer(*, backend_config=None):
         out = txl.local_scalar("uint32")
         txl.ptx.shfl_sync.bfly.b32(
             out,
-            txl.reinterpret("uint32", val_f32),
+            txl.reinterpret(val_f32, ty="uint32"),
             txl.uint32(xor),
             txl.uint32(31),
             txl.uint32(FULL),
         )
-        return txl.reinterpret("float32", out)
+        return txl.reinterpret(out, ty="float32")
 
     def _shfl_idx(val_f32, src_lane):
         out = txl.local_scalar("uint32")
         txl.ptx.shfl_sync.idx.b32(
             out,
-            txl.reinterpret("uint32", val_f32),
+            txl.reinterpret(val_f32, ty="uint32"),
             txl.cast(src_lane, "uint32"),
             txl.uint32(31),
             txl.uint32(FULL),
         )
-        return txl.reinterpret("float32", out)
+        return txl.reinterpret(out, ty="float32")
 
     def _f2(a, b):
         return txl.cuda.make_float2(a, b)
@@ -1361,18 +1362,18 @@ def _make_defer(*, backend_config=None):
 
         @txl.kernel()
         def kda_decode_persist(
-            q: txl.gptr[txl.bf16],
-            k: txl.gptr[txl.bf16],
-            v: txl.gptr[txl.bf16],
-            g: txl.gptr[txl.bf16],
-            beta: txl.gptr[txl.bf16],
-            a_log: txl.gptr[txl.f32],
-            dt_bias: txl.gptr[txl.f32],
-            state_in: txl.gptr[txl.bf16],
-            state_out: txl.gptr[txl.bf16],
-            output: txl.gptr[txl.bf16],
-            ssm_idx: txl.gptr[txl.i32],
-            num_accepted: txl.gptr[txl.i32],
+            q: txl.Tensor((txl.int64(),), txl.bf16),
+            k: txl.Tensor((txl.int64(),), txl.bf16),
+            v: txl.Tensor((txl.int64(),), txl.bf16),
+            g: txl.Tensor((txl.int64(),), txl.bf16),
+            beta: txl.Tensor((txl.int64(),), txl.bf16),
+            a_log: txl.Tensor((txl.int64(),), txl.f32),
+            dt_bias: txl.Tensor((txl.int64(),), txl.f32),
+            state_in: txl.Tensor((txl.int64(),), txl.bf16),
+            state_out: txl.Tensor((txl.int64(),), txl.bf16),
+            output: txl.Tensor((txl.int64(),), txl.bf16),
+            ssm_idx: txl.Tensor((txl.int64(),), txl.i32),
+            num_accepted: txl.Tensor((txl.int64(),), txl.i32),
             scale: txl.f32,
             lower_bound: txl.f32,
             num_slots: txl.i32,
@@ -1610,13 +1611,14 @@ def _make_defer(*, backend_config=None):
                                         with txl.If(kk < MAXC), txl.Then():
                                             txl.ptx.st.shared.b32(
                                                 cpslots.ptr_to([kk]),
-                                                txl.reinterpret("uint32", slot),
+                                                txl.reinterpret(slot, ty="uint32"),
                                             )
                                         txl.assign(c0, c0 + hole_cnt)
                             else:
                                 with txl.If((want_rank >= 0) & (rank == want_rank)), txl.Then():
                                     txl.ptx.st.shared.b32(
-                                        cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot)
+                                        cpslots.ptr_to([dst_idx]),
+                                        txl.reinterpret(slot, ty="uint32"),
                                     )
                         txl.assign(cnt, cnt + txl.cast(txl.popcount(mask), "int32"))
 
@@ -1699,7 +1701,7 @@ def _make_defer(*, backend_config=None):
                         txl.cuda.cta_sync()
                     with txl.If(tid == 0), txl.Then():
                         txl.ptx.st.shared.b32(
-                            cpslots.ptr_to([MAXC]), txl.reinterpret("uint32", cnt)
+                            cpslots.ptr_to([MAXC]), txl.reinterpret(cnt, ty="uint32")
                         )
                     txl.cuda.cta_sync()
                     ucnt = txl.local_scalar("int32")
@@ -1779,7 +1781,7 @@ def _make_defer(*, backend_config=None):
                         alog = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(alog, raw.ptr_to([gb + 256 + (h % 4) * 2]))
                         txl.ptx["mul.f32"](
-                            tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E)
+                            tmp, txl.reinterpret(alog, ty="float32"), txl.float32(LOG2E)
                         )
                         txl.ptx["ex2.approx.ftz.f32"](ea, tmp)
                         bias = txl.alloc_local((4,), "uint32", align=16)
@@ -1788,7 +1790,7 @@ def _make_defer(*, backend_config=None):
                         )
                         for e in range(4):
                             x = txl.local_scalar("float32")
-                            txl.ptx["add.f32"](x, gf[e], txl.reinterpret("float32", bias[e]))
+                            txl.ptx["add.f32"](x, gf[e], txl.reinterpret(bias[e], ty="float32"))
                             txl.ptx["mul.f32"](x, x, ea)
                             txl.ptx["mul.f32"](x, x, txl.float32(-LOG2E))
                             txl.ptx["ex2.approx.ftz.f32"](x, x)
@@ -1806,35 +1808,35 @@ def _make_defer(*, backend_config=None):
                         ent = t * FST + pair * 8 + (pair >> 3) * 4
                         txl.ptx.st.shared.v2.b32(
                             ftab.ptr_to([ent + 2]),
-                            txl.reinterpret("uint32", gf[2 * pp]),
-                            txl.reinterpret("uint32", gf[2 * pp + 1]),
+                            txl.reinterpret(gf[2 * pp], ty="uint32"),
+                            txl.reinterpret(gf[2 * pp + 1], ty="uint32"),
                         )
                         txl.ptx.st.shared.v4.b32(
                             ftab.ptr_to([ent + 4]),
-                            txl.reinterpret("uint32", kf[2 * pp]),
-                            txl.reinterpret("uint32", kf[2 * pp + 1]),
-                            txl.reinterpret("uint32", qf[2 * pp]),
-                            txl.reinterpret("uint32", qf[2 * pp + 1]),
+                            txl.reinterpret(kf[2 * pp], ty="uint32"),
+                            txl.reinterpret(kf[2 * pp + 1], ty="uint32"),
+                            txl.reinterpret(qf[2 * pp], ty="uint32"),
+                            txl.reinterpret(qf[2 * pp + 1], ty="uint32"),
                         )
                         txl.ptx.st.shared.v2.b32(
                             ftab.ptr_to([ent + FST]),
-                            txl.reinterpret("uint32", kf[2 * pp]),
-                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                            txl.reinterpret(kf[2 * pp], ty="uint32"),
+                            txl.reinterpret(kf[2 * pp + 1], ty="uint32"),
                         )
                     txl.ptx.st.shared.v4.b32(
                         vtab.ptr_to([t * D + lane * 4]),
-                        txl.reinterpret("uint32", vf[0]),
-                        txl.reinterpret("uint32", vf[1]),
-                        txl.reinterpret("uint32", vf[2]),
-                        txl.reinterpret("uint32", vf[3]),
+                        txl.reinterpret(vf[0], ty="uint32"),
+                        txl.reinterpret(vf[1], ty="uint32"),
+                        txl.reinterpret(vf[2], ty="uint32"),
+                        txl.reinterpret(vf[3], ty="uint32"),
                     )
                     with txl.If(lane == 0), txl.Then():
                         bf = txl.local_scalar("float32")
                         txl.ptx.cvt.f32.bf16(bf, txl.cast(bbits, "uint16"))
                         txl.ptx.st.shared.v2.b32(
                             svec.ptr_to([2 * t]),
-                            txl.reinterpret("uint32", bf),
-                            txl.reinterpret("uint32", cpart),
+                            txl.reinterpret(bf, ty="uint32"),
+                            txl.reinterpret(cpart, ty="uint32"),
                         )
 
                 S = txl.alloc_local((J * 8,), "uint64", align=8)
@@ -1893,8 +1895,8 @@ def _make_defer(*, backend_config=None):
                     """Reduce d1/d2 over the 8 k-slice lanes (all-reduce or reduce-scatter); u_t (into u2) and out_t."""
                     bc = txl.alloc_local((2,), "uint32", align=8)
                     txl.ptx.ld.shared.v2.b32(bc[0], bc[1], svec.ptr_to([2 * t]))
-                    beta_t = txl.reinterpret("float32", bc[0])
-                    c_t = txl.reinterpret("float32", bc[1])
+                    beta_t = txl.reinterpret(bc[0], ty="float32")
+                    c_t = txl.reinterpret(bc[1], ty="float32")
                     vals = []
                     for j in range(J):
                         r = txl.local_scalar("float32")
@@ -1915,7 +1917,7 @@ def _make_defer(*, backend_config=None):
                             vv = txl.local_scalar("uint32")
                             txl.ptx.ld.shared.b32(vv, vtab.ptr_to([t * D + row0 + col]))
                             diff = txl.local_scalar("float32")
-                            txl.ptx["sub.f32"](diff, txl.reinterpret("float32", vv), vals[j])
+                            txl.ptx["sub.f32"](diff, txl.reinterpret(vv, ty="float32"), vals[j])
                             uj = txl.local_scalar("float32")
                             txl.ptx["mul.f32"](uj, diff, beta_t)
                             txl.assign(u2[j], _f2(uj, uj))
@@ -1958,7 +1960,7 @@ def _make_defer(*, backend_config=None):
                         vv = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(vv, vtab.ptr_to([t * D + row0 + col]))
                         diff = txl.local_scalar("float32")
-                        txl.ptx["sub.f32"](diff, txl.reinterpret("float32", vv), dd1)
+                        txl.ptx["sub.f32"](diff, txl.reinterpret(vv, ty="float32"), dd1)
                         txl.ptx["mul.f32"](uloc[i], diff, beta_t)
                         o = txl.local_scalar("float32")
                         txl.ptx["fma.rn.f32"](o, c_t, uloc[i], dd2)
@@ -2433,23 +2435,23 @@ def _make_dyn(*, backend_config=None):
         out = txl.local_scalar("uint32")
         txl.ptx.shfl_sync.bfly.b32(
             out,
-            txl.reinterpret("uint32", val_f32),
+            txl.reinterpret(val_f32, ty="uint32"),
             txl.uint32(xor),
             txl.uint32(31),
             txl.uint32(FULL),
         )
-        return txl.reinterpret("float32", out)
+        return txl.reinterpret(out, ty="float32")
 
     def _shfl_idx(val_f32, src_lane):
         out = txl.local_scalar("uint32")
         txl.ptx.shfl_sync.idx.b32(
             out,
-            txl.reinterpret("uint32", val_f32),
+            txl.reinterpret(val_f32, ty="uint32"),
             txl.cast(src_lane, "uint32"),
             txl.uint32(31),
             txl.uint32(FULL),
         )
-        return txl.reinterpret("float32", out)
+        return txl.reinterpret(out, ty="float32")
 
     def _f2(a, b):
         return txl.cuda.make_float2(a, b)
@@ -2517,19 +2519,19 @@ def _make_dyn(*, backend_config=None):
 
         @txl.kernel()
         def kda_decode_persist(
-            q: txl.gptr[txl.bf16],
-            k: txl.gptr[txl.bf16],
-            v: txl.gptr[txl.bf16],
-            g: txl.gptr[txl.bf16],
-            beta: txl.gptr[txl.bf16],
-            a_log: txl.gptr[txl.f32],
-            dt_bias: txl.gptr[txl.f32],
-            state_in: txl.gptr[txl.bf16],
-            state_out: txl.gptr[txl.bf16],
-            output: txl.gptr[txl.bf16],
-            ssm_idx: txl.gptr[txl.i32],
-            num_accepted: txl.gptr[txl.i32],
-            sched: txl.gptr[txl.i32],
+            q: txl.Tensor((txl.int64(),), txl.bf16),
+            k: txl.Tensor((txl.int64(),), txl.bf16),
+            v: txl.Tensor((txl.int64(),), txl.bf16),
+            g: txl.Tensor((txl.int64(),), txl.bf16),
+            beta: txl.Tensor((txl.int64(),), txl.bf16),
+            a_log: txl.Tensor((txl.int64(),), txl.f32),
+            dt_bias: txl.Tensor((txl.int64(),), txl.f32),
+            state_in: txl.Tensor((txl.int64(),), txl.bf16),
+            state_out: txl.Tensor((txl.int64(),), txl.bf16),
+            output: txl.Tensor((txl.int64(),), txl.bf16),
+            ssm_idx: txl.Tensor((txl.int64(),), txl.i32),
+            num_accepted: txl.Tensor((txl.int64(),), txl.i32),
+            sched: txl.Tensor((txl.int64(),), txl.i32),
             scale: txl.f32,
             lower_bound: txl.f32,
             num_slots: txl.i32,
@@ -2800,12 +2802,13 @@ def _make_dyn(*, backend_config=None):
                             if want_rank is None:
                                 with txl.If(rank < MAXR), txl.Then():
                                     txl.ptx.st.shared.b32(
-                                        cpslots.ptr_to([rank]), txl.reinterpret("uint32", slot)
+                                        cpslots.ptr_to([rank]), txl.reinterpret(slot, ty="uint32")
                                     )
                             else:
                                 with txl.If((want_rank >= 0) & (rank == want_rank)), txl.Then():
                                     txl.ptx.st.shared.b32(
-                                        cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot)
+                                        cpslots.ptr_to([dst_idx]),
+                                        txl.reinterpret(slot, ty="uint32"),
                                     )
                         txl.assign(cnt, cnt + txl.cast(txl.popcount(mask), "int32"))
 
@@ -2820,18 +2823,26 @@ def _make_dyn(*, backend_config=None):
                         txl.cuda.cta_sync()
                     with txl.If(tid == 0), txl.Then():
                         txl.ptx.st.shared.b32(
-                            cpslots.ptr_to([MAXR + 1]), txl.reinterpret("uint32", cnt)
+                            cpslots.ptr_to([MAXR + 1]), txl.reinterpret(cnt, ty="uint32")
                         )
-                        txl.ptx.st.shared.b32(mailbox.ptr_to([0]), txl.reinterpret("uint32", tk1))
-                        txl.ptx.st.shared.b32(mailbox.ptr_to([1]), txl.reinterpret("uint32", tk2))
+                        txl.ptx.st.shared.b32(
+                            mailbox.ptr_to([0]), txl.reinterpret(tk1, ty="uint32")
+                        )
+                        txl.ptx.st.shared.b32(
+                            mailbox.ptr_to([1]), txl.reinterpret(tk2, ty="uint32")
+                        )
                     txl.cuda.cta_sync()
                     ucnt = txl.local_scalar("int32")
                     txl.ptx.ld.shared.b32(ucnt, cpslots.ptr_to([MAXR + 1]))
                     txl.assign(total_copy, txl.uniform(ucnt) * DCU)
                 else:
                     with txl.If(tid == 0), txl.Then():
-                        txl.ptx.st.shared.b32(mailbox.ptr_to([0]), txl.reinterpret("uint32", tk1))
-                        txl.ptx.st.shared.b32(mailbox.ptr_to([1]), txl.reinterpret("uint32", tk2))
+                        txl.ptx.st.shared.b32(
+                            mailbox.ptr_to([0]), txl.reinterpret(tk1, ty="uint32")
+                        )
+                        txl.ptx.st.shared.b32(
+                            mailbox.ptr_to([1]), txl.reinterpret(tk2, ty="uint32")
+                        )
                     txl.cuda.cta_sync()
                 total_items = num_units + total_copy
                 nxt = txl.local_scalar("int32")
@@ -2909,7 +2920,7 @@ def _make_dyn(*, backend_config=None):
                         alog = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(alog, raw.ptr_to([gb + 256 + (h % 4) * 2]))
                         txl.ptx["mul.f32"](
-                            tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E)
+                            tmp, txl.reinterpret(alog, ty="float32"), txl.float32(LOG2E)
                         )
                         txl.ptx["ex2.approx.ftz.f32"](ea, tmp)
                         bias = txl.alloc_local((4,), "uint32", align=16)
@@ -2918,7 +2929,7 @@ def _make_dyn(*, backend_config=None):
                         )
                         for e in range(4):
                             x = txl.local_scalar("float32")
-                            txl.ptx["add.f32"](x, gf[e], txl.reinterpret("float32", bias[e]))
+                            txl.ptx["add.f32"](x, gf[e], txl.reinterpret(bias[e], ty="float32"))
                             txl.ptx["mul.f32"](x, x, ea)
                             txl.ptx["mul.f32"](x, x, txl.float32(-LOG2E))
                             txl.ptx["ex2.approx.ftz.f32"](x, x)
@@ -2936,35 +2947,35 @@ def _make_dyn(*, backend_config=None):
                         ent = t * FST + pair * 8 + (pair >> 3) * 4
                         txl.ptx.st.shared.v2.b32(
                             ftab.ptr_to([ent + 2]),
-                            txl.reinterpret("uint32", gf[2 * pp]),
-                            txl.reinterpret("uint32", gf[2 * pp + 1]),
+                            txl.reinterpret(gf[2 * pp], ty="uint32"),
+                            txl.reinterpret(gf[2 * pp + 1], ty="uint32"),
                         )
                         txl.ptx.st.shared.v4.b32(
                             ftab.ptr_to([ent + 4]),
-                            txl.reinterpret("uint32", kf[2 * pp]),
-                            txl.reinterpret("uint32", kf[2 * pp + 1]),
-                            txl.reinterpret("uint32", qf[2 * pp]),
-                            txl.reinterpret("uint32", qf[2 * pp + 1]),
+                            txl.reinterpret(kf[2 * pp], ty="uint32"),
+                            txl.reinterpret(kf[2 * pp + 1], ty="uint32"),
+                            txl.reinterpret(qf[2 * pp], ty="uint32"),
+                            txl.reinterpret(qf[2 * pp + 1], ty="uint32"),
                         )
                         txl.ptx.st.shared.v2.b32(
                             ftab.ptr_to([ent + FST]),
-                            txl.reinterpret("uint32", kf[2 * pp]),
-                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                            txl.reinterpret(kf[2 * pp], ty="uint32"),
+                            txl.reinterpret(kf[2 * pp + 1], ty="uint32"),
                         )
                     txl.ptx.st.shared.v4.b32(
                         vtab.ptr_to([t * D + lane * 4]),
-                        txl.reinterpret("uint32", vf[0]),
-                        txl.reinterpret("uint32", vf[1]),
-                        txl.reinterpret("uint32", vf[2]),
-                        txl.reinterpret("uint32", vf[3]),
+                        txl.reinterpret(vf[0], ty="uint32"),
+                        txl.reinterpret(vf[1], ty="uint32"),
+                        txl.reinterpret(vf[2], ty="uint32"),
+                        txl.reinterpret(vf[3], ty="uint32"),
                     )
                     with txl.If(lane == 0), txl.Then():
                         bf = txl.local_scalar("float32")
                         txl.ptx.cvt.f32.bf16(bf, txl.cast(bbits, "uint16"))
                         txl.ptx.st.shared.v2.b32(
                             svec.ptr_to([2 * t]),
-                            txl.reinterpret("uint32", bf),
-                            txl.reinterpret("uint32", cpart),
+                            txl.reinterpret(bf, ty="uint32"),
+                            txl.reinterpret(cpart, ty="uint32"),
                         )
 
                 S = txl.alloc_local((J * 8,), "uint64", align=8)
@@ -2982,8 +2993,8 @@ def _make_dyn(*, backend_config=None):
                     """Reduce-scatter d1/d2 over the 8 k-slice lanes; lane owns R columns; broadcast u."""
                     bc = txl.alloc_local((2,), "uint32", align=8)
                     txl.ptx.ld.shared.v2.b32(bc[0], bc[1], svec.ptr_to([2 * t]))
-                    beta_t = txl.reinterpret("float32", bc[0])
-                    c_t = txl.reinterpret("float32", bc[1])
+                    beta_t = txl.reinterpret(bc[0], ty="float32")
+                    c_t = txl.reinterpret(bc[1], ty="float32")
                     vals = []
                     for j in range(J):
                         r = txl.local_scalar("float32")
@@ -3004,7 +3015,7 @@ def _make_dyn(*, backend_config=None):
                             vv = txl.local_scalar("uint32")
                             txl.ptx.ld.shared.b32(vv, vtab.ptr_to([t * D + row0 + col]))
                             diff = txl.local_scalar("float32")
-                            txl.ptx["sub.f32"](diff, txl.reinterpret("float32", vv), vals[j])
+                            txl.ptx["sub.f32"](diff, txl.reinterpret(vv, ty="float32"), vals[j])
                             txl.ptx["mul.f32"](ub[j], diff, beta_t)
                             o = txl.local_scalar("float32")
                             txl.ptx["fma.rn.f32"](o, c_t, ub[j], vals[J + j])
@@ -3047,7 +3058,7 @@ def _make_dyn(*, backend_config=None):
                         vv = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(vv, vtab.ptr_to([t * D + row0 + col]))
                         diff = txl.local_scalar("float32")
-                        txl.ptx["sub.f32"](diff, txl.reinterpret("float32", vv), dd1)
+                        txl.ptx["sub.f32"](diff, txl.reinterpret(vv, ty="float32"), dd1)
                         txl.ptx["mul.f32"](uloc[i], diff, beta_t)
                         o = txl.local_scalar("float32")
                         txl.ptx["fma.rn.f32"](o, c_t, uloc[i], dd2)
@@ -3318,7 +3329,7 @@ def _make_dyn(*, backend_config=None):
                             txl.assign(ck, ck + txl.int32(1))
                             with txl.If(tid == 0), txl.Then():
                                 txl.ptx.st.shared.b32(
-                                    mailbox.ptr_to([2]), txl.reinterpret("uint32", tk3)
+                                    mailbox.ptr_to([2]), txl.reinterpret(tk3, ty="uint32")
                                 )
                             txl.cuda.cta_sync()
                             _rng_end(tk)
@@ -3366,7 +3377,7 @@ def _make_dyn(*, backend_config=None):
                                     with txl.If(nxt < total_items), txl.Then():
                                         prefetch_copy(nxt - num_units)
                                     txl.ptx.st.shared.b32(
-                                        mailbox.ptr_to([2]), txl.reinterpret("uint32", tk3)
+                                        mailbox.ptr_to([2]), txl.reinterpret(tk3, ty="uint32")
                                     )
                                 txl.cuda.cta_sync()
                                 _rng_end(tk)
@@ -3620,23 +3631,23 @@ def _make_split(*, backend_config=None):
         out = txl.local_scalar("uint32")
         txl.ptx.shfl_sync.bfly.b32(
             out,
-            txl.reinterpret("uint32", val_f32),
+            txl.reinterpret(val_f32, ty="uint32"),
             txl.uint32(xor),
             txl.uint32(31),
             txl.uint32(FULL),
         )
-        return txl.reinterpret("float32", out)
+        return txl.reinterpret(out, ty="float32")
 
     def _shfl_idx(val_f32, src_lane):
         out = txl.local_scalar("uint32")
         txl.ptx.shfl_sync.idx.b32(
             out,
-            txl.reinterpret("uint32", val_f32),
+            txl.reinterpret(val_f32, ty="uint32"),
             txl.cast(src_lane, "uint32"),
             txl.uint32(31),
             txl.uint32(FULL),
         )
-        return txl.reinterpret("float32", out)
+        return txl.reinterpret(out, ty="float32")
 
     def _f2(a, b):
         return txl.cuda.make_float2(a, b)
@@ -3710,18 +3721,18 @@ def _make_split(*, backend_config=None):
 
         @txl.kernel()
         def kda_decode_persist(
-            q: txl.gptr[txl.bf16],
-            k: txl.gptr[txl.bf16],
-            v: txl.gptr[txl.bf16],
-            g: txl.gptr[txl.bf16],
-            beta: txl.gptr[txl.bf16],
-            a_log: txl.gptr[txl.f32],
-            dt_bias: txl.gptr[txl.f32],
-            state_in: txl.gptr[txl.bf16],
-            state_out: txl.gptr[txl.bf16],
-            output: txl.gptr[txl.bf16],
-            ssm_idx: txl.gptr[txl.i32],
-            num_accepted: txl.gptr[txl.i32],
+            q: txl.Tensor((txl.int64(),), txl.bf16),
+            k: txl.Tensor((txl.int64(),), txl.bf16),
+            v: txl.Tensor((txl.int64(),), txl.bf16),
+            g: txl.Tensor((txl.int64(),), txl.bf16),
+            beta: txl.Tensor((txl.int64(),), txl.bf16),
+            a_log: txl.Tensor((txl.int64(),), txl.f32),
+            dt_bias: txl.Tensor((txl.int64(),), txl.f32),
+            state_in: txl.Tensor((txl.int64(),), txl.bf16),
+            state_out: txl.Tensor((txl.int64(),), txl.bf16),
+            output: txl.Tensor((txl.int64(),), txl.bf16),
+            ssm_idx: txl.Tensor((txl.int64(),), txl.i32),
+            num_accepted: txl.Tensor((txl.int64(),), txl.i32),
             scale: txl.f32,
             lower_bound: txl.f32,
             num_slots: txl.i32,
@@ -4031,13 +4042,14 @@ def _make_split(*, backend_config=None):
                                         with txl.If(kk < MAXC), txl.Then():
                                             txl.ptx.st.shared.b32(
                                                 cpslots.ptr_to([kk]),
-                                                txl.reinterpret("uint32", slot),
+                                                txl.reinterpret(slot, ty="uint32"),
                                             )
                                         txl.assign(c0, c0 + hole_cnt)
                             else:
                                 with txl.If((want_rank >= 0) & (rank == want_rank)), txl.Then():
                                     txl.ptx.st.shared.b32(
-                                        cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot)
+                                        cpslots.ptr_to([dst_idx]),
+                                        txl.reinterpret(slot, ty="uint32"),
                                     )
                         txl.assign(cnt, cnt + txl.cast(txl.popcount(mask), "int32"))
 
@@ -4055,7 +4067,7 @@ def _make_split(*, backend_config=None):
                         txl.cuda.cta_sync()
                     with txl.If(tid == 0), txl.Then():
                         txl.ptx.st.shared.b32(
-                            cpslots.ptr_to([MAXC]), txl.reinterpret("uint32", cnt)
+                            cpslots.ptr_to([MAXC]), txl.reinterpret(cnt, ty="uint32")
                         )
                     txl.cuda.cta_sync()
                     txl.ptx.fence.proxy.async_.shared__cta()
@@ -4133,7 +4145,7 @@ def _make_split(*, backend_config=None):
                         alog = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(alog, raw.ptr_to([gb + 256 + (h % 4) * 2]))
                         txl.ptx["mul.f32"](
-                            tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E)
+                            tmp, txl.reinterpret(alog, ty="float32"), txl.float32(LOG2E)
                         )
                         txl.ptx["ex2.approx.ftz.f32"](ea, tmp)
                         bias = txl.alloc_local((4,), "uint32", align=16)
@@ -4142,7 +4154,7 @@ def _make_split(*, backend_config=None):
                         )
                         for e in range(4):
                             x = txl.local_scalar("float32")
-                            txl.ptx["add.f32"](x, gf[e], txl.reinterpret("float32", bias[e]))
+                            txl.ptx["add.f32"](x, gf[e], txl.reinterpret(bias[e], ty="float32"))
                             txl.ptx["mul.f32"](x, x, ea)
                             txl.ptx["mul.f32"](x, x, txl.float32(-LOG2E))
                             txl.ptx["ex2.approx.ftz.f32"](x, x)
@@ -4160,35 +4172,35 @@ def _make_split(*, backend_config=None):
                         ent = t * FST + pair * 8 + (pair >> 3) * 4
                         txl.ptx.st.shared.v2.b32(
                             ftab.ptr_to([ent + 2]),
-                            txl.reinterpret("uint32", gf[2 * pp]),
-                            txl.reinterpret("uint32", gf[2 * pp + 1]),
+                            txl.reinterpret(gf[2 * pp], ty="uint32"),
+                            txl.reinterpret(gf[2 * pp + 1], ty="uint32"),
                         )
                         txl.ptx.st.shared.v4.b32(
                             ftab.ptr_to([ent + 4]),
-                            txl.reinterpret("uint32", kf[2 * pp]),
-                            txl.reinterpret("uint32", kf[2 * pp + 1]),
-                            txl.reinterpret("uint32", qf[2 * pp]),
-                            txl.reinterpret("uint32", qf[2 * pp + 1]),
+                            txl.reinterpret(kf[2 * pp], ty="uint32"),
+                            txl.reinterpret(kf[2 * pp + 1], ty="uint32"),
+                            txl.reinterpret(qf[2 * pp], ty="uint32"),
+                            txl.reinterpret(qf[2 * pp + 1], ty="uint32"),
                         )
                         txl.ptx.st.shared.v2.b32(
                             ftab.ptr_to([ent + FST]),
-                            txl.reinterpret("uint32", kf[2 * pp]),
-                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                            txl.reinterpret(kf[2 * pp], ty="uint32"),
+                            txl.reinterpret(kf[2 * pp + 1], ty="uint32"),
                         )
                     txl.ptx.st.shared.v4.b32(
                         vtab.ptr_to([t * D + lane * 4]),
-                        txl.reinterpret("uint32", vf[0]),
-                        txl.reinterpret("uint32", vf[1]),
-                        txl.reinterpret("uint32", vf[2]),
-                        txl.reinterpret("uint32", vf[3]),
+                        txl.reinterpret(vf[0], ty="uint32"),
+                        txl.reinterpret(vf[1], ty="uint32"),
+                        txl.reinterpret(vf[2], ty="uint32"),
+                        txl.reinterpret(vf[3], ty="uint32"),
                     )
                     with txl.If(lane == 0), txl.Then():
                         bf = txl.local_scalar("float32")
                         txl.ptx.cvt.f32.bf16(bf, txl.cast(bbits, "uint16"))
                         txl.ptx.st.shared.v2.b32(
                             svec.ptr_to([2 * t]),
-                            txl.reinterpret("uint32", bf),
-                            txl.reinterpret("uint32", cpart),
+                            txl.reinterpret(bf, ty="uint32"),
+                            txl.reinterpret(cpart, ty="uint32"),
                         )
 
                 S = txl.alloc_local((J * 8,), "uint64", align=8)
@@ -4211,8 +4223,8 @@ def _make_split(*, backend_config=None):
                         """Reduce-scatter d1/d2 over the 8 k-slice lanes; lane owns R columns; broadcast u."""
                         bc = txl.alloc_local((2,), "uint32", align=8)
                         txl.ptx.ld.shared.v2.b32(bc[0], bc[1], svec.ptr_to([2 * t]))
-                        beta_t = txl.reinterpret("float32", bc[0])
-                        c_t = txl.reinterpret("float32", bc[1])
+                        beta_t = txl.reinterpret(bc[0], ty="float32")
+                        c_t = txl.reinterpret(bc[1], ty="float32")
                         vals = []
                         for j in range(J):
                             r = txl.local_scalar("float32")
@@ -4237,7 +4249,7 @@ def _make_split(*, backend_config=None):
                                 vv = txl.local_scalar("uint32")
                                 txl.ptx.ld.shared.b32(vv, vtab.ptr_to([t * D + row0 + col]))
                                 diff = txl.local_scalar("float32")
-                                txl.ptx["sub.f32"](diff, txl.reinterpret("float32", vv), vals[j])
+                                txl.ptx["sub.f32"](diff, txl.reinterpret(vv, ty="float32"), vals[j])
                                 txl.ptx["mul.f32"](ub[j], diff, beta_t)
                                 o = txl.local_scalar("float32")
                                 txl.ptx["fma.rn.f32"](o, c_t, ub[j], vals[J + j])
@@ -4280,7 +4292,7 @@ def _make_split(*, backend_config=None):
                             vv = txl.local_scalar("uint32")
                             txl.ptx.ld.shared.b32(vv, vtab.ptr_to([t * D + row0 + col]))
                             diff = txl.local_scalar("float32")
-                            txl.ptx["sub.f32"](diff, txl.reinterpret("float32", vv), dd1)
+                            txl.ptx["sub.f32"](diff, txl.reinterpret(vv, ty="float32"), dd1)
                             txl.ptx["mul.f32"](uloc[i], diff, beta_t)
                             o = txl.local_scalar("float32")
                             txl.ptx["fma.rn.f32"](o, c_t, uloc[i], dd2)
@@ -4938,23 +4950,23 @@ def _make_clc(*, backend_config=None):
         out = txl.local_scalar("uint32")
         txl.ptx.shfl_sync.bfly.b32(
             out,
-            txl.reinterpret("uint32", val_f32),
+            txl.reinterpret(val_f32, ty="uint32"),
             txl.uint32(xor),
             txl.uint32(31),
             txl.uint32(FULL),
         )
-        return txl.reinterpret("float32", out)
+        return txl.reinterpret(out, ty="float32")
 
     def _shfl_idx(val_f32, src_lane):
         out = txl.local_scalar("uint32")
         txl.ptx.shfl_sync.idx.b32(
             out,
-            txl.reinterpret("uint32", val_f32),
+            txl.reinterpret(val_f32, ty="uint32"),
             txl.cast(src_lane, "uint32"),
             txl.uint32(31),
             txl.uint32(FULL),
         )
-        return txl.reinterpret("float32", out)
+        return txl.reinterpret(out, ty="float32")
 
     def _f2(a, b):
         return txl.cuda.make_float2(a, b)
@@ -5021,18 +5033,18 @@ def _make_clc(*, backend_config=None):
 
         @txl.kernel()
         def kda_decode_persist(
-            q: txl.gptr[txl.bf16],
-            k: txl.gptr[txl.bf16],
-            v: txl.gptr[txl.bf16],
-            g: txl.gptr[txl.bf16],
-            beta: txl.gptr[txl.bf16],
-            a_log: txl.gptr[txl.f32],
-            dt_bias: txl.gptr[txl.f32],
-            state_in: txl.gptr[txl.bf16],
-            state_out: txl.gptr[txl.bf16],
-            output: txl.gptr[txl.bf16],
-            ssm_idx: txl.gptr[txl.i32],
-            num_accepted: txl.gptr[txl.i32],
+            q: txl.Tensor((txl.int64(),), txl.bf16),
+            k: txl.Tensor((txl.int64(),), txl.bf16),
+            v: txl.Tensor((txl.int64(),), txl.bf16),
+            g: txl.Tensor((txl.int64(),), txl.bf16),
+            beta: txl.Tensor((txl.int64(),), txl.bf16),
+            a_log: txl.Tensor((txl.int64(),), txl.f32),
+            dt_bias: txl.Tensor((txl.int64(),), txl.f32),
+            state_in: txl.Tensor((txl.int64(),), txl.bf16),
+            state_out: txl.Tensor((txl.int64(),), txl.bf16),
+            output: txl.Tensor((txl.int64(),), txl.bf16),
+            ssm_idx: txl.Tensor((txl.int64(),), txl.i32),
+            num_accepted: txl.Tensor((txl.int64(),), txl.i32),
             scale: txl.f32,
             lower_bound: txl.f32,
             num_slots: txl.i32,
@@ -5320,13 +5332,14 @@ def _make_clc(*, backend_config=None):
                                         with txl.If(kk < MAXC), txl.Then():
                                             txl.ptx.st.shared.b32(
                                                 cpslots.ptr_to([kk]),
-                                                txl.reinterpret("uint32", slot),
+                                                txl.reinterpret(slot, ty="uint32"),
                                             )
                                         txl.assign(c0, c0 + hole_cnt)
                             else:
                                 with txl.If((want_rank >= 0) & (rank == want_rank)), txl.Then():
                                     txl.ptx.st.shared.b32(
-                                        cpslots.ptr_to([dst_idx]), txl.reinterpret("uint32", slot)
+                                        cpslots.ptr_to([dst_idx]),
+                                        txl.reinterpret(slot, ty="uint32"),
                                     )
                         txl.assign(cnt, cnt + txl.cast(txl.popcount(mask), "int32"))
 
@@ -5344,7 +5357,7 @@ def _make_clc(*, backend_config=None):
                         txl.cuda.cta_sync()
                     with txl.If(tid == 0), txl.Then():
                         txl.ptx.st.shared.b32(
-                            cpslots.ptr_to([MAXC]), txl.reinterpret("uint32", cnt)
+                            cpslots.ptr_to([MAXC]), txl.reinterpret(cnt, ty="uint32")
                         )
                     txl.cuda.cta_sync()
                     ucnt = txl.local_scalar("int32")
@@ -5421,7 +5434,7 @@ def _make_clc(*, backend_config=None):
                         alog = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(alog, raw.ptr_to([gb + 256 + (h % 4) * 2]))
                         txl.ptx["mul.f32"](
-                            tmp, txl.reinterpret("float32", alog), txl.float32(LOG2E)
+                            tmp, txl.reinterpret(alog, ty="float32"), txl.float32(LOG2E)
                         )
                         txl.ptx["ex2.approx.ftz.f32"](ea, tmp)
                         bias = txl.alloc_local((4,), "uint32", align=16)
@@ -5430,7 +5443,7 @@ def _make_clc(*, backend_config=None):
                         )
                         for e in range(4):
                             x = txl.local_scalar("float32")
-                            txl.ptx["add.f32"](x, gf[e], txl.reinterpret("float32", bias[e]))
+                            txl.ptx["add.f32"](x, gf[e], txl.reinterpret(bias[e], ty="float32"))
                             txl.ptx["mul.f32"](x, x, ea)
                             txl.ptx["mul.f32"](x, x, txl.float32(-LOG2E))
                             txl.ptx["ex2.approx.ftz.f32"](x, x)
@@ -5448,35 +5461,35 @@ def _make_clc(*, backend_config=None):
                         ent = t * FST + pair * 8 + (pair >> 3) * 4
                         txl.ptx.st.shared.v2.b32(
                             ftab.ptr_to([ent + 2]),
-                            txl.reinterpret("uint32", gf[2 * pp]),
-                            txl.reinterpret("uint32", gf[2 * pp + 1]),
+                            txl.reinterpret(gf[2 * pp], ty="uint32"),
+                            txl.reinterpret(gf[2 * pp + 1], ty="uint32"),
                         )
                         txl.ptx.st.shared.v4.b32(
                             ftab.ptr_to([ent + 4]),
-                            txl.reinterpret("uint32", kf[2 * pp]),
-                            txl.reinterpret("uint32", kf[2 * pp + 1]),
-                            txl.reinterpret("uint32", qf[2 * pp]),
-                            txl.reinterpret("uint32", qf[2 * pp + 1]),
+                            txl.reinterpret(kf[2 * pp], ty="uint32"),
+                            txl.reinterpret(kf[2 * pp + 1], ty="uint32"),
+                            txl.reinterpret(qf[2 * pp], ty="uint32"),
+                            txl.reinterpret(qf[2 * pp + 1], ty="uint32"),
                         )
                         txl.ptx.st.shared.v2.b32(
                             ftab.ptr_to([ent + FST]),
-                            txl.reinterpret("uint32", kf[2 * pp]),
-                            txl.reinterpret("uint32", kf[2 * pp + 1]),
+                            txl.reinterpret(kf[2 * pp], ty="uint32"),
+                            txl.reinterpret(kf[2 * pp + 1], ty="uint32"),
                         )
                     txl.ptx.st.shared.v4.b32(
                         vtab.ptr_to([t * D + lane * 4]),
-                        txl.reinterpret("uint32", vf[0]),
-                        txl.reinterpret("uint32", vf[1]),
-                        txl.reinterpret("uint32", vf[2]),
-                        txl.reinterpret("uint32", vf[3]),
+                        txl.reinterpret(vf[0], ty="uint32"),
+                        txl.reinterpret(vf[1], ty="uint32"),
+                        txl.reinterpret(vf[2], ty="uint32"),
+                        txl.reinterpret(vf[3], ty="uint32"),
                     )
                     with txl.If(lane == 0), txl.Then():
                         bf = txl.local_scalar("float32")
                         txl.ptx.cvt.f32.bf16(bf, txl.cast(bbits, "uint16"))
                         txl.ptx.st.shared.v2.b32(
                             svec.ptr_to([2 * t]),
-                            txl.reinterpret("uint32", bf),
-                            txl.reinterpret("uint32", cpart),
+                            txl.reinterpret(bf, ty="uint32"),
+                            txl.reinterpret(cpart, ty="uint32"),
                         )
 
                 S = txl.alloc_local((J * 8,), "uint64", align=8)
@@ -5494,8 +5507,8 @@ def _make_clc(*, backend_config=None):
                     """Reduce-scatter d1/d2 over the 8 k-slice lanes; lane owns R columns; broadcast u."""
                     bc = txl.alloc_local((2,), "uint32", align=8)
                     txl.ptx.ld.shared.v2.b32(bc[0], bc[1], svec.ptr_to([2 * t]))
-                    beta_t = txl.reinterpret("float32", bc[0])
-                    c_t = txl.reinterpret("float32", bc[1])
+                    beta_t = txl.reinterpret(bc[0], ty="float32")
+                    c_t = txl.reinterpret(bc[1], ty="float32")
                     vals = []
                     for j in range(J):
                         r = txl.local_scalar("float32")
@@ -5516,7 +5529,7 @@ def _make_clc(*, backend_config=None):
                             vv = txl.local_scalar("uint32")
                             txl.ptx.ld.shared.b32(vv, vtab.ptr_to([t * D + row0 + col]))
                             diff = txl.local_scalar("float32")
-                            txl.ptx["sub.f32"](diff, txl.reinterpret("float32", vv), vals[j])
+                            txl.ptx["sub.f32"](diff, txl.reinterpret(vv, ty="float32"), vals[j])
                             txl.ptx["mul.f32"](ub[j], diff, beta_t)
                             o = txl.local_scalar("float32")
                             txl.ptx["fma.rn.f32"](o, c_t, ub[j], vals[J + j])
@@ -5559,7 +5572,7 @@ def _make_clc(*, backend_config=None):
                         vv = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(vv, vtab.ptr_to([t * D + row0 + col]))
                         diff = txl.local_scalar("float32")
-                        txl.ptx["sub.f32"](diff, txl.reinterpret("float32", vv), dd1)
+                        txl.ptx["sub.f32"](diff, txl.reinterpret(vv, ty="float32"), dd1)
                         txl.ptx["mul.f32"](uloc[i], diff, beta_t)
                         o = txl.local_scalar("float32")
                         txl.ptx["fma.rn.f32"](o, c_t, uloc[i], dd2)
@@ -5704,14 +5717,14 @@ def _make_clc(*, backend_config=None):
                         txl.assign(clc_phase, clc_phase ^ txl.int32(1))
                         cancelled = txl.local_scalar("uint32")
                         txl.query_cancel_first_ctaid_x(cancelled, txl.address_of(clc_handle[0]))
-                        txl.assign(nxt_u, txl.reinterpret("int32", cancelled))
+                        txl.assign(nxt_u, txl.reinterpret(cancelled, ty="int32"))
                         txl.ptx.st.shared.b32(clc_mailbox.ptr_to([0]), cancelled)
                         with txl.If(cancelled != txl.uint32(CLC_SENTINEL)), txl.Then():
-                            issue_vec(txl.reinterpret("int32", cancelled), vcount & 1)
+                            issue_vec(txl.reinterpret(cancelled, ty="int32"), vcount & 1)
                             txl.ptx.cp.async_.bulk.wait_group.read(0)
                             issue_state(
-                                txl.reinterpret("int32", cancelled),
-                                unit_coords(txl.reinterpret("int32", cancelled))[3],
+                                txl.reinterpret(cancelled, ty="int32"),
+                                unit_coords(txl.reinterpret(cancelled, ty="int32"))[3],
                                 next_state_stage,
                             )
                             txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
@@ -5821,7 +5834,7 @@ def _make_clc(*, backend_config=None):
                     _rng_end(tk)
                     next_bits = txl.local_scalar("uint32")
                     txl.ptx.ld.shared.b32(next_bits, clc_mailbox.ptr_to([0]))
-                    txl.assign(nxt_u, txl.reinterpret("int32", next_bits))
+                    txl.assign(nxt_u, txl.reinterpret(next_bits, ty="int32"))
                     txl.assign(u, nxt_u)
 
                 if spec:

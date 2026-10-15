@@ -577,13 +577,13 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
                         txl.assign(
                             source_bases[item],
                             txl.reinterpret(
-                                "uint64",
                                 a.ptr_to(
                                     [
                                         txl.cast(token_row, "int64") * K_dim // 2
                                         + txl.cast(byte_base, "int64")
                                     ]
                                 ),
+                                ty="uint64",
                             ),
                         )
                     else:
@@ -603,7 +603,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
                             destination = swizzled_base + stage_offset + item * 2_048
                             txl.ptx["cp.async.cg.shared.global.L2::128B"](
                                 smem.ptr_to([destination]),
-                                txl.reinterpret("handle", source_bases[item] + k_offset),
+                                txl.reinterpret(source_bases[item] + k_offset, ty="handle"),
                                 16,
                                 txl.cast(txl.if_then_else(predicates[item] != 0, 16, 0), "uint32"),
                             )
@@ -1158,18 +1158,18 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
             txl.ptx.griddepcontrol.launch_dependents()
 
     kernel.__annotations__ = {
-        "a": txl.gptr[txl.u8, (seq_len * K_dim // 2,)],
-        "b": txl.gptr[txl.u8, (num_experts * N * K_dim // 2,)],
-        "sfa": txl.gptr[txl.u8, (seq_len * K_dim // 16,)],
-        "sfb": txl.gptr[txl.u8, (num_experts * N * K_dim // 16,)],
-        "c": txl.gptr[txl.u8, (permuted_m * N // 4,)],
-        "sfc": txl.gptr[txl.u8, (permuted_m * N // 32,)],
-        "alpha": txl.gptr[txl.f32, (num_experts,)],
-        "tile_idx_to_expert_idx": txl.gptr[txl.i32, (permuted_tiles,)],
-        "tile_idx_to_mn_limit": txl.gptr[txl.i32, (permuted_tiles,)],
-        "token_id_mapping": txl.gptr[txl.i32, (permuted_m,)],
-        "num_non_exiting_tiles": txl.gptr[txl.i32, (1,)],
-        "global_scale": txl.gptr[txl.f32, (1,)],
+        "a": txl.Tensor((seq_len * K_dim // 2,), txl.u8),
+        "b": txl.Tensor((num_experts * N * K_dim // 2,), txl.u8),
+        "sfa": txl.Tensor((seq_len * K_dim // 16,), txl.u8),
+        "sfb": txl.Tensor((num_experts * N * K_dim // 16,), txl.u8),
+        "c": txl.Tensor((permuted_m * N // 4,), txl.u8),
+        "sfc": txl.Tensor((permuted_m * N // 32,), txl.u8),
+        "alpha": txl.Tensor((num_experts,), txl.f32),
+        "tile_idx_to_expert_idx": txl.Tensor((permuted_tiles,), txl.i32),
+        "tile_idx_to_mn_limit": txl.Tensor((permuted_tiles,), txl.i32),
+        "token_id_mapping": txl.Tensor((permuted_m,), txl.i32),
+        "num_non_exiting_tiles": txl.Tensor((1,), txl.i32),
+        "global_scale": txl.Tensor((1,), txl.f32),
     }
     return txl.kernel()(kernel)
 

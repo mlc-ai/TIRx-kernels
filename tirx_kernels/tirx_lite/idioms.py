@@ -690,10 +690,10 @@ def mma_chain(mma, d, *, a, b, idesc, pred, accumulate, guard, dol=None, k_range
             if a_is_view:
                 a_op = a_desc + a_off(kp)
             else:
-                a_op = T.Cast("uint32", a + (a_base + kp) * a_step)
+                a_op = T.Cast(a + (a_base + kp) * a_step, "uint32")
             T.evaluate(
                 T.ptx[mma](
-                    T.Cast("uint32", d),
+                    T.Cast(d, "uint32"),
                     a_op,
                     b_desc + b_off(kp),
                     T.uint32(idesc),

@@ -94,10 +94,10 @@ def make_kernel(hidden_size: int, *, backend_config=None):
     # original's 34.
     @txl.kernel()
     def rmsnorm(
-        inp: txl.gptr[txl.f16],
-        wgt: txl.gptr[txl.f16],
-        out: txl.gptr[txl.f16],
-        # txl.gptr is 1-D, so the [batch, hidden] shape cannot carry the row
+        inp: txl.Tensor((txl.int64(),), txl.f16),
+        wgt: txl.Tensor((txl.int64(),), txl.f16),
+        out: txl.Tensor((txl.int64(),), txl.f16),
+        # This Tensor parameter is 1-D, so the [batch, hidden] shape cannot carry the row
         # count the way the original's match_buffer does; it is an argument.
         batch_size: txl.i32,
     ):
@@ -137,7 +137,7 @@ def make_kernel(hidden_size: int, *, backend_config=None):
         def gidx(offset):
             """A global element index, promoted to the buffer's int64 axis ONCE.
 
-            ``txl.gptr``'s extent is an ``int64`` Var, so an index built out of
+            This Tensor parameter's extent is an ``int64`` Var, so an index built out of
             int32 terms is widened term by term — three ``IMAD.WIDE`` where the
             original (whose match_buffer shape is int32) does the whole address
             in 32 bits and widens at the pointer.
@@ -149,7 +149,7 @@ def make_kernel(hidden_size: int, *, backend_config=None):
             this implies is the original's too (largest config: 4113*8192).
             """
             txl.assign(goff, offset)
-            return txl.Cast("int64", goff)
+            return txl.Cast(goff, "int64")
 
         def warp_sum(acc):
             """Butterfly sum of ``acc[0]`` over the 32 lanes — orig:L725-729.
@@ -163,12 +163,12 @@ def make_kernel(hidden_size: int, *, backend_config=None):
             for delta in (16, 8, 4, 2, 1):
                 txl.ptx.shfl_sync.bfly.b32(
                     peer,
-                    txl.reinterpret("uint32", acc[0]),
+                    txl.reinterpret(acc[0], ty="uint32"),
                     txl.uint32(delta),
                     txl.uint32(31),
                     txl.uint32(FULL_MASK),
                 )
-                txl.assign(acc[0], acc[0] + txl.reinterpret("float32", peer))
+                txl.assign(acc[0], acc[0] + txl.reinterpret(peer, ty="float32"))
 
         def scale_pair(dst, i, a, b):
             """``dst[2i:2i+2] = a * b`` as one packed f32x2 multiply.

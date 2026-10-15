@@ -161,12 +161,12 @@ def get_kernel(
 
     @txl.kernel()
     def nvfp4_quantize_per_token(
-        in_global: txl.gptr[dtype],
-        out_global: txl.gptr[txl.u8],
-        sf_out: txl.gptr[txl.u8],
-        pts_out: txl.gptr[txl.f32],
+        in_global: txl.Tensor((txl.int64(),), dtype),
+        out_global: txl.Tensor((txl.int64(),), txl.u8),
+        sf_out: txl.Tensor((txl.int64(),), txl.u8),
+        pts_out: txl.Tensor((txl.int64(),), txl.f32),
         m_rows: txl.i32,
-        gsi: txl.gptr[txl.f32],
+        gsi: txl.Tensor((txl.int64(),), txl.f32),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=m, block=_PER_TOKEN_WARPS * 32),

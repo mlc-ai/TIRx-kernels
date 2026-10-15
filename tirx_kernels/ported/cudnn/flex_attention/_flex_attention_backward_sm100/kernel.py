@@ -115,7 +115,7 @@ def _desc_at(base, shared_address):
         "uint64",
     )
     base_bits = (
-        txl.reinterpret(txl.u64, txl.int64(base))
+        txl.reinterpret(txl.int64(base), ty=txl.u64)
         if isinstance(base, int) and base < 0
         else txl.uint64(base)
     )
@@ -196,9 +196,9 @@ def _tmem_store16(src, base, address):
 def _shfl_bfly_f32(value, lane_xor, membermask):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out, txl.reinterpret(txl.u32, value), txl.uint32(lane_xor), txl.uint32(31), membermask
+        out, txl.reinterpret(value, ty=txl.u32), txl.uint32(lane_xor), txl.uint32(31), membermask
     )
-    return txl.reinterpret(txl.f32, out)
+    return txl.reinterpret(out, ty=txl.f32)
 
 
 def _butterfly_sum_f32(value):
@@ -604,10 +604,10 @@ def get_kernel(*, backend_config=None, **config):
 
     @txl.kernel()
     def preprocess(
-        o: txl.gptr[txl.bf16],
-        do: txl.gptr[txl.bf16],
-        lse: txl.gptr[txl.f32],
-        workspace: txl.gptr[txl.f32],
+        o: txl.Tensor((txl.int64(),), txl.bf16),
+        do: txl.Tensor((txl.int64(),), txl.bf16),
+        lse: txl.Tensor((txl.int64(),), txl.f32),
+        workspace: txl.Tensor((txl.int64(),), txl.f32),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -716,32 +716,32 @@ def get_kernel(*, backend_config=None, **config):
 
     @txl.kernel()
     def bwd(
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        do_map: txl.TensorMap,
-        dv_map: txl.TensorMap,
-        dk_map: txl.TensorMap,
-        dk_output: txl.gptr[elem_type],
-        dv_output: txl.gptr[elem_type],
-        cu_q: txl.gptr[txl.i32],
-        cu_k: txl.gptr[txl.i32],
-        partial_count: txl.gptr[txl.i32],
-        partial_index: txl.gptr[txl.i32],
-        full_count: txl.gptr[txl.i32],
-        full_index: txl.gptr[txl.i32],
-        cu_k_blocks: txl.gptr[txl.i32],
-        dq_write_order: txl.gptr[txl.i32],
-        dq_write_order_full: txl.gptr[txl.i32],
-        partial_offset: txl.gptr[txl.i32],
-        full_offset: txl.gptr[txl.i32],
-        packed_mask: txl.gptr[txl.u32],
-        sequence_desc: txl.gptr[txl.i32],
-        work_desc: txl.gptr[txl.i32],
-        dq_semaphore: txl.gptr[txl.i32],
-        dk_semaphore: txl.gptr[txl.i32],
-        dv_semaphore: txl.gptr[txl.i32],
-        workspace: txl.gptr[txl.f32],
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        do_map: txl.Ptr(txl.TensorMap),
+        dv_map: txl.Ptr(txl.TensorMap),
+        dk_map: txl.Ptr(txl.TensorMap),
+        dk_output: txl.Tensor((txl.int64(),), elem_type),
+        dv_output: txl.Tensor((txl.int64(),), elem_type),
+        cu_q: txl.Tensor((txl.int64(),), txl.i32),
+        cu_k: txl.Tensor((txl.int64(),), txl.i32),
+        partial_count: txl.Tensor((txl.int64(),), txl.i32),
+        partial_index: txl.Tensor((txl.int64(),), txl.i32),
+        full_count: txl.Tensor((txl.int64(),), txl.i32),
+        full_index: txl.Tensor((txl.int64(),), txl.i32),
+        cu_k_blocks: txl.Tensor((txl.int64(),), txl.i32),
+        dq_write_order: txl.Tensor((txl.int64(),), txl.i32),
+        dq_write_order_full: txl.Tensor((txl.int64(),), txl.i32),
+        partial_offset: txl.Tensor((txl.int64(),), txl.i32),
+        full_offset: txl.Tensor((txl.int64(),), txl.i32),
+        packed_mask: txl.Tensor((txl.int64(),), txl.u32),
+        sequence_desc: txl.Tensor((txl.int64(),), txl.i32),
+        work_desc: txl.Tensor((txl.int64(),), txl.i32),
+        dq_semaphore: txl.Tensor((txl.int64(),), txl.i32),
+        dk_semaphore: txl.Tensor((txl.int64(),), txl.i32),
+        dv_semaphore: txl.Tensor((txl.int64(),), txl.i32),
+        workspace: txl.Tensor((txl.int64(),), txl.f32),
         softmax_scale: txl.f32,
     ):
         txl.device_entry(
@@ -1189,10 +1189,10 @@ def get_kernel(*, backend_config=None, **config):
 
             # Exact dimension-selected source descriptors. K-major views carry
             # the 0x10000 leading-dimension field; transpose views do not.
-            desc_qk_k = txl.reinterpret(txl.u64, txl.int64(qk_native_k_base))
-            desc_qk_transpose = txl.reinterpret(txl.u64, txl.int64(qk_transpose_base))
-            desc_v_k = txl.reinterpret(txl.u64, txl.int64(v_native_k_base))
-            desc_v_transpose = txl.reinterpret(txl.u64, txl.int64(v_transpose_base))
+            desc_qk_k = txl.reinterpret(txl.int64(qk_native_k_base), ty=txl.u64)
+            desc_qk_transpose = txl.reinterpret(txl.int64(qk_transpose_base), ty=txl.u64)
+            desc_v_k = txl.reinterpret(txl.int64(v_native_k_base), ty=txl.u64)
+            desc_v_transpose = txl.reinterpret(txl.int64(v_transpose_base), ty=txl.u64)
             desc_dq_a = txl.uint64(0x4000404004000000)
             d_k = _desc_at(desc_qk_k, smem_base + txl.uint32(off_sk))
             d_k_mn = _desc_at(desc_qk_transpose, smem_base + txl.uint32(off_sk))
@@ -1385,7 +1385,9 @@ def get_kernel(*, backend_config=None, **config):
                             txl.shift_right(mask_words[j // 32], txl.uint32(j % 32)), txl.uint32(1)
                         )
                         with txl.If(keep == txl.uint32(0)), txl.Then():
-                            txl.assign(scores[j], txl.reinterpret(txl.f32, txl.uint32(0xFF800000)))
+                            txl.assign(
+                                scores[j], txl.reinterpret(txl.uint32(0xFF800000), ty=txl.f32)
+                            )
                 for rep in range(2):
                     for pair in range(16):
                         j = rep * 32 + pair * 2
@@ -1879,7 +1881,9 @@ def get_kernel(*, backend_config=None, **config):
     def make_postprocess(seq_len, padded_len, source_base):
         @txl.kernel()
         def postprocess(
-            workspace: txl.gptr[txl.f32], output: txl.gptr[txl.bf16], output_scale: txl.f32
+            workspace: txl.Tensor((txl.int64(),), txl.f32),
+            output: txl.Tensor((txl.int64(),), txl.bf16),
+            output_scale: txl.f32,
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(

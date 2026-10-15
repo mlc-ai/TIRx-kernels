@@ -187,17 +187,17 @@ def _ld_shared_b32(buffer, index):
     """``ld.shared.b32``."""
     out = txl.local_scalar("uint32")
     txl.ptx.ld.shared.b32(out, buffer.ptr_to([index]))
-    return txl.reinterpret("float32", out)
+    return txl.reinterpret(out, ty="float32")
 
 
 def _st_shared_f32(buffer, index, value):
     """``st.shared.b32``."""
-    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret("uint32", value))
+    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret(value, ty="uint32"))
 
 
 def _st_shared_f32_pred(buffer, index, value, pred):
     """``@p st.shared.b32`` -- the ``lane == 0 and wid < SW`` publication."""
-    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret("uint32", value), pred=pred)
+    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret(value, ty="uint32"), pred=pred)
 
 
 def _ld_shared_granule(buffer, index):
@@ -477,18 +477,18 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any], *, backend_config=N
 
     @txl.kernel()
     def _recurrent_kda_decode_grouped(
-        q: txl.gptr[txl.bf16, (QK_ELEMENTS,)],
-        k: txl.gptr[txl.bf16, (QK_ELEMENTS,)],
-        v: txl.gptr[txl.bf16, (V_ELEMENTS,)],
-        g: txl.gptr[txl.bf16, (V_ELEMENTS,)],
-        beta: txl.gptr[txl.bf16, (BETA_ELEMENTS,)],
-        a_log: txl.gptr[txl.f32, (A_LOG_ELEMENTS,)],
-        dt_bias: txl.gptr[txl.f32, (DT_BIAS_ELEMENTS,)],
-        cu: txl.gptr[txl.i32, (CU_ELEMENTS,)],
-        ssm_idx: txl.gptr[txl.i32, (SSM_IDX_ELEMENTS,)],
-        nat: txl.gptr[txl.i32, (NAT_ELEMENTS,)],
-        state: txl.gptr[txl.bf16, (STATE_ELEMENTS,)],
-        out: txl.gptr[txl.bf16, (V_ELEMENTS,)],
+        q: txl.Tensor((QK_ELEMENTS,), txl.bf16),
+        k: txl.Tensor((QK_ELEMENTS,), txl.bf16),
+        v: txl.Tensor((V_ELEMENTS,), txl.bf16),
+        g: txl.Tensor((V_ELEMENTS,), txl.bf16),
+        beta: txl.Tensor((BETA_ELEMENTS,), txl.bf16),
+        a_log: txl.Tensor((A_LOG_ELEMENTS,), txl.f32),
+        dt_bias: txl.Tensor((DT_BIAS_ELEMENTS,), txl.f32),
+        cu: txl.Tensor((CU_ELEMENTS,), txl.i32),
+        ssm_idx: txl.Tensor((SSM_IDX_ELEMENTS,), txl.i32),
+        nat: txl.Tensor((NAT_ELEMENTS,), txl.i32),
+        state: txl.Tensor((STATE_ELEMENTS,), txl.bf16),
+        out: txl.Tensor((V_ELEMENTS,), txl.bf16),
         q_total: txl.i32,
         g_stride_q: txl.i32,
         state_slot_stride: txl.i64,

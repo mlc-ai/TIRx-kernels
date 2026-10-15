@@ -1581,16 +1581,16 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                     )
 
     kernel.__annotations__ = {
-        "a": txl.gptr[txl.u8, (kernel_m * K_dim // 2,)],
-        "b": txl.gptr[txl.u8, (kernel_n * K_dim // 2,)],
-        "sfa": txl.gptr[
-            txl.u8, (_ceil_div(kernel_m, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)
-        ],
-        "sfb": txl.gptr[
-            txl.u8, (_ceil_div(kernel_n, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,)
-        ],
-        "c": txl.gptr[txl.u8, (kernel_m * kernel_n * 2,)],
-        "alpha_ptr": txl.gptr[txl.f32, (1,)],
+        "a": txl.Tensor((kernel_m * K_dim // 2,), txl.u8),
+        "b": txl.Tensor((kernel_n * K_dim // 2,), txl.u8),
+        "sfa": txl.Tensor(
+            (_ceil_div(kernel_m, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,), txl.u8
+        ),
+        "sfb": txl.Tensor(
+            (_ceil_div(kernel_n, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,), txl.u8
+        ),
+        "c": txl.Tensor((kernel_m * kernel_n * 2,), txl.u8),
+        "alpha_ptr": txl.Tensor((1,), txl.f32),
     }
     return txl.kernel()(kernel)
 

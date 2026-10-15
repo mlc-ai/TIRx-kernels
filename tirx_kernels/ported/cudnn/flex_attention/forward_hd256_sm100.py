@@ -240,11 +240,11 @@ def _load_u32x4(buffer, index):
 def _ld_shared_f32(buffer, index):
     bits = txl.local_scalar("uint32")
     txl.ptx.ld.shared.b32(bits, buffer.ptr_to([index]))
-    return txl.reinterpret("float32", bits)
+    return txl.reinterpret(bits, ty="float32")
 
 
 def _st_shared_f32(buffer, index, value):
-    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret("uint32", value))
+    txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret(value, ty="uint32"))
 
 
 def _exp2(value):
@@ -1630,22 +1630,22 @@ def _make_kernel(*, backend_config=None, **config):
             )
 
     kernel.__annotations__ = {
-        "q": txl.gptr[elem_dtype],
-        "k": txl.gptr[elem_dtype],
-        "v": txl.gptr[elem_dtype],
-        "out": txl.gptr[elem_dtype],
-        "lse": txl.gptr[txl.f32],
-        "cu_q": txl.gptr[txl.i32],
-        "cu_k": txl.gptr[txl.i32],
-        "sequence_desc": txl.gptr[txl.i32],
-        "mask_block_cnt": txl.gptr[txl.i32],
-        "mask_block_offset": txl.gptr[txl.i32],
-        "mask_block_idx": txl.gptr[txl.i32],
-        "full_block_cnt": txl.gptr[txl.i32],
-        "full_block_offset": txl.gptr[txl.i32],
-        "full_block_idx": txl.gptr[txl.i32],
-        "mask_payload": txl.gptr[txl.u32],
-        "fwd_work_desc": txl.gptr[txl.i32],
+        "q": txl.Tensor((txl.int64(),), elem_dtype),
+        "k": txl.Tensor((txl.int64(),), elem_dtype),
+        "v": txl.Tensor((txl.int64(),), elem_dtype),
+        "out": txl.Tensor((txl.int64(),), elem_dtype),
+        "lse": txl.Tensor((txl.int64(),), txl.f32),
+        "cu_q": txl.Tensor((txl.int64(),), txl.i32),
+        "cu_k": txl.Tensor((txl.int64(),), txl.i32),
+        "sequence_desc": txl.Tensor((txl.int64(),), txl.i32),
+        "mask_block_cnt": txl.Tensor((txl.int64(),), txl.i32),
+        "mask_block_offset": txl.Tensor((txl.int64(),), txl.i32),
+        "mask_block_idx": txl.Tensor((txl.int64(),), txl.i32),
+        "full_block_cnt": txl.Tensor((txl.int64(),), txl.i32),
+        "full_block_offset": txl.Tensor((txl.int64(),), txl.i32),
+        "full_block_idx": txl.Tensor((txl.int64(),), txl.i32),
+        "mask_payload": txl.Tensor((txl.int64(),), txl.u32),
+        "fwd_work_desc": txl.Tensor((txl.int64(),), txl.i32),
         "softmax_scale_log2": txl.f32,
         "softmax_scale": txl.f32,
     }

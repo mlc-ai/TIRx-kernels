@@ -88,14 +88,15 @@ def _fmaf_rn(a, b, c):
 
 def _unpack_lo(word, dtype):
     return txl.cast(
-        txl.reinterpret(dtype, txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16")),
+        txl.reinterpret(txl.cast(txl.bitwise_and(word, txl.uint32(0xFFFF)), "uint16"), ty=dtype),
         "float32",
     )
 
 
 def _unpack_hi(word, dtype):
     return txl.cast(
-        txl.reinterpret(dtype, txl.cast(txl.shift_right(word, txl.uint32(16)), "uint16")), "float32"
+        txl.reinterpret(txl.cast(txl.shift_right(word, txl.uint32(16)), "uint16"), ty=dtype),
+        "float32",
     )
 
 
@@ -123,18 +124,21 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, *, backend_config=
         if thor_bf16:
             # BF16 widening places its bits in the high half of an FP32 word.
             txl.ptx.mov.b32(
-                dst[2 * pair], txl.reinterpret("float32", txl.shift_left(word, txl.uint32(16)))
+                dst[2 * pair], txl.reinterpret(txl.shift_left(word, txl.uint32(16)), ty="float32")
             )
             txl.ptx.mov.b32(
                 dst[2 * pair + 1],
-                txl.reinterpret("float32", txl.bitwise_and(word, txl.uint32(0xFFFF0000))),
+                txl.reinterpret(txl.bitwise_and(word, txl.uint32(0xFFFF0000)), ty="float32"),
             )
         else:
             txl.ptx.mov.b32(dst[2 * pair], _unpack_lo(word, dtype))
             txl.ptx.mov.b32(dst[2 * pair + 1], _unpack_hi(word, dtype))
 
     @txl.kernel()
-    def act_and_mul(input_global: txl.gptr[dtype, 2], out_global: txl.gptr[dtype, 2]):
+    def act_and_mul(
+        input_global: txl.Tensor((txl.int64(), txl.int64()), dtype),
+        out_global: txl.Tensor((txl.int64(), txl.int64()), dtype),
+    ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_tokens, block=(block_size + 31) // 32 * 32),
             backend_config=resolve_backend_config(backend_config),
@@ -238,8 +242,8 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, *, backend_config=
                         ]
                     ),
                 )
-                xr = txl.cast(txl.reinterpret(dtype, xr16), "float32")
-                yr = txl.cast(txl.reinterpret(dtype, yr16), "float32")
+                xr = txl.cast(txl.reinterpret(xr16, ty=dtype), "float32")
+                yr = txl.cast(txl.reinterpret(yr16, ty=dtype), "float32")
                 if act == "silu":
                     txl.ptx.ex2.approx.ftz.f32(er, xr * txl.float32(-_LOG2E))
                     out_r = (xr / (txl.float32(1.0) + er)) * yr

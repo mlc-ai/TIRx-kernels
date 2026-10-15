@@ -347,15 +347,15 @@ def get_kernel(
 
     @txl.kernel()
     def radix_topk_multi_cta(
-        inp: txl.gptr[dtype, (num_rows * length,)],
-        out_idx: txl.gptr[txl.i32, (num_rows * k,)],
-        out_val: txl.gptr[dtype, (num_rows * k,)],
-        aux: txl.gptr[txl.i32, (aux_elems,)],
-        lengths_g: txl.gptr[txl.i32, (num_rows,)],
-        row_starts_g: txl.gptr[txl.i32, (num_rows,)],
-        pt_starts_g: txl.gptr[txl.i32, (num_rows,)],
-        row_to_batch_g: txl.gptr[txl.i32, (num_rows,)],
-        state: txl.gptr[txl.u32, (WORKSPACE_WORDS,)],
+        inp: txl.Tensor((num_rows * length,), dtype),
+        out_idx: txl.Tensor((num_rows * k,), txl.i32),
+        out_val: txl.Tensor((num_rows * k,), dtype),
+        aux: txl.Tensor((aux_elems,), txl.i32),
+        lengths_g: txl.Tensor((num_rows,), txl.i32),
+        row_starts_g: txl.Tensor((num_rows,), txl.i32),
+        pt_starts_g: txl.Tensor((num_rows,), txl.i32),
+        row_to_batch_g: txl.Tensor((num_rows,), txl.i32),
+        state: txl.Tensor((WORKSPACE_WORDS,), txl.u32),
         aux_stride: txl.i64,
     ):
         txl.device_entry(
@@ -401,15 +401,17 @@ def get_kernel(
                 row_len = length
                 if not basic:
                     if row_starts:
-                        row_start = txl.reinterpret("int32", ld_global_u32(row_starts_g, row_idx))
+                        row_start = txl.reinterpret(
+                            ld_global_u32(row_starts_g, row_idx), ty="int32"
+                        )
                     if page_table:
                         if page_table_row_starts:
                             page_start = txl.reinterpret(
-                                "int32", ld_global_u32(pt_starts_g, row_idx)
+                                ld_global_u32(pt_starts_g, row_idx), ty="int32"
                             )
                         else:
                             page_start = row_start
-                    row_len = txl.reinterpret("int32", ld_global_u32(lengths_g, row_idx))
+                    row_len = txl.reinterpret(ld_global_u32(lengths_g, row_idx), ty="int32")
                 row_in = txl.cast(row_idx, "int64") * txl.int64(length) + txl.cast(
                     row_start, "int64"
                 )
@@ -430,7 +432,7 @@ def get_kernel(
                         g0 = t_start + i0
                         with txl.If(g0 < k), txl.Then():
                             slot0 = row_out + txl.cast(g0, "int64")
-                            st_global_u32(out_idx, slot0, txl.reinterpret("uint32", g0))
+                            st_global_u32(out_idx, slot0, txl.reinterpret(g0, ty="uint32"))
                             bits0 = ld_global_bits(
                                 inp,
                                 txl.cast(row_idx, "int64") * txl.int64(length)
@@ -445,7 +447,9 @@ def get_kernel(
                 offset = txl.int32(0)
                 if page_table:
                     if row_to_batch:
-                        batch_idx = txl.reinterpret("int32", ld_global_u32(row_to_batch_g, row_idx))
+                        batch_idx = txl.reinterpret(
+                            ld_global_u32(row_to_batch_g, row_idx), ty="int32"
+                        )
                     with txl.If(row_len <= k), txl.Then():
                         # NOT split: every CTA writes the whole [0, k) range (:1272-1276).
                         txl.assign(take_main, txl.int32(0))
@@ -456,20 +460,20 @@ def get_kernel(
                                 txl.assign(
                                     page_id,
                                     txl.reinterpret(
-                                        "int32",
                                         ld_global_u32(
                                             aux, src0 + txl.cast(page_start + i1, "int64")
                                         ),
+                                        ty="int32",
                                     ),
                                 )
                             st_global_u32(
                                 out_idx,
                                 row_out + txl.cast(i1, "int64"),
-                                txl.reinterpret("uint32", page_id),
+                                txl.reinterpret(page_id, ty="uint32"),
                             )
                 if ragged:
                     offset = txl.reinterpret(
-                        "int32", ld_global_u32(aux, txl.cast(row_idx, "int64"))
+                        ld_global_u32(aux, txl.cast(row_idx, "int64")), ty="int32"
                     )
                     with txl.If(row_len <= k), txl.Then():
                         txl.assign(take_main, txl.int32(0))
@@ -480,7 +484,7 @@ def get_kernel(
                             st_global_u32(
                                 out_idx,
                                 row_out + txl.cast(i2, "int64"),
-                                txl.reinterpret("uint32", val2),
+                                txl.reinterpret(val2, ty="uint32"),
                             )
                 if not (basic and not basic_trivial):
                     # Common tail of the trivial branches (:1257-1266, :1277-1286,
@@ -692,12 +696,12 @@ def get_kernel(
                     if page_table:
                         if row_to_batch:
                             batch_idx = txl.reinterpret(
-                                "int32", ld_global_u32(row_to_batch_g, row_idx)
+                                ld_global_u32(row_to_batch_g, row_idx), ty="int32"
                             )
                         src_base = txl.cast(batch_idx, "int64") * aux_stride
                     if ragged:
                         offset = txl.reinterpret(
-                            "int32", ld_global_u32(aux, txl.cast(row_idx, "int64"))
+                            ld_global_u32(aux, txl.cast(row_idx, "int64")), ty="int32"
                         )
 
                     if not deterministic:
@@ -962,7 +966,7 @@ def get_kernel(
                         )
                         with txl.serial(my_start + tx, my_end, step=BLOCK_THREADS) as ig:
                             out_slot = row_out + txl.cast(ig, "int64")
-                            gidx = txl.reinterpret("int32", ld_global_u32(out_idx, out_slot))
+                            gidx = txl.reinterpret(ld_global_u32(out_idx, out_slot), ty="int32")
                             st_global_u32(
                                 out_idx,
                                 out_slot,

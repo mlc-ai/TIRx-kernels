@@ -201,13 +201,13 @@ def make_kernel(
 
     @txl.kernel()
     def flash_attention4(
-        Q_tensor_map: txl.TensorMap,
-        Q_tensor_map_1: txl.TensorMap,
-        K_tensor_map: txl.TensorMap,
-        K_tensor_map_1: txl.TensorMap,
-        V_tensor_map: txl.TensorMap,
-        V_tensor_map_1: txl.TensorMap,
-        O_tensor_map: txl.TensorMap,
+        Q_tensor_map: txl.Ptr(txl.TensorMap),
+        Q_tensor_map_1: txl.Ptr(txl.TensorMap),
+        K_tensor_map: txl.Ptr(txl.TensorMap),
+        K_tensor_map_1: txl.Ptr(txl.TensorMap),
+        V_tensor_map: txl.Ptr(txl.TensorMap),
+        V_tensor_map_1: txl.Ptr(txl.TensorMap),
+        O_tensor_map: txl.Ptr(txl.TensorMap),
     ):
         # ---- CTA coordinates — orig:L625-628 ---------------------------------
         txl.device_entry(
@@ -303,8 +303,8 @@ def make_kernel(
                 txl.ptx.mov.b64(desc_lo[0], desc_hi[0], desc.value)
                 txl.ptx.mov.b64(desc.value, txl.uniform(desc_lo[0]), desc_hi[0])
                 return desc
-            txl.assign(desc_lo[0], txl.uniform(txl.Cast("uint32", desc.value)))
-            txl.assign(desc_hi[0], txl.Cast("uint32", txl.shift_right(desc.value, txl.uint64(32))))
+            txl.assign(desc_lo[0], txl.uniform(txl.Cast(desc.value, "uint32")))
+            txl.assign(desc_hi[0], txl.Cast(txl.shift_right(desc.value, txl.uint64(32)), "uint32"))
             return desc_lo, desc_hi
 
         def desc_at(desc, off16):
@@ -323,13 +323,13 @@ def make_kernel(
             low = (
                 lo[0]
                 if isinstance(off16, int) and off16 == 0
-                else lo[0] + txl.Cast("uint32", off16)
+                else lo[0] + txl.Cast(off16, "uint32")
             )
             txl.assign(
                 packed[0],
                 txl.bitwise_or(
-                    txl.shift_left(txl.Cast("uint64", hi[0]), txl.uint64(32)),
-                    txl.Cast("uint64", low),
+                    txl.shift_left(txl.Cast(hi[0], "uint64"), txl.uint64(32)),
+                    txl.Cast(low, "uint64"),
                 ),
             )
             return packed[0]
@@ -367,9 +367,9 @@ def make_kernel(
                 )
                 desc_lo = txl.alloc_local((1,), "uint32")
                 desc_hi = txl.alloc_local((1,), "uint32")
-                txl.assign(desc_lo[0], txl.uniform(txl.Cast("uint32", desc_value[0])))
+                txl.assign(desc_lo[0], txl.uniform(txl.Cast(desc_value[0], "uint32")))
                 txl.assign(
-                    desc_hi[0], txl.Cast("uint32", txl.shift_right(desc_value[0], txl.uint64(32)))
+                    desc_hi[0], txl.Cast(txl.shift_right(desc_value[0], txl.uint64(32)), "uint32")
                 )
 
                 if operand == "q":
@@ -479,7 +479,7 @@ def make_kernel(
         def commit(bar, stage):
             """The matrix engine's arrive on a one-way barrier — orig TCGen05Bar.arrive."""
             if USE_2CTA:
-                txl.ptx[tcgen05_commit](bar.ptr_to([stage]), txl.Cast("uint16", txl.uint32(3)))
+                txl.ptx[tcgen05_commit](bar.ptr_to([stage]), txl.Cast(txl.uint32(3), "uint16"))
             else:
                 txl.ptx[tcgen05_commit](bar.ptr_to([stage]))
 
@@ -720,11 +720,11 @@ def make_kernel(
                                         q_smem[i_q].ptr_to(k_part * BLK_M, 0),
                                         txl.address_of(tensor_map),
                                         txl.int32(0),
-                                        txl.Cast("int32", q_tile_start(i_q)),
+                                        txl.Cast(q_tile_start(i_q), "int32"),
                                         txl.Cast(
-                                            "int32",
                                             (batch_idx * NUM_QO_HEADS + kv_head_idx) * 2
                                             + (k_part if USE_2CTA else 0),
+                                            "int32",
                                         ),
                                         txl.cuda.cvta_generic_to_shared(
                                             q_load_full_remote.ptr_to([i_q])
@@ -735,10 +735,10 @@ def make_kernel(
                                         q_smem[i_q].ptr_to(k_part * BLK_M, 0),
                                         txl.address_of(tensor_map),
                                         txl.int32(0),
-                                        txl.Cast("int32", kv_head_idx * GQA_RATIO),
-                                        txl.Cast("int32", q_tile_start(i_q)),
+                                        txl.Cast(kv_head_idx * GQA_RATIO, "int32"),
+                                        txl.Cast(q_tile_start(i_q), "int32"),
                                         txl.Cast(
-                                            "int32", batch_idx * 2 + (k_part if USE_2CTA else 0)
+                                            batch_idx * 2 + (k_part if USE_2CTA else 0), "int32"
                                         ),
                                         txl.cuda.cvta_generic_to_shared(
                                             q_load_full_remote.ptr_to([i_q])
@@ -770,13 +770,12 @@ def make_kernel(
                                     txl.address_of(tensor_map),
                                     txl.int32(0),
                                     txl.Cast(
-                                        "int32",
                                         i_kv * BLK_N + cta_rank * KV_ROWS
                                         if not is_v
                                         else i_kv * BLK_N,
+                                        "int32",
                                     ),
                                     txl.Cast(
-                                        "int32",
                                         (batch_idx * NUM_KV_HEADS + kv_head_idx) * 2
                                         + (
                                             cta_rank
@@ -785,6 +784,7 @@ def make_kernel(
                                             if USE_2CTA
                                             else 0
                                         ),
+                                        "int32",
                                     ),
                                     txl.cuda.cvta_generic_to_shared(
                                         kv_load_full_remote.ptr_to([kv_pipe.stage])
@@ -831,17 +831,17 @@ def make_kernel(
                                 txl.ptx[TMA_S2G_3D](
                                     txl.address_of(O_tensor_map),
                                     txl.int32(0),
-                                    txl.Cast("int32", m_start_global),
-                                    txl.Cast("int32", (batch_idx * NUM_QO_HEADS + kv_head_idx) * 2),
+                                    txl.Cast(m_start_global, "int32"),
+                                    txl.Cast((batch_idx * NUM_QO_HEADS + kv_head_idx) * 2, "int32"),
                                     o_smem[i_q].ptr_to(0, 0),
                                 )
                             else:
                                 txl.ptx[TMA_S2G_4D](
                                     txl.address_of(O_tensor_map),
                                     txl.int32(0),
-                                    txl.Cast("int32", kv_head_idx * GQA_RATIO),
-                                    txl.Cast("int32", m_start_global),
-                                    txl.Cast("int32", batch_idx * 2),
+                                    txl.Cast(kv_head_idx * GQA_RATIO, "int32"),
+                                    txl.Cast(m_start_global, "int32"),
+                                    txl.Cast(batch_idx * 2, "int32"),
                                     o_smem[i_q].ptr_to(0, 0),
                                 )
                         txl.ptx.cp.async_.bulk.commit_group()
@@ -869,7 +869,7 @@ def make_kernel(
                         for ki in range(HEAD_DIM // MMA_K):
                             with txl.If(elected()), txl.Then():
                                 txl.ptx[mma_f16](
-                                    txl.Cast("uint32", q_stage * MMA_N),
+                                    txl.Cast(q_stage * MMA_N, "uint32"),
                                     desc_at(qd, q_stage * Q_STAGE16 + qoff(ki)),
                                     desc_at(kd, kv_stage * KV_STAGE16 + koff(ki)),
                                     txl.uint32(id_qk),
@@ -886,16 +886,16 @@ def make_kernel(
                         for ki in range(K_SPLIT // MMA_K):
                             with txl.If(elected()), txl.Then():
                                 txl.ptx[mma_f16](
-                                    txl.Cast("uint32", (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N),
+                                    txl.Cast((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N, "uint32"),
                                     txl.Cast(
-                                        "uint32", i_q * MMA_N + MMA_N // 2 + ki * (MMA_K // 2)
+                                        i_q * MMA_N + MMA_N // 2 + ki * (MMA_K // 2), "uint32"
                                     ),
                                     desc_at(vd, kv_stage * KV_STAGE16 + mnoff(ki)),
                                     txl.uint32(id_pv),
                                     *mma_keep_lanes,
                                     # any(ki != 0, should_accumulate), folded at
                                     # trace time: ki is a Python int here.
-                                    True if ki != 0 else txl.Cast("bool", should_accumulate),
+                                    True if ki != 0 else txl.Cast(should_accumulate, "bool"),
                                 )
 
                     def gemm_pv_part2(i_q, kv_stage, vd):
@@ -904,10 +904,10 @@ def make_kernel(
                         for ki in range((BLK_N - K_SPLIT) // MMA_K):
                             with txl.If(elected()), txl.Then():
                                 txl.ptx[mma_f16](
-                                    txl.Cast("uint32", (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N),
+                                    txl.Cast((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N, "uint32"),
                                     txl.Cast(
-                                        "uint32",
                                         i_q * MMA_N + MMA_N // 2 + K_SPLIT // 2 + ki * (MMA_K // 2),
+                                        "uint32",
                                     ),
                                     desc_at(
                                         vd, kv_stage * KV_STAGE16 + mnoff(K_SPLIT // MMA_K + ki)
@@ -1038,7 +1038,7 @@ def make_kernel(
                         mask_inv = txl.local_scalar("uint32")
                         txl.assign(
                             mask_inv,
-                            shl_u32_clamp(txl.uint32(0xFFFFFFFF), txl.Cast("uint32", k_keep)),
+                            shl_u32_clamp(txl.uint32(0xFFFFFFFF), txl.Cast(k_keep, "uint32")),
                         )
                         for i in range(CHUNK_SIZE):
                             if i < ncol - s * CHUNK_SIZE:
@@ -1050,7 +1050,7 @@ def make_kernel(
                                 txl.ptx.mov.b32(
                                     s_chunk[c],
                                     txl.Select(
-                                        txl.Cast("bool", in_bound), s_chunk[c], txl.float32(NEG_INF)
+                                        txl.Cast(in_bound, "bool"), s_chunk[c], txl.float32(NEG_INF)
                                     ),
                                 )
 
@@ -1131,9 +1131,9 @@ def make_kernel(
                     # Stats-ready handshake to the correction wg over a HW named
                     # barrier — orig:L1192-1203.
                     if STATS_BAR_PAIRWISE:
-                        txl.ptx.bar.arrive(txl.Cast("uint32", 1 + wg_id * 4 + warp_id), 64)
+                        txl.ptx.bar.arrive(txl.Cast(1 + wg_id * 4 + warp_id, "uint32"), 64)
                     else:
-                        txl.ptx.bar.arrive(txl.Cast("uint32", 1 + wg_id), 256)
+                        txl.ptx.bar.arrive(txl.Cast(1 + wg_id, "uint32"), 256)
                     softmax_fma_token = iket_range("softmax-fma", leader_only=True)
                     for i in range(BLK_N // 2):
                         fma_f32x2(s_chunk, 2 * i, txl.float32(scale_log2), -row_max_scaled)
@@ -1274,9 +1274,9 @@ def make_kernel(
                             sScale.ptr_to([ROW_SUM_BASE + tid_in_wg + wg_id * BLK_M]), row_sum[0]
                         )
                     if STATS_BAR_PAIRWISE:
-                        txl.ptx.bar.arrive(txl.Cast("uint32", 1 + wg_id * 4 + warp_id), 64)
+                        txl.ptx.bar.arrive(txl.Cast(1 + wg_id * 4 + warp_id, "uint32"), 64)
                     else:
-                        txl.ptx.bar.arrive(txl.Cast("uint32", 1 + wg_id), 256)
+                        txl.ptx.bar.arrive(txl.Cast(1 + wg_id, "uint32"), 256)
 
             # =================================================================
             # correction warpgroup 2 — orig:L1396-1528
@@ -1285,7 +1285,7 @@ def make_kernel(
 
                 def stats_sync(i_q):
                     if STATS_BAR_PAIRWISE:
-                        txl.ptx.bar.sync(txl.Cast("uint32", 1 + i_q * 4 + warp_id), 64)
+                        txl.ptx.bar.sync(txl.Cast(1 + i_q * 4 + warp_id, "uint32"), 64)
                     else:
                         txl.ptx.bar.sync(txl.uint32(1 + i_q), 256)
 

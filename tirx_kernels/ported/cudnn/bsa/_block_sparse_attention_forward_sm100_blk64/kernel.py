@@ -26,7 +26,7 @@ LN_2 = math.log(2.0)
 def _load_bf16(buffer, index):
     bits = txl.local_scalar("uint16")
     txl.ptx.ld.global_.b16(bits, buffer.ptr_to([index]))
-    return txl.cast(txl.reinterpret("bfloat16", bits), "float32")
+    return txl.cast(txl.reinterpret(bits, ty="bfloat16"), "float32")
 
 
 def _load_i32(buffer, index):
@@ -57,24 +57,24 @@ def _shfl_xor_f32(value, lane_xor):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         out,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(lane_xor),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", out)
+    return txl.reinterpret(out, ty="float32")
 
 
 def _shfl_xor_i32(value, lane_xor):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         out,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(lane_xor),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("int32", out)
+    return txl.reinterpret(out, ty="int32")
 
 
 def _warp_sum(value):
@@ -109,16 +109,16 @@ def make_forward_kernel(*, backend_config=None, **config):
 
     @txl.kernel()
     def forward(
-        q: txl.gptr[txl.bf16],
-        k: txl.gptr[txl.bf16],
-        v: txl.gptr[txl.bf16],
-        out_bf16: txl.gptr[txl.bf16],
-        out_f32: txl.gptr[txl.f32],
-        lse: txl.gptr[txl.f32],
-        block_index: txl.gptr[txl.i32],
-        block_sizes: txl.gptr[txl.i32],
-        block_nums: txl.gptr[txl.i32],
-        split_offsets: txl.gptr[txl.i32],
+        q: txl.Tensor((txl.int64(),), txl.bf16),
+        k: txl.Tensor((txl.int64(),), txl.bf16),
+        v: txl.Tensor((txl.int64(),), txl.bf16),
+        out_bf16: txl.Tensor((txl.int64(),), txl.bf16),
+        out_f32: txl.Tensor((txl.int64(),), txl.f32),
+        lse: txl.Tensor((txl.int64(),), txl.f32),
+        block_index: txl.Tensor((txl.int64(),), txl.i32),
+        block_sizes: txl.Tensor((txl.int64(),), txl.i32),
+        block_nums: txl.Tensor((txl.int64(),), txl.i32),
+        split_offsets: txl.Tensor((txl.int64(),), txl.i32),
         softmax_scale: txl.f32,
     ):
         # Numerically direct transcription of the sparse block/split contract.
@@ -257,10 +257,10 @@ def make_combine_kernel(*, backend_config=None, **config):
 
     @txl.kernel()
     def combine(
-        out_partial: txl.gptr[txl.f32],
-        lse_partial: txl.gptr[txl.f32],
-        out: txl.gptr[txl.bf16],
-        lse: txl.gptr[txl.f32],
+        out_partial: txl.Tensor((txl.int64(),), txl.f32),
+        lse_partial: txl.Tensor((txl.int64(),), txl.f32),
+        out: txl.Tensor((txl.int64(),), txl.bf16),
+        lse: txl.Tensor((txl.int64(),), txl.f32),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(row_tiles, 2, batch), block=4 * 32),
@@ -379,7 +379,7 @@ def make_combine_kernel(*, backend_config=None, **config):
             )
         with txl.If(stats_split0 == 0), txl.Then():
             txl.ptx.st.shared.u32(
-                s_max_split.ptr_to([stats_row]), txl.reinterpret("uint32", local_last)
+                s_max_split.ptr_to([stats_row]), txl.reinterpret(local_last, ty="uint32")
             )
             flat_row = row_tile * 16 + stats_row
             with txl.If((dim_tile == 0) & (flat_row < seqlen_q * num_heads)), txl.Then():
@@ -401,7 +401,9 @@ def make_combine_kernel(*, backend_config=None, **config):
         txl.ptx.ld.shared.u32(max1_bits, s_max_split.ptr_to([row1]))
         max_split = txl.local_scalar("int32")
         txl.ptx.max.s32(
-            max_split, txl.reinterpret("int32", max0_bits), txl.reinterpret("int32", max1_bits)
+            max_split,
+            txl.reinterpret(max0_bits, ty="int32"),
+            txl.reinterpret(max1_bits, ty="int32"),
         )
         acc0 = txl.alloc_local((4,), "float32")
         acc1 = txl.alloc_local((4,), "float32")

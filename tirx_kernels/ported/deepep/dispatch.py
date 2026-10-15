@@ -134,7 +134,7 @@ _EVICT_NORMAL = 0x1000000000000000
 
 
 def _gptr(base_u64, byte_off):
-    return txl.reinterpret("handle", base_u64 + txl.cast(byte_off, "uint64"))
+    return txl.reinterpret(base_u64 + txl.cast(byte_off, "uint64"), ty="handle")
 
 
 def _ld_global_s64(buffer, index):
@@ -150,13 +150,13 @@ def _peer_u64(table, dst):
 def _ld_shared_s32(buffer, index):
     out = txl.alloc_local([1], "uint32")
     txl.ptx.ld.shared.b32(out[0], buffer.ptr_to([index]))
-    return txl.reinterpret("int32", out[0])
+    return txl.reinterpret(out[0], ty="int32")
 
 
 def _ld_shared_f32(buffer, index):
     out = txl.alloc_local([1], "uint32")
     txl.ptx.ld.shared.b32(out[0], buffer.ptr_to([index]))
-    return txl.reinterpret("float32", out[0])
+    return txl.reinterpret(out[0], ty="float32")
 
 
 def _st_shared_s32(buffer, index, value):
@@ -164,7 +164,7 @@ def _st_shared_s32(buffer, index, value):
 
 
 def _st_shared_f32(buffer, index, value):
-    return txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret("uint32", value))
+    return txl.ptx.st.shared.b32(buffer.ptr_to([index]), txl.reinterpret(value, ty="uint32"))
 
 
 def _ld_volatile_u64(dst, addr):
@@ -220,16 +220,16 @@ def _build_dispatch_kernel(
 
     @txl.kernel()
     def deepep_dispatch(
-        x: txl.gptr[txl.u8],
-        topk_idx: txl.gptr[txl.i64],
-        topk_weights: txl.gptr[txl.f32],
-        copied_topk_idx: txl.gptr[txl.i64],
-        psum_rank: txl.gptr[txl.i32, (NUM_RANKS,)],
-        psum_expert: txl.gptr[txl.i32, (EXPERTS_PER_RANK + 1,)],
-        num_unaligned: txl.gptr[txl.i32, (EXPERTS_PER_RANK,)],
-        dst_slot_idx: txl.gptr[txl.i32],
-        peer_ws_ptrs: txl.gptr[txl.i64, (NUM_RANKS,)],
-        peer_buf_ptrs: txl.gptr[txl.i64, (NUM_RANKS,)],
+        x: txl.Tensor((txl.int64(),), txl.u8),
+        topk_idx: txl.Tensor((txl.int64(),), txl.i64),
+        topk_weights: txl.Tensor((txl.int64(),), txl.f32),
+        copied_topk_idx: txl.Tensor((txl.int64(),), txl.i64),
+        psum_rank: txl.Tensor((NUM_RANKS,), txl.i32),
+        psum_expert: txl.Tensor((EXPERTS_PER_RANK + 1,), txl.i32),
+        num_unaligned: txl.Tensor((EXPERTS_PER_RANK,), txl.i32),
+        dst_slot_idx: txl.Tensor((txl.int64(),), txl.i32),
+        peer_ws_ptrs: txl.Tensor((NUM_RANKS,), txl.i64),
+        peer_buf_ptrs: txl.Tensor((NUM_RANKS,), txl.i64),
         workspace_addr: txl.i64,
         buffer_addr: txl.i64,
         num_tokens: txl.i32,
@@ -703,13 +703,13 @@ def _build_epilogue_kernel(
     @txl.kernel()
     def deepep_dispatch_copy_epilogue(
         buffer_addr: txl.i64,
-        psum_rank: txl.gptr[txl.i32, (NUM_RANKS,)],
-        psum_expert: txl.gptr[txl.i32, (EXPERTS_PER_RANK,)],
-        recv_x: txl.gptr[txl.u8],
-        recv_topk_idx: txl.gptr[txl.i64],
-        recv_topk_weights: txl.gptr[txl.f32],
-        recv_src_metadata: txl.gptr[txl.i32],
-        num_unaligned: txl.gptr[txl.i32, (EXPERTS_PER_RANK,)],
+        psum_rank: txl.Tensor((NUM_RANKS,), txl.i32),
+        psum_expert: txl.Tensor((EXPERTS_PER_RANK,), txl.i32),
+        recv_x: txl.Tensor((txl.int64(),), txl.u8),
+        recv_topk_idx: txl.Tensor((txl.int64(),), txl.i64),
+        recv_topk_weights: txl.Tensor((txl.int64(),), txl.f32),
+        recv_src_metadata: txl.Tensor((txl.int64(),), txl.i32),
+        num_unaligned: txl.Tensor((EXPERTS_PER_RANK,), txl.i32),
         num_recv_tokens: txl.i32,
         rank_idx: txl.i32,
     ):

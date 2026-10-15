@@ -136,17 +136,23 @@ _shfl_idx_i32 = shfl_idx_i32
 # ---------------------------------------------------------------------------
 # Target entry.
 # ---------------------------------------------------------------------------
+_shape_num_batches = txl.Var("num_batches", txl.i32)
+_shape_num_heads_kv = txl.Var("num_heads_kv", txl.i32)
+_shape_total_rows = txl.Var("total_rows", txl.i32)
+_shape_work_capacity = txl.Var("work_capacity", txl.i32)
+
+
 @txl.kernel()
 def _kernel(
-    k2q_row_ptr: txl.gptr(txl.i32, shape=lambda p: (p["num_heads_kv"] * (p["total_rows"] + 1),)),
-    cu_seqlens_k: txl.gptr(txl.i32, shape=lambda p: (p["num_batches"] + 1,)),
-    scheduler_metadata: txl.gptr(txl.i32, shape=lambda p: (p["work_capacity"] * WORK_FIELDS,)),
-    work_count: txl.gptr[txl.i32, (1,)],
-    total_rows: txl.i32,
-    num_batches: txl.i32,
+    k2q_row_ptr: txl.Tensor((_shape_num_heads_kv * (_shape_total_rows + 1),), txl.i32),
+    cu_seqlens_k: txl.Tensor((_shape_num_batches + 1,), txl.i32),
+    scheduler_metadata: txl.Tensor((_shape_work_capacity * WORK_FIELDS,), txl.i32),
+    work_count: txl.Tensor((1,), txl.i32),
+    total_rows: _shape_total_rows,
+    num_batches: _shape_num_batches,
     target: txl.i32,
-    work_capacity: txl.i32,
-    num_heads_kv: txl.i32,
+    work_capacity: _shape_work_capacity,
+    num_heads_kv: _shape_num_heads_kv,
     blk_kv: txl.i32,
 ):
     # CUDA TRANSCRIPTION START

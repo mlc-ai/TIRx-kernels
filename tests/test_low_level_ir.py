@@ -13,7 +13,7 @@ from tvm.script import tirx as T
 
 def _build_kernel_with_buffer_access(scope: str, access: str):
     @txl.kernel(check_ir=True)
-    def probe(global_buffer: txl.gptr("float32")):
+    def probe(global_buffer: txl.Tensor((txl.int64(),), "float32")):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
         buffer = (
@@ -21,9 +21,9 @@ def _build_kernel_with_buffer_access(scope: str, access: str):
         )
         if access == "load":
             local = txl.alloc_local([1], "float32")
-            txl.tensor_store(local, buffer[0], [0])
+            txl.tensor_store(local, [0], buffer[0])
         elif access == "store":
-            txl.tensor_store(buffer, txl.float32(1), [0])
+            txl.tensor_store(buffer, [0], txl.float32(1))
         else:
             txl.keep_alive(txl.address_of(buffer[0]))
 
@@ -75,7 +75,9 @@ def test_address_of_tensor_load_is_not_a_memory_read(scope):
 
 def test_address_of_still_checks_memory_reads_in_its_index():
     @txl.kernel(check_ir=False)
-    def probe(indices: txl.gptr("int32"), values: txl.gptr("float32")):
+    def probe(
+        indices: txl.Tensor((txl.int64(),), "int32"), values: txl.Tensor((txl.int64(),), "float32")
+    ):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
         txl.keep_alive(txl.address_of(values[indices[0]]))

@@ -360,15 +360,15 @@ def make_forward_kernel(*, backend_config=None, **config):
 
     @txl.kernel()
     def forward(
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        o_map: txl.TensorMap,
-        lse: txl.gptr[txl.f32],
-        block_index: txl.gptr[txl.i32],
-        block_sizes: txl.gptr[txl.i32],
-        block_nums: txl.gptr[txl.i32],
-        split_offsets: txl.gptr[txl.i32],
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        o_map: txl.Ptr(txl.TensorMap),
+        lse: txl.Tensor((txl.int64(),), txl.f32),
+        block_index: txl.Tensor((txl.int64(),), txl.i32),
+        block_sizes: txl.Tensor((txl.int64(),), txl.i32),
+        block_nums: txl.Tensor((txl.int64(),), txl.i32),
+        split_offsets: txl.Tensor((txl.int64(),), txl.i32),
         softmax_scale_log2: txl.f32,
     ):
         txl.device_entry(

@@ -350,15 +350,19 @@ def _elected():
 def _copy_tensormap(src_map, dst):
     """Copy one 128-byte TensorMap image using the source's vector traffic."""
     payload = txl.alloc_local((4,), "uint64")
-    src = txl.reinterpret("uint64", src_map.ptr_to([0]))
-    target = txl.reinterpret("uint64", dst)
+    src = txl.reinterpret(src_map.ptr_to([0]), ty="uint64")
+    target = txl.reinterpret(dst, ty="uint64")
     for group in range(4):
         offset = txl.uint64(group * 32)
         txl.ptx.ld.global_.v4.b64(
-            payload[0], payload[1], payload[2], payload[3], txl.reinterpret("handle", src + offset)
+            payload[0],
+            payload[1],
+            payload[2],
+            payload[3],
+            txl.reinterpret(src + offset, ty="handle"),
         )
         txl.ptx.st.global_.v4.b64(
-            txl.reinterpret("handle", target + offset),
+            txl.reinterpret(target + offset, ty="handle"),
             payload[0],
             payload[1],
             payload[2],
@@ -368,7 +372,7 @@ def _copy_tensormap(src_map, dst):
 
 def _replace_tensormap_address(desc, address):
     txl.ptx.tensormap_replace.tile.global_address.global_.b1024.b64(
-        desc, txl.reinterpret("uint64", address)
+        desc, txl.reinterpret(address, ty="uint64")
     )
 
 
@@ -496,12 +500,12 @@ def _shuffle_xor_f32(value, delta):
     shuffled = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         shuffled,
-        txl.reinterpret("uint32", value),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(delta),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret("float32", shuffled)
+    return txl.reinterpret(shuffled, ty="float32")
 
 
 def _fadd2(a_lo, a_hi, b_lo, b_hi):
@@ -689,40 +693,40 @@ def _make_prologue(
 ):
     @txl.kernel()
     def prologue(
-        base_q: txl.gptr[txl.i64],
-        base_k: txl.gptr[txl.i64],
-        base_v: txl.gptr[txl.i64],
-        base_gate: txl.gptr[txl.i64],
-        base_do: txl.gptr[txl.i64],
-        base_beta: txl.gptr[txl.i64],
-        base_w: txl.gptr[txl.i64],
-        base_dq: txl.gptr[txl.i64],
-        base_dk: txl.gptr[txl.i64],
-        base_dv: txl.gptr[txl.i64],
-        base_dgate: txl.gptr[txl.i64],
-        base_dwo: txl.gptr[txl.i64],
-        base_db: txl.gptr[txl.i64],
-        base_checkpoint: txl.gptr[txl.i64],
-        descriptor_workspace: txl.gptr[txl.i64],
-        cu_seqlens: txl.gptr[txl.i32],
-        q: txl.gptr[txl.u8],
-        k: txl.gptr[txl.u8],
-        v: txl.gptr[txl.u8],
-        gate: txl.gptr[txl.u8],
-        do: txl.gptr[txl.u8],
-        beta: txl.gptr[txl.u8],
-        w: txl.gptr[txl.u8],
-        dq: txl.gptr[txl.u8],
-        dk: txl.gptr[txl.u8],
-        dv: txl.gptr[txl.u8],
-        dgate: txl.gptr[txl.u8],
-        dwo: txl.gptr[txl.u8],
-        db: txl.gptr[txl.u8],
-        checkpoints: txl.gptr[txl.u8],
-        work_item_staging: txl.gptr[txl.i32],
-        work_count: txl.gptr[txl.i32],
-        work_items: txl.gptr[txl.i32],
-        scheduler: txl.gptr[txl.i32],
+        base_q: txl.Tensor((txl.int64(),), txl.i64),
+        base_k: txl.Tensor((txl.int64(),), txl.i64),
+        base_v: txl.Tensor((txl.int64(),), txl.i64),
+        base_gate: txl.Tensor((txl.int64(),), txl.i64),
+        base_do: txl.Tensor((txl.int64(),), txl.i64),
+        base_beta: txl.Tensor((txl.int64(),), txl.i64),
+        base_w: txl.Tensor((txl.int64(),), txl.i64),
+        base_dq: txl.Tensor((txl.int64(),), txl.i64),
+        base_dk: txl.Tensor((txl.int64(),), txl.i64),
+        base_dv: txl.Tensor((txl.int64(),), txl.i64),
+        base_dgate: txl.Tensor((txl.int64(),), txl.i64),
+        base_dwo: txl.Tensor((txl.int64(),), txl.i64),
+        base_db: txl.Tensor((txl.int64(),), txl.i64),
+        base_checkpoint: txl.Tensor((txl.int64(),), txl.i64),
+        descriptor_workspace: txl.Tensor((txl.int64(),), txl.i64),
+        cu_seqlens: txl.Tensor((txl.int64(),), txl.i32),
+        q: txl.Tensor((txl.int64(),), txl.u8),
+        k: txl.Tensor((txl.int64(),), txl.u8),
+        v: txl.Tensor((txl.int64(),), txl.u8),
+        gate: txl.Tensor((txl.int64(),), txl.u8),
+        do: txl.Tensor((txl.int64(),), txl.u8),
+        beta: txl.Tensor((txl.int64(),), txl.u8),
+        w: txl.Tensor((txl.int64(),), txl.u8),
+        dq: txl.Tensor((txl.int64(),), txl.u8),
+        dk: txl.Tensor((txl.int64(),), txl.u8),
+        dv: txl.Tensor((txl.int64(),), txl.u8),
+        dgate: txl.Tensor((txl.int64(),), txl.u8),
+        dwo: txl.Tensor((txl.int64(),), txl.u8),
+        db: txl.Tensor((txl.int64(),), txl.u8),
+        checkpoints: txl.Tensor((txl.int64(),), txl.u8),
+        work_item_staging: txl.Tensor((txl.int64(),), txl.i32),
+        work_count: txl.Tensor((txl.int64(),), txl.i32),
+        work_items: txl.Tensor((txl.int64(),), txl.i32),
+        scheduler: txl.Tensor((txl.int64(),), txl.i32),
         n_batch: txl.i32,
         q_row_stride_bytes: txl.i32,
         k_row_stride_bytes: txl.i32,
@@ -1027,17 +1031,17 @@ def _make_main(
 ):
     @txl.kernel()
     def main(
-        descriptor_workspace: txl.gptr[txl.i64],
+        descriptor_workspace: txl.Tensor((txl.int64(),), txl.i64),
         n_desc: txl.i32,
-        a_log: txl.gptr[txl.f32],
-        dt_bias: txl.gptr[txl.f32],
-        cu_seqlens: txl.gptr[txl.i32],
-        dgate: txl.gptr[txl.f32],
-        d_initial_state: txl.gptr[txl.f32],
-        d_final_state: txl.gptr[txl.f32],
-        work_items: txl.gptr[txl.i32],
-        work_count: txl.gptr[txl.i32],
-        scheduler: txl.gptr[txl.i32],
+        a_log: txl.Tensor((txl.int64(),), txl.f32),
+        dt_bias: txl.Tensor((txl.int64(),), txl.f32),
+        cu_seqlens: txl.Tensor((txl.int64(),), txl.i32),
+        dgate: txl.Tensor((txl.int64(),), txl.f32),
+        d_initial_state: txl.Tensor((txl.int64(),), txl.f32),
+        d_final_state: txl.Tensor((txl.int64(),), txl.f32),
+        work_items: txl.Tensor((txl.int64(),), txl.i32),
+        work_count: txl.Tensor((txl.int64(),), txl.i32),
+        scheduler: txl.Tensor((txl.int64(),), txl.i32),
         scale: txl.f32,
     ):
         txl.device_entry(
@@ -2329,7 +2333,7 @@ def _make_main(
                     )
                     txl.ptx.st.shared.b16(
                         arena.ptr_to([_SMEM_DIAG + decay_stage * 4096 + diagonal_swizzled * 2]),
-                        txl.reinterpret("uint16", txl.cast(gate_prefix[15], "bfloat16")),
+                        txl.reinterpret(txl.cast(gate_prefix[15], "bfloat16"), ty="uint16"),
                     )
 
                     qk_stage = serial % 4
@@ -3277,12 +3281,12 @@ def _make_main(
                     with txl.unroll(16) as token:
                         txl.assign(
                             dq_bits[token],
-                            txl.reinterpret("uint16", txl.cast(dq_values[token], "bfloat16")),
+                            txl.reinterpret(txl.cast(dq_values[token], "bfloat16"), ty="uint16"),
                         )
                     with txl.unroll(16) as token:
                         txl.assign(
                             dk_bits[token],
-                            txl.reinterpret("uint16", txl.cast(dk_values[token], "bfloat16")),
+                            txl.reinterpret(txl.cast(dk_values[token], "bfloat16"), ty="uint16"),
                         )
                     with txl.unroll(16) as token:
                         txl.ptx.st.shared.b16(
@@ -3312,7 +3316,7 @@ def _make_main(
                     with txl.unroll(16) as token:
                         txl.assign(
                             db_bits[token],
-                            txl.reinterpret("uint16", txl.cast(db_values[token], "bfloat16")),
+                            txl.reinterpret(txl.cast(db_values[token], "bfloat16"), ty="uint16"),
                         )
                     with txl.unroll(16) as token:
                         txl.ptx.st.shared.f32(
@@ -3834,30 +3838,32 @@ def _make_main(
                         for slot in range(16):
                             txl.assign(
                                 dy_value[slot],
-                                txl.cast(txl.reinterpret("bfloat16", dy_bits[slot]), "float32"),
+                                txl.cast(txl.reinterpret(dy_bits[slot], ty="bfloat16"), "float32"),
                             )
                         for slot in range(16):
                             txl.assign(
                                 w_value[slot],
-                                txl.cast(txl.reinterpret("bfloat16", w_bits[slot]), "float32"),
+                                txl.cast(txl.reinterpret(w_bits[slot], ty="bfloat16"), "float32"),
                             )
                         for slot in range(16):
                             txl.assign(
                                 v_value[slot],
-                                txl.cast(txl.reinterpret("bfloat16", v_bits[slot]), "float32"),
+                                txl.cast(txl.reinterpret(v_bits[slot], ty="bfloat16"), "float32"),
                             )
                         for slot, token in enumerate(span):
                             txl.ptx.st.shared.b16(
                                 arena.ptr_to([_SMEM_DV + dv_stage * 4096 + elements[token] * 2]),
                                 txl.reinterpret(
-                                    "uint16", txl.cast(w_value[slot] * dy_value[slot], "bfloat16")
+                                    txl.cast(w_value[slot] * dy_value[slot], "bfloat16"),
+                                    ty="uint16",
                                 ),
                             )
                         for slot, token in enumerate(span):
                             txl.ptx.st.shared.b16(
                                 arena.ptr_to([_SMEM_DWO + dwo_stage * 4096 + elements[token] * 2]),
                                 txl.reinterpret(
-                                    "uint16", txl.cast(v_value[slot] * dy_value[slot], "bfloat16")
+                                    txl.cast(v_value[slot] * dy_value[slot], "bfloat16"),
+                                    ty="uint16",
                                 ),
                             )
                     txl.ptx.fence.proxy.async_.shared__cta()

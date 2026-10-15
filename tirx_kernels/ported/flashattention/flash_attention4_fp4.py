@@ -361,15 +361,15 @@ def make_kernel(
     n_block_max_all = ceildiv(seq_len_kv, BLK_N)
 
     params = [
-        ("tmap_q", txl.TensorMap),
-        ("tmap_k", txl.TensorMap),
-        ("tmap_v", txl.TensorMap),
-        ("tmap_o", txl.TensorMap),
-        ("tmap_sfq", txl.TensorMap),
-        ("tmap_sfk", txl.TensorMap),
+        ("tmap_q", txl.Ptr(txl.TensorMap)),
+        ("tmap_k", txl.Ptr(txl.TensorMap)),
+        ("tmap_v", txl.Ptr(txl.TensorMap)),
+        ("tmap_o", txl.Ptr(txl.TensorMap)),
+        ("tmap_sfq", txl.Ptr(txl.TensorMap)),
+        ("tmap_sfk", txl.Ptr(txl.TensorMap)),
     ]
     if quant_pv:
-        params.append(("tmap_sfv", txl.TensorMap))
+        params.append(("tmap_sfv", txl.Ptr(txl.TensorMap)))
     params.append(("softmax_scale_log2", txl.f32))
     names = tuple(n for n, _ in params)
 
@@ -557,12 +557,12 @@ def make_kernel(
                 word,
                 txl.bitwise_or(
                     txl.bitwise_or(
-                        txl.Cast("uint32", bytes_[0]),
-                        txl.shift_left(txl.Cast("uint32", bytes_[1]), txl.uint32(8)),
+                        txl.Cast(bytes_[0], "uint32"),
+                        txl.shift_left(txl.Cast(bytes_[1], "uint32"), txl.uint32(8)),
                     ),
                     txl.bitwise_or(
-                        txl.shift_left(txl.Cast("uint32", bytes_[2]), txl.uint32(16)),
-                        txl.shift_left(txl.Cast("uint32", bytes_[3]), txl.uint32(24)),
+                        txl.shift_left(txl.Cast(bytes_[2], "uint32"), txl.uint32(16)),
+                        txl.shift_left(txl.Cast(bytes_[3], "uint32"), txl.uint32(24)),
                     ),
                 ),
             )
@@ -598,8 +598,8 @@ def make_kernel(
                         # 5-D SF coordinates: the 128-row block index sits on dim 2 when a tile
                         # spans two 512 B chunks and on dim 1 when it spans one (sketch, fact 7).
                         if SF_TILE_K == 2:
-                            return (txl.int32(0), txl.int32(0), txl.Cast("int32", block))
-                        return (txl.int32(0), txl.Cast("int32", block), txl.int32(0))
+                            return (txl.int32(0), txl.int32(0), txl.Cast(block, "int32"))
+                        return (txl.int32(0), txl.Cast(block, "int32"), txl.int32(0))
 
                     def load_q(stage):
                         block = m_block * 2 + stage
@@ -611,9 +611,9 @@ def make_kernel(
                                 sQ.ptr_to([stage * q_stage_bytes]),
                                 txl.address_of(tmap_q),
                                 txl.int32(0),
-                                txl.Cast("int32", block * BLK_M),
-                                txl.Cast("int32", head),
-                                txl.Cast("int32", batch),
+                                txl.Cast(block * BLK_M, "int32"),
+                                txl.Cast(head, "int32"),
+                                txl.Cast(batch, "int32"),
                                 smem_u32(q_load.full.ptr_to([stage])),
                                 txl.uint64(0),
                             )
@@ -622,8 +622,8 @@ def make_kernel(
                                 sSFQ.ptr_to([stage * sfq_chunk_bytes]),
                                 txl.address_of(tmap_sfq),
                                 *sf_coords(block),
-                                txl.Cast("int32", head),
-                                txl.Cast("int32", batch),
+                                txl.Cast(head, "int32"),
+                                txl.Cast(batch, "int32"),
                                 smem_u32(q_load.full.ptr_to([stage])),
                                 txl.uint64(0),
                             )
@@ -634,35 +634,35 @@ def make_kernel(
                             txl.ptx[TMA_PREFETCH_4D](
                                 txl.address_of(tmap_k),
                                 txl.int32(0),
-                                txl.Cast("int32", n * BLK_N),
-                                txl.Cast("int32", kv_head),
-                                txl.Cast("int32", batch),
+                                txl.Cast(n * BLK_N, "int32"),
+                                txl.Cast(kv_head, "int32"),
+                                txl.Cast(batch, "int32"),
                             )
                             if pv_format == "bf16":
                                 for half in range(DV // 64):
                                     txl.ptx[TMA_PREFETCH_4D](
                                         txl.address_of(tmap_v),
                                         txl.int32(64 * half),
-                                        txl.Cast("int32", n * BLK_N),
-                                        txl.Cast("int32", kv_head),
-                                        txl.Cast("int32", batch),
+                                        txl.Cast(n * BLK_N, "int32"),
+                                        txl.Cast(kv_head, "int32"),
+                                        txl.Cast(batch, "int32"),
                                     )
                             elif pv_format == "fp8":
                                 txl.ptx[TMA_PREFETCH_4D](
                                     txl.address_of(tmap_v),
                                     txl.int32(0),
-                                    txl.Cast("int32", n * BLK_N),
-                                    txl.Cast("int32", kv_head),
-                                    txl.Cast("int32", batch),
+                                    txl.Cast(n * BLK_N, "int32"),
+                                    txl.Cast(kv_head, "int32"),
+                                    txl.Cast(batch, "int32"),
                                 )
                             else:
                                 key_units = BLK_N // 2 if pv_format == "nvfp4" else BLK_N
                                 txl.ptx[TMA_PREFETCH_4D](
                                     txl.address_of(tmap_v),
-                                    txl.Cast("int32", n * key_units),
+                                    txl.Cast(n * key_units, "int32"),
                                     txl.int32(0),
-                                    txl.Cast("int32", kv_head),
-                                    txl.Cast("int32", batch),
+                                    txl.Cast(kv_head, "int32"),
+                                    txl.Cast(batch, "int32"),
                                 )
 
                     def load_k(n):
@@ -675,9 +675,9 @@ def make_kernel(
                                 sK.ptr_to([k_slot_off(slot)]),
                                 txl.address_of(tmap_k),
                                 txl.int32(0),
-                                txl.Cast("int32", n * BLK_N),
-                                txl.Cast("int32", kv_head),
-                                txl.Cast("int32", batch),
+                                txl.Cast(n * BLK_N, "int32"),
+                                txl.Cast(kv_head, "int32"),
+                                txl.Cast(batch, "int32"),
                                 smem_u32(kv_load.full.ptr_to([slot])),
                                 txl.uint64(0),
                             )
@@ -686,8 +686,8 @@ def make_kernel(
                                 sSFK.ptr_to([slot * sfq_chunk_bytes]),
                                 txl.address_of(tmap_sfk),
                                 *sf_coords(n),
-                                txl.Cast("int32", kv_head),
-                                txl.Cast("int32", batch),
+                                txl.Cast(kv_head, "int32"),
+                                txl.Cast(batch, "int32"),
                                 smem_u32(kv_load.full.ptr_to([slot])),
                                 txl.uint64(0),
                             )
@@ -705,9 +705,9 @@ def make_kernel(
                                         sV.ptr_to([v_slot_off(slot) + half * v_half_bytes]),
                                         txl.address_of(tmap_v),
                                         txl.int32(64 * half),
-                                        txl.Cast("int32", n * BLK_N),
-                                        txl.Cast("int32", kv_head),
-                                        txl.Cast("int32", batch),
+                                        txl.Cast(n * BLK_N, "int32"),
+                                        txl.Cast(kv_head, "int32"),
+                                        txl.Cast(batch, "int32"),
                                         smem_u32(kv_load.full.ptr_to([slot])),
                                         txl.uint64(0),
                                     )
@@ -717,9 +717,9 @@ def make_kernel(
                                     sV.ptr_to([v_slot_off(slot)]),
                                     txl.address_of(tmap_v),
                                     txl.int32(0),
-                                    txl.Cast("int32", n * BLK_N),
-                                    txl.Cast("int32", kv_head),
-                                    txl.Cast("int32", batch),
+                                    txl.Cast(n * BLK_N, "int32"),
+                                    txl.Cast(kv_head, "int32"),
+                                    txl.Cast(batch, "int32"),
                                     smem_u32(kv_load.full.ptr_to([slot])),
                                     txl.uint64(0),
                                 )
@@ -729,24 +729,24 @@ def make_kernel(
                                 txl.ptx[TMA_G2S_4D](
                                     sV.ptr_to([v_slot_off(slot)]),
                                     txl.address_of(tmap_v),
-                                    txl.Cast("int32", n * key_units),
+                                    txl.Cast(n * key_units, "int32"),
                                     txl.int32(0),
-                                    txl.Cast("int32", kv_head),
-                                    txl.Cast("int32", batch),
+                                    txl.Cast(kv_head, "int32"),
+                                    txl.Cast(batch, "int32"),
                                     smem_u32(kv_load.full.ptr_to([slot])),
                                     txl.uint64(0),
                                 )
                             if pv_format == "nvfp4":
-                                sfv_coords = (txl.int32(0), txl.Cast("int32", n * 2), txl.int32(0))
+                                sfv_coords = (txl.int32(0), txl.Cast(n * 2, "int32"), txl.int32(0))
                             else:
-                                sfv_coords = (txl.int32(0), txl.int32(0), txl.Cast("int32", n))
+                                sfv_coords = (txl.int32(0), txl.int32(0), txl.Cast(n, "int32"))
                             with txl.If(elected()), txl.Then():
                                 txl.ptx[TMA_G2S_5D](
                                     sSFV.ptr_to([slot * sfv_chunk_bytes]),
                                     txl.address_of(tmap_sfv),
                                     *sfv_coords,
-                                    txl.Cast("int32", kv_head),
-                                    txl.Cast("int32", batch),
+                                    txl.Cast(kv_head, "int32"),
+                                    txl.Cast(batch, "int32"),
                                     smem_u32(kv_load.full.ptr_to([slot])),
                                     txl.uint64(0),
                                 )
@@ -836,7 +836,7 @@ def make_kernel(
                     b_base = slot * (v_slot_off(1) // 16)
 
                     def issue(kt):
-                        enable = True if kt != 0 else txl.Cast("bool", acc)
+                        enable = True if kt != 0 else txl.Cast(acc, "bool")
                         a_tmem = txl.uint32(TMEM_P[stage] + 8 * kt)
                         b_desc = desc_at(desc_v, b_base + v_k_step16 * kt)
                         if pv_format == "bf16":
@@ -991,9 +991,9 @@ def make_kernel(
                             txl.ptx[TMA_S2G_4D](
                                 txl.address_of(tmap_o),
                                 txl.int32(64 * half),
-                                txl.Cast("int32", (m_block * 2 + stage) * BLK_M),
-                                txl.Cast("int32", head),
-                                txl.Cast("int32", batch),
+                                txl.Cast((m_block * 2 + stage) * BLK_M, "int32"),
+                                txl.Cast(head, "int32"),
+                                txl.Cast(batch, "int32"),
                                 sO.ptr_to([stage * o_stage_bytes + half * 16384]),
                                 txl.uint64(0),
                                 pred=txl.cast(elected(), "bool"),
@@ -1048,7 +1048,7 @@ def make_kernel(
                         txl.ptx.shr.u32(
                             bits,
                             txl.uint32(0xFFFFFFFF),
-                            txl.Cast("uint32", txl.max((c + 1) * 32 - lim, 0)),
+                            txl.Cast(txl.max((c + 1) * 32 - lim, 0), "uint32"),
                         )
                         for i in range(32):
                             keep = txl.bitwise_and(bits, txl.uint32(1 << i)) != txl.uint32(0)
@@ -1311,11 +1311,11 @@ def make_kernel(
                                 + (row // 8) * 1024
                                 + (row % 8) * 128
                                 + txl.Cast(
-                                    "int32",
                                     txl.bitwise_xor(
-                                        txl.Cast("uint32", (c % 64) // 8),
-                                        txl.Cast("uint32", row % 8),
+                                        txl.Cast((c % 64) // 8, "uint32"),
+                                        txl.Cast(row % 8, "uint32"),
                                     ),
+                                    "int32",
                                 )
                                 * 16
                                 + (c % 8) * 2

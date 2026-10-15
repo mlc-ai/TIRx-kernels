@@ -511,38 +511,38 @@ def _make_kernel(
     # Every payload crosses the launch boundary as a flat byte array; the logical
     # extents live in the tensor maps and in the scalar index arithmetic below.
     annotations = {
-        "a": txl.gptr[txl.u8, (byte_count(tokens_total, K_dim, ab_bits),)],
+        "a": txl.Tensor((byte_count(tokens_total, K_dim, ab_bits),), txl.u8),
         "b": (
-            txl.gptr["int64", (L,)]
+            txl.Tensor((L,), "int64")
             if weight_mode == "discrete"
-            else txl.gptr[txl.u8, (byte_count(N, K_dim, ab_bits) * L,)]
+            else txl.Tensor((byte_count(N, K_dim, ab_bits) * L,), txl.u8)
         ),
-        "sfa": txl.gptr[txl.u8, (sf_bytes(derived["sf_shape_a"]),)],
+        "sfa": txl.Tensor((sf_bytes(derived["sf_shape_a"]),), txl.u8),
         "sfb": (
-            txl.gptr["int64", (L,)]
+            txl.Tensor((L,), "int64")
             if weight_mode == "discrete"
-            else txl.gptr[txl.u8, (sf_bytes(derived["sf_shape_b"]),)]
+            else txl.Tensor((sf_bytes(derived["sf_shape_b"]),), txl.u8)
         ),
-        "c": txl.gptr[txl.u8, (byte_count(tokens_total, N_out, c_bits),)],
-        "d_row": txl.gptr[txl.u8, (byte_count(tokens_total, N_out, d_bits),)],
+        "c": txl.Tensor((byte_count(tokens_total, N_out, c_bits),), txl.u8),
+        "d_row": txl.Tensor((byte_count(tokens_total, N_out, d_bits),), txl.u8),
     }
     if derived["generate_sfd"]:
-        annotations["d_col"] = txl.gptr[txl.u8, (byte_count(tokens_total, N_out, d_bits),)]
-        annotations["sfd_row"] = txl.gptr[txl.u8, (sf_bytes(derived["sf_shape_d_row"]),)]
-        annotations["sfd_col"] = txl.gptr[txl.u8, (sf_bytes(derived["sf_shape_d_col"]),)]
-        annotations["norm_const"] = txl.gptr["float32", (1,)]
+        annotations["d_col"] = txl.Tensor((byte_count(tokens_total, N_out, d_bits),), txl.u8)
+        annotations["sfd_row"] = txl.Tensor((sf_bytes(derived["sf_shape_d_row"]),), txl.u8)
+        annotations["sfd_col"] = txl.Tensor((sf_bytes(derived["sf_shape_d_col"]),), txl.u8)
+        annotations["norm_const"] = txl.Tensor((1,), "float32")
     if derived["generate_amax"]:
-        annotations["amax"] = txl.gptr["float32", (L * 2,)]
-    annotations["padded_offsets"] = txl.gptr["int32", (L,)]
-    annotations["alpha"] = txl.gptr["float32", (L,)]
-    annotations["beta"] = txl.gptr["float32", (L,)]
+        annotations["amax"] = txl.Tensor((L * 2,), "float32")
+    annotations["padded_offsets"] = txl.Tensor((L,), "int32")
+    annotations["alpha"] = txl.Tensor((L,), "float32")
+    annotations["beta"] = txl.Tensor((L,), "float32")
     if with_prob:
-        annotations["prob"] = txl.gptr["float32", (tokens_total,)]
-        annotations["dprob"] = txl.gptr["float32", (tokens_total,)]
+        annotations["prob"] = txl.Tensor((tokens_total,), "float32")
+        annotations["dprob"] = txl.Tensor((tokens_total,), "float32")
     if with_dbias:
-        annotations["dbias"] = txl.gptr[txl.u8, (L * N_out * 2,)]
+        annotations["dbias"] = txl.Tensor((L * N_out * 2,), txl.u8)
     if derived["workspace_bytes"]:
-        annotations["workspace"] = txl.gptr[txl.u8, (derived["workspace_bytes"],)]
+        annotations["workspace"] = txl.Tensor((derived["workspace_bytes"],), txl.u8)
 
     # ---- shapes the launch geometry and the barrier protocol depend on -------
     offsets = derived["smem_offsets"]
@@ -2795,7 +2795,7 @@ def _make_kernel(
             host prelude encoded. That read is the one part of this that the
             source has no counterpart for.
             """
-            source: txl.uint64 = txl.reinterpret("uint64", txl.address_of(source_map))
+            source: txl.uint64 = txl.reinterpret(txl.address_of(source_map), ty="uint64")
             groups = []
             for group in range(2):
                 payload = txl.alloc_local((4,), "uint64")
@@ -2805,19 +2805,19 @@ def _make_kernel(
                     payload[1],
                     payload[2],
                     payload[3],
-                    txl.reinterpret("handle", source + offset),
+                    txl.reinterpret(source + offset, ty="handle"),
                 )
                 groups.append(payload)
             return groups
 
         def write_tensormap_image(groups, destination, address):
             """Publish one image, substituting word 0, the global address."""
-            target: txl.uint64 = txl.reinterpret("uint64", destination)
+            target: txl.uint64 = txl.reinterpret(destination, ty="uint64")
             for group, payload in enumerate(groups):
                 if group == 0:
                     txl.assign(payload[0], address)
                 txl.ptx.st.global_.v4.b64(
-                    txl.reinterpret("handle", target + txl.uint64(group * 32)),
+                    txl.reinterpret(target + txl.uint64(group * 32), ty="handle"),
                     payload[0],
                     payload[1],
                     payload[2],
@@ -2873,9 +2873,9 @@ def _make_kernel(
         helper_body = _entry_point(["b", "sfb", "workspace"], helper)
 
         helper_body.__annotations__ = {
-            "b": txl.gptr[pointer_dtype, (L,)],
-            "sfb": txl.gptr[pointer_dtype, (L,)],
-            "workspace": txl.gptr[txl.u8, (max(1, derived["workspace_bytes"]),)],
+            "b": txl.Tensor((L,), pointer_dtype),
+            "sfb": txl.Tensor((L,), pointer_dtype),
+            "workspace": txl.Tensor((max(1, derived["workspace_bytes"]),), txl.u8),
         }
         return txl.kernel()(helper_body)
 

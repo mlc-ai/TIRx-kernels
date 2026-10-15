@@ -501,16 +501,16 @@ def _prepare_host(params):
 
 def _make_device_kernel(*, backend_config=None):
     def test_mma_ss_tma_2sm_persistent(
-        A: txl.gptr[txl.f16, (LOCAL_M, K)],
-        B: txl.gptr[txl.f16, (LOCAL_N, K)],
-        ag_out: txl.gptr[txl.f16, (M, K)],
-        semaphore: txl.gptr[txl.u64, (WORLD_SIZE,)],
-        out: txl.gptr[txl.f16, (M, LOCAL_N)],
-        profiler_buffer: txl.gptr[txl.u64, (PROFILER_BUFFER_SIZE,)],
-        gemm_task_types: txl.gptr[txl.i32, (CAPACITY,)],
-        gemm_task_idxs: txl.gptr[txl.i32, (CAPACITY, 2)],
-        gemm_head: txl.gptr[txl.i32, (1,)],
-        gemm_tail: txl.gptr[txl.i32, (1,)],
+        A: txl.Tensor((LOCAL_M, K), txl.f16),
+        B: txl.Tensor((LOCAL_N, K), txl.f16),
+        ag_out: txl.Tensor((M, K), txl.f16),
+        semaphore: txl.Tensor((WORLD_SIZE,), txl.u64),
+        out: txl.Tensor((M, LOCAL_N), txl.f16),
+        profiler_buffer: txl.Tensor((PROFILER_BUFFER_SIZE,), txl.u64),
+        gemm_task_types: txl.Tensor((CAPACITY,), txl.i32),
+        gemm_task_idxs: txl.Tensor((CAPACITY, 2), txl.i32),
+        gemm_head: txl.Tensor((1,), txl.i32),
+        gemm_tail: txl.Tensor((1,), txl.i32),
     ):
         host = _prepare_host(
             {
@@ -623,7 +623,7 @@ def _make_device_kernel(*, backend_config=None):
         # rank: 0 -- _mapa_u64_tx already materializes the mapa into a local
         # scalar, so the reinterpret over it is a pure type re-tag.
         packed_ptr = txl.reinterpret(
-            PtrType(PrimType("uint64")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)
+            _mapa_u64_tx(packed_buf.ptr_to([0]), 0), ty=PtrType(PrimType("uint64"))
         )
         packed_value = txl.decl_tensor([1], "uint64", data=packed_ptr, scope="shared")
         # Initialize in source order after the packed-value mapa.
@@ -636,7 +636,7 @@ def _make_device_kernel(*, backend_config=None):
         out_pipe.full.init(1)
         out_pipe.empty.init(128 * NUM_CONSUMER)
         ptr = txl.reinterpret(
-            PtrType(PrimType("uint64")), _mapa_u64_tx(ab_pipe.full.ptr_to([0]), 0)
+            _mapa_u64_tx(ab_pipe.full.ptr_to([0]), 0), ty=PtrType(PrimType("uint64"))
         )
         tma_finished = txl.decl_tensor([PIPELINE_DEPTH], "uint64", data=ptr, scope="shared")
         ab_state = txl.PipelineState(1, phase=0)

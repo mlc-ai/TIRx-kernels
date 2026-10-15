@@ -130,9 +130,9 @@ def _tmem_store16(src, base, address):
 def _shfl_bfly_f32(value, lane_xor, membermask):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out, txl.reinterpret(txl.u32, value), txl.uint32(lane_xor), txl.uint32(31), membermask
+        out, txl.reinterpret(value, ty=txl.u32), txl.uint32(lane_xor), txl.uint32(31), membermask
     )
-    return txl.reinterpret(txl.f32, out)
+    return txl.reinterpret(out, ty=txl.f32)
 
 
 def _butterfly_sum_f32(value):
@@ -275,10 +275,10 @@ def get_kernel(*, backend_config=None, **config):
 
     @txl.kernel()
     def preprocess(
-        o: txl.gptr[txl.bf16],
-        do: txl.gptr[txl.bf16],
-        lse: txl.gptr[txl.f32],
-        workspace: txl.gptr[txl.f32],
+        o: txl.Tensor((txl.int64(),), txl.bf16),
+        do: txl.Tensor((txl.int64(),), txl.bf16),
+        lse: txl.Tensor((txl.int64(),), txl.f32),
+        workspace: txl.Tensor((txl.int64(),), txl.f32),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -387,17 +387,17 @@ def get_kernel(*, backend_config=None, **config):
 
     @txl.kernel()
     def bwd(
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        do_map: txl.TensorMap,
-        dv_map: txl.TensorMap,
-        dk_map: txl.TensorMap,
-        dk_output: txl.gptr[txl.bf16],
-        dv_output: txl.gptr[txl.bf16],
-        bucketed_offsets: txl.gptr[txl.i32],
-        bucketed_indices: txl.gptr[txl.i32],
-        workspace: txl.gptr[txl.f32],
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        do_map: txl.Ptr(txl.TensorMap),
+        dv_map: txl.Ptr(txl.TensorMap),
+        dk_map: txl.Ptr(txl.TensorMap),
+        dk_output: txl.Tensor((txl.int64(),), txl.bf16),
+        dv_output: txl.Tensor((txl.int64(),), txl.bf16),
+        bucketed_offsets: txl.Tensor((txl.int64(),), txl.i32),
+        bucketed_indices: txl.Tensor((txl.int64(),), txl.i32),
+        workspace: txl.Tensor((txl.int64(),), txl.f32),
         edge_stride: txl.i64,
         softmax_scale: txl.f32,
     ):
@@ -756,7 +756,7 @@ def get_kernel(*, backend_config=None, **config):
                 kv_live = task * txl.int32(128) + crow < txl.int32(seqlen_kv)
                 for j in range(64):
                     with txl.If(kv_live == txl.bool(False)), txl.Then():
-                        txl.assign(scores[j], txl.reinterpret(txl.f32, txl.uint32(0xFF800000)))
+                        txl.assign(scores[j], txl.reinterpret(txl.uint32(0xFF800000), ty=txl.f32))
                 for rep in range(2):
                     for pair in range(16):
                         j = rep * 32 + pair * 2
@@ -1125,7 +1125,9 @@ def get_kernel(*, backend_config=None, **config):
     def make_postprocess(seq_len, padded_len, source_base):
         @txl.kernel()
         def postprocess(
-            workspace: txl.gptr[txl.f32], output: txl.gptr[txl.bf16], output_scale: txl.f32
+            workspace: txl.Tensor((txl.int64(),), txl.f32),
+            output: txl.Tensor((txl.int64(),), txl.bf16),
+            output_scale: txl.f32,
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(

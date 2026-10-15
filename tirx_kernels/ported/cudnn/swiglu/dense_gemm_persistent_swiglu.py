@@ -1233,9 +1233,11 @@ def _make_kernel(
             def pack_outputs():
                 if ab12_dtype == "float32":
                     for index in range(32):
-                        txl.assign(ab12_x_words[index], txl.reinterpret("uint32", x_values[index]))
                         txl.assign(
-                            ab12_gate_words[index], txl.reinterpret("uint32", gate_values[index])
+                            ab12_x_words[index], txl.reinterpret(x_values[index], ty="uint32")
+                        )
+                        txl.assign(
+                            ab12_gate_words[index], txl.reinterpret(gate_values[index], ty="uint32")
                         )
                 else:
                     pack_b16(x_values, ab12_dtype, ab12_x_words, 32)
@@ -1528,10 +1530,10 @@ def _make_kernel(
             txl.ptx.cp.async_.bulk.wait_group.read(0)
 
     kernel.__annotations__ = {
-        "a": txl.gptr[txl.u8, (M * K_dim * L * ab_bits // 8,)],
-        "b": txl.gptr[txl.u8, (N * K_dim * L * ab_bits // 8,)],
-        "ab12": txl.gptr[txl.u8, (M * N * L * ab12_bits // 8,)],
-        "c": txl.gptr[txl.u8, (M * (N // 2) * L * c_bits // 8,)],
+        "a": txl.Tensor((M * K_dim * L * ab_bits // 8,), txl.u8),
+        "b": txl.Tensor((N * K_dim * L * ab_bits // 8,), txl.u8),
+        "ab12": txl.Tensor((M * N * L * ab12_bits // 8,), txl.u8),
+        "c": txl.Tensor((M * (N // 2) * L * c_bits // 8,), txl.u8),
         "alpha": txl.f32,
     }
     return txl.kernel()(kernel)

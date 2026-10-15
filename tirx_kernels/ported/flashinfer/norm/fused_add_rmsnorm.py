@@ -650,7 +650,7 @@ def get_kernel(
                 )
                 txl.ptx.st.shared.b32(
                     shared_raw.ptr_to([reduce_base + reduce_index * 4]),
-                    txl.reinterpret("uint32", warp_sum),
+                    txl.reinterpret(warp_sum, ty="uint32"),
                 )
             txl.ptx.bar.sync(txl.uint32(0))
             final_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0), name="final_sum")
@@ -662,7 +662,7 @@ def get_kernel(
                 txl.ptx.ld.shared.b32(
                     reduce_word[0], shared_raw.ptr_to([reduce_base + reduce_index * 4])
                 )
-                txl.assign(final_sum, txl.reinterpret("float32", reduce_word[0]))
+                txl.assign(final_sum, txl.reinterpret(reduce_word[0], ty="float32"))
             txl.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
             sum_sq = txl.local_scalar(txl.f32, init=final_sum, name="sum_sq")
         elif cluster_n > 1:
@@ -711,7 +711,8 @@ def get_kernel(
                         reduce_word[0], shared_raw.ptr_to([reduce_base + reduce_index * 4])
                     )
                     txl.assign(
-                        final_sum, _add_f32(final_sum, txl.reinterpret("float32", reduce_word[0]))
+                        final_sum,
+                        _add_f32(final_sum, txl.reinterpret(reduce_word[0], ty="float32")),
                     )
             txl.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
             sum_sq = txl.local_scalar(txl.f32, init=final_sum, name="sum_sq")
@@ -822,9 +823,9 @@ def get_kernel(
 
         @txl.kernel()
         def flashinfer_fused_add_rmsnorm_compact(
-            input_buffer: txl.gptr[dtype],
-            residual: txl.gptr[dtype],
-            weight: txl.gptr[dtype, (H,)],
+            input_buffer: txl.Tensor((txl.int64(),), dtype),
+            residual: txl.Tensor((txl.int64(),), dtype),
+            weight: txl.Tensor((H,), dtype),
             runtime_M: txl.i64,
             runtime_eps: txl.f32,
         ):
@@ -851,9 +852,9 @@ def get_kernel(
 
         @txl.kernel()
         def flashinfer_fused_add_rmsnorm_strided(
-            input_buffer: txl.gptr[dtype],
-            residual: txl.gptr[dtype],
-            weight: txl.gptr[dtype, (H,)],
+            input_buffer: txl.Tensor((txl.int64(),), dtype),
+            residual: txl.Tensor((txl.int64(),), dtype),
+            weight: txl.Tensor((H,), dtype),
             runtime_M: txl.i64,
             runtime_eps: txl.f32,
             x_row_stride: txl.i64,

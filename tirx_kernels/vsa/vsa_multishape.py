@@ -280,19 +280,19 @@ def encode(view, major):
     desc, off16 = view.encode(major=major, mma_k=16)
     lo = txl.alloc_local((1,), "uint32")
     hi = txl.alloc_local((1,), "uint32")
-    txl.assign(lo[0], txl.uniform(txl.Cast("uint32", desc.value)))
-    txl.assign(hi[0], txl.Cast("uint32", txl.shift_right(desc.value, txl.uint64(32))))
+    txl.assign(lo[0], txl.uniform(txl.Cast(desc.value, "uint32")))
+    txl.assign(hi[0], txl.Cast(txl.shift_right(desc.value, txl.uint64(32)), "uint32"))
     return (lo, hi), off16
 
 
 def desc_at(desc, off16):
     lo, hi = desc
-    low = lo[0] if isinstance(off16, int) and off16 == 0 else lo[0] + txl.Cast("uint32", off16)
+    low = lo[0] if isinstance(off16, int) and off16 == 0 else lo[0] + txl.Cast(off16, "uint32")
     packed_desc = txl.alloc_local((1,), "uint64")
     txl.assign(
         packed_desc[0],
         txl.bitwise_or(
-            txl.shift_left(txl.Cast("uint64", hi[0]), txl.uint64(32)), txl.Cast("uint64", low)
+            txl.shift_left(txl.Cast(hi[0], "uint64"), txl.uint64(32)), txl.Cast(low, "uint64")
         ),
     )
     return packed_desc[0]
@@ -536,8 +536,8 @@ def make_attention_kernel_blk128(
             desc, off16 = view.encode(major=major, mma_k=16)
             lo = txl.alloc_local((1,), "uint32")
             hi = txl.alloc_local((1,), "uint32")
-            txl.assign(lo[0], txl.uniform(txl.Cast("uint32", desc.value)))
-            txl.assign(hi[0], txl.Cast("uint32", txl.shift_right(desc.value, txl.uint64(32))))
+            txl.assign(lo[0], txl.uniform(txl.Cast(desc.value, "uint32")))
+            txl.assign(hi[0], txl.Cast(txl.shift_right(desc.value, txl.uint64(32)), "uint32"))
             return (lo, hi), off16
 
         def desc_at(desc, off16):
@@ -545,14 +545,14 @@ def make_attention_kernel_blk128(
             low = (
                 lo[0]
                 if isinstance(off16, int) and off16 == 0
-                else lo[0] + txl.Cast("uint32", off16)
+                else lo[0] + txl.Cast(off16, "uint32")
             )
             packed_desc = txl.alloc_local((1,), "uint64")
             txl.assign(
                 packed_desc[0],
                 txl.bitwise_or(
-                    txl.shift_left(txl.Cast("uint64", hi[0]), txl.uint64(32)),
-                    txl.Cast("uint64", low),
+                    txl.shift_left(txl.Cast(hi[0], "uint64"), txl.uint64(32)),
+                    txl.Cast(low, "uint64"),
                 ),
             )
             return packed_desc[0]
@@ -1285,12 +1285,12 @@ def make_attention_kernel_blk128(
     if HALF:
 
         def vsa_attn_blk64(
-            q_map: txl.TensorMap,
-            k_map: txl.TensorMap,
-            v_map: txl.TensorMap,
-            o_map: txl.TensorMap,
-            blocks: txl.gptr[txl.i32],
-            counts: txl.gptr[txl.i32],
+            q_map: txl.Ptr(txl.TensorMap),
+            k_map: txl.Ptr(txl.TensorMap),
+            v_map: txl.Ptr(txl.TensorMap),
+            o_map: txl.Ptr(txl.TensorMap),
+            blocks: txl.Tensor((txl.int64(),), txl.i32),
+            counts: txl.Tensor((txl.int64(),), txl.i32),
             num_tasks: txl.i32,
             tiles_per_head: txl.i32,
             topk: txl.i32,
@@ -1317,11 +1317,11 @@ def make_attention_kernel_blk128(
     else:
 
         def vsa_attn_blk128(
-            q_map: txl.TensorMap,
-            k_map: txl.TensorMap,
-            v_map: txl.TensorMap,
-            o_map: txl.TensorMap,
-            blocks: txl.gptr[txl.i32],
+            q_map: txl.Ptr(txl.TensorMap),
+            k_map: txl.Ptr(txl.TensorMap),
+            v_map: txl.Ptr(txl.TensorMap),
+            o_map: txl.Ptr(txl.TensorMap),
+            blocks: txl.Tensor((txl.int64(),), txl.i32),
             num_tasks: txl.i32,
             tiles_per_head: txl.i32,
             topk: txl.i32,
@@ -2360,12 +2360,12 @@ def make_attention_kernel_blk64(
                 txl.ptx.bar.arrive(txl.uint32(2), txl.uint32(416))
 
     def vsa_attn_blk64_ws(
-        q_map: txl.TensorMap,
-        k_map: txl.TensorMap,
-        v_map: txl.TensorMap,
-        out: txl.gptr[txl.i32],
-        q2k: txl.gptr[txl.i32],
-        lens: txl.gptr[txl.i32],
+        q_map: txl.Ptr(txl.TensorMap),
+        k_map: txl.Ptr(txl.TensorMap),
+        v_map: txl.Ptr(txl.TensorMap),
+        out: txl.Tensor((txl.int64(),), txl.i32),
+        q2k: txl.Tensor((txl.int64(),), txl.i32),
+        lens: txl.Tensor((txl.int64(),), txl.i32),
         num_tasks: txl.i32,
         num_blocks: txl.i32,
         num_heads: txl.i32,

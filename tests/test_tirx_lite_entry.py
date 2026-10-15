@@ -37,7 +37,7 @@ def _split(kernel):
 
 def test_tensormap_parameter_uses_addressable_pointer_type():
     @txl.kernel()
-    def probe(descriptor: txl.TensorMap):
+    def probe(descriptor: txl.Ptr(txl.TensorMap)):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32))
         txl.ptx.prefetch.tensormap(txl.address_of(descriptor))
 
@@ -55,7 +55,7 @@ def test_tensormap_parameter_uses_addressable_pointer_type():
 def test_flat_and_with_entries_generate_the_same_ir():
     def build(managed):
         @txl.kernel()
-        def probe(out: txl.gptr(txl.i32), n: txl.i32):
+        def probe(out: txl.Tensor((txl.int64(),), txl.i32), n: txl.i32):
             def body():
                 tile = txl.smem_pool().alloc((32,), txl.i32)
                 txl.ptx.st.shared.b32(tile.ptr_to([txl.thread_id()]), txl.cta_id())
@@ -84,7 +84,7 @@ def test_host_preparation_and_tail_remain_outside_device_region():
         return descriptor
 
     @txl.kernel()
-    def probe(a: txl.gptr(txl.f32), n: txl.i32):
+    def probe(a: txl.Tensor((txl.int64(),), txl.f32), n: txl.i32):
         descriptor = prepare(a)
         with txl.device_entry(launch=txl.cuda.LaunchConfig(grid=n, block=32)):
             txl.keep_alive(txl.address_of(descriptor))
@@ -105,7 +105,11 @@ def test_host_preparation_and_tail_remain_outside_device_region():
 @pytest.mark.parametrize("device_uses_n", [False, True])
 def test_launch_only_values_stay_on_host(device_uses_n):
     @txl.kernel()
-    def probe(out: txl.gptr(txl.i32), n: txl.i32, stream: txl.gptr(txl.u8)):
+    def probe(
+        out: txl.Tensor((txl.int64(),), txl.i32),
+        n: txl.i32,
+        stream: txl.Tensor((txl.int64(),), txl.u8),
+    ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(n + 1) // 2, block=32, stream=stream.data)
         )
@@ -276,13 +280,44 @@ def _compile(kernel, host, tmp_path):
 
 @pytest.mark.skipif(not tvm.cuda().exist, reason="requires CUDA")
 @pytest.mark.parametrize("host", ["llvm", "cuda_host"])
+def test_native_tensor_arguments_check_shared_shapes(host, tmp_path):
+    import torch
+
+    size = txl.Var("size", txl.int64)
+
+    @txl.kernel()
+    def copy_tensor(x: txl.Tensor((size,), txl.f32), y: txl.Tensor((size,), txl.f32)):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=(x.shape[0] + 31) // 32, block=32))
+        i = txl.cta_id() * 32 + txl.thread_id()
+        with txl.If(i < x.shape[0]), txl.Then():
+            value = txl.local_scalar("float32")
+            txl.ptx.ld.global_.f32(value, x.ptr_to([i]))
+            txl.ptx.st.global_.f32(y.ptr_to([i]), value)
+
+    module, _ = _compile(copy_tensor, host, tmp_path)
+    copy = module[copy_tensor.name]
+    x = torch.arange(37, dtype=torch.float32, device="cuda")
+    y = torch.empty_like(x)
+    copy(x, y)
+    torch.testing.assert_close(y, x)
+    for invalid, error, message in (
+        (torch.empty(38, device="cuda"), ValueError, "expected to match"),
+        (torch.empty(37, dtype=torch.int32, device="cuda"), TypeError, "expected float32"),
+        (torch.empty((1, 37), device="cuda"), ValueError, "expected 1"),
+    ):
+        with pytest.raises(error, match=message):
+            copy(x, invalid)
+
+
+@pytest.mark.skipif(not tvm.cuda().exist, reason="requires CUDA")
+@pytest.mark.parametrize("host", ["llvm", "cuda_host"])
 @pytest.mark.parametrize("prepare_map", [False, True])
 def test_dynamic_launch_and_host_descriptors_execute(host, prepare_map, tmp_path):
     if prepare_map and int(tvm.cuda().compute_version.split(".")[0]) < 9:
         pytest.skip("tensor map encoding requires SM90 or newer")
 
     @txl.kernel()
-    def coordinates(out: txl.gptr(txl.i32), n: txl.i32):
+    def coordinates(out: txl.Tensor((txl.int64(),), txl.i32), n: txl.i32):
         if prepare_map:
             descriptor = txl.stack_alloca("tensormap", 1)
             txl.cu_tensor_map_encode_tiled(
