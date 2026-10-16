@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from tvm.backend.config import merge_backend_configs
+from tvm_tirx.backend.config import merge_backend_configs
 
 SERVER_URL_ENV = "TIRX_BENCH_SERVER"
 REFERENCE_DEPS_DIR_ENV = "TIRX_BENCH_REFERENCE_DEPS"
@@ -231,7 +231,7 @@ class ServerProfile:
         label = self.tvm.get("git_label")
         if label:
             return str(label)
-        return f"tvm-{self.versions.get('tvm') or 'unknown'}"
+        return f"tvm-{self.versions.get('tvm_tirx') or self.versions.get('tvm') or 'unknown'}"
 
     @property
     def tirx_tree(self) -> str:

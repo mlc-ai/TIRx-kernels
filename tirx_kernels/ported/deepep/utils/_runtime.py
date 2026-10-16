@@ -24,9 +24,9 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import cuda_target
-from tvm.tirx.bench import DistributedBenchContext
+from tvm_tirx.tirx.bench import DistributedBenchContext
 
 _PROCESS_GROUP_TIMEOUT = timedelta(seconds=60)
 
@@ -75,7 +75,7 @@ def require_sm100(world_size: int) -> None:
 
 def _create_runtime(rank: int, world_size: int) -> DistributedRuntime:
     torch.cuda.set_device(rank)
-    device = tvm.cuda(rank)
+    device = tvm_tirx.cuda(rank)
     compute_stream = int(device.create_raw_stream())
     device.set_raw_stream(compute_stream)
     timing_stream = torch.cuda.ExternalStream(compute_stream, device=rank)
@@ -124,7 +124,7 @@ def _rank_entry(
             timeout=_PROCESS_GROUP_TIMEOUT,
         )
         runtime = _create_runtime(rank, world_size)
-        modules = {name: tvm.runtime.load_module(path) for name, path in library_paths.items()}
+        modules = {name: tvm_tirx.runtime.load_module(path) for name, path in library_paths.items()}
         result = worker(runtime, modules, mode, worker_kwargs)
         runtime.barrier()
         succeeded = True
@@ -146,10 +146,10 @@ def compile_kernels(kernels: dict[str, Any], tmpdir: str, *, backend_config=None
     library_paths: dict[str, str] = {}
     for name, func in kernels.items():
         library_path = Path(tmpdir) / f"{name}.so"
-        executable = tvm.compile(
-            tvm.IRModule({"main": func}),
+        executable = tvm_tirx.tirx.compile(
+            tvm_tirx.IRModule({"main": func}),
             target=cuda_target(backend_config=backend_config),
-            tir_pipeline="tirx",
+            pipeline="tirx",
         )
         executable.export_library(str(library_path))
         library_paths[name] = str(library_path)

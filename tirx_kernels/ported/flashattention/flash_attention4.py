@@ -24,11 +24,11 @@ from typing import Any
 import torch
 
 import tirx_kernels.tirx_lite as txl
-import tvm
-import tvm.testing
+import tvm_tirx
+import tvm_tirx.testing
 from tirx_kernels.runner import PREPARE_NUM_SMS_ENV, bench, cuda_target, resolve_backend_config
-from tvm.tirx.cuda import iket
-from tvm.tirx.cuda.iket import IketProfiler
+from tvm_tirx.backend.cuda import iket
+from tvm_tirx.backend.cuda.iket import IketProfiler
 
 IKET_EVENT_NAMES = (
     "correction",
@@ -679,7 +679,7 @@ def make_kernel(
         with txl.If(warp_cta == 12), txl.Then():
             txl.ptx[tmem_alloc](txl.address_of(tmem_addr[0]), txl.uint32(N_COLS_TMEM))
             txl.cuda.warp_sync()
-        with txl.If(tvm.tirx.all(wg_id == 3, warp_id == 0)), txl.Then():
+        with txl.If(tvm_tirx.tirx.all(wg_id == 3, warp_id == 0)), txl.Then():
             allocated = txl.local_scalar("uint32")
             txl.ptx.ld.shared.u32(allocated, tmem_addr.ptr_to([0]))
             txl.cuda.trap_when_assert_failed(allocated == txl.uint32(0))
@@ -1231,7 +1231,7 @@ def make_kernel(
                     o_ready.wait(wg_id, o_epi_epoch.phase)
                     corr_epi.empty.wait(wg_id, o_epi_epoch.phase)
                     epi_ld_tmem_token = iket_range("epi-ld-tmem", leader_only=True)
-                    acc_O_row_is_zero_or_nan = tvm.tirx.any(
+                    acc_O_row_is_zero_or_nan = tvm_tirx.tirx.any(
                         row_sum[0] == txl.float32(0.0), row_sum[0] != row_sum[0]
                     )
                     norm_scale_sm = txl.local_scalar("float32")
@@ -1345,7 +1345,7 @@ def make_kernel(
                         o_ready.wait(i_q, tmem_epoch.phase)
                         corr_epi.empty.wait(i_q, tmem_epoch.phase)
                         epi_ld_tmem_token = iket_range("epi-ld-tmem", leader_only=True)
-                        zero_or_nan = tvm.tirx.any(
+                        zero_or_nan = tvm_tirx.tirx.any(
                             row_sum_c == txl.float32(0.0), row_sum_c != row_sum_c
                         )
                         norm_scale = txl.local_scalar("float32")
@@ -1389,7 +1389,7 @@ def make_kernel(
             txl.cuda.cluster_sync()
         else:
             txl.cuda.cta_sync()
-        with txl.If(tvm.tirx.all(wg_id == 0, warp_id == 0)), txl.Then():
+        with txl.If(tvm_tirx.tirx.all(wg_id == 0, warp_id == 0)), txl.Then():
             dealloc = txl.local_scalar("uint32")
             txl.ptx.ld.shared.u32(dealloc, tmem_addr.ptr_to([0]))
             txl.ptx[tmem_relinquish]()
@@ -1411,7 +1411,7 @@ def _encode(tensor, dims, strides, box):
     desc = _AlignedTensorMap()
     rank = len(dims)
     assert len(strides) == rank - 1 and len(box) == rank
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
         desc.ptr,
         "float16",
         rank,
@@ -1898,9 +1898,9 @@ def _profile_iket_workload(args: argparse.Namespace, *, backend_config=None) -> 
         backend_config=backend_config,
     )
     executable = IketProfiler().compile(
-        tvm.IRModule({"main": func}),
+        tvm_tirx.IRModule({"main": func}),
         target=cuda_target(backend_config=backend_config),
-        tir_pipeline="tirx",
+        pipeline="tirx",
     )
 
     q, k, v, _ = prepare_data(

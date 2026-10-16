@@ -55,7 +55,7 @@ The local `tirx_kernels/` tree is shipped with each request (a deterministic
 tar.gz, blob-cached on the server by SHA-256), so the kernels measured are the
 ones in this checkout. TVM, torch, triton and the reference packages are the
 server worker's; `/health` versions, the worker's TVM git HEAD and a content
-fingerprint of its `python/tvm/tirx` are recorded under `pipeline.server` and
+fingerprint of its `tirx/python/tvm_tirx` are recorded under `pipeline.server` and
 as `git.tir` / `kernel_tree` in every run. A local TVM checkout is never
 measured; changing the server's TVM makes `ratio_diff` refuse the comparison
 until the baseline is promoted again.

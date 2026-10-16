@@ -11,12 +11,12 @@ from tvm_ffi import structural_equal, structural_walk
 
 import tirx_kernels.tirx_lite as txl
 from tirx_kernels.runner import cuda_target
-from tvm import ir
-from tvm.backend.config import copy_backend_config, parse_backend_config
+from tvm_tirx import ir
+from tvm_tirx.backend.config import copy_backend_config, parse_backend_config
 
 
 def test_kernel_compile_receives_explicit_settings(monkeypatch):
-    import tvm
+    import tvm_tirx
 
     @txl.kernel()
     def probe(out: txl.Tensor((txl.int64(),), "float32")):
@@ -24,7 +24,7 @@ def test_kernel_compile_receives_explicit_settings(monkeypatch):
         txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(1.0))
 
     calls = []
-    monkeypatch.setattr(tvm, "compile", lambda *args, **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(tvm_tirx.tirx, "compile", lambda *args, **kwargs: calls.append(kwargs))
     config = {"cuda": {"arch": "sm_107a", "nvcc": [], "nvrtc": []}}
     probe.compile(target=cuda_target(backend_config=config))
     assert copy_backend_config(calls[0]["target"].attrs["backend_config"]) == config
@@ -186,7 +186,7 @@ def test_warp_scan_keeps_collectives_outside_guards():
 
 
 def test_mma_chain_encodes_descriptor_before_branch_guard():
-    from tvm.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
+    from tvm_tirx.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
 
     idesc = encode_instr_descriptor_dense_uint32(
         64, 64, 16, "float32", "float16", "float16", False, False

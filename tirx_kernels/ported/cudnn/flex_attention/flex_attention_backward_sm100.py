@@ -421,7 +421,7 @@ def prepare_bench(*, backend_config=None, **config):
         # bench_suite compiles inside its CPU-prepare scope, which calls
         # tvm.support.nvcc.compile_cuda directly.  Capture that returned NVRTC
         # cubin so profiler runs can replay the byte-identical benchmark image.
-        import tvm.support.nvcc as nvcc
+        import tvm_tirx.support.nvcc as nvcc
 
         original_compile_cuda = nvcc.compile_cuda
 

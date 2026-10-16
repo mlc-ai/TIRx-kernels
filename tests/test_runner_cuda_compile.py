@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from tirx_kernels import runner
-from tvm.backend.config import copy_backend_config, merge_backend_configs
+from tvm_tirx.backend.config import copy_backend_config, merge_backend_configs
 
 
 def test_explicit_config_defaults_and_forwarding(monkeypatch):
@@ -46,8 +46,8 @@ def test_explicit_config_defaults_and_forwarding(monkeypatch):
     )
     assert runner.cuda_target(backend_config=config).arch == "sm_107a"
     calls = []
-    monkeypatch.setattr(runner.tvm, "compile", lambda *a, **kw: calls.append(kw))
-    monkeypatch.setattr(runner.tvm, "IRModule", lambda value: value)
+    monkeypatch.setattr(runner.tvm_tirx.tirx, "compile", lambda *a, **kw: calls.append(kw))
+    monkeypatch.setattr(runner.tvm_tirx, "IRModule", lambda value: value)
     runner.compile_kernel(object(), backend_config=config)
     assert copy_backend_config(calls[0]["target"].attrs["backend_config"]) == config
 
@@ -59,8 +59,8 @@ def test_mqa_compile_target_preserves_tuning(
 ):
     module = importlib.import_module(f"tirx_kernels.ported.deepgemm.mqa_logits_{precision}")
     monkeypatch.setattr(module, "get_kernel", lambda **kwargs: object())
-    monkeypatch.setattr(runner.tvm, "IRModule", lambda value: value)
-    monkeypatch.setattr(runner.tvm, "compile", lambda mod, *, target, tir_pipeline: target)
+    monkeypatch.setattr(runner.tvm_tirx, "IRModule", lambda value: value)
+    monkeypatch.setattr(runner.tvm_tirx.tirx, "compile", lambda mod, *, target, pipeline: target)
     config = {"cuda": {"arch": "sm_100a"}}
     if explicit_options:
         config["cuda"].update(nvcc=[], nvrtc=["--ftz=true"], ptxas=[])
@@ -121,14 +121,17 @@ def test_prepare_and_gpu_stage_keep_same_config(monkeypatch):
 
 def test_real_cpu_prepare_does_not_initialize_cuda():
     script = """
-from tvm.backend.cuda import BackendConfig
+import sys
+from tvm_tirx.backend.cuda import BackendConfig
 from tirx_kernels.runner import cuda_is_initialized, prepare_kernel_bench
+assert "tvm" not in sys.modules
 assert not cuda_is_initialized()
 prepared = prepare_kernel_bench(
     "rmsnorm", {"hidden_size": 128, "batch_size": 32},
     backend_config={"cuda": BackendConfig(arch="sm_100a")},
 )
 assert not cuda_is_initialized()
+assert "tvm" not in sys.modules
 assert prepared.benchmark.backend_config["cuda"]["compiler"] == "nvcc"
 """
     subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
@@ -155,16 +158,16 @@ def test_factory_cache_uses_config_snapshots():
 
 
 def test_factory_cache_keeps_target_defaults():
-    import tvm
+    import tvm_tirx
 
     @runner.cache_backend_config
     def factory(*, backend_config=None):
         return backend_config
 
     base = {"kind": "cuda", "arch": "sm_100a"}
-    with tvm.target.Target(base):
+    with tvm_tirx.target.Target(base):
         plain = factory()
-    with tvm.target.Target({**base, "backend_config": {"cuda": {"nvrtc": []}}}):
+    with tvm_tirx.target.Target({**base, "backend_config": {"cuda": {"nvrtc": []}}}):
         configured = factory()
         assert runner.cuda_target().attrs["backend_config"]["cuda"]["nvrtc"] == []
     assert plain == {"cuda": {"arch": "sm_100a"}}
@@ -174,7 +177,7 @@ def test_factory_cache_keeps_target_defaults():
 
 
 def test_manual_cache_key_tracks_presence_and_target_defaults():
-    import tvm
+    import tvm_tirx
 
     config = {"cuda": {"arch": "sm_100a"}}
     first = runner.backend_config_key(config)
@@ -182,7 +185,7 @@ def test_manual_cache_key_tracks_presence_and_target_defaults():
     config["cuda"]["nvrtc"] = ["--use_fast_math"]
     # An explicit list must still override factory-local math defaults.
     assert first != runner.backend_config_key(config)
-    with tvm.target.Target(
+    with tvm_tirx.target.Target(
         {"kind": "cuda", "arch": "sm_100a", "backend_config": {"cuda": {"ptxas": []}}}
     ):
         assert first != runner.backend_config_key({"cuda": {"arch": "sm_100a"}})

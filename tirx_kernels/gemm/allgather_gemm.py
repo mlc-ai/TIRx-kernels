@@ -14,8 +14,8 @@ import torch
 import torch.distributed as dist
 
 import tirx_kernels.tirx_lite as txl
-import tvm
-from tvm.ir.type import PrimType, PtrType
+import tvm_tirx
+from tvm_tirx.ir.type import PrimType, PtrType
 
 from .utils._baselines import create_baseline_suite
 from .utils._baselines import ratios as baseline_ratios
@@ -272,9 +272,9 @@ class MPMCQueue:
     def __init__(
         self,
         capacity: int,
-        task_types: tvm.ir.Var,
-        task_idxs: tvm.ir.Var,
-        head: tvm.ir.Var,
+        task_types: tvm_tirx.ir.Var,
+        task_idxs: tvm_tirx.ir.Var,
+        head: tvm_tirx.ir.Var,
         num_tot_tasks: int,
     ):
         if capacity & (capacity - 1):
@@ -291,9 +291,9 @@ class MPMCQueue:
 class GEMMMPMCQueue(MPMCQueue):
     def dequeue(
         self,
-        fetched_task_type: tvm.ir.Var,
-        fetched_task_idx0: tvm.ir.Var,
-        fetched_task_idx1: tvm.ir.Var,
+        fetched_task_type: tvm_tirx.ir.Var,
+        fetched_task_idx0: tvm_tirx.ir.Var,
+        fetched_task_idx1: tvm_tirx.ir.Var,
         sem: Semaphore,
         rank,
     ):
@@ -332,7 +332,7 @@ class SingleDynamicTileScheduler:
     def __init__(
         self,
         queue: MPMCQueue,
-        packed_value: tvm.ir.Var,
+        packed_value: tvm_tirx.ir.Var,
         sch_pipe,
         producer_state,
         consumer_state,
@@ -1154,7 +1154,7 @@ class _Case:
         sync_compute_to_communication(self.runtime)
 
     def launch(self) -> None:
-        tvm.get_global_func(ALLGATHER_HOST_ENTRYPOINT)(
+        tvm_tirx.get_global_func(ALLGATHER_HOST_ENTRYPOINT)(
             self.semaphore,
             self.A,
             self.ag_out,

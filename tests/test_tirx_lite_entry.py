@@ -11,10 +11,10 @@ import pytest
 from tvm_ffi import structural_walk
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.tirx_lite import entry
-from tvm import ir
-from tvm.script.ir_builder import IRBuilder
+from tvm_tirx import ir
+from tvm_tirx.script.ir_builder import IRBuilder
 
 
 def _nodes(value, kind):
@@ -24,12 +24,12 @@ def _nodes(value, kind):
 
 
 def _split(kernel):
-    target = tvm.target.Target("cuda", host="llvm")
+    target = tvm_tirx.target.Target("cuda", host="llvm")
     with target:
-        mod = tvm.tirx.transform.LowerTIRx()(
-            tvm.IRModule({"main": kernel.func.with_attr("target", target)})
+        mod = tvm_tirx.tirx.transform.LowerTIRx()(
+            tvm_tirx.IRModule({"main": kernel.func.with_attr("target", target)})
         )
-        mod = tvm.tirx.transform.SplitHostDevice()(mod)
+        mod = tvm_tirx.tirx.transform.SplitHostDevice()(mod)
     device = [f for f in mod.functions.values() if f.attrs and f.attrs.get("calling_conv") == 2]
     assert len(device) == 1
     return mod["main"], device[0]
@@ -43,13 +43,13 @@ def test_tensormap_parameter_uses_addressable_pointer_type():
 
     parameter = probe.func.params[0]
     assert isinstance(parameter.ty, ir.PtrType)
-    assert isinstance(parameter.ty.element_type, tvm.tirx.TensorMapType)
+    assert isinstance(parameter.ty.element_type, tvm_tirx.tirx.TensorMapType)
     address = next(
         call for call in _nodes(probe.func, ir.Call) if call.op.name == "tirx.address_of"
     )
     assert address.ty == ir.PrimType("uint64")
     _, device = _split(probe)
-    assert isinstance(device.params[0].ty.element_type, tvm.tirx.TensorMapType)
+    assert isinstance(device.params[0].ty.element_type, tvm_tirx.tirx.TensorMapType)
 
 
 def test_flat_and_with_entries_generate_the_same_ir():
@@ -255,12 +255,12 @@ def test_nested_kernel_tracing_restores_the_outer_device_session():
 
 
 def _compile(kernel, host, tmp_path):
-    from tvm.backend.cuda import export_cuda_host
-    from tvm.testing import env
+    from tvm_tirx.backend.cuda import export_cuda_host
+    from tvm_tirx.testing import env
 
     arch = env.cuda_arch(0)
-    target = tvm.target.Target({"kind": "cuda", "arch": arch}, host=host)
-    module = tvm.compile(kernel.func, target=target, tir_pipeline="tirx").mod
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": arch}, host=host)
+    module = tvm_tirx.tirx.compile(kernel.func, target=target, pipeline="tirx").mod
     if host == "llvm":
         return module, None
     import tvm_ffi.cpp
@@ -278,7 +278,7 @@ def _compile(kernel, host, tmp_path):
     return tvm_ffi.load_module(library), library
 
 
-@pytest.mark.skipif(not tvm.cuda().exist, reason="requires CUDA")
+@pytest.mark.skipif(not tvm_tirx.cuda().exist, reason="requires CUDA")
 @pytest.mark.parametrize("host", ["llvm", "cuda_host"])
 def test_native_tensor_arguments_check_shared_shapes(host, tmp_path):
     import torch
@@ -309,11 +309,11 @@ def test_native_tensor_arguments_check_shared_shapes(host, tmp_path):
             copy(x, invalid)
 
 
-@pytest.mark.skipif(not tvm.cuda().exist, reason="requires CUDA")
+@pytest.mark.skipif(not tvm_tirx.cuda().exist, reason="requires CUDA")
 @pytest.mark.parametrize("host", ["llvm", "cuda_host"])
 @pytest.mark.parametrize("prepare_map", [False, True])
 def test_dynamic_launch_and_host_descriptors_execute(host, prepare_map, tmp_path):
-    if prepare_map and int(tvm.cuda().compute_version.split(".")[0]) < 9:
+    if prepare_map and int(tvm_tirx.cuda().compute_version.split(".")[0]) < 9:
         pytest.skip("tensor map encoding requires SM90 or newer")
 
     @txl.kernel()
@@ -330,7 +330,7 @@ def test_dynamic_launch_and_host_descriptors_execute(host, prepare_map, tmp_path
 
     module, library = _compile(coordinates, host, tmp_path)
     for n in (1, 3, 2):
-        out = tvm.runtime.empty((n * 32,), "int32", tvm.cuda())
+        out = tvm_tirx.runtime.empty((n * 32,), "int32", tvm_tirx.cuda())
         module[coordinates.name](out, n)
         np.testing.assert_array_equal(out.numpy(), np.repeat(np.arange(n, dtype="int32"), 32))
     if library:
@@ -343,12 +343,14 @@ import sys
 import torch
 import tvm_ffi
 assert "tvm" not in sys.modules
+assert "tvm_tirx" not in sys.modules
 module = tvm_ffi.load_module(sys.argv[1])
 out = torch.empty(64, dtype=torch.int32, device="cuda")
 module["coordinates"](out, 2)
 expected = torch.arange(2, dtype=torch.int32, device="cuda").repeat_interleave(32)
 torch.testing.assert_close(out, expected)
 assert "tvm" not in sys.modules
+assert "tvm_tirx" not in sys.modules
 """,
                 str(library),
             ],

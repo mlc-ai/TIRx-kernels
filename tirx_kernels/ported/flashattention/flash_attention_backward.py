@@ -20,9 +20,9 @@ import math
 import torch
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import cache_backend_config, cuda_target, resolve_backend_config
-from tvm.backend.cuda.cpp.descriptors import encode_smem_descriptor_base_uint64
+from tvm_tirx.backend.cuda.cpp.descriptors import encode_smem_descriptor_base_uint64
 
 HEAD_DIM = 128
 
@@ -50,7 +50,7 @@ def _encode(tensor, dtype, rank, global_dims, global_strides, box_dims, swizzle,
     descriptor = _AlignedTensorMap()
     if len(global_dims) != rank or len(global_strides) != rank - 1 or len(box_dims) != rank:
         raise ValueError("TensorMap dimension counts disagree with the rank")
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
         descriptor.ptr,
         dtype,
         rank,

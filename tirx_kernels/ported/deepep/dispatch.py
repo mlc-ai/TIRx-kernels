@@ -1188,7 +1188,7 @@ def _run_worker(
             return {"status": "OK"}
 
         # mode == "bench"
-        from tvm.tirx.bench import bench
+        from tvm_tirx.tirx.bench import bench
 
         def build_reference():
             def launch() -> None:

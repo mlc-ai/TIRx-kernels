@@ -24,9 +24,9 @@ import torch
 import tvm_ffi
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import backend_config_key, cuda_target, resolve_backend_config
-from tvm.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
+from tvm_tirx.backend.cuda.cpp.descriptors import encode_instr_descriptor_dense_uint32
 
 from ._kda_forward_schedule import packed_schedule
 
@@ -486,7 +486,7 @@ def build_kernel(
             with txl.If(n_items > 1), txl.Then():
                 issue_loads(txl.int32(1))
             with txl.serial(n_items, unroll=False) as c:
-                with txl.If(tvm.tirx.all(c >= 1, c + 1 < n_items)), txl.Then():
+                with txl.If(tvm_tirx.tirx.all(c >= 1, c + 1 < n_items)), txl.Then():
                     fwait(aa_r, (c + 1) % 2, ((c - 1) // 2) % 2, "ld-wait-aar")
                     txl.ptx.fence.proxy.async_.shared__cta()
                     issue_loads(c + 1)
@@ -1568,7 +1568,7 @@ def build_kernel(
                             a_e2v * dtb[6],
                             a_e2v * dtb[7],
                         )
-                    with txl.If(tvm.tirx.all(half == 0, lane == 0)), txl.Then():
+                    with txl.If(tvm_tirx.tirx.all(half == 0, lane == 0)), txl.Then():
                         txl.ptx.st.shared.f32(adt_s.ptr_to([128]), a_e2v)
                 txl.ptx.bar.sync(txl.uint32(NB_PREP), txl.uint32(288))
                 txl.ptx.ld.shared.v4.f32(adt2[0], adt2[1], adt2[2], adt2[3], adt_s.ptr_to([d0]))
@@ -1907,7 +1907,7 @@ _TMAP_ENCODE = None
 def _tmap_encode():
     global _TMAP_ENCODE
     if _TMAP_ENCODE is None:
-        _TMAP_ENCODE = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+        _TMAP_ENCODE = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
     return _TMAP_ENCODE
 
 
@@ -1980,8 +1980,8 @@ def _get_kernel(
         )
         target = cuda_target(backend_config=backend_config)
         with target:
-            _KERNELS[(cache_config, key)] = tvm.compile(
-                kernel.mod, target=target, tir_pipeline="tirx"
+            _KERNELS[(cache_config, key)] = tvm_tirx.tirx.compile(
+                kernel.mod, target=target, pipeline="tirx"
             )
     return _KERNELS[(cache_config, key)]
 
@@ -3767,7 +3767,7 @@ class _AlignedTensorMap:
 
 def _encode(tensor, dims, strides_bytes, box, swizzle_code):
     desc = _AlignedTensorMap()
-    encode = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
     encode(
         desc.ptr,
         "bfloat16",
@@ -3810,13 +3810,13 @@ def _compile(H, hpc, *, backend_config=None):
     if exes is None:
         k1 = make_front(H, backend_config=backend_config)
         with cuda_target(backend_config=backend_config):
-            exe1 = tvm.compile(
-                k1.mod, target=cuda_target(backend_config=backend_config), tir_pipeline="tirx"
+            exe1 = tvm_tirx.tirx.compile(
+                k1.mod, target=cuda_target(backend_config=backend_config), pipeline="tirx"
             )
         k2 = make_chain(H, hpc, backend_config=backend_config)
         with cuda_target(backend_config=backend_config):
-            exe2 = tvm.compile(
-                k2.mod, target=cuda_target(backend_config=backend_config), tir_pipeline="tirx"
+            exe2 = tvm_tirx.tirx.compile(
+                k2.mod, target=cuda_target(backend_config=backend_config), pipeline="tirx"
             )
         exes = (exe1, exe2)
         _COMPILED[(cache_config, (H, hpc))] = exes

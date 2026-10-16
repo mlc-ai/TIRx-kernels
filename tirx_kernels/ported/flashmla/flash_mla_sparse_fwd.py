@@ -25,11 +25,11 @@ from typing import Any
 
 import torch
 
-import tvm
+import tvm_tirx
 from tirx_kernels.ported.flashmla import sparse_prefill_head64_phase1 as _head64
 from tirx_kernels.ported.flashmla import sparse_prefill_head128_phase1 as _head128
 from tirx_kernels.ported.flashmla import sparse_prefill_head128_small_topk_phase1 as _small_topk
-from tvm.tirx.cuda import iket
+from tvm_tirx.backend.cuda import iket
 
 KERNEL_META = {
     "name": "flash_mla_sparse_fwd",
@@ -287,9 +287,9 @@ def _profile_iket_workload(args: argparse.Namespace, *, backend_config=None) -> 
     launches = []
     for _name, config in _iket_configs(args):
         executable = iket.IketProfiler().compile(
-            tvm.IRModule({"main": get_kernel(**config, backend_config=backend_config)}),
+            tvm_tirx.IRModule({"main": get_kernel(**config, backend_config=backend_config)}),
             target=target,
-            tir_pipeline="tirx",
+            pipeline="tirx",
         )
         case = prepare_data(**config)
         launches.append((executable, _iket_launch_args(case)))

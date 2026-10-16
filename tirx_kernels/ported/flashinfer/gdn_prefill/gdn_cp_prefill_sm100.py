@@ -3977,7 +3977,7 @@ def _encode_tensor_map(
     swizzle: int = 3,
 ) -> _AlignedTensorMap:
     """Encode one source-shaped swizzled TMA tile."""
-    import tvm
+    import tvm_tirx
 
     rank = len(global_dims)
     if rank not in (3, 4, 5):
@@ -3989,7 +3989,7 @@ def _encode_tensor_map(
     if len(box_dims) != rank:
         raise ValueError("TensorMap box dimension count must match rank")
     descriptor = _AlignedTensorMap()
-    encode = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
     encode(
         descriptor.ptr,
         dtype,

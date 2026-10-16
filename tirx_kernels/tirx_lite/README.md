@@ -188,14 +188,14 @@ Pass the nested `backend_config` mapping to the factory and place it in the comp
 `txl.cuda.BackendConfig` is a `TypedDict` helper returning an ordinary dictionary:
 
 ```python
-import tvm
+import tvm_tirx
 
 config = {"cuda": txl.cuda.BackendConfig(
     arch="sm_100a", compiler="nvrtc",
     nvrtc=["--use_fast_math", "--ftz=false"],
 )}
 kernel = make_kernel(..., backend_config=config)
-target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a", "backend_config": config})
+target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100a", "backend_config": config})
 executable = kernel.compile(target=target)
 ```
 

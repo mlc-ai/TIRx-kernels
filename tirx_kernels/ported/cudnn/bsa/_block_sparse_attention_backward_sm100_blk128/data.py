@@ -63,11 +63,11 @@ def _encode_tensormap(
 ):
     import ctypes
 
-    import tvm
+    import tvm_tirx
 
     rank = len(global_dims)
     descriptor = _AlignedTensorMap()
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
         descriptor.ptr,
         dtype,
         rank,

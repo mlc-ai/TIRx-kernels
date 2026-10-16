@@ -11,8 +11,8 @@ from typing import Any
 
 from tvm_ffi import structural_visit
 
-import tvm
-from tvm import tirx
+import tvm_tirx
+from tvm_tirx import tirx
 
 _FORBIDDEN_SCOPE_ROOTS = ("global", "shared")
 _ADDRESS_OF_OP = "tirx.address_of"
@@ -30,7 +30,7 @@ def _node_name(node: Any) -> str:
 
 def _span_text(node: Any) -> str | None:
     span = getattr(node, "loc", None)
-    if span is None or isinstance(span, tvm.ir.UnknownLoc):
+    if span is None or isinstance(span, tvm_tirx.ir.UnknownLoc):
         return None
 
     source_name = getattr(span, "source_name", None)
@@ -120,14 +120,14 @@ class _LowLevelIRInspector:
         self.setmaxnreg_calls: list[LowLevelIRFinding] = []
         self.has_min_blocks_per_sm = False
 
-    def __call__(self, body: tvm.ir.Stmt) -> None:
+    def __call__(self, body: tvm_tirx.ir.Stmt) -> None:
         structural_visit(
             body,
             [
-                (tvm.ir.TensorLoad, self._visit_load),
-                (tvm.ir.TensorStore, self._visit_store),
-                (tvm.ir.Call, self._visit_call),
-                (tvm.ir.RegionStmt, self._visit_region),
+                (tvm_tirx.ir.TensorLoad, self._visit_load),
+                (tvm_tirx.ir.TensorStore, self._visit_store),
+                (tvm_tirx.ir.Call, self._visit_call),
+                (tvm_tirx.ir.RegionStmt, self._visit_region),
             ],
         )
 
@@ -149,14 +149,14 @@ class _LowLevelIRInspector:
             span=_span_text(node),
         )
 
-    def _visit_load(self, op: tvm.ir.TensorLoad, visitor: Any) -> None:
+    def _visit_load(self, op: tvm_tirx.ir.TensorLoad, visitor: Any) -> None:
         scope = str(op.source.scope())
         if _is_forbidden_scope(scope):
             self.violations.append(self._finding(op, "buffer_load", scope))
         for index in op.indices:
             visitor.visit(index)
 
-    def _visit_store(self, op: tvm.ir.TensorStore, visitor: Any) -> None:
+    def _visit_store(self, op: tvm_tirx.ir.TensorStore, visitor: Any) -> None:
         scope = str(op.dest.scope())
         if _is_forbidden_scope(scope):
             self.violations.append(self._finding(op, "buffer_store", scope))
@@ -164,10 +164,10 @@ class _LowLevelIRInspector:
         for index in op.indices:
             visitor.visit(index)
 
-    def _visit_call(self, op: tvm.ir.Call, visitor: Any) -> None:
+    def _visit_call(self, op: tvm_tirx.ir.Call, visitor: Any) -> None:
         op_name = getattr(op.op, "name", None)
         if (
-            isinstance(op.op, tvm.ir.Op)
+            isinstance(op.op, tvm_tirx.ir.Op)
             and op.op.has_attr("FTileOpDispatch")
             and op.op.get_attr("FTileOpDispatch") is not None
         ):
@@ -182,7 +182,7 @@ class _LowLevelIRInspector:
                 self.violations.append(finding)
         if op_name == _ADDRESS_OF_OP and len(op.args) == 1:
             addressed = op.args[0]
-            if isinstance(addressed, tvm.ir.TensorLoad):
+            if isinstance(addressed, tvm_tirx.ir.TensorLoad):
                 scope = str(addressed.source.scope())
                 if _is_forbidden_scope(scope):
                     self.address_only_loads.append(
@@ -206,12 +206,12 @@ def _iter_functions(value: Any, path: str = "root") -> Iterator[tuple[str, tirx.
         yield path, value
         return
 
-    if isinstance(value, tvm.IRModule):
+    if isinstance(value, tvm_tirx.IRModule):
         for global_var, base_func in value.functions.items():
             function_path = f"{path}.{_global_name(global_var)}"
             if not isinstance(base_func, tirx.Function):
                 raise TypeError(
-                    f"{function_path} is {_node_name(base_func)}, expected tvm.tirx.Function"
+                    f"{function_path} is {_node_name(base_func)}, expected tvm_tirx.tirx.Function"
                 )
             yield function_path, base_func
         return

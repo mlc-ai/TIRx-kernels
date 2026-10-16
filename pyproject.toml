@@ -67,7 +67,7 @@ unfixable = []
 "tirx_kernels/ported/deepgemm/_sglang_cutedsl/*.py" = ["E501", "E741", "F821", "F823", "F841", "F842", "RUF003", "RUF012"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["tvm", "tirx_kernels"]
+known-first-party = ["tvm_tirx", "tirx_kernels"]
 split-on-trailing-comma = false
 
 [tool.ruff.format]

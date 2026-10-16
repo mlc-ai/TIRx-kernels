@@ -16,7 +16,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import cache_backend_config, cuda_target, resolve_backend_config
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
@@ -34,7 +34,7 @@ class _AlignedTensorMap:
 
 def _encode_tensor_map(dtype, rank, tensor, dims, strides, box, swizzle):
     descriptor = _AlignedTensorMap()
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
         descriptor.ptr,
         dtype,
         rank,
@@ -825,7 +825,7 @@ def _compile_tirx_mqa_for_config(
     logits_stride_override: int | None,
     backend_config=None,
 ) -> Any:
-    import tvm
+    import tvm_tirx
 
     target = cuda_target(backend_config=backend_config)
     kernel = get_kernel(
@@ -841,7 +841,7 @@ def _compile_tirx_mqa_for_config(
         backend_config=backend_config,
     )
     with target:
-        mod = tvm.IRModule({"main": kernel})
+        mod = tvm_tirx.IRModule({"main": kernel})
         # --ftz=false lets abs fold into FADD2 operand modifiers (ftz blocks it).
         backend_config = resolve_backend_config(
             backend_config,
@@ -866,8 +866,8 @@ def _compile_tirx_mqa_for_config(
                 }
             },
         )
-        return tvm.compile(
-            mod, target=cuda_target(backend_config=backend_config), tir_pipeline="tirx"
+        return tvm_tirx.tirx.compile(
+            mod, target=cuda_target(backend_config=backend_config), pipeline="tirx"
         )
 
 

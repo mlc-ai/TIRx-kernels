@@ -220,12 +220,12 @@ python scripts/install_reference_dependencies.py
 
 [`reference-dependencies.json`](reference-dependencies.json) is the single
 source of truth for reference revisions and the shared CUTLASS DSL version.
-The same command installs the pinned pytest/xdist runner. `torch` and `tvm.tirx`
+The same command installs the pinned pytest/xdist runner. `torch` and `tvm_tirx`
 remain externally managed runtime/compiler dependencies.
 
 | Dependency       | Needed by                          | Notes                                                  |
 | ---------------- | ---------------------------------- | ------------------------------------------------------ |
-| `tvm.tirx`       | all kernels (compile + run)        | The TIRx compiler. Put it on `PYTHONPATH`, e.g. `/path/to/tir/python`. |
+| `tvm_tirx`       | all kernels (compile + run)        | The TIRx compiler. Put it on `PYTHONPATH`, e.g. `/path/to/tvm/tirx/python`. |
 | `torch`          | all kernels                        | CUDA build matching your GPU.                          |
 | `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels and the MegaMoE timer. |
 | cuDNN Frontend (`cudnn`) | `cudnn_*` correctness and baselines | Source install pinned in the lock (v1.28.0); replaces any released `nvidia-cudnn-frontend` wheel, which lacks the CuTeDSL kernel sources. |

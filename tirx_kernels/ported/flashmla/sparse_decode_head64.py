@@ -14,9 +14,9 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import cache_backend_config
-from tvm.ir import PrimType, PtrType
+from tvm_tirx.ir import PrimType, PtrType
 
 B_H = 64
 B_TOPK = 64
@@ -2859,7 +2859,7 @@ def _encode_tensor_map(ptr, dtype, dims, strides, box, *, swizzle, l2_promotion=
     desc = _AlignedTensorMap()
     rank = len(dims)
     assert len(strides) == rank - 1 and len(box) == rank
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
         desc.ptr,
         dtype,
         rank,

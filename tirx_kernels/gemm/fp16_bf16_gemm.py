@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import torch
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import bench, resolve_backend_config
 
 
@@ -28,7 +28,7 @@ def prepare_data(dtype, M, N, K):
     return (A, B, C)
 
 
-_DTYPE_MAP = {"fp16": tvm.DataType("float16"), "bf16": tvm.DataType("bfloat16")}
+_DTYPE_MAP = {"fp16": tvm_tirx.DataType("float16"), "bf16": tvm_tirx.DataType("bfloat16")}
 
 _TMA_G2S_2SM = (
     "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::2"
@@ -909,8 +909,8 @@ def prepare_bench(dtype, M, N, K, *, backend_config=None, **kwargs):
         kernel = get_kernel(dtype, M, N, K, backend_config=backend_config)
         target = cuda_target(backend_config=backend_config)
         with target:
-            mod = tvm.IRModule({"main": kernel})
-            ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
+            mod = tvm_tirx.IRModule({"main": kernel})
+            ex = tvm_tirx.tirx.compile(mod, target=target, pipeline="tirx")
     state = PreparedBench(dtype=dtype, M=M, N=N, K=K, executable=ex)
     return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 

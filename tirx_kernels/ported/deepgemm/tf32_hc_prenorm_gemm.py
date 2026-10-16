@@ -11,7 +11,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import cache_backend_config
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
@@ -922,7 +922,7 @@ def _encode_tensor_map(
     ]
     if force_cu_dtype is not None:
         args.append(force_cu_dtype)
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(*args)
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(*args)
     return descriptor
 
 
@@ -992,7 +992,9 @@ def _compile_tirx_tf32_hc_for_config(
         backend_config=backend_config,
     )
     with target:
-        return tvm.compile(tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx")
+        return tvm_tirx.tirx.compile(
+            tvm_tirx.IRModule({"main": kernel}), target=target, pipeline="tirx"
+        )
 
 
 _compile_tirx_tf32_hc_for_config = cache_backend_config(_compile_tirx_tf32_hc_for_config)

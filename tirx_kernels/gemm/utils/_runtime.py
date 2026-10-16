@@ -22,8 +22,8 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from tvm_ffi import Shape
 
-import tvm
-from tvm.tirx.bench import DistributedBenchContext
+import tvm_tirx
+from tvm_tirx.tirx.bench import DistributedBenchContext
 
 _LOCKED_LIBRARY_ENVS = {
     "nccl": "TIRX_NCCL_LIBRARY",
@@ -144,7 +144,7 @@ def require_sm100(device_indices: Sequence[int]) -> None:
 def symmetric_empty(runtime: DistributedRuntime, shape: Sequence[int], dtype: str):
     """Allocate one explicitly device-local NVSHMEM tensor on every rank."""
 
-    return tvm.get_global_func("runtime.disco.nvshmem.empty")(
+    return tvm_tirx.get_global_func("runtime.disco.nvshmem.empty")(
         Shape(tuple(shape)), dtype, runtime.device
     )
 
@@ -201,15 +201,17 @@ def require_nvls_multicast(runtime: DistributedRuntime, tensor: torch.Tensor) ->
 
 
 def barrier_on_compute_stream(runtime: DistributedRuntime) -> None:
-    tvm.get_global_func("runtime.disco.nvshmem.barrier_all_on_stream")(runtime.compute_stream)
+    tvm_tirx.get_global_func("runtime.disco.nvshmem.barrier_all_on_stream")(runtime.compute_stream)
 
 
 def barrier_on_communication_stream(runtime: DistributedRuntime) -> None:
-    tvm.get_global_func("runtime.disco.nvshmem.barrier_all_on_stream")(runtime.communication_stream)
+    tvm_tirx.get_global_func("runtime.disco.nvshmem.barrier_all_on_stream")(
+        runtime.communication_stream
+    )
 
 
 def _sync_streams(runtime: DistributedRuntime, source: int, destination: int) -> None:
-    tvm.get_global_func("runtime.Device_StreamSyncFromTo")(runtime.device, source, destination)
+    tvm_tirx.get_global_func("runtime.Device_StreamSyncFromTo")(runtime.device, source, destination)
 
 
 def sync_compute_to_communication(runtime: DistributedRuntime) -> None:
@@ -297,8 +299,11 @@ def _locked_library_paths(*, required: Sequence[str] = ()) -> dict[str, Path]:
 
 
 def _broadcast_nvshmem_uid(rank: int, device_index: int) -> Shape:
+    # NVSHMEM runtime registrations remain in the parent TVM package.
+    from tvm import runtime as _tvm_runtime  # noqa: F401
+
     if rank == 0:
-        uid = tvm.get_global_func("runtime.disco.nvshmem.init_nvshmem_uid")()
+        uid = tvm_tirx.get_global_func("runtime.disco.nvshmem.init_nvshmem_uid")()
         values = [int(value) for value in uid]
     else:
         values = []
@@ -315,7 +320,7 @@ def _broadcast_nvshmem_uid(rank: int, device_index: int) -> Shape:
 
 def _create_runtime(rank: int, world_size: int, device_index: int) -> DistributedRuntime:
     torch.cuda.set_device(device_index)
-    device = tvm.cuda(device_index)
+    device = tvm_tirx.cuda(device_index)
     communication_stream = int(device.create_raw_stream())
     compute_stream = int(device.create_raw_stream())
     device.set_raw_stream(compute_stream)
@@ -378,11 +383,11 @@ def _rank_entry(
         )
         validate_current_cuda_assignment("after distributed process-group init", restore=True)
         uid = _broadcast_nvshmem_uid(rank, device_index)
-        tvm.get_global_func("runtime.disco.nvshmem.init_nvshmem")(uid, world_size, rank)
+        tvm_tirx.get_global_func("runtime.disco.nvshmem.init_nvshmem")(uid, world_size, rank)
 
         runtime = _create_runtime(rank, world_size, device_index)
         modules = {
-            name: tvm.runtime.load_module(library_path)
+            name: tvm_tirx.runtime.load_module(library_path)
             for name, library_path in library_paths.items()
         }
         worker_modules = modules if worker_receives_mapping else modules["main"]
@@ -479,8 +484,8 @@ def _run_distributed_modules(
         library_paths = {}
         for index, (name, ir_module) in enumerate(ir_modules.items()):
             library_path = Path(tmpdir) / f"kernel-{index}.so"
-            executable = tvm.compile(
-                ir_module, target=cuda_target(backend_config=backend_config), tir_pipeline="tirx"
+            executable = tvm_tirx.tirx.compile(
+                ir_module, target=cuda_target(backend_config=backend_config), pipeline="tirx"
             )
             executable.export_library(str(library_path))
             library_paths[name] = str(library_path)
@@ -515,8 +520,8 @@ def prepare_distributed_bench(
     temporary_directory = tempfile.TemporaryDirectory(prefix="tirx-gemm-comm-prepared-")
     library_path = Path(temporary_directory.name) / "kernel.so"
     try:
-        executable = tvm.compile(
-            ir_module, target=cuda_target(backend_config=backend_config), tir_pipeline="tirx"
+        executable = tvm_tirx.tirx.compile(
+            ir_module, target=cuda_target(backend_config=backend_config), pipeline="tirx"
         )
         executable.export_library(str(library_path))
     except BaseException:

@@ -1037,9 +1037,9 @@ def _build_tirx_tensor_maps(
     shared_l2_weights: torch.Tensor | None = None,
     shared_l2_weights_sf: torch.Tensor | None = None,
 ) -> dict[str, _AlignedTensorMap]:
-    import tvm
+    import tvm_tirx
 
-    encode_tensormap = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode_tensormap = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
     launch = get_deepgemm_launch_config(case.config)
     workspace = case.workspace_layout
     gran_k = 32
@@ -1297,7 +1297,7 @@ def _compile_tirx_mega_moe_for_config(
     emit_nvl_barrier_timeout_printf: bool = True,
     backend_config=None,
 ) -> Any:
-    import tvm
+    import tvm_tirx
     from tirx_kernels.runner import cuda_target, resolve_backend_config
 
     backend_config = resolve_backend_config(backend_config, defaults={"cuda": {"compiler": "nvcc"}})
@@ -1325,8 +1325,8 @@ def _compile_tirx_mega_moe_for_config(
     # supplies the exact architecture-specific target validated for the runtime
     # GPU (currently sm_100a, sm_103a, or sm_107a).
     target = cuda_target(backend_config=backend_config)
-    mod = tvm.IRModule({"main": kernel})
-    return tvm.compile(mod, target=target, tir_pipeline="tirx")
+    mod = tvm_tirx.IRModule({"main": kernel})
+    return tvm_tirx.tirx.compile(mod, target=target, pipeline="tirx")
 
 
 def _compile_tirx_mega_moe(
@@ -1355,9 +1355,9 @@ def _compile_tirx_mega_moe(
 
 @cache
 def _load_prepared_mega_moe_executable(library_path: str) -> Any:
-    import tvm
+    import tvm_tirx
 
-    return tvm.runtime.Executable(tvm.runtime.load_module(library_path))
+    return tvm_tirx.runtime.Executable(tvm_tirx.runtime.load_module(library_path))
 
 
 def _require_mega_moe_tuple(name: str, value: Any) -> tuple[torch.Tensor, torch.Tensor]:

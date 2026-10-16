@@ -39,7 +39,7 @@ instrument, including the f16x2 widening case corrected by
 :func:`cast_f16x2_to_f32x2`.
 
 Style note: like ``entry.py`` and ``smem.py`` this module talks to ``tirx``
-directly (``from tvm.script import tirx as T``) and wraps void instruction
+directly (``from tvm_tirx.script import tirx as T``) and wraps void instruction
 calls in ``T.evaluate`` by hand. The ``txl.ptx`` / ``txl.cuda`` statement proxies
 live in the package ``__init__``, which imports *this* module; going through
 them here would be a cycle, and ``T.evaluate(T.ptx...)`` is exactly what the
@@ -48,11 +48,11 @@ proxy does anyway.
 
 from __future__ import annotations
 
-from tvm.backend.cuda.cpp.descriptors import _INSTR_DESC_FORMAT_MAP, _TCGEN05_MMA_K
-from tvm.backend.cuda.ptx.table import TABLE as _PTX_TABLE
-from tvm.backend.cuda.ptx.table import _tcgen05_mma_mask_lanes
-from tvm.script import tirx as T
-from tvm.tirx.script import ir_builder as _I
+from tvm_tirx.backend.cuda.cpp.descriptors import _INSTR_DESC_FORMAT_MAP, _TCGEN05_MMA_K
+from tvm_tirx.backend.cuda.ptx.table import TABLE as _PTX_TABLE
+from tvm_tirx.backend.cuda.ptx.table import _tcgen05_mma_mask_lanes
+from tvm_tirx.script import tirx as T
+from tvm_tirx.tirx.script import ir_builder as _I
 
 from .smem import KTileView
 

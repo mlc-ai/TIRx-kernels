@@ -785,7 +785,7 @@ def main() -> None:
         action="store_true",
         help="Import every unique kernel in --workloads and exit (for CI import gates)",
     )
-    from tvm.backend.config import add_backend_config_argument
+    from tvm_tirx.backend.config import add_backend_config_argument
 
     add_backend_config_argument(ap)
     args = ap.parse_args()

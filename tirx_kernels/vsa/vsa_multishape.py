@@ -52,7 +52,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import backend_config_key, cuda_target, resolve_backend_config
 
 D = 128
@@ -2410,7 +2410,7 @@ def _encode_map(tensor, S, H, box_rows, box_bands=1):
     dims = (64, S, H * 2)
     strides = (H * D * 2, 128)
     box = (64, box_rows, box_bands)
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
         desc.ptr,
         "bfloat16",
         3,
@@ -2457,7 +2457,7 @@ def _compile(kernel, reg_level=None, *, backend_config=None):
         )
     target = cuda_target(backend_config=backend_config)
     with target:
-        return tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
+        return tvm_tirx.tirx.compile(kernel.mod, target=target, pipeline="tirx")
 
 
 def _get_executable(

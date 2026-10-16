@@ -899,7 +899,7 @@ class _AlignedTensorMap:
 def _encode_state_tensor_map(
     state: torch.Tensor, spec: dict[str, Any], state_stride: int
 ) -> _AlignedTensorMap:
-    import tvm
+    import tvm_tirx
 
     if int(state.data_ptr()) % 128:
         raise ValueError("horizontal state TensorMap base must be 128-byte aligned")
@@ -909,7 +909,7 @@ def _encode_state_tensor_map(
     nheads = spec["NHEADS"]
     state_slots = spec["STATE_ELEMENTS"] // state_stride
     state_bytes = spec["STATE_BYTES"]
-    encode = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
     encode(
         descriptor.ptr,
         spec["STATE_DTYPE"],

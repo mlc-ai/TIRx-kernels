@@ -71,13 +71,13 @@ def module_repo_root(import_name: str) -> Path | None:
 
 
 def tir_repo_root() -> Path | None:
-    """TVM git root: TVM_PATH env, else installed tvm package checkout."""
+    """TVM git root: TVM_PATH env, else the imported tvm_tirx checkout."""
     env = os.environ.get("TVM_PATH")
     if env:
         p = Path(env).resolve()
-        if (p / "python" / "tvm").is_dir():
+        if (p / "tirx" / "python" / "tvm_tirx").is_dir():
             return p
-    return module_repo_root("tvm")
+    return module_repo_root("tvm_tirx")
 
 
 def collect_repo_git() -> dict[str, str | None]:
@@ -120,7 +120,8 @@ def collect_kernel_fingerprint() -> dict[str, str | None]:
     tir_root = tir_repo_root()
     tirx_root = module_repo_root("tirx_kernels") or kernels_repo_root()
     return {
-        "tir:python/tvm/tirx": git_tree_sha(tir_root, "python/tvm/tirx"),
+        # Preserve the report schema while fingerprinting the split compiler package.
+        "tir:python/tvm/tirx": git_tree_sha(tir_root, "tirx/python/tvm_tirx"),
         "tirx-kernels:tirx_kernels": git_tree_sha(tirx_root, "tirx_kernels"),
     }
 
@@ -358,22 +359,19 @@ def content_fingerprint(root: Path, *, suffixes: tuple[str, ...] = (".py",)) -> 
 
 
 def tvm_identity() -> dict:
-    """Identify the TVM that this process imports (file, version, git HEAD, tirx tree)."""
+    """Identify the imported TIRx package (file, version, git HEAD, tirx tree)."""
     info: dict = {"importable": False}
     try:
-        import tvm
+        import tvm_tirx
     except Exception as error:  # pragma: no cover - depends on the environment
         info["error"] = f"{type(error).__name__}: {error}"
         return info
     info["importable"] = True
-    info["file"] = getattr(tvm, "__file__", None)
-    info["version"] = getattr(tvm, "__version__", None)
+    info["file"] = getattr(tvm_tirx, "__file__", None)
+    info["version"] = getattr(tvm_tirx, "__version__", None)
     root: Path | None = None
     if info["file"]:
         for candidate in Path(info["file"]).resolve().parents:
-            if (candidate / "python" / "tvm").is_dir() and (candidate / ".git").exists():
-                root = candidate
-                break
             if (candidate / ".git").exists():
                 root = candidate
                 break

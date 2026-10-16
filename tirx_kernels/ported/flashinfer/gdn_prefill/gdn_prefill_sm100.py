@@ -1685,7 +1685,7 @@ def _encode_tensor_map(
     tensor: torch.Tensor, *, global_dims: tuple[int, ...], global_strides_bytes: tuple[int, ...]
 ) -> _AlignedTensorMap:
     """Encode the frozen 64x64 FP16, B128-swizzled TMA tile."""
-    import tvm
+    import tvm_tirx
 
     rank = len(global_dims)
     if rank not in (3, 4):
@@ -1696,7 +1696,7 @@ def _encode_tensor_map(
     descriptor = _AlignedTensorMap()
     box_dims = (64, 64, *((1,) * (rank - 2)))
     element_strides = (1,) * rank
-    encode = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
     encode(
         descriptor.ptr,
         "float16",

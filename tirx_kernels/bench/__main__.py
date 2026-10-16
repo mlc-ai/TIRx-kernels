@@ -97,7 +97,7 @@ def main():
         default=None,
         help=("Seconds before every implementation in every round (default: runner protocol)"),
     )
-    from tvm.backend.config import add_backend_config_argument
+    from tvm_tirx.backend.config import add_backend_config_argument
 
     add_backend_config_argument(parser)
     args = parser.parse_args()
@@ -154,7 +154,7 @@ def main():
             if args.config and label != args.config:
                 continue
             try:
-                # GPU flock is inside tvm.tirx.bench (prepare + rounds).
+                # GPU flock is inside tvm_tirx.tirx.bench (prepare + rounds).
                 result = run_kernel_bench(
                     name,
                     cfg,

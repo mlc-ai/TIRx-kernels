@@ -18,7 +18,7 @@ from typing import Any
 
 from tvm_ffi import structural_walk
 
-import tvm
+import tvm_tirx
 from tirx_kernels.ported.flashinfer.topk import radix_topk_single_cta as target
 
 REPO = Path(__file__).resolve().parents[2]
@@ -246,20 +246,20 @@ class _IRScanner:
         self.findings: list[Finding] = []
 
     def __call__(self, body) -> None:
-        structural_walk(body, [(tvm.ir.Call, self._visit_call)])
+        structural_walk(body, [(tvm_tirx.ir.Call, self._visit_call)])
 
     def _record(self, node: Any, detail: str) -> None:
         span = getattr(node, "loc", None)
         suffix = f" span={span}" if span is not None else ""
         self.findings.append(Finding("IR", self.specialization, detail + suffix))
 
-    def _visit_call(self, call: tvm.ir.Call) -> None:
+    def _visit_call(self, call: tvm_tirx.ir.Call) -> None:
         op = getattr(call, "op", None)
         op_name = getattr(op, "name", None)
         if op_name is not None and op_name.startswith("tirx.tile."):
             self._record(call, f"forbidden operator {op_name}")
         elif (
-            isinstance(op, tvm.ir.Op)
+            isinstance(op, tvm_tirx.ir.Op)
             and op.has_attr("FTileOpDispatch")
             and op.get_attr("FTileOpDispatch") is not None
         ):

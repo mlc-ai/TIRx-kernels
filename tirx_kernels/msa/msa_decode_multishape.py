@@ -52,7 +52,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.tirx_lite as txl
-import tvm
+import tvm_tirx
 from tirx_kernels.runner import backend_config_key, cuda_target, resolve_backend_config
 
 HEAD_DIM = 128
@@ -2528,7 +2528,7 @@ def _encode(tensor, dtype_name, dims, strides, box, l2_promotion=2):
     desc = _AlignedTensorMap()
     rank = len(dims)
     assert len(strides) == rank - 1 and len(box) == rank
-    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
         desc.ptr,
         dtype_name,
         rank,
@@ -2557,7 +2557,7 @@ def _compile(cfg, builder, family, *, backend_config=None):
         kernel = builder(cfg, backend_config=backend_config)
         target = cuda_target(backend_config=backend_config)
         with target:
-            hit = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
+            hit = tvm_tirx.tirx.compile(kernel.mod, target=target, pipeline="tirx")
         _EXEC_CACHE[(cache_config, key)] = hit
     return hit
 
@@ -4663,7 +4663,7 @@ def _build_q16_twotile_factory(*, backend_config=None):
             with txl.If(warp_cta == 8), txl.Then():
                 txl.ptx[TMEM_ALLOC](txl.address_of(tmem_addr[0]), txl.uint32(N_COLS_TMEM))
                 txl.cuda.warp_sync()
-            with txl.If(tvm.tirx.all(wg_id == 2, warp_id == 0)), txl.Then():
+            with txl.If(tvm_tirx.tirx.all(wg_id == 2, warp_id == 0)), txl.Then():
                 allocated = txl.local_scalar("uint32")
                 txl.ptx.ld.shared.u32(allocated, tmem_addr.ptr_to([0]))
                 txl.cuda.trap_when_assert_failed(allocated == txl.uint32(0))
@@ -5535,7 +5535,7 @@ def _build_q16_twotile_factory(*, backend_config=None):
                                                 mrg_ctl.ptr_to([ctl_base + 1]), txl.int32(0)
                                             )
                         with txl.If(do_stage != 0), txl.Then():
-                            acc_O_row_is_zero_or_nan = tvm.tirx.any(
+                            acc_O_row_is_zero_or_nan = tvm_tirx.tirx.any(
                                 l_row == txl.float32(0.0), l_row != l_row
                             )
                             norm_scale = txl.local_scalar("float32")
@@ -5576,7 +5576,7 @@ def _build_q16_twotile_factory(*, backend_config=None):
                 with txl.If(done == NUM_CTAS - 1), txl.Then():
                     txl.ptx.st.relaxed.gpu.global_.b32(sched.ptr_to([0]), txl.int32(0))
                     txl.ptx.st.relaxed.gpu.global_.b32(sched.ptr_to([1]), txl.int32(0))
-            with txl.If(tvm.tirx.all(wg_id == 0, warp_id == 0)), txl.Then():
+            with txl.If(tvm_tirx.tirx.all(wg_id == 0, warp_id == 0)), txl.Then():
                 dealloc = txl.local_scalar("uint32")
                 txl.ptx.ld.shared.u32(dealloc, tmem_addr.ptr_to([0]))
                 txl.ptx[TMEM_RELINQUISH]()
@@ -5635,7 +5635,7 @@ def setup_q16_twotile(data, B, seqlen_q, *, backend_config=None):
         kernel = make_kernel_q16_twotile(B, T, hq, hkv, topk, int(num_sms))
         target = cuda_target(backend_config=backend_config)
         with target:
-            ex = tvm.compile(kernel.mod, target=target, tir_pipeline="tirx")
+            ex = tvm_tirx.tirx.compile(kernel.mod, target=target, pipeline="tirx")
         _EXEC_CACHE[(cache_config, key)] = ex
 
     scale_log2 = float(data["softmax_scale"]) * LOG2E

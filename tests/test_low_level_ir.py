@@ -8,7 +8,7 @@ import pytest
 import tirx_kernels.tirx_lite as txl
 from tirx_kernels.runner import run_kernel_test
 from tirx_kernels.tirx_lite.low_level_ir import LowLevelIRContractError, check_low_level_ir
-from tvm.script import tirx as T
+from tvm_tirx.script import tirx as T
 
 
 def _build_kernel_with_buffer_access(scope: str, access: str):
