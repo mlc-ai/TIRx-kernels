@@ -359,24 +359,24 @@ def make_attention_kernel_blk128(
         tid = txl.thread_id()
         lane = tid & 31
 
-        with txl.If(warp == 0), txl.Then():
+        with txl.if_(warp == 0), txl.then_():
             txl.ptx.prefetch.tensormap(txl.address_of(q_map))
             txl.ptx.prefetch.tensormap(txl.address_of(k_map))
             txl.ptx.prefetch.tensormap(txl.address_of(v_map))
             txl.ptx.prefetch.tensormap(txl.address_of(o_map))
         if PREFETCH_IDS and not HALF:
-            with txl.If((warp == 14) & (cta < task_count)), txl.Then():
+            with txl.if_((warp == 14) & (cta < task_count)), txl.then_():
                 first_line = txl.local_scalar("int32", init=lane)
-                with txl.While(first_line * 32 < list_topk + 32):
+                with txl.while_(first_line * 32 < list_topk + 32):
                     txl.ptx.prefetch.global_.L2(blocks.ptr_to([cta * list_topk + first_line * 32]))
                     txl.assign(first_line, first_line + 32)
 
         smem = txl.smem_pool()
-        q_smem = smem.alloc((TILE_ROWS, D), txl.bf16, swizzle=txl.SW128B)
-        kv_smem = smem.alloc((KV_STAGES, TILE_KEYS, D), txl.bf16, swizzle=txl.SW128B)
-        o_smem = smem.alloc((TILE_ROWS, D), txl.bf16, swizzle=txl.SW128B)
-        stats_smem = smem.alloc((512,), txl.f32, align=16)
-        tmem_mailbox = smem.alloc((1,), txl.u32, align=8)
+        q_smem = smem.alloc((TILE_ROWS, D), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        kv_smem = smem.alloc((KV_STAGES, TILE_KEYS, D), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        o_smem = smem.alloc((TILE_ROWS, D), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        stats_smem = smem.alloc((512,), "float32", align=16)
+        tmem_mailbox = smem.alloc((1,), "uint32", align=8)
         pool = smem.pool
         pre_leader = tid == 14 * 32
         pre_leader_u = txl.local_scalar(
@@ -413,9 +413,9 @@ def make_attention_kernel_blk128(
         txl.ptx.fence.mbarrier_init.release.cluster()
         if EARLY_ISSUE and not HALF:
             sid0_pre = txl.local_scalar("int32", init=0)
-            with txl.If(warp == 14), txl.Then():
+            with txl.if_(warp == 14), txl.then_():
                 txl.cuda.warp_sync()
-                with txl.If(cta < task_count), txl.Then():
+                with txl.if_(cta < task_count), txl.then_():
                     head_pre = cta // tile_count
                     tile_pre = cta - head_pre * tile_count
                     txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
@@ -603,11 +603,11 @@ def make_attention_kernel_blk128(
 
             def advance_kv():
                 txl.assign(kv_stage, kv_stage + 1)
-                with txl.If(kv_stage == KV_STAGES), txl.Then():
+                with txl.if_(kv_stage == KV_STAGES), txl.then_():
                     txl.assign(kv_stage, 0)
                     txl.assign(kv_phase, kv_phase ^ 1)
 
-            with txl.While(task < task_count):
+            with txl.while_(task < task_count):
                 head, tile = task_coords(task)
                 n_iter = task_iters(task, head, tile)
                 base = list_base(task, head, tile)
@@ -676,22 +676,22 @@ def make_attention_kernel_blk128(
                         )
 
                 if EARLY_ISSUE and not HALF:
-                    with txl.If(task != cta), txl.Then():
+                    with txl.if_(task != cta), txl.then_():
                         issue_q()
                     txl.assign(q_phase, q_phase ^ 1)
                     if sid_fifo:
                         sid0 = txl.local_scalar("int32", init=0)
-                        with txl.If(task == cta):
-                            with txl.Then():
+                        with txl.if_(task == cta):
+                            with txl.then_():
                                 txl.assign(sid0, sid0_pre)
-                            with txl.Else():
+                            with txl.else_():
                                 txl.assign(sid0, load_sid(txl.int32(0)))
                         load_kv(False, txl.int32(0), sid0)
                     else:
-                        with txl.If(task == cta):
-                            with txl.Then():
+                        with txl.if_(task == cta):
+                            with txl.then_():
                                 load_kv(False, txl.int32(0), sid0_pre)
-                            with txl.Else():
+                            with txl.else_():
                                 load_kv(False, txl.int32(0))
                 else:
                     issue_q()
@@ -703,7 +703,7 @@ def make_attention_kernel_blk128(
                         load_kv(False, txl.int32(0))
 
                 next_task = txl.local_scalar("int32", init=task + cta_stride)
-                with txl.If((next_task < task_count) & (leader != txl.uint32(0))), txl.Then():
+                with txl.if_((next_task < task_count) & (leader != txl.uint32(0))), txl.then_():
                     next_head, next_tile = task_coords(next_task)
                     for band in range(2):
                         txl.ptx[TMA_PREFETCH_L2](
@@ -714,7 +714,7 @@ def make_attention_kernel_blk128(
                         )
                     if PREFETCH_IDS and not HALF:
                         line = txl.local_scalar("int32", init=0)
-                        with txl.While(line * 32 < list_topk + 32):
+                        with txl.while_(line * 32 < list_topk + 32):
                             txl.ptx.prefetch.global_.L2(
                                 blocks.ptr_to([next_task * list_topk + line * 32])
                             )
@@ -723,7 +723,7 @@ def make_attention_kernel_blk128(
                     sid1 = load_sid(txl.int32(1))
                     load_kv(False, txl.int32(1), sid1)
                     i = txl.local_scalar("int32", init=0)
-                    with txl.While(i < n_iter - 2):
+                    with txl.while_(i < n_iter - 2):
                         load_kv(True, i, sid0)
                         next_sid0 = load_sid(i + 2)
                         load_kv(False, i + 2, next_sid0)
@@ -738,7 +738,7 @@ def make_attention_kernel_blk128(
                 else:
                     load_kv(False, txl.int32(1))
                     i = txl.local_scalar("int32", init=0)
-                    with txl.While(i < n_iter - 2):
+                    with txl.while_(i < n_iter - 2):
                         load_kv(True, i)
                         load_kv(False, i + 2)
                         txl.assign(i, i + 1)
@@ -768,7 +768,7 @@ def make_attention_kernel_blk128(
 
             def advance_kv():
                 txl.assign(kv_stage, kv_stage + 1)
-                with txl.If(kv_stage == KV_STAGES), txl.Then():
+                with txl.if_(kv_stage == KV_STAGES), txl.then_():
                     txl.assign(kv_stage, 0)
                     txl.assign(kv_phase, kv_phase ^ 1)
 
@@ -807,7 +807,7 @@ def make_attention_kernel_blk128(
                         pred=leader,
                     )
 
-            with txl.While(task < task_count):
+            with txl.while_(task < task_count):
                 head, tile = task_coords(task)
                 n_iter = task_iters(task, head, tile)
                 txl.assign(acc0, 0)
@@ -826,7 +826,7 @@ def make_attention_kernel_blk128(
                     advance_kv()
                 pair_count = (n_iter - 2) >> 1
                 pair = txl.local_scalar("int32", init=0)
-                with txl.While(pair < pair_count):
+                with txl.while_(pair < pair_count):
                     for s in range(2):
                         phase = spo_phase0 if s == 0 else spo_phase1
                         acc = acc0 if s == 0 else acc1
@@ -892,7 +892,7 @@ def make_attention_kernel_blk128(
             leader = txl.local_scalar("uint32", init=txl.cuda.elect_sync())
             oepi_phase = txl.local_scalar("int32", init=0)
             task = txl.local_scalar("int32", init=cta)
-            with txl.While(task < task_count):
+            with txl.while_(task < task_count):
                 head, tile = task_coords(task)
                 tok = iket_range("epi-wait-full")
                 oepi_full.wait(0, oepi_phase)
@@ -974,11 +974,11 @@ def make_attention_kernel_blk128(
                         lens.append(
                             txl.local_scalar("int32", init=txl.if_then_else(member, length, 0))
                         )
-                    with txl.If((lens[0] < 64) | (lens[1] < 64)), txl.Then():
+                    with txl.if_((lens[0] < 64) | (lens[1] < 64)), txl.then_():
                         apply_column_mask(score, lens[0], lens[1])
                 else:
                     if not complete_pairs:
-                        with txl.If(i >= list_topk), txl.Then():
+                        with txl.if_(i >= list_topk), txl.then_():
                             for j in range(128):
                                 txl.assign(score[j], txl.float32(NEG_INF))
 
@@ -1002,7 +1002,7 @@ def make_attention_kernel_blk128(
                     delta_scaled = txl.local_scalar("float32")
                     txl.ptx.mul.f32(delta_scaled, delta, scale_log2)
                     txl.assign(old_scale, exp2(delta_scaled))
-                    with txl.If(delta_scaled >= txl.float32(-8.0)), txl.Then():
+                    with txl.if_(delta_scaled >= txl.float32(-8.0)), txl.then_():
                         txl.assign(new_max, row_max)
                         txl.assign(max_safe, row_max)
                         txl.assign(old_scale, txl.float32(1.0))
@@ -1072,14 +1072,14 @@ def make_attention_kernel_blk128(
                         spo_empty.arrive(s)
                 txl.ptx.tcgen05.wait__st.sync.aligned()
                 txl.cuda.warp_sync()
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     plast_full.arrive(s)
                 iket_end(tok_c)
                 txl.assign(row_sum, new_row_sum)
                 txl.assign(row_max, new_max)
                 txl.assign(score_phase, score_phase ^ 1)
 
-            with txl.While(task < task_count):
+            with txl.while_(task < task_count):
                 head, tile = task_coords(task)
                 n_iter = task_iters(task, head, tile)
                 base = list_base(task, head, tile)
@@ -1087,7 +1087,7 @@ def make_attention_kernel_blk128(
                 txl.assign(row_sum, txl.float32(0.0))
                 consume(txl.local_scalar("int32", init=s), True, base, n_iter)
                 iteration = txl.local_scalar("int32", init=1)
-                with txl.While(iteration < (n_iter >> 1)):
+                with txl.while_(iteration < (n_iter >> 1)):
                     consume(txl.local_scalar("int32", init=iteration * 2 + s), False, base, n_iter)
                     txl.assign(iteration, iteration + 1)
                 stats_empty.wait(s, stats_phase)
@@ -1189,7 +1189,7 @@ def make_attention_kernel_blk128(
                         words[7],
                     )
 
-            with txl.While(task < task_count):
+            with txl.while_(task < task_count):
                 head, tile = task_coords(task)
                 n_iter = task_iters(task, head, tile)
                 for s in range(2):
@@ -1197,7 +1197,7 @@ def make_attention_kernel_blk128(
                     stats_empty.arrive(s)
                 pair_count = (n_iter - 2) >> 1
                 pair = txl.local_scalar("int32", init=0)
-                with txl.While(pair < pair_count):
+                with txl.while_(pair < pair_count):
                     for s in range(2):
                         pv_corr_phase = pv_corr_phase0 if s == 0 else pv_corr_phase1
                         stats_sync(s, corr_warp)
@@ -1209,7 +1209,7 @@ def make_attention_kernel_blk128(
                         txl.ptx.vote_sync.ballot.b32(
                             ballot, txl.ptx.pred(scale < txl.float32(1.0)), txl.uint32(0xFFFFFFFF)
                         )
-                        with txl.If(ballot != 0), txl.Then():
+                        with txl.if_(ballot != 0), txl.then_():
                             tok = iket_range("corr-rescale")
                             rescale_o(s, scale)
                             iket_end(tok)
@@ -1264,7 +1264,7 @@ def make_attention_kernel_blk128(
                 txl.ptx.fence.proxy.async_.shared__cta()
                 txl.ptx.tcgen05.wait__ld.sync.aligned()
                 if EARLY_TMEM_RELEASE:
-                    with txl.If(task + cta_stride >= task_count), txl.Then():
+                    with txl.if_(task + cta_stride >= task_count), txl.then_():
                         txl.ptx.bar.arrive(txl.uint32(2), txl.uint32(416))
                 spo_empty.arrive(0)
                 spo_empty.arrive(1)
@@ -1277,7 +1277,7 @@ def make_attention_kernel_blk128(
                 txl.assign(task, task + cta_stride)
             oepi_empty.wait(0, oepi_phase)
             if EARLY_TMEM_RELEASE:
-                with txl.If(cta >= task_count), txl.Then():
+                with txl.if_(cta >= task_count), txl.then_():
                     txl.ptx.bar.arrive(txl.uint32(2), txl.uint32(416))
             else:
                 txl.ptx.bar.arrive(txl.uint32(2), txl.uint32(416))
@@ -1289,14 +1289,14 @@ def make_attention_kernel_blk128(
             k_map: txl.Ptr(txl.TensorMap),
             v_map: txl.Ptr(txl.TensorMap),
             o_map: txl.Ptr(txl.TensorMap),
-            blocks: txl.Tensor((txl.int64(),), txl.i32),
-            counts: txl.Tensor((txl.int64(),), txl.i32),
-            num_tasks: txl.i32,
-            tiles_per_head: txl.i32,
-            topk: txl.i32,
-            entry_stride: txl.i32,
-            num_ctas: txl.i32,
-            scale_log2: txl.f32,
+            blocks: txl.Tensor((txl.int64(),), "int32"),
+            counts: txl.Tensor((txl.int64(),), "int32"),
+            num_tasks: "int32",
+            tiles_per_head: "int32",
+            topk: "int32",
+            entry_stride: "int32",
+            num_ctas: "int32",
+            scale_log2: "float32",
         ):
             body(
                 q_map,
@@ -1321,12 +1321,12 @@ def make_attention_kernel_blk128(
             k_map: txl.Ptr(txl.TensorMap),
             v_map: txl.Ptr(txl.TensorMap),
             o_map: txl.Ptr(txl.TensorMap),
-            blocks: txl.Tensor((txl.int64(),), txl.i32),
-            num_tasks: txl.i32,
-            tiles_per_head: txl.i32,
-            topk: txl.i32,
-            num_ctas: txl.i32,
-            scale_log2: txl.f32,
+            blocks: txl.Tensor((txl.int64(),), "int32"),
+            num_tasks: "int32",
+            tiles_per_head: "int32",
+            topk: "int32",
+            num_ctas: "int32",
+            scale_log2: "float32",
         ):
             body(
                 q_map,
@@ -1424,27 +1424,27 @@ def make_attention_kernel_blk64(
         n_stream0 = (n_groups + 1) >> 1
         n_stream1 = n_groups >> 1
 
-        with txl.If(warp == 0), txl.Then():
+        with txl.if_(warp == 0), txl.then_():
             txl.ptx.prefetch.tensormap(txl.address_of(q_map))
             txl.ptx.prefetch.tensormap(txl.address_of(k_map))
             txl.ptx.prefetch.tensormap(txl.address_of(v_map))
         if PREFETCH_IDS:
-            with txl.If((warp == 14) & (cta < task_count)), txl.Then():
+            with txl.if_((warp == 14) & (cta < task_count)), txl.then_():
                 first_line = txl.local_scalar("int32", init=lane)
-                with txl.While(first_line * 32 < list_topk + 32):
+                with txl.while_(first_line * 32 < list_topk + 32):
                     txl.ptx.prefetch.global_.L2(q2k.ptr_to([cta * list_topk + first_line * 32]))
                     txl.assign(first_line, first_line + 32)
 
         smem = txl.smem_pool()
-        q_smem = smem.alloc((64, D), txl.bf16, swizzle=txl.SW128B)
+        q_smem = smem.alloc((64, D), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
         kv_base = smem.pool.offset
-        k_smem = smem.alloc((WS_PIECES // 2, WS_GROUP * 64, D), txl.bf16, swizzle=txl.SW128B)
+        k_smem = smem.alloc((WS_PIECES // 2, WS_GROUP * 64, D), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
         smem.pool.move_base_to(kv_base)
-        v_smem = smem.alloc((WS_PIECES * 2, 64, D), txl.bf16, swizzle=txl.SW128B)
+        v_smem = smem.alloc((WS_PIECES * 2, 64, D), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
         smem.pool.move_base_to(kv_base + WS_PIECES * WS_PIECE_BYTES)
-        xchg = smem.alloc((4 * 32 * 32,), txl.f32, align=16)
-        stats_smem = smem.alloc((512,), txl.f32, align=16)
-        tmem_mailbox = smem.alloc((1,), txl.u32, align=8)
+        xchg = smem.alloc((4 * 32 * 32,), "float32", align=16)
+        stats_smem = smem.alloc((512,), "float32", align=16)
+        tmem_mailbox = smem.alloc((1,), "uint32", align=8)
         pool = smem.pool
 
         pre_leader = tid == 14 * 32
@@ -1479,9 +1479,9 @@ def make_attention_kernel_blk64(
         txl.ptx.fence.mbarrier_init.release.cluster()
         if EARLY_ISSUE:
             sids0 = [txl.local_scalar("int32", init=0) for _ in range(WS_GROUP)]
-            with txl.If(warp == 14), txl.Then():
+            with txl.if_(warp == 14), txl.then_():
                 txl.cuda.warp_sync()
-                with txl.If(cta < task_count), txl.Then():
+                with txl.if_(cta < task_count), txl.then_():
                     head_pre = cta // block_count
                     qb_pre = cta - head_pre * block_count
                     txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
@@ -1553,7 +1553,7 @@ def make_attention_kernel_blk64(
 
             def advance_pieces():
                 txl.assign(piece, piece + 2)
-                with txl.If(piece == WS_PIECES), txl.Then():
+                with txl.if_(piece == WS_PIECES), txl.then_():
                     txl.assign(piece, 0)
                     txl.assign(piece_phase, piece_phase ^ 1)
 
@@ -1569,7 +1569,7 @@ def make_attention_kernel_blk64(
                 )
                 return txl.cuda.cvta_generic_to_shared(kv_full.ptr_to([idx]))
 
-            with txl.While(task < task_count):
+            with txl.while_(task < task_count):
                 head, qblock = task_coords(task)
                 head2 = head * 2
                 list_base = txl.local_scalar("int32", init=task * list_topk)
@@ -1637,13 +1637,13 @@ def make_attention_kernel_blk64(
                     )
 
                 if EARLY_ISSUE:
-                    with txl.If(task != cta), txl.Then():
+                    with txl.if_(task != cta), txl.then_():
                         issue_q()
                     txl.assign(q_phase, q_phase ^ 1)
-                    with txl.If(task == cta):
-                        with txl.Then():
+                    with txl.if_(task == cta):
+                        with txl.then_():
                             load_k_group(txl.int32(0), sids0)
-                        with txl.Else():
+                        with txl.else_():
                             load_k_group(txl.int32(0))
                 else:
                     issue_q()
@@ -1651,22 +1651,22 @@ def make_attention_kernel_blk64(
                     load_k_group(txl.int32(0))
 
                 next_task = txl.local_scalar("int32", init=task + cta_stride)
-                with txl.If((next_task < task_count) & (leader != txl.uint32(0))), txl.Then():
+                with txl.if_((next_task < task_count) & (leader != txl.uint32(0))), txl.then_():
                     next_head, next_qblock = task_coords(next_task)
                     txl.ptx[TMA_PREFETCH_L2](
                         txl.address_of(q_map), txl.int32(0), next_qblock * 64, next_head * 2
                     )
                     if PREFETCH_IDS:
                         line = txl.local_scalar("int32", init=0)
-                        with txl.While(line * 32 < list_topk + 32):
+                        with txl.while_(line * 32 < list_topk + 32):
                             txl.ptx.prefetch.global_.L2(
                                 q2k.ptr_to([next_task * list_topk + line * 32])
                             )
                             txl.assign(line, line + 1)
-                with txl.If(n_groups >= 2), txl.Then():
+                with txl.if_(n_groups >= 2), txl.then_():
                     load_k_group(txl.int32(1))
                 g = txl.local_scalar("int32", init=2)
-                with txl.While(g < n_groups):
+                with txl.while_(g < n_groups):
                     if cross_alias:
                         load_k_group(g)
                         load_v_group(g - 2)
@@ -1674,7 +1674,7 @@ def make_attention_kernel_blk64(
                         load_v_group(g - 2)
                         load_k_group(g)
                     txl.assign(g, g + 1)
-                with txl.If(n_groups >= 2), txl.Then():
+                with txl.if_(n_groups >= 2), txl.then_():
                     load_v_group(n_groups - 2)
                 load_v_group(n_groups - 1)
                 txl.assign(task, task + cta_stride)
@@ -1712,7 +1712,7 @@ def make_attention_kernel_blk64(
 
             def advance_pieces(n):
                 txl.assign(piece, piece + n)
-                with txl.If(piece >= WS_PIECES), txl.Then():
+                with txl.if_(piece >= WS_PIECES), txl.then_():
                     txl.assign(piece, piece - WS_PIECES)
                     txl.assign(piece_phase, piece_phase ^ 1)
 
@@ -1723,7 +1723,7 @@ def make_attention_kernel_blk64(
                 return voff(k16 % 4) + (k16 // 4) * 2 * WS_BLOCK16
 
             def issue_qk_half(s, k_piece, lo, hi):
-                with txl.If(leader != txl.uint32(0)), txl.Then():
+                with txl.if_(leader != txl.uint32(0)), txl.then_():
                     for k16 in range(lo, hi):
                         txl.ptx[MMA_WS_F16](
                             txl.cast(tmem_base + s * 128, "uint32"),
@@ -1735,7 +1735,7 @@ def make_attention_kernel_blk64(
                         )
 
             def issue_pv_part(s, v_piece, lo, hi, accumulate):
-                with txl.If(leader != txl.uint32(0)), txl.Then():
+                with txl.if_(leader != txl.uint32(0)), txl.then_():
                     for k16 in range(lo, hi):
                         p_addr = (
                             tmem_base + 64 + (1 - s) * 128 + k16 * 8
@@ -1858,7 +1858,7 @@ def make_attention_kernel_blk64(
                 advance_pieces(2)
                 txl.assign(spo_phase[s], spo_phase[s] ^ 1)
 
-            with txl.While(task < task_count):
+            with txl.while_(task < task_count):
                 txl.assign(acc[0], 0)
                 txl.assign(acc[1], 0)
                 if cross_alias:
@@ -1869,28 +1869,28 @@ def make_attention_kernel_blk64(
                 iket_end(tok)
                 txl.assign(q_phase, q_phase ^ 1)
                 prologue_qk(0)
-                with txl.If(n_groups >= 2), txl.Then():
+                with txl.if_(n_groups >= 2), txl.then_():
                     prologue_qk(1)
                 pairs = (n_groups - 2) >> 1
                 pair = txl.local_scalar("int32", init=0)
-                with txl.While(pair < pairs):
+                with txl.while_(pair < pairs):
                     step(0)
                     step(1)
                     txl.assign(pair, pair + 1)
 
-                with txl.If((n_groups >= 3) & (((n_groups - 2) & 1) != 0)), txl.Then():
+                with txl.if_((n_groups >= 3) & (((n_groups - 2) & 1) != 0)), txl.then_():
                     step(0)
                 commit(q_empty, 0)
-                with txl.If(n_groups >= 2):
-                    with txl.Then():
-                        with txl.If((n_groups & 1) == 0):
-                            with txl.Then():
+                with txl.if_(n_groups >= 2):
+                    with txl.then_():
+                        with txl.if_((n_groups & 1) == 0):
+                            with txl.then_():
                                 tail(0)
                                 tail(1)
-                            with txl.Else():
+                            with txl.else_():
                                 tail(1)
                                 tail(0)
-                    with txl.Else():
+                    with txl.else_():
                         tail(0)
                 if cross_alias:
                     for s_, n_s_ in ((0, n_stream0), (1, n_stream1)):
@@ -1962,7 +1962,7 @@ def make_attention_kernel_blk64(
                 if not full_blocks:
                     prefetch_sid(g + 2, list_base)
                 if not complete_groups:
-                    with txl.If((lens_local[0] < 64) | (lens_local[1] < 64)), txl.Then():
+                    with txl.if_((lens_local[0] < 64) | (lens_local[1] < 64)), txl.then_():
                         apply_column_mask(score, lens_local[0], lens_local[1])
 
                 old_scale = txl.local_scalar("float32", init=txl.float32(0.0))
@@ -1985,7 +1985,7 @@ def make_attention_kernel_blk64(
                     delta_scaled = txl.local_scalar("float32")
                     txl.ptx.mul.f32(delta_scaled, delta, scale_log2)
                     txl.assign(old_scale, exp2(delta_scaled))
-                    with txl.If(delta_scaled >= txl.float32(-8.0)), txl.Then():
+                    with txl.if_(delta_scaled >= txl.float32(-8.0)), txl.then_():
                         txl.assign(new_max, row_max)
                         txl.assign(max_safe, row_max)
                         txl.assign(old_scale, txl.float32(1.0))
@@ -2039,7 +2039,7 @@ def make_attention_kernel_blk64(
                             pv_done.wait(s, pv_phase)
                             txl.assign(pv_phase, pv_phase ^ 1)
 
-                            with txl.If((s == 1) | (g + 1 < n_groups)), txl.Then():
+                            with txl.if_((s == 1) | (g + 1 < n_groups)), txl.then_():
                                 peer_gen = txl.local_scalar(
                                     "int32",
                                     init=(g >> 1)
@@ -2082,7 +2082,7 @@ def make_attention_kernel_blk64(
                 txl.ptx.tcgen05.wait__st.sync.aligned()
                 iket_end(tok_b)
                 txl.cuda.warp_sync()
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     plast_full.arrive(s)
                 iket_end(tok_c)
                 tok_s = iket_range("sm-sum")
@@ -2094,14 +2094,14 @@ def make_attention_kernel_blk64(
             if not full_blocks:
                 prefetch_sid(s, txl.min(task, task_count - 1) * list_topk)
                 prefetch_len()
-            with txl.While(task < task_count):
+            with txl.while_(task < task_count):
                 list_base = txl.local_scalar("int32", init=task * list_topk)
                 txl.assign(row_max, txl.float32(NEG_INF))
                 txl.assign(row_sum, txl.float32(0.0))
-                with txl.If(n_s > 0), txl.Then():
+                with txl.if_(n_s > 0), txl.then_():
                     consume(txl.local_scalar("int32", init=s), True, list_base)
                     k = txl.local_scalar("int32", init=1)
-                    with txl.While(k < n_s):
+                    with txl.while_(k < n_s):
                         consume(txl.local_scalar("int32", init=s + 2 * k), False, list_base)
                         txl.assign(k, k + 1)
                     stats_empty.wait(s, stats_phase)
@@ -2139,7 +2139,7 @@ def make_attention_kernel_blk64(
             def o_free_arrive():
                 txl.ptx.tcgen05.wait__ld.sync.aligned()
                 spo_empty.arrive(0)
-                with txl.If(n_stream1 > 0), txl.Then():
+                with txl.if_(n_stream1 > 0), txl.then_():
                     spo_empty.arrive(1)
 
             def rescale_o(s, scale):
@@ -2162,13 +2162,13 @@ def make_attention_kernel_blk64(
                 txl.ptx.tcgen05.wait__st.sync.aligned()
 
             o_free_arrive()
-            with txl.While(task < task_count):
+            with txl.while_(task < task_count):
                 head, qblock = task_coords(task)
                 g = txl.local_scalar("int32", init=0)
-                with txl.While(g < n_groups):
+                with txl.while_(g < n_groups):
                     s = g & 1
                     stats_sync(s, c)
-                    with txl.If(g >= 2), txl.Then():
+                    with txl.if_(g >= 2), txl.then_():
                         scale = ld_stats(s * 128 + tid128)
                         if cross_alias:
                             pv_done.wait(s, pv_corr_phase[s])
@@ -2177,7 +2177,7 @@ def make_attention_kernel_blk64(
                         txl.ptx.vote_sync.ballot.b32(
                             ballot, txl.ptx.pred(scale < txl.float32(1.0)), txl.uint32(0xFFFFFFFF)
                         )
-                        with txl.If(ballot != 0), txl.Then():
+                        with txl.if_(ballot != 0), txl.then_():
                             tok = iket_range("corr-rescale")
                             rescale_o(s, scale)
                             iket_end(tok)
@@ -2191,7 +2191,7 @@ def make_attention_kernel_blk64(
                 txl.assign(sums[0], ld_stats(tid128))
                 txl.assign(maxes[0], ld_stats(256 + tid128))
                 stats_empty.arrive(0)
-                with txl.If(n_stream1 > 0), txl.Then():
+                with txl.if_(n_stream1 > 0), txl.then_():
                     stats_sync(1, c)
                     txl.assign(sums[1], ld_stats(128 + tid128))
                     txl.assign(maxes[1], ld_stats(384 + tid128))
@@ -2248,7 +2248,7 @@ def make_attention_kernel_blk64(
 
                 tok = iket_range("corr-wait-oacc")
                 oacc_full.wait(0, oacc_phase)
-                with txl.If(n_stream1 > 0), txl.Then():
+                with txl.if_(n_stream1 > 0), txl.then_():
                     oacc_full.wait(1, oacc_phase)
                 iket_end(tok)
                 txl.assign(oacc_phase, oacc_phase ^ 1)
@@ -2268,8 +2268,8 @@ def make_attention_kernel_blk64(
                     trip (four per task instead of eight); the stream-0 chunk is scaled in place."""
                     acc = txl.alloc_local((32,), "float32")
                     tmem_load32(acc, tmem_base + 256 + dim0 + row_hi)
-                    with txl.If(n_stream1 > 0):
-                        with txl.Then():
+                    with txl.if_(n_stream1 > 0):
+                        with txl.then_():
                             values1 = txl.alloc_local((32,), "float32")
                             tmem_load32(values1, tmem_base + 384 + dim0 + row_hi)
                             for pair in range(16):
@@ -2286,14 +2286,14 @@ def make_attention_kernel_blk64(
                                     acc[idx],
                                     acc[idx + 1],
                                 )
-                        with txl.Else():
+                        with txl.else_():
                             for pair in range(16):
                                 idx = pair * 2
                                 packed("mul.rn.f32x2", acc, idx, acc[idx], acc[idx + 1], f[0], f[0])
                     if last:
                         o_free_arrive()
                         if EARLY_TMEM_RELEASE:
-                            with txl.If(task + cta_stride >= task_count), txl.Then():
+                            with txl.if_(task + cta_stride >= task_count), txl.then_():
                                 txl.ptx.bar.arrive(txl.uint32(2), txl.uint32(416))
                     return acc
 
@@ -2350,11 +2350,11 @@ def make_attention_kernel_blk64(
                 iket_end(tok)
                 if cross_alias:
                     txl.assign(pv_corr_phase[0], pv_corr_phase[0] ^ 1)
-                    with txl.If(n_stream1 > 0), txl.Then():
+                    with txl.if_(n_stream1 > 0), txl.then_():
                         txl.assign(pv_corr_phase[1], pv_corr_phase[1] ^ 1)
                 txl.assign(task, task + cta_stride)
             if EARLY_TMEM_RELEASE:
-                with txl.If(cta >= task_count), txl.Then():
+                with txl.if_(cta >= task_count), txl.then_():
                     txl.ptx.bar.arrive(txl.uint32(2), txl.uint32(416))
             else:
                 txl.ptx.bar.arrive(txl.uint32(2), txl.uint32(416))
@@ -2363,15 +2363,15 @@ def make_attention_kernel_blk64(
         q_map: txl.Ptr(txl.TensorMap),
         k_map: txl.Ptr(txl.TensorMap),
         v_map: txl.Ptr(txl.TensorMap),
-        out: txl.Tensor((txl.int64(),), txl.i32),
-        q2k: txl.Tensor((txl.int64(),), txl.i32),
-        lens: txl.Tensor((txl.int64(),), txl.i32),
-        num_tasks: txl.i32,
-        num_blocks: txl.i32,
-        num_heads: txl.i32,
-        topk: txl.i32,
-        num_ctas: txl.i32,
-        scale_log2: txl.f32,
+        out: txl.Tensor((txl.int64(),), "int32"),
+        q2k: txl.Tensor((txl.int64(),), "int32"),
+        lens: txl.Tensor((txl.int64(),), "int32"),
+        num_tasks: "int32",
+        num_blocks: "int32",
+        num_heads: "int32",
+        topk: "int32",
+        num_ctas: "int32",
+        scale_log2: "float32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(block=16 * 32, grid=grid),

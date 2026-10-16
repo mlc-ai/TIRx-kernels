@@ -132,24 +132,24 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
 
     @txl.kernel()
     def gdn_prefill(
-        q: txl.Tensor((txl.int64(),), txl.f16),
-        k: txl.Tensor((txl.int64(),), txl.f16),
-        v: txl.Tensor((txl.int64(),), txl.f16),
-        gate: txl.Tensor((txl.int64(),), txl.f32),
-        beta: txl.Tensor((txl.int64(),), txl.f32),
-        o: txl.Tensor((txl.int64(),), txl.f16),
-        cu_seqlens: txl.Tensor((txl.int64(),), txl.i32),
-        initial_state: txl.Tensor((txl.int64(),), txl.f32),
-        final_state: txl.Tensor((txl.int64(),), txl.f32),
+        q: txl.Tensor((txl.int64(),), "float16"),
+        k: txl.Tensor((txl.int64(),), "float16"),
+        v: txl.Tensor((txl.int64(),), "float16"),
+        gate: txl.Tensor((txl.int64(),), "float32"),
+        beta: txl.Tensor((txl.int64(),), "float32"),
+        o: txl.Tensor((txl.int64(),), "float16"),
+        cu_seqlens: txl.Tensor((txl.int64(),), "int32"),
+        initial_state: txl.Tensor((txl.int64(),), "float32"),
+        final_state: txl.Tensor((txl.int64(),), "float32"),
         q_map: txl.Ptr(txl.TensorMap),
         k_map: txl.Ptr(txl.TensorMap),
         v_map: txl.Ptr(txl.TensorMap),
         o_map: txl.Ptr(txl.TensorMap),
-        desc_ws: txl.Tensor((txl.int64(),), txl.i8),  # per-CTA descriptor workspace (orig: int8)
-        total_tokens: txl.i64,
-        num_sequences: txl.i32,
-        num_sms: txl.i32,
-        scale: txl.f32,
+        desc_ws: txl.Tensor((txl.int64(),), "int8"),  # per-CTA descriptor workspace (orig: int8)
+        total_tokens: "int64",
+        num_sequences: "int32",
+        num_sms: "int32",
+        scale: "float32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=txl.min(num_sequences * HV, num_sms), block=12 * 32),
@@ -213,22 +213,22 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
         # ONE primitive. Stages are the leading dimension — an ordinary
         # coordinate passed to the operand constructors, no subviews.
         # swizzle=None is the IDENTITY: a plain row-major tirx buffer.
-        # swizzle=txl.SW128B is a COMPOSED layout, not a bare xor: the alloc's
+        # swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM is a COMPOSED layout, not a bare xor: the alloc's
         # last two dims are tiled into [8, 128B/elem] atoms and the xor applies
         # INSIDE each atom. All four constructors derive from that layout.
-        s_tmem_addr = smem.alloc((1,), txl.i32, align=4)  # tcgen05.alloc mailbox
-        s_q = smem.alloc((2, CHUNK, D_HEAD), txl.f16, swizzle=txl.SW128B)
-        s_k = smem.alloc((4, CHUNK, D_HEAD), txl.f16, swizzle=txl.SW128B)
-        s_v = smem.alloc((3, D_HEAD, CHUNK), txl.f16, swizzle=txl.SW128B)
-        s_ainv = smem.alloc((3, CHUNK, CHUNK), txl.f16, swizzle=txl.SW128B)
-        s_qk = smem.alloc((2, CHUNK, CHUNK), txl.f16, swizzle=txl.SW128B)
-        s_o = smem.alloc((2, D_HEAD, CHUNK), txl.f16, swizzle=txl.SW128B)
-        s_cumsumlog = smem.alloc((5, CHUNK), txl.f32, align=4)  # plain tirx buffers
-        s_cumprod = smem.alloc((5, CHUNK), txl.f32, align=4)  # (orig:L121-123)
-        s_beta = smem.alloc((5, CHUNK), txl.f32, align=4)
+        s_tmem_addr = smem.alloc((1,), "int32", align=4)  # tcgen05.alloc mailbox
+        s_q = smem.alloc((2, CHUNK, D_HEAD), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_k = smem.alloc((4, CHUNK, D_HEAD), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_v = smem.alloc((3, D_HEAD, CHUNK), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_ainv = smem.alloc((3, CHUNK, CHUNK), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_qk = smem.alloc((2, CHUNK, CHUNK), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_o = smem.alloc((2, D_HEAD, CHUNK), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_cumsumlog = smem.alloc((5, CHUNK), "float32", align=4)  # plain tirx buffers
+        s_cumprod = smem.alloc((5, CHUNK), "float32", align=4)  # (orig:L121-123)
+        s_beta = smem.alloc((5, CHUNK), "float32", align=4)
 
         # publish the mbarrier.init stores before any use — orig:L1477-1481
-        with txl.If(txl.thread_id() == 0), txl.Then():
+        with txl.if_(txl.thread_id() == 0), txl.then_():
             txl.ptx.fence.mbarrier_init.release.cluster()
         txl.cuda.cta_sync()
 
@@ -532,7 +532,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                 for p in range(4):
                     txl.idioms.cast_f16x2_to_f32x2(row, p, words[p])
                 for i in range(8):
-                    with txl.If((lane & 7) == i), txl.Then():
+                    with txl.if_((lane & 7) == i), txl.then_():
                         txl.assign(row[i], txl.float32(1.0))
                 rs = txl.local_scalar("float32")
                 pv = txl.local_scalar("uint32")
@@ -557,9 +557,9 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                                 txl.uint32(0x181F),
                                 txl.uint32(0xFFFFFFFF),
                             )
-                            with txl.If((lane & 7) > src), txl.Then():
+                            with txl.if_((lane & 7) > src), txl.then_():
                                 txl.assign(row[i], row[i] + rs * txl.reinterpret(pv, ty="float32"))
-                    with txl.If((lane & 7) > src), txl.Then():
+                    with txl.if_((lane & 7) > src), txl.then_():
                         txl.assign(row[src], rs)
                 for p in range(4):
                     pack_f16x2(words[p], row[2 * p], row[2 * p + 1])
@@ -699,7 +699,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
             lw = txl.warp_id_in_role()  # 0..3
             work = txl.alloc_local([1], "int32")
             txl.assign(work[0], txl.cta_id())
-            with txl.While(work[0] < total_work):
+            with txl.while_(work[0] < total_work):
                 batch, head, lo, hi, seqlen = work_coords(work[0])
                 with txl.serial(txl.ceildiv(seqlen, PAIR_TOKENS)) as _pair:
                     # decay transfer for both chunks: hold TWO gate stages —
@@ -722,7 +722,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                         # Select's short-circuit; ex2's DPS shape would
                         # otherwise hoist both out unconditionally, so keep
                         # them under the same guard.        orig:L1560-1576
-                        with txl.If(row0 >= col), txl.Then():
+                        with txl.if_(row0 >= col), txl.then_():
                             for j in range(2):
                                 txl.ptx.ld.shared.f32(
                                     clog[j], txl.address_of(s_cumsumlog[g2[j], col])
@@ -764,7 +764,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
 
                     # hierarchical inverse on both stages      orig:L1663-1680
                     my = txl.local_scalar("int32", init=a2[0])
-                    with txl.If((lw >> 1) == 1), txl.Then():
+                    with txl.if_((lw >> 1) == 1), txl.then_():
                         txl.assign(my, a2[1])
                     bar_inv()
                     # a2[j] / my[0] are int LOCALS, not PipelineState vars: a
@@ -834,7 +834,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
             st_op = txl.PipelineState(2, phase=1)  # producer, p_o
 
             # tmem alloc by owner warp 0, result via mailbox — orig:L1792-1795
-            with txl.If(txl.warp_id_in_role() == 0), txl.Then():
+            with txl.if_(txl.warp_id_in_role() == 0), txl.then_():
                 txl.ptx["tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"](
                     txl.address_of(s_tmem_addr[0]), txl.uint32(TMEM_COLS)
                 )
@@ -912,7 +912,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                     )
                 txl.ptx[WAIT_ST]()
                 bar_state()
-                with txl.If((tid1 & 127) == 0), txl.Then():
+                with txl.if_((tid1 & 127) == 0), txl.then_():
                     # p_kv's full side has TWO producers of different KINDS:
                     # mma1 commits it from the matrix engine (TCGen05Bar), cg1
                     # signals it in software here. `full="tcgen05"` names only
@@ -944,11 +944,11 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
 
             work = txl.alloc_local([1], "int32")
             txl.assign(work[0], txl.cta_id())
-            with txl.While(work[0] < total_work):
+            with txl.while_(work[0] < total_work):
                 batch, head, lo, hi, seqlen = work_coords(work[0])
                 chunks = txl.ceildiv(seqlen, PAIR_TOKENS) * 2
-                with txl.If(chunks > 0):
-                    with txl.Then():
+                with txl.if_(chunks > 0):
+                    with txl.then_():
                         load_initial_state(batch, head)
                         cp2 = txl.local_scalar("float32")
                         sv = txl.alloc_local([128], "float32")
@@ -965,7 +965,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                         dw = txl.alloc_local([32], "uint32")
                         cbase = (tid1 << 1) & 6
                         with txl.serial(chunks) as chunk:  # orig:L1850
-                            with txl.If((chunk & 1) == 0), txl.Then():
+                            with txl.if_((chunk & 1) == 0), txl.then_():
                                 # kv skip(2): mma1 produces these two rounds; a
                                 # depth-1 ring makes two advances phase-neutral,
                                 # kept as the visible ledger of foreign rounds
@@ -1077,7 +1077,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
 
                             # NV (f16) + decayed-V (f16) inputs orig:L2038-2097
                             p_cg1.full.wait(st_cg1c.stage, st_cg1c.phase)
-                            with txl.If(lane1 == 0), txl.Then():
+                            with txl.if_(lane1 == 0), txl.then_():
                                 p_v.empty.arrive(st_v.stage)  # init_empty=4:
                             st_v.advance()  # guarded arrive, unguarded advance
                             cg1_acc_ld(fr, TM_CG1)
@@ -1113,7 +1113,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                             p_o.full.arrive(st_op.stage)  # commit O
                             st_op.advance()
                         store_final_state(batch, head)
-                    with txl.Else():  # orig:L2132-2134
+                    with txl.else_():  # orig:L2132-2134
                         base = state_gidx(batch, head)
                         sval = txl.local_scalar("float32")
                         # The source deliberately keeps this loop rolled.
@@ -1127,7 +1127,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                 txl.assign(work[0], work[0] + grid_x)
             # tmem dealloc by owner at role exit — orig:L2136-2143
             txl.cuda.warpgroup_sync(BAR_DEALLOC)
-            with txl.If(txl.warp_id_in_role() == 0), txl.Then():
+            with txl.if_(txl.warp_id_in_role() == 0), txl.then_():
                 txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"]()
                 txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
                     txl.Cast(tmem[0], "uint32"), txl.uint32(TMEM_COLS)
@@ -1148,7 +1148,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
 
             work = txl.alloc_local([1], "int32")
             txl.assign(work[0], txl.cta_id())
-            with txl.While(work[0] < total_work):
+            with txl.while_(work[0] < total_work):
                 batch, head, lo, hi, seqlen = work_coords(work[0])
                 with txl.serial(txl.ceildiv(seqlen, PAIR_TOKENS)) as _pair:
                     # K/Q stages stay in flight across the whole pair, so copy
@@ -1205,9 +1205,9 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
             st_vp = txl.PipelineState(3, phase=1)  # producer, p_v
             # copy the three by-value TensorMap payloads into the CTA slots
             # once, Q -> K -> V — orig:L2416-2428
-            with txl.If(txl.cta_id() < total_work), txl.Then():
+            with txl.if_(txl.cta_id() < total_work), txl.then_():
                 for dsc, m in ((d_q, q_map), (d_k, k_map), (d_v, v_map)):
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         copy_desc(dsc, m)
                     txl.cuda.warp_sync()
                 txl.ptx.fence.acq_rel.cta()
@@ -1247,10 +1247,10 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                 )
                 for dsc, pipe, st, insn, dst, coords in specs:
                     pipe.empty.wait(st.stage, st.phase)  # acquire
-                    with txl.If(chunk_idx == 0), txl.Then():  # orig:L1122-1124
-                        with txl.If(elected()), txl.Then():
+                    with txl.if_(chunk_idx == 0), txl.then_():  # orig:L1122-1124
+                        with txl.if_(elected()), txl.then_():
                             txl.ptx[TMAP_ACQ](dsc)  # size operand is the ISA's literal 128
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         # TMABar.arrive(tx_count=) IS arrive.expect_tx — the
                         # in-tree spelling of tx accounting.   orig:L1129
                         pipe.full.arrive(st.stage, tx_count=STAGE_BYTES)
@@ -1266,16 +1266,16 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
 
             work = txl.alloc_local([1], "int32")
             txl.assign(work[0], txl.cta_id())
-            with txl.While(work[0] < total_work):
+            with txl.while_(work[0] < total_work):
                 batch, head, lo, hi, seqlen = work_coords(work[0])
                 qk_head, sub = head_split(head)
                 chunks = txl.ceildiv(seqlen, PAIR_TOKENS) * 2
                 valid = txl.ceildiv(seqlen, CHUNK)
-                with txl.If(chunks > 0), txl.Then():
-                    with txl.If(elected()), txl.Then():
+                with txl.if_(chunks > 0), txl.then_():
+                    with txl.if_(elected()), txl.then_():
                         txl.ptx[BULK_WAIT](0)
                     txl.cuda.warp_sync()  # orig:L2452-2455
-                    with txl.If(elected()), txl.Then():  # orig:L2456-2484
+                    with txl.if_(elected()), txl.then_():  # orig:L2456-2484
                         replace_desc(
                             d_q,
                             txl.address_of(q[txl.int64(0)]),
@@ -1340,7 +1340,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
 
             work = txl.alloc_local([1], "int32")
             txl.assign(work[0], txl.cta_id())
-            with txl.While(work[0] < total_work):
+            with txl.while_(work[0] < total_work):
                 batch, head, lo, hi, seqlen = work_coords(work[0])
                 chunks = txl.ceildiv(seqlen, PAIR_TOKENS) * 2
                 with txl.serial(chunks) as chunk:
@@ -1417,7 +1417,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                     p_qs.full.arrive(st_qsp.stage, pred=elect())
                     st_qsp.advance()
 
-                    with txl.If(chunk == 0), txl.Then():  # orig:L2384-2385
+                    with txl.if_(chunk == 0), txl.then_():  # orig:L2384-2385
                         st_kvp.advance()  # skip cg1's initial-state round
                     p_kv.empty.wait(st_kvp.stage, st_kvp.phase)
                     m_dcy.wait(0, st_dcy.phase)
@@ -1450,8 +1450,8 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
             st_bp = txl.PipelineState(5, phase=1)  # producer, p_beta
             st_oc = txl.PipelineState(2, phase=0)  # consumer, p_o
             lane_a = txl.lane_id()
-            with txl.If(txl.cta_id() < total_work), txl.Then():  # orig:L2607-2611
-                with txl.If(elected()), txl.Then():
+            with txl.if_(txl.cta_id() < total_work), txl.then_():  # orig:L2607-2611
+                with txl.if_(elected()), txl.then_():
                     copy_desc(d_o, o_map)
                 txl.cuda.warp_sync()
                 txl.ptx.fence.acq_rel.cta()
@@ -1468,14 +1468,14 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                 for i in range(2):
                     txl.assign(g[i], txl.float32(1.0))
                     txl.assign(valid[i], txl.int32(1))
-                with txl.If(is_last):
-                    with txl.Then():
+                with txl.if_(is_last):
+                    with txl.then_():
                         for i in range(2):
                             txl.assign(valid[i], txl.Cast(pos[i] < hi, "int32"))
                         for i in range(2):
-                            with txl.If(valid[i] != 0), txl.Then():
+                            with txl.if_(valid[i] != 0), txl.then_():
                                 txl.ptx.ld.global_.f32(g[i], gsrc[i])
-                    with txl.Else():
+                    with txl.else_():
                         for i in range(2):
                             txl.ptx.ld.global_.f32(g[i], gsrc[i])
                 for i in range(2):
@@ -1505,8 +1505,8 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
 
                 p_beta.empty.wait(st_bp.stage, st_bp.phase)  # acquire
                 bdst = [txl.address_of(s_beta[st_bp.stage, lane_a + 32 * i]) for i in range(2)]
-                with txl.If(is_last):
-                    with txl.Then():
+                with txl.if_(is_last):
+                    with txl.then_():
                         # The async arrival publishes copies, not generic
                         # pre-stores. Zero-fill invalid rows through the same
                         # cp.async completion as valid beta loads.
@@ -1517,7 +1517,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                                 4,
                                 txl.Select(valid[i] != 0, txl.uint32(4), txl.uint32(0)),
                             )
-                    with txl.Else():
+                    with txl.else_():
                         for i in range(2):
                             txl.ptx[CP_ASYNC](bdst[i], bsrc[i], 4, 4)
                 # the full side commits by transaction, no software arrive:
@@ -1526,7 +1526,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
 
             def store_o(off, head, qk_head, sub):  # orig:L1278-1321
                 p_o.full.wait(st_oc.stage, st_oc.phase)
-                with txl.If(elected()), txl.Then():
+                with txl.if_(elected()), txl.then_():
                     for d in (0, 64):
                         coords = (
                             (txl.int32(d), txl.Cast(off, "int32"), sub, qk_head)
@@ -1545,20 +1545,20 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
 
             work = txl.alloc_local([1], "int32")
             txl.assign(work[0], txl.cta_id())
-            with txl.While(work[0] < total_work):
+            with txl.while_(work[0] < total_work):
                 batch, head, lo, hi, seqlen = work_coords(work[0])
                 qk_head, sub = head_split(head)
                 valid = txl.ceildiv(seqlen, CHUNK)
                 chunks = txl.ceildiv(seqlen, PAIR_TOKENS) * 2
-                with txl.If(chunks > 0), txl.Then():
-                    with txl.If(elected()), txl.Then():
+                with txl.if_(chunks > 0), txl.then_():
+                    with txl.if_(elected()), txl.then_():
                         txl.ptx[BULK_WAIT](0)
                     txl.cuda.warp_sync()  # orig:L2636-2638
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         replace_vo_desc(d_o, txl.address_of(o[txl.int64(0)]), hi)
                     txl.cuda.warp_sync()  # orig:L2639-2663
                     txl.ptx[TMAP_REL]()
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         txl.ptx[TMAP_ACQ](d_o)  # orig:L2664-2665
 
                     # exact fixed lookahead (0,1), then (2,3), then chunk+4
@@ -1567,14 +1567,14 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                         produce_gate_beta(
                             lo + txl.int64(c * CHUNK), head, txl.int32(c) >= valid - 1, hi
                         )
-                    with txl.If(chunks > 2), txl.Then():
+                    with txl.if_(chunks > 2), txl.then_():
                         for c in range(2, 4):
                             produce_gate_beta(
                                 lo + txl.int64(c * CHUNK), head, txl.int32(c) >= valid - 1, hi
                             )
                     with txl.serial(chunks) as c:  # steady state: +4 lookahead
                         coff = lo + txl.Cast(c * CHUNK, "int64")
-                        with txl.If(c + 4 < chunks), txl.Then():
+                        with txl.if_(c + 4 < chunks), txl.then_():
                             produce_gate_beta(
                                 coff + txl.int64(4 * CHUNK), head, c + 4 >= valid - 1, hi
                             )

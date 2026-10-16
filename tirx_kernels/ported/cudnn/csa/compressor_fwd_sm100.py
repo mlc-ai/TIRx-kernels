@@ -134,14 +134,14 @@ def get_kernel(head_dim: int, coff: int, *, backend_config=None, **kwargs):
 
     @txl.kernel()
     def compressor_fwd(
-        kv: txl.Tensor((txl.int64(),), txl.bf16),
-        score: txl.Tensor((txl.int64(),), txl.bf16),
-        ape: txl.Tensor((txl.int64(),), txl.f32),
-        cu_seqlens: txl.Tensor((txl.int64(),), txl.i32),
-        cu_seqlens_comp: txl.Tensor((txl.int64(),), txl.i32),
-        out: txl.Tensor((txl.int64(),), txl.bf16),
-        nb_total: txl.i32,
-        n_seq: txl.i32,
+        kv: txl.Tensor((txl.int64(),), "bfloat16"),
+        score: txl.Tensor((txl.int64(),), "bfloat16"),
+        ape: txl.Tensor((txl.int64(),), "float32"),
+        cu_seqlens: txl.Tensor((txl.int64(),), "int32"),
+        cu_seqlens_comp: txl.Tensor((txl.int64(),), "int32"),
+        out: txl.Tensor((txl.int64(),), "bfloat16"),
+        nb_total: "int32",
+        n_seq: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=[nb_total, txl.ceildiv(ncol, 64), 1], block=2 * 32),
@@ -151,7 +151,7 @@ def get_kernel(head_dim: int, coff: int, *, backend_config=None, **kwargs):
         bb, block_y, _ = txl.cta_id()
         thread = txl.thread_id()
         col = block_y * txl.int32(64) + thread
-        with txl.If(col < ncol), txl.Then():
+        with txl.if_(col < ncol), txl.then_():
             column = col * txl.int32(vec)
 
             # The source hoists all APE traffic ahead of row validity checks.
@@ -171,10 +171,10 @@ def get_kernel(head_dim: int, coff: int, *, backend_config=None, **kwargs):
             nb_valid = txl.local_scalar("int32")
             txl.ptx.ld.global_.b32(nb_valid, cu_seqlens_comp.ptr_to([n_seq]))
 
-            with txl.If(bb < nb_total), txl.Then():
+            with txl.if_(bb < nb_total), txl.then_():
                 seq_idx = txl.local_scalar("int32", init=txl.int32(0))
                 block_in_sequence = txl.local_scalar("int32", init=txl.int32(0))
-                with txl.If(bb < nb_valid), txl.Then():
+                with txl.if_(bb < nb_valid), txl.then_():
                     txl.assign(block_in_sequence, bb)
                     sequence = txl.local_scalar("int32", init=txl.int32(0))
 
@@ -215,21 +215,21 @@ def get_kernel(head_dim: int, coff: int, *, backend_config=None, **kwargs):
 
                     # Preserve the source compiler's nounroll 8/4/2/1 boundary
                     # grouping rather than a scalar two-load loop.
-                    with txl.While(sequence + 8 <= n_seq):
+                    with txl.while_(sequence + 8 <= n_seq):
                         for offset in range(8):
                             scan_boundary(sequence + txl.int32(offset))
                         txl.assign(sequence, sequence + 8)
-                    with txl.If(sequence + 4 <= n_seq), txl.Then():
+                    with txl.if_(sequence + 4 <= n_seq), txl.then_():
                         txl.ptx.ld.global_.b32(sequence_begin, cu_seqlens_comp.ptr_to([sequence]))
                         for offset in range(4):
                             scan_boundary(sequence + txl.int32(offset))
                         txl.assign(sequence, sequence + 4)
-                    with txl.If(sequence + 2 <= n_seq), txl.Then():
+                    with txl.if_(sequence + 2 <= n_seq), txl.then_():
                         txl.ptx.ld.global_.b32(sequence_begin, cu_seqlens_comp.ptr_to([sequence]))
                         for offset in range(2):
                             scan_boundary(sequence + txl.int32(offset))
                         txl.assign(sequence, sequence + 2)
-                    with txl.If(sequence < n_seq), txl.Then():
+                    with txl.if_(sequence < n_seq), txl.then_():
                         txl.ptx.ld.global_.b32(sequence_begin, cu_seqlens_comp.ptr_to([sequence]))
                         scan_boundary(sequence)
 
@@ -255,7 +255,7 @@ def get_kernel(head_dim: int, coff: int, *, backend_config=None, **kwargs):
                     score_bits = txl.alloc_local([vec], "uint16")
                     value_bits = txl.alloc_local([vec], "uint16")
                     if coff == 2 and k < 4:
-                        with txl.If(block_in_sequence > 0), txl.Then():
+                        with txl.if_(block_in_sequence > 0), txl.then_():
                             offset = (token - txl.int32(4) + txl.int32(k)) * txl.int32(
                                 width
                             ) + column
@@ -277,7 +277,7 @@ def get_kernel(head_dim: int, coff: int, *, backend_config=None, **kwargs):
                         for lane in range(vec):
                             txl.ptx.mov.b32(scores[k * vec + lane], txl.float32(float("-inf")))
                             txl.ptx.mov.b32(values[k * vec + lane], txl.float32(0.0))
-                            with txl.If(block_in_sequence > 0), txl.Then():
+                            with txl.if_(block_in_sequence > 0), txl.then_():
                                 txl.ptx.add.rn.f32.bf16(
                                     scores[k * vec + lane],
                                     score_bits[lane],

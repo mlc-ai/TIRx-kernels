@@ -103,7 +103,7 @@ def _ring_prev(slot, phase, size):
 
 def _wait_plain(barrier, phase):
     ready = txl.local_scalar("uint32", init=txl.uint32(0))
-    with txl.While(ready == txl.uint32(0)):
+    with txl.while_(ready == txl.uint32(0)):
         txl.ptx.mbarrier.try_wait.parity.shared.b64(
             ready, barrier, txl.cast(phase, "uint32"), txl.uint32(_TRY_WAIT_TICKS)
         )
@@ -111,7 +111,7 @@ def _wait_plain(barrier, phase):
 
 def _wait_acquire_cta(barrier, phase):
     ready = txl.local_scalar("uint32", init=txl.uint32(0))
-    with txl.While(ready == txl.uint32(0)):
+    with txl.while_(ready == txl.uint32(0)):
         txl.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
             ready, barrier, txl.cast(phase, "uint32"), txl.uint32(_TRY_WAIT_TICKS)
         )
@@ -223,14 +223,14 @@ def make_kernel(*, backend_config=None):
         B_tmap: txl.Ptr(txl.TensorMap),
         SFA_tmap: txl.Ptr(txl.TensorMap),
         SFB_tmap: txl.Ptr(txl.TensorMap),
-        C: txl.Tensor((txl.int64(),), txl.f16),
-        M: txl.i32,
-        N: txl.i32,
-        K_dim: txl.i32,
-        route_table: txl.Tensor((txl.int64(),), txl.i32),
-        sm_side: txl.Tensor((txl.int64(),), txl.i32),
-        cluster_side: txl.Tensor((txl.int64(),), txl.i32),
-        placement_errors: txl.Tensor((txl.int64(),), txl.u32),
+        C: txl.Tensor((txl.int64(),), "float16"),
+        M: "int32",
+        N: "int32",
+        K_dim: "int32",
+        route_table: txl.Tensor((txl.int64(),), "int32"),
+        sm_side: txl.Tensor((txl.int64(),), "int32"),
+        cluster_side: txl.Tensor((txl.int64(),), "int32"),
+        placement_errors: txl.Tensor((txl.int64(),), "uint32"),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -253,7 +253,7 @@ def make_kernel(*, backend_config=None):
         ab_role = roles.role("ab_tma", warps=[5])
         sf_role = roles.role("sf_tma", warps=[6])
 
-        smem = txl.alloc_tensor((_SMEM_BYTES,), txl.u8, scope="shared.dyn", align=1024)
+        smem = txl.alloc_tensor((_SMEM_BYTES,), "uint8", scope="shared.dyn", align=1024)
         smbase = txl.local_scalar("uint32", init=txl.cuda.cvta_generic_to_shared(smem.ptr_to([0])))
 
         cluster_grid_m = txl.local_scalar("int32", init=_uceil(M, txl.int32(256)))
@@ -295,16 +295,16 @@ def make_kernel(*, backend_config=None):
         )
 
         smid = txl.local_scalar("uint32", init=txl.cuda.mov_sreg(32, "smid"))
-        with txl.If(tid == 0), txl.Then():
+        with txl.if_(tid == 0), txl.then_():
             actual_side = txl.local_scalar("int32")
             planned_side = txl.local_scalar("int32")
             txl.ptx.ld.global_.nc.s32(actual_side, sm_side.ptr_to([smid]))
             txl.ptx.ld.global_.nc.s32(planned_side, cluster_side.ptr_to([cluster_id]))
-            with txl.If(actual_side != planned_side), txl.Then():
+            with txl.if_(actual_side != planned_side), txl.then_():
                 old = txl.local_scalar("uint32")
                 txl.ptx.atom.global_.add.u32(old, placement_errors.ptr_to([0]), txl.uint32(1))
 
-        with txl.If((warp == 0) & (lane == 0)), txl.Then():
+        with txl.if_((warp == 0) & (lane == 0)), txl.then_():
             for stage in range(6):
                 txl.ptx.mbarrier.init.shared.b64(
                     txl.ptr_byte_offset(
@@ -362,8 +362,8 @@ def make_kernel(*, backend_config=None):
         txl.ptx.barrier.cluster.wait.acquire.aligned()
 
         taddr = txl.local_scalar("uint32", init=txl.uint32(0))
-        with txl.If(warp <= 4), txl.Then():
-            with txl.If(warp == 0), txl.Then():
+        with txl.if_(warp <= 4), txl.then_():
+            with txl.if_(warp == 0), txl.then_():
                 txl.ptx["tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32"](
                     smbase + txl.uint32(_TMEM_ADDR), txl.uint32(512)
                 )
@@ -376,11 +376,11 @@ def make_kernel(*, backend_config=None):
             )
 
         with ab_role:
-            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                 slot = txl.local_scalar("int32", init=txl.int32(0))
                 phase = txl.local_scalar("uint32", init=txl.uint32(1))
                 work = txl.local_scalar("int32", init=cluster_id)
-                with txl.While(work < total_tiles):
+                with txl.while_(work < total_tiles):
                     tile = txl.local_scalar("int32")
                     txl.ptx.ld.global_.ca.s32(tile, route_table.ptr_to([work]))
                     m_row = txl.local_scalar("int32", init=_umod(tile, cluster_grid_m))
@@ -388,9 +388,9 @@ def make_kernel(*, backend_config=None):
                     m_block = txl.local_scalar("int32", init=m_row * 2 + m_pair)
                     n_block = txl.local_scalar("int32", init=n_group * 2 + m_pair)
                     group = txl.local_scalar("int32", init=txl.int32(0))
-                    with txl.While(group < num_groups):
+                    with txl.while_(group < num_groups):
                         for sub in range(3):
-                            with txl.If((group < full_groups) | (sub < t_win)), txl.Then():
+                            with txl.if_((group < full_groups) | (sub < t_win)), txl.then_():
                                 _wait_acquire_cta(
                                     smbase + txl.uint32(_AB_FREE) + txl.cast(slot * 8, "uint32"),
                                     phase,
@@ -399,7 +399,7 @@ def make_kernel(*, backend_config=None):
                                     smbase + txl.uint32(_AB_READY) + txl.cast(slot * 8, "uint32"),
                                     txl.uint32(0xFEFFFFFF),
                                 )
-                                with txl.If(m_pair == 0), txl.Then():
+                                with txl.if_(m_pair == 0), txl.then_():
                                     txl.ptx[
                                         "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64"
                                     ](mbar, txl.uint32(65536))
@@ -440,7 +440,7 @@ def make_kernel(*, backend_config=None):
                 _wait_acquire_cta(
                     smbase + txl.uint32(_AB_FREE) + txl.cast(last_slot * 8, "uint32"), last_phase
                 )
-                with txl.If(m_pair == 0), txl.Then():
+                with txl.if_(m_pair == 0), txl.then_():
                     mbar = txl.bitwise_and(
                         smbase + txl.uint32(_AB_READY) + txl.cast(last_slot * 8, "uint32"),
                         txl.uint32(0xFEFFFFFF),
@@ -450,20 +450,20 @@ def make_kernel(*, backend_config=None):
                     )
 
         with sf_role:
-            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                 slot = txl.local_scalar("int32", init=txl.int32(0))
                 phase = txl.local_scalar("uint32", init=txl.uint32(1))
                 work = txl.local_scalar("int32", init=cluster_id)
-                with txl.While(work < total_tiles):
+                with txl.while_(work < total_tiles):
                     tile = txl.local_scalar("int32")
                     txl.ptx.ld.global_.ca.s32(tile, route_table.ptr_to([work]))
                     m_row = txl.local_scalar("int32", init=_umod(tile, cluster_grid_m))
                     n_group = txl.local_scalar("int32", init=_udiv(tile, cluster_grid_m))
                     m_block = txl.local_scalar("int32", init=m_row * 2 + m_pair)
                     group = txl.local_scalar("int32", init=txl.int32(0))
-                    with txl.While(group < num_groups):
+                    with txl.while_(group < num_groups):
                         for sub in range(4):
-                            with txl.If((group < full_groups) | (sub < t_sf)), txl.Then():
+                            with txl.if_((group < full_groups) | (sub < t_sf)), txl.then_():
                                 _wait_acquire_cta(
                                     smbase + txl.uint32(_SF_FREE) + txl.cast(slot * 8, "uint32"),
                                     phase,
@@ -472,7 +472,7 @@ def make_kernel(*, backend_config=None):
                                     smbase + txl.uint32(_SF_READY) + txl.cast(slot * 8, "uint32"),
                                     txl.uint32(0xFEFFFFFF),
                                 )
-                                with txl.If(m_pair == 0), txl.Then():
+                                with txl.if_(m_pair == 0), txl.then_():
                                     txl.ptx[
                                         "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64"
                                     ](mbar, txl.uint32(9216))
@@ -516,7 +516,7 @@ def make_kernel(*, backend_config=None):
                 _wait_acquire_cta(
                     smbase + txl.uint32(_SF_FREE) + txl.cast(last_slot * 8, "uint32"), last_phase
                 )
-                with txl.If(m_pair == 0), txl.Then():
+                with txl.if_(m_pair == 0), txl.then_():
                     mbar = txl.bitwise_and(
                         smbase + txl.uint32(_SF_READY) + txl.cast(last_slot * 8, "uint32"),
                         txl.uint32(0xFEFFFFFF),
@@ -526,7 +526,7 @@ def make_kernel(*, backend_config=None):
                     )
 
         with mma_role:
-            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                 d_phase = txl.local_scalar("uint32", init=txl.uint32(1))
                 ab_slot = txl.local_scalar("int32", init=txl.int32(0))
                 ab_phase = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -671,7 +671,7 @@ def make_kernel(*, backend_config=None):
                     if issue_pred is None:
                         txl.ptx[_TCGEN05_MMA](*args)
                     else:
-                        with txl.If(issue_pred), txl.Then():
+                        with txl.if_(issue_pred), txl.then_():
                             txl.ptx[_TCGEN05_MMA](*args)
 
                 def issue64(slot, atom, word, d_tmem, accum):
@@ -745,7 +745,7 @@ def make_kernel(*, backend_config=None):
                     txl.assign(sf_slot, ns)
                     txl.assign(sf_phase, np)
                     _wait_plain(smbase + txl.uint32(_AB_READY) + txl.cast(W0 * 8, "uint32"), ph0)
-                    with txl.If(need_wait != 0), txl.Then():
+                    with txl.if_(need_wait != 0), txl.then_():
                         _wait_plain(smbase + txl.uint32(_ACC_FREE), acc_wait)
                         txl.assign(need_wait, txl.uint32(0))
                     issue_at(0)
@@ -795,7 +795,7 @@ def make_kernel(*, backend_config=None):
                     if t_windows >= 3:
                         commit_ab(W2)
 
-                with txl.While(work < total_tiles):
+                with txl.while_(work < total_tiles):
                     acc_wait = txl.local_scalar("uint32", init=d_phase)
                     txl.assign(d_phase, d_phase ^ txl.uint32(1))
                     d_tmem = taddr + d_phase * txl.uint32(220)
@@ -803,7 +803,7 @@ def make_kernel(*, backend_config=None):
                     need_wait = txl.local_scalar("uint32", init=txl.uint32(1))
                     group = txl.local_scalar("int32", init=txl.int32(0))
 
-                    with txl.While(group < full_groups):
+                    with txl.while_(group < full_groups):
                         W0 = txl.local_scalar("int32", init=ab_slot)
                         ph0 = txl.local_scalar("uint32", init=ab_phase)
                         W1, ph1 = _ring_next(W0, ph0, 6)
@@ -815,7 +815,7 @@ def make_kernel(*, backend_config=None):
                         _wait_plain(
                             smbase + txl.uint32(_AB_READY) + txl.cast(W0 * 8, "uint32"), ph0
                         )
-                        with txl.If(need_wait != 0), txl.Then():
+                        with txl.if_(need_wait != 0), txl.then_():
                             _wait_plain(smbase + txl.uint32(_ACC_FREE), acc_wait)
                             txl.assign(need_wait, txl.uint32(0))
                         issue96(0, W0, W1, W2, d_tmem, accum)
@@ -853,15 +853,15 @@ def make_kernel(*, backend_config=None):
                         commit_ab(W2)
                         txl.assign(group, group + 1)
 
-                    with txl.If(tail_cells != 0), txl.Then():
-                        with txl.If(b64 != 0), txl.Then():
+                    with txl.if_(tail_cells != 0), txl.then_():
+                        with txl.if_(b64 != 0), txl.then_():
                             for ac in (0, 2, 4, 6):
                                 for bc in (1, 2):
-                                    with txl.If((a64 == ac) & (b64 == bc)), txl.Then():
+                                    with txl.if_((a64 == ac) & (b64 == bc)), txl.then_():
                                         issue_k64_variant(
                                             ac, bc, d_tmem, accum, need_wait, acc_wait
                                         )
-                        with txl.If(b64 == 0), txl.Then():
+                        with txl.if_(b64 == 0), txl.then_():
                             W0 = txl.local_scalar("int32", init=ab_slot)
                             ph0 = txl.local_scalar("uint32", init=ab_phase)
                             W1, ph1 = _ring_next(W0, ph0, 6)
@@ -873,14 +873,14 @@ def make_kernel(*, backend_config=None):
                             _wait_plain(
                                 smbase + txl.uint32(_AB_READY) + txl.cast(W0 * 8, "uint32"), ph0
                             )
-                            with txl.If(need_wait != 0), txl.Then():
+                            with txl.if_(need_wait != 0), txl.then_():
                                 _wait_plain(smbase + txl.uint32(_ACC_FREE), acc_wait)
                                 txl.assign(need_wait, txl.uint32(0))
                             issue96(0, W0, W1, W2, d_tmem, accum)
                             txl.assign(accum, txl.uint32(1))
                             issue96(1, W0, W1, W2, d_tmem, accum, issue_pred=tail_cells >= 2)
 
-                            with txl.If(tail_cells > 2), txl.Then():
+                            with txl.if_(tail_cells > 2), txl.then_():
                                 ns, np = stage_scale(sf_slot, sf_phase)
                                 txl.assign(sf_slot, ns)
                                 txl.assign(sf_phase, np)
@@ -891,7 +891,7 @@ def make_kernel(*, backend_config=None):
                             commit_ab(W0)
                             issue96(3, W0, W1, W2, d_tmem, accum, issue_pred=tail_cells >= 4)
 
-                            with txl.If(tail_cells > 4), txl.Then():
+                            with txl.if_(tail_cells > 4), txl.then_():
                                 ns, np = stage_scale(sf_slot, sf_phase)
                                 txl.assign(sf_slot, ns)
                                 txl.assign(sf_phase, np)
@@ -904,7 +904,7 @@ def make_kernel(*, backend_config=None):
                             txl.assign(ab_phase, np_ab)
                             issue96(5, W0, W1, W2, d_tmem, accum, issue_pred=tail_cells >= 6)
 
-                            with txl.If(tail_cells > 6), txl.Then():
+                            with txl.if_(tail_cells > 6), txl.then_():
                                 ns, np = stage_scale(sf_slot, sf_phase)
                                 txl.assign(sf_slot, ns)
                                 txl.assign(sf_phase, np)
@@ -929,7 +929,7 @@ def make_kernel(*, backend_config=None):
             even_crank = txl.local_scalar(
                 "uint32", init=txl.bitwise_and(txl.cast(crank, "uint32"), txl.uint32(0xFFFFFFFE))
             )
-            with txl.While(work < total_tiles):
+            with txl.while_(work < total_tiles):
                 tile_lane = txl.local_scalar("int32")
                 txl.ptx.ld.global_.ca.s32(tile_lane, route_table.ptr_to([work]))
                 tile = txl.local_scalar("uint32")
@@ -960,7 +960,7 @@ def make_kernel(*, backend_config=None):
                     band = txl.Select(d_buffer == 0, 7 - k, k)
                     load_addr = tmem_base + txl.cast(band * 32, "uint32") + taddr_lane
                     txl.ptx[_TMEM_LD_X32](*[values[i] for i in range(32)], load_addr)
-                    with txl.If(k == 1), txl.Then():
+                    with txl.if_(k == 1), txl.then_():
                         mapped_free = txl.local_scalar("uint32")
                         txl.ptx.mapa.shared__cluster.u32(
                             mapped_free, smbase + txl.uint32(_ACC_FREE), even_crank
@@ -969,29 +969,29 @@ def make_kernel(*, backend_config=None):
                         txl.ptx["mbarrier.arrive.release.cta.shared::cluster.b64"](
                             mapped_free, txl.uint32(1), pred=txl.cast(lane == 0, "uint32")
                         )
-                    with txl.If(row_in != 0), txl.Then():
+                    with txl.if_(row_in != 0), txl.then_():
                         for pair in range(16):
                             txl.ptx.cvt.rn.f16x2.f32(
                                 packed[pair], values[pair * 2 + 1], values[pair * 2]
                             )
                         col = txl.local_scalar("int32", init=off_n + band * 32)
-                        with txl.If(aligned != 0), txl.Then():
+                        with txl.if_(aligned != 0), txl.then_():
                             for q in range(2):
                                 c16 = col + q * 16
-                                with txl.If(c16 + 16 <= N), txl.Then():
+                                with txl.if_(c16 + 16 <= N), txl.then_():
                                     txl.ptx["st.global.L1::no_allocate.L2::evict_first.v8.b32"](
                                         C.ptr_to([row_base + c16]),
                                         *[packed[q * 8 + i] for i in range(8)],
                                     )
-                                with txl.If(c16 + 16 > N), txl.Then():
+                                with txl.if_(c16 + 16 > N), txl.then_():
                                     for p in range(2):
                                         c8 = c16 + p * 8
-                                        with txl.If(c8 + 8 <= N), txl.Then():
+                                        with txl.if_(c8 + 8 <= N), txl.then_():
                                             txl.ptx["st.global.L1::no_allocate.v4.b32"](
                                                 C.ptr_to([row_base + c8]),
                                                 *[packed[q * 8 + p * 4 + i] for i in range(4)],
                                             )
-                                        with txl.If(c8 + 8 > N), txl.Then():
+                                        with txl.if_(c8 + 8 > N), txl.then_():
                                             for h in range(8):
                                                 word = q * 8 + p * 4 + h // 2
                                                 txl.ptx.st.global_.b16(
@@ -999,15 +999,15 @@ def make_kernel(*, backend_config=None):
                                                     _half_from_word(packed[word], h % 2),
                                                     pred=txl.cast(c8 + h < N, "uint32"),
                                                 )
-                        with txl.If(aligned == 0), txl.Then():
+                        with txl.if_(aligned == 0), txl.then_():
                             for q in range(4):
                                 c8 = col + q * 8
-                                with txl.If(c8 + 8 <= N), txl.Then():
+                                with txl.if_(c8 + 8 <= N), txl.then_():
                                     txl.ptx["st.global.L1::no_allocate.v4.b32"](
                                         C.ptr_to([row_base + c8]),
                                         *[packed[q * 4 + i] for i in range(4)],
                                     )
-                                with txl.If(c8 + 8 > N), txl.Then():
+                                with txl.if_(c8 + 8 > N), txl.then_():
                                     for h in range(8):
                                         word = q * 4 + h // 2
                                         txl.ptx.st.global_.b16(
@@ -1019,7 +1019,7 @@ def make_kernel(*, backend_config=None):
                 txl.assign(work, work + _NUM_CLUSTERS)
 
             txl.ptx.bar.sync(txl.uint32(3), txl.uint32(128))
-            with txl.If(warp == 0), txl.Then():
+            with txl.if_(warp == 0), txl.then_():
                 txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::2.sync.aligned"]()
                 remote_dealloc = txl.local_scalar("uint32")
                 txl.ptx.mapa.shared__cluster.u32(

@@ -25,7 +25,7 @@ import tirx_kernels.tirx_lite as txl
 # --- global memory ----------------------------------------------------------
 def ld_global_i32(buffer, index):
     """``ld.global.b32``; the source's plain scalar load."""
-    out = txl.local_scalar(txl.i32)
+    out = txl.local_scalar("int32")
     txl.ptx.ld.global_.b32(out, buffer.ptr_to([index]))
     return out
 
@@ -44,15 +44,15 @@ def atom_add_global_i32(buffer, index, value):
     (``cute.arch.atomic_add(..., sem="relaxed", scope="gpu")``) or write the
     instruction directly (``copy_utils.atomic_add_i32``).
     """
-    out = txl.local_scalar(txl.u32)
+    out = txl.local_scalar("uint32")
     txl.ptx.atom.global_.add.u32(out, buffer.ptr_to([index]), value)
-    return txl.reinterpret(out, ty=txl.i32)
+    return txl.reinterpret(out, ty="int32")
 
 
 # --- shared memory ----------------------------------------------------------
 def ld_shared_i32(buffer, index):
     """``ld.shared.b32``."""
-    out = txl.local_scalar(txl.i32)
+    out = txl.local_scalar("int32")
     txl.ptx.ld.shared.b32(out, buffer.ptr_to([index]))
     return out
 
@@ -70,15 +70,15 @@ def bar_sync():
 
 def shfl_idx_i32(value, source_lane):
     """``shfl.sync.idx.b32 d, a, src, 31, -1``; a full-warp broadcast."""
-    out = txl.local_scalar(txl.u32)
+    out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.idx.b32(
         out,
-        txl.reinterpret(value, ty=txl.u32),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(source_lane),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret(out, ty=txl.i32)
+    return txl.reinterpret(out, ty="int32")
 
 
 # --- integer division -------------------------------------------------------
@@ -92,13 +92,13 @@ def udiv_i32(x, d):
     the same quotient and drops the correction; the divisors stay runtime values,
     so a real integer divide is still issued.
     """
-    return txl.cast(txl.cast(x, txl.u32) // txl.cast(d, txl.u32), txl.i32)
+    return txl.cast(txl.cast(x, "uint32") // txl.cast(d, "uint32"), "int32")
 
 
 def uceil_div_i32(x, d):
     """``ceil(x / d)`` under the same non-negativity argument as :func:`udiv_i32`."""
-    numerator = txl.cast(x, txl.u32) + txl.cast(d, txl.u32) - txl.uint32(1)
-    return txl.cast(numerator // txl.cast(d, txl.u32), txl.i32)
+    numerator = txl.cast(x, "uint32") + txl.cast(d, "uint32") - txl.uint32(1)
+    return txl.cast(numerator // txl.cast(d, "uint32"), "int32")
 
 
 __all__ = [

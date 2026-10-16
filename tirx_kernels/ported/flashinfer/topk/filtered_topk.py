@@ -381,14 +381,14 @@ def get_kernel(
     @txl.kernel()
     def filtered_topk(
         inp: txl.Tensor((num_rows * length,), dtype),
-        out_idx: txl.Tensor((num_rows * k,), txl.i32),
+        out_idx: txl.Tensor((num_rows * k,), "int32"),
         out_val: txl.Tensor((num_rows * k,), dtype),
-        aux: txl.Tensor((aux_elems,), txl.i32),
-        lengths_g: txl.Tensor((num_rows,), txl.i32),
-        row_starts_g: txl.Tensor((num_rows,), txl.i32),
-        pt_starts_g: txl.Tensor((num_rows,), txl.i32),
-        row_to_batch_g: txl.Tensor((num_rows,), txl.i32),
-        aux_stride: txl.i64,
+        aux: txl.Tensor((aux_elems,), "int32"),
+        lengths_g: txl.Tensor((num_rows,), "int32"),
+        row_starts_g: txl.Tensor((num_rows,), "int32"),
+        pt_starts_g: txl.Tensor((num_rows,), "int32"),
+        row_to_batch_g: txl.Tensor((num_rows,), "int32"),
+        aux_stride: "int64",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=grid, block=FILTERED_TOPK_BLOCK_THREADS // 32 * 32),
@@ -453,8 +453,8 @@ def get_kernel(
             with txl.serial(tx, k, step=FILTERED_TOPK_BLOCK_THREADS) as i0:
                 slot0 = txl.local_scalar("int64", init=row_out + txl.cast(i0, "int64"))
                 if basic:
-                    with txl.If(i0 < row_len):
-                        with txl.Then():
+                    with txl.if_(i0 < row_len):
+                        with txl.then_():
                             st_global_u32(out_idx, slot0, txl.reinterpret(i0, ty="uint32"))
                             st_global_bits(
                                 out_val,
@@ -462,7 +462,7 @@ def get_kernel(
                                 ld_global_nc_bits(inp, row_in + txl.cast(i0, "int64"), is32),
                                 is32,
                             )
-                        with txl.Else():
+                        with txl.else_():
                             # A literal -1 is written as its bit pattern:
                             # reinterpreting an immediate lowers to an
                             # address-of-literal, which is not an lvalue.
@@ -479,7 +479,7 @@ def get_kernel(
                     )
                 elif page_table:
                     page0 = txl.local_scalar("int32", init=txl.int32(-1))
-                    with txl.If(i0 < row_len), txl.Then():
+                    with txl.if_(i0 < row_len), txl.then_():
                         txl.assign(
                             page0,
                             txl.reinterpret(
@@ -513,14 +513,14 @@ def get_kernel(
                 run_main = False
             else:
                 take_main = txl.local_scalar("int32", init=txl.int32(1))
-                with txl.If(row_len <= k), txl.Then():
+                with txl.if_(row_len <= k), txl.then_():
                     txl.assign(take_main, txl.int32(0))
                     emit_trivial()
 
         if run_main:
             with (
-                nullcontext() if take_main is None else txl.If(take_main == 1),
-                nullcontext() if take_main is None else txl.Then(),
+                nullcontext() if take_main is None else txl.if_(take_main == 1),
+                nullcontext() if take_main is None else txl.then_(),
             ):
                 emit_filtered_topk_main(
                     inp,
@@ -588,12 +588,12 @@ def get_finalize_kernel(
 
     @txl.kernel()
     def filtered_topk_finalize(
-        out_idx: txl.Tensor((num_rows * k,), txl.i32),
+        out_idx: txl.Tensor((num_rows * k,), "int32"),
         out_val: txl.Tensor((num_rows * k,), dtype),
-        aux: txl.Tensor((aux_elems,), txl.i32),
-        pt_starts_g: txl.Tensor((num_rows,), txl.i32),
-        row_to_batch_g: txl.Tensor((num_rows,), txl.i32),
-        aux_stride: txl.i64,
+        aux: txl.Tensor((aux_elems,), "int32"),
+        pt_starts_g: txl.Tensor((num_rows,), "int32"),
+        row_to_batch_g: txl.Tensor((num_rows,), "int32"),
+        aux_stride: "int64",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_rows, block=block_threads // 32 * 32),
@@ -621,7 +621,7 @@ def get_finalize_kernel(
             pos = tx * items_per_thread + i
             txl.assign(keys[i], txl.uint32(0xFFFFFFFF))
             txl.assign(values[i], txl.uint32(0))
-            with txl.If(pos < k), txl.Then():
+            with txl.if_(pos < k), txl.then_():
                 slot = txl.local_scalar("int64", init=row_out + txl.cast(pos, "int64"))
                 idx = txl.reinterpret(ld_global_u32(out_idx, slot), ty="int32")
                 # `(idx >= 0) ? idx : ~0u` -- nvcc folds the clamp to a single
@@ -669,7 +669,7 @@ def get_finalize_kernel(
 
         with txl.unroll(items_per_thread) as i2:
             pos2 = tx * items_per_thread + i2
-            with txl.If(pos2 < k), txl.Then():
+            with txl.if_(pos2 < k), txl.then_():
                 slot2 = txl.local_scalar("int64", init=row_out + txl.cast(pos2, "int64"))
                 key = keys[i2]
                 if basic:
@@ -685,7 +685,7 @@ def get_finalize_kernel(
                             st_global_u16(out_val, slot2, txl.cast(values[i2], "uint16"))
                 elif page_table:
                     page_id = txl.local_scalar("int32", init=txl.int32(-1))
-                    with txl.If(key != txl.uint32(0xFFFFFFFF)), txl.Then():
+                    with txl.if_(key != txl.uint32(0xFFFFFFFF)), txl.then_():
                         src = txl.local_scalar(
                             "int64", init=txl.cast(batch_idx, "int64") * aux_stride
                         )
@@ -705,7 +705,7 @@ def get_finalize_kernel(
                     st_global_u32(out_idx, slot2, txl.reinterpret(page_id, ty="uint32"))
                 else:
                     val2 = txl.local_scalar("int32", init=txl.int32(-1))
-                    with txl.If(key != txl.uint32(0xFFFFFFFF)), txl.Then():
+                    with txl.if_(key != txl.uint32(0xFFFFFFFF)), txl.then_():
                         txl.assign(val2, txl.reinterpret(key, ty="int32") + offset)
                     st_global_u32(out_idx, slot2, txl.reinterpret(val2, ty="uint32"))
 

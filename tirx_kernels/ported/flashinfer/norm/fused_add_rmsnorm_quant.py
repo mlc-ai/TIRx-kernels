@@ -557,7 +557,7 @@ def get_kernel(
         shared_raw = txl.smem_pool().alloc((smem_bytes,), "uint8")
 
         if cluster_n > 1:
-            with txl.If(tid == 0), txl.Then():
+            with txl.if_(tid == 0), txl.then_():
                 txl.ptx.mbarrier.init.shared.b64(shared_raw.ptr_to([mbar_offset]), txl.uint32(1))
             txl.ptx.fence.mbarrier_init.release.cluster()
             txl.ptx.barrier.cluster.arrive.relaxed()
@@ -587,7 +587,7 @@ def get_kernel(
             else:
                 x_offset = actual_row * x_row_stride + txl.cast(absolute_col, "int64")
             if use_async:
-                with txl.If(row_valid), txl.Then():
+                with txl.if_(row_valid), txl.then_():
                     source_bytes: txl.uint32 = txl.cast(
                         txl.if_then_else(col_valid, copy_bytes, 0), "uint32"
                     )
@@ -598,7 +598,7 @@ def get_kernel(
                         source_bytes,
                     )
             else:
-                with txl.If(txl.And(row_valid, col_valid)), txl.Then():
+                with txl.if_(txl.And(row_valid, col_valid)), txl.then_():
                     _load_global_bits(input_buffer, x_offset, x_bits, vb * vec, VEC=vec)
 
         with fragment_range(vec_blocks) as vb:
@@ -610,7 +610,7 @@ def get_kernel(
             else:
                 residual_offset = actual_row * residual_row_stride + txl.cast(absolute_col, "int64")
             if use_async:
-                with txl.If(row_valid), txl.Then():
+                with txl.if_(row_valid), txl.then_():
                     source_bytes: txl.uint32 = txl.cast(
                         txl.if_then_else(col_valid, copy_bytes, 0), "uint32"
                     )
@@ -623,7 +623,7 @@ def get_kernel(
                         source_bytes,
                     )
             else:
-                with txl.If(txl.And(row_valid, col_valid)), txl.Then():
+                with txl.if_(txl.And(row_valid, col_valid)), txl.then_():
                     _load_global_bits(residual, residual_offset, r_bits, vb * vec, VEC=vec)
 
         if use_async:
@@ -632,7 +632,7 @@ def get_kernel(
         with fragment_range(vec_blocks) as vb:
             local_col: txl.int32 = (thread_in_row + vb * tpr) * vec
             absolute_col: txl.int32 = block_y * cols + local_col
-            with txl.If(absolute_col < H), txl.Then():
+            with txl.if_(absolute_col < H), txl.then_():
                 _load_global_bits(weight, absolute_col, w_bits, vb * vec, VEC=vec)
 
         if use_async:
@@ -662,9 +662,9 @@ def get_kernel(
             txl.assign(r_f32[value], _cvt_to_f32(r_bits[value], input_dtype))
 
         with fragment_range(packed_pairs) as pair:
-            x_high = txl.local_scalar(txl.f32, init=x_f32[pair * 2 + 1])
-            r_high = txl.local_scalar(txl.f32, init=r_f32[pair * 2 + 1])
-            with txl.If(pair * 2 + 1 >= total_values), txl.Then():
+            x_high = txl.local_scalar("float32", init=x_f32[pair * 2 + 1])
+            r_high = txl.local_scalar("float32", init=r_f32[pair * 2 + 1])
+            with txl.if_(pair * 2 + 1 >= total_values), txl.then_():
                 txl.assign(x_high, undefined_f32[0])
                 txl.assign(r_high, undefined_f32[0])
             packed = txl.alloc_local((1,), "uint64")
@@ -716,22 +716,22 @@ def get_kernel(
             )
             txl.ptx.mov.b64(h_sq[pair * 2], h_sq[pair * 2 + 1], packed[0])
 
-        local_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
+        local_sum = txl.local_scalar("float32", init=txl.float32(0.0))
         with fragment_range(total_values) as value:
             txl.assign(local_sum, _add_f32(local_sum, h_sq[value]))
         txl.assign(local_sum, _butterfly_sum_f32(local_sum, row_lane_xors))
         warp_sum: txl.float32 = local_sum
 
         if warps_per_row > 1 and cluster_n == 1:
-            with txl.If(lane == 0), txl.Then():
+            with txl.if_(lane == 0), txl.then_():
                 reduce_index: txl.int32 = row_warp + warp_in_row * rows
                 txl.ptx.st.shared.b32(
                     shared_raw.ptr_to([reduce_base + reduce_index * 4]),
                     txl.reinterpret(warp_sum, ty="uint32"),
                 )
             txl.ptx.bar.sync(txl.uint32(0))
-            final_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
-            with txl.If(lane < warps_per_row), txl.Then():
+            final_sum = txl.local_scalar("float32", init=txl.float32(0.0))
+            with txl.if_(lane < warps_per_row), txl.then_():
                 reduce_word = txl.alloc_local((1,), "uint32")
                 reduce_index: txl.int32 = row_warp + lane * rows
                 txl.ptx.ld.shared.b32(
@@ -741,12 +741,12 @@ def get_kernel(
             txl.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
             sum_sq: txl.float32 = final_sum
         elif cluster_n > 1:
-            with txl.If(warp == 0), txl.Then():
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(warp == 0), txl.then_():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                         shared_raw.ptr_to([mbar_offset]), txl.uint32(expected_bytes)
                     )
-            with txl.If(lane < cluster_n), txl.Then():
+            with txl.if_(lane < cluster_n), txl.then_():
                 reduce_index: txl.int32 = (
                     row_warp + warp_in_row * rows + cta_rank * rows * warps_per_row
                 )
@@ -758,10 +758,10 @@ def get_kernel(
                     peer_reduce, warp_sum, peer_mbar
                 )
             _cluster_mbarrier_wait(shared_raw.ptr_to([mbar_offset]))
-            final_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
+            final_sum = txl.local_scalar("float32", init=txl.float32(0.0))
             for iteration in range(_ceil_div(total_partials_per_row, 32)):
                 partial: txl.int32 = lane + iteration * 32
-                with txl.If(partial < total_partials_per_row), txl.Then():
+                with txl.if_(partial < total_partials_per_row), txl.then_():
                     partial_warp: txl.int32 = partial % warps_per_row
                     partial_cta: txl.int32 = partial // warps_per_row
                     reduce_index: txl.int32 = (
@@ -802,8 +802,8 @@ def get_kernel(
         y_f32 = txl.alloc_local((pair_values,), "float32")
 
         with fragment_range(packed_pairs) as pair:
-            high_scale = txl.local_scalar(txl.f32, init=rstd)
-            with txl.If(pair * 2 + 1 >= total_values), txl.Then():
+            high_scale = txl.local_scalar("float32", init=rstd)
+            with txl.if_(pair * 2 + 1 >= total_values), txl.then_():
                 txl.assign(high_scale, undefined_f32[0])
             packed = txl.alloc_local((1,), "uint64")
             txl.ptx.mul.f32x2(
@@ -814,8 +814,8 @@ def get_kernel(
             txl.ptx.mov.b64(normalized[pair * 2], normalized[pair * 2 + 1], packed[0])
 
         with fragment_range(packed_pairs) as pair:
-            high_bias = txl.local_scalar(txl.f32, init=txl.float32(0.0))
-            with txl.If(pair * 2 + 1 >= total_values), txl.Then():
+            high_bias = txl.local_scalar("float32", init=txl.float32(0.0))
+            with txl.if_(pair * 2 + 1 >= total_values), txl.then_():
                 txl.assign(high_bias, undefined_f32[0])
             packed = txl.alloc_local((1,), "uint64")
             txl.ptx.add.f32x2(
@@ -835,8 +835,8 @@ def get_kernel(
             txl.ptx.mov.b64(weighted[pair * 2], weighted[pair * 2 + 1], packed[0])
 
         with fragment_range(packed_pairs) as pair:
-            high_inv_scale = txl.local_scalar(txl.f32, init=inv_scale)
-            with txl.If(pair * 2 + 1 >= total_values), txl.Then():
+            high_inv_scale = txl.local_scalar("float32", init=inv_scale)
+            with txl.if_(pair * 2 + 1 >= total_values), txl.then_():
                 txl.assign(high_inv_scale, undefined_f32[0])
             packed = txl.alloc_local((1,), "uint64")
             txl.ptx.mul.f32x2(
@@ -857,7 +857,7 @@ def get_kernel(
             def store_scalars():
                 for element in range(vec):
                     scalar_col: txl.int32 = absolute_col + element
-                    with txl.If(txl.And(scalar_col < H, row_valid)), txl.Then():
+                    with txl.if_(txl.And(scalar_col < H, row_valid)), txl.then_():
                         clamped_low: txl.float32 = _maximum_f32(
                             y_f32[vb * vec + element], txl.float32(-fp8_max)
                         )
@@ -874,8 +874,8 @@ def get_kernel(
                         txl.ptx.st.global_.b8(out.ptr_to([scalar_offset]), txl.cast(pair, "uint8"))
 
             vector_guard = txl.And(absolute_col + vec <= H, row_valid)
-            with txl.If(vector_guard):
-                with txl.Then():
+            with txl.if_(vector_guard):
+                with txl.then_():
                     if vec == 8:
                         p01: txl.uint16 = _cvt_fp8_pair(
                             y_f32[vb * 8], y_f32[vb * 8 + 1], output_dtype
@@ -902,7 +902,7 @@ def get_kernel(
                         txl.ptx.st.global_.b16(out.ptr_to([y_offset]), p01)
                     else:
                         store_scalars()
-                with txl.Else():
+                with txl.else_():
                     store_scalars()
 
         if enable_pdl:
@@ -916,9 +916,9 @@ def get_kernel(
             input_buffer: txl.Tensor((txl.int64(),), input_dtype),
             residual: txl.Tensor((txl.int64(),), input_dtype),
             weight: txl.Tensor((H,), input_dtype),
-            runtime_M: txl.i64,
-            scale_buffer: txl.Tensor((1,), txl.f32),
-            runtime_eps: txl.f32,
+            runtime_M: "int64",
+            scale_buffer: txl.Tensor((1,), "float32"),
+            runtime_eps: "float32",
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(
@@ -955,12 +955,12 @@ def get_kernel(
             input_buffer: txl.Tensor((txl.int64(),), input_dtype),
             residual: txl.Tensor((txl.int64(),), input_dtype),
             weight: txl.Tensor((H,), input_dtype),
-            runtime_M: txl.i64,
-            scale_buffer: txl.Tensor((1,), txl.f32),
-            runtime_eps: txl.f32,
-            y_row_stride: txl.i64,
-            x_row_stride: txl.i64,
-            residual_row_stride: txl.i64,
+            runtime_M: "int64",
+            scale_buffer: txl.Tensor((1,), "float32"),
+            runtime_eps: "float32",
+            y_row_stride: "int64",
+            x_row_stride: "int64",
+            residual_row_stride: "int64",
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(

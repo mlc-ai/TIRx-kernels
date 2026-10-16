@@ -21,7 +21,7 @@ for j in txl.serial(count):
 
 # after: largest_product bounds every live product in this iteration order.
 j = txl.local_scalar("int32", init=0)
-with txl.While((j < count) & (largest_product != txl.float32(0.0))):
+with txl.while_((j < count) & (largest_product != txl.float32(0.0))):
     consume_and_advance(products, j)
     txl.assign(j, j + 1)
 ```

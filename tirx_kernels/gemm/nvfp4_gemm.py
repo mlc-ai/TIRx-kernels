@@ -360,7 +360,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
     MMA_K_BLOCKS = CTA_K // MMA_K
     SF_CTA_K = CTA_K // 16
     NUM_CLUSTERS = SM_COUNT // CLUSTER_SIZE
-    D_SWIZZLE_MODE = txl.SW32B if EPI_TILE == 16 else txl.SW64B if EPI_TILE == 32 else txl.SW128B
+    D_SWIZZLE_MODE = txl.SwizzleMode.SWIZZLE_32B_ATOM if EPI_TILE == 16 else txl.SwizzleMode.SWIZZLE_64B_ATOM if EPI_TILE == 32 else txl.SwizzleMode.SWIZZLE_128B_ATOM
     A_BYTES = CTA_M * (CTA_K // 2) * CTA_GROUP
     B_BYTES = CTA_N * (CTA_K // 2) * CTA_GROUP
     SFA_BYTES = CTA_M * SF_CTA_K * CTA_GROUP
@@ -377,7 +377,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
         SFA_tensor_map: txl.Ptr(txl.TensorMap),
         SFB_tensor_map: txl.Ptr(txl.TensorMap),
         D_tensor_map: txl.Ptr(txl.TensorMap),
-        alpha: txl.Tensor((txl.int64(),), txl.f32),
+        alpha: txl.Tensor((txl.int64(),), "float32"),
     ):
         # The cluster-local rank remains a low-level scope; K owns the global
         # persistent-CTA grid.
@@ -405,7 +405,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
         r_epi = sp.role("epilogue", warps=list(range(_W_EPILOGUE, NUM_WARPS)))
 
         with r_mma:
-            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                 for tmap in (
                     A_tensor_map,
                     B_tensor_map,
@@ -442,11 +442,11 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
         # original pool directly.
         smem = txl.smem_pool()
         pool = smem.pool
-        A_smem_packed = smem.alloc((PIPE_DEPTH, CTA_M, CTA_K // 2), txl.u8, swizzle=txl.SW128B)
-        B_smem_packed = smem.alloc((PIPE_DEPTH, CTA_N, CTA_K // 2), txl.u8, swizzle=txl.SW128B)
+        A_smem_packed = smem.alloc((PIPE_DEPTH, CTA_M, CTA_K // 2), "uint8", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        B_smem_packed = smem.alloc((PIPE_DEPTH, CTA_N, CTA_K // 2), "uint8", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
         SFA_smem = smem.alloc((PIPE_DEPTH, CTA_M, SF_CTA_K), "uint8", align=1024)
         SFB_smem = smem.alloc((PIPE_DEPTH, SFB_N, SF_CTA_K), "uint8", align=1024)
-        output_smem = smem.alloc((WB_PIPE_DEPTH, CTA_M, EPI_TILE), txl.bf16, swizzle=D_SWIZZLE_MODE)
+        output_smem = smem.alloc((WB_PIPE_DEPTH, CTA_M, EPI_TILE), "bfloat16", swizzle=D_SWIZZLE_MODE)
         tmem_addr = pool.alloc([1], "uint32", align=4)
         mbar_leader = tid_in_cta == 32
         smem_pipe = txl.Pipeline(pool, PIPE_DEPTH, full="tma", empty="tcgen05", leader=mbar_leader)
@@ -465,7 +465,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
         tmem_finished = txl.MBarrier(pool, 1, leader=mbar_leader)
         tmem_finished.init(1)
         smem.commit()
-        with txl.If(mbar_leader), txl.Then():
+        with txl.if_(mbar_leader), txl.then_():
             txl.ptx.fence.mbarrier_init.release.cluster()
 
         A_smem = A_smem_packed.buf.view("float4_e2m1fn")
@@ -484,14 +484,14 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
         sf_desc.init(txl.reinterpret(txl.uint64(0), ty="handle"), ldo=0, sdo=8, swizzle=0)
         desc_a.init(A_smem.ptr_to([0, 0, 0]), ldo=0, sdo=64, swizzle=3)
         desc_b.init(B_smem.ptr_to([0, 0, 0]), ldo=0, sdo=64, swizzle=3)
-        with txl.If(warp_id == 0), txl.Then():
+        with txl.if_(warp_id == 0), txl.then_():
             txl.ptx[f"tcgen05.alloc.cta_group::{CTA_GROUP}.sync.aligned.shared::cta.b32"](
                 txl.address_of(tmem_addr[0]), txl.uint32(512)
             )
             txl.cuda.warp_sync()
         txl.ptx.barrier.cluster.arrive.release.aligned()
         txl.ptx.barrier.cluster.wait.acquire()
-        with txl.If(tid_in_cta < 32), txl.Then():
+        with txl.if_(tid_in_cta < 32), txl.then_():
             txl.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
 
         pair_mask = txl.local_scalar("int32", init=txl.int32(0))
@@ -514,7 +514,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                 stage = tma_cur.stage
                 k = k_tile * CTA_K // 2
                 smem_pipe.empty.wait(tma_cur.stage, tma_cur.phase)
-                with txl.If(id_in_pair == 0), txl.Then():
+                with txl.if_(id_in_pair == 0), txl.then_():
                     rem = txl.local_scalar("uint64")
                     txl.ptx.mapa.shared__cluster.u64(
                         rem, tile_full_bar.ptr_to([stage]), txl.uint32(pair_leader_rank)
@@ -543,8 +543,8 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                     txl.uint64(_EVICT_NORMAL_L2_POLICY),
                 )
 
-            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
-                with txl.While(tile_scheduler.valid()):
+            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
+                with txl.while_(tile_scheduler.valid()):
                     with txl.serial(K_TILES) as k_tile:
                         issue_tma_load(k_tile)
                         tma_cur.advance()
@@ -558,7 +558,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                 sf_m = (a_m // 128) * 128
                 sf_n = (d_n // 128) * 128
                 smem_pipe.empty.wait(tma_cur.stage, tma_cur.phase)
-                with txl.If(id_in_pair == 0), txl.Then():
+                with txl.if_(id_in_pair == 0), txl.then_():
                     rem = txl.local_scalar("uint64")
                     txl.ptx.mapa.shared__cluster.u64(
                         rem, scale_full_bar.ptr_to([stage]), txl.uint32(pair_leader_rank)
@@ -580,7 +580,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                 )
                 mapped_sfb_bar = _mapa_u64(scale_full_bar.ptr_to([stage]), 0)
                 if SFB_N == 128:
-                    with txl.If(id_in_pair == 0), txl.Then():
+                    with txl.if_(id_in_pair == 0), txl.then_():
                         txl.ptx[_TMA_G2S_3D](
                             SFB_smem.ptr_to([stage, 0, 0]),
                             txl.address_of(SFB_tensor_map),
@@ -607,15 +607,15 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                         txl.uint64(_EVICT_NORMAL_L2_POLICY),
                     )
 
-            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
-                with txl.While(tile_scheduler.valid()):
+            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
+                with txl.while_(tile_scheduler.valid()):
                     with txl.serial(K_TILES) as k_tile:
                         issue_scale_tma_load(k_tile)
                         tma_cur.advance()
                     tile_scheduler.next_tile()
 
         with r_mma:
-            with txl.If(id_in_pair == 0), txl.Then():
+            with txl.if_(id_in_pair == 0), txl.then_():
 
                 def execute_mma():
                     stage = mma_smem.stage
@@ -724,8 +724,8 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                     txl.assign(accum, 1)
                     smem_pipe.empty.arrive(mma_smem.stage, cta_group=CTA_GROUP, cta_mask=pair_mask)
 
-                with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
-                    with txl.While(tile_scheduler.valid()):
+                with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
+                    with txl.while_(tile_scheduler.valid()):
                         tmem_pipe.empty.wait(mma_tmem.stage, mma_tmem.phase)
                         txl.assign(accum, 0)
                         with txl.serial(K_TILES):
@@ -765,7 +765,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                 regs_to_smem(reg_bf16_words, chunk_index, fragment_cols)
                 txl.cuda.warpgroup_sync(1)
                 d_n_out = d_n + linear_n
-                with txl.If(tid_in_wg == 0), txl.Then():
+                with txl.if_(tid_in_wg == 0), txl.then_():
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx[_TMA_S2G_EVICT_FIRST](
                         txl.address_of(D_tensor_map),
@@ -792,7 +792,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                             )
                         if no == MMA_N // EPI_TILE - 1:
                             txl.ptx.tcgen05.wait__ld.sync.aligned()
-                            with txl.If(tid_in_wg == 0), txl.Then():
+                            with txl.if_(tid_in_wg == 0), txl.then_():
                                 tmem_pipe.empty.arrive(
                                     epi_cur.stage, remote=pair_leader_rank, pred=True, count=1
                                 )
@@ -828,7 +828,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                             reg_all_f32[pair * 2 + 1],
                             reg_all_f32[pair * 2],
                         )
-                    with txl.If(tid_in_wg == 0), txl.Then():
+                    with txl.if_(tid_in_wg == 0), txl.then_():
                         tmem_pipe.empty.arrive(
                             epi_cur.stage, remote=pair_leader_rank, pred=True, count=1
                         )
@@ -836,16 +836,16 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                     for no in range(MMA_N // EPI_TILE):
                         store_epi_chunk(reg_all_bf16_words, no, no * EPI_TILE, MMA_N)
 
-            with txl.While(tile_scheduler.valid()):
+            with txl.while_(tile_scheduler.valid()):
                 epilogue()
                 epi_cur.advance()
                 tile_scheduler.next_tile()
-            with txl.If(tid_in_wg == 0), txl.Then():
+            with txl.if_(tid_in_wg == 0), txl.then_():
                 txl.ptx.cp.async_.bulk.wait_group.read(0)
             txl.cuda.warpgroup_sync(1)
 
-        with txl.If(warp_id == _W_EPILOGUE), txl.Then():
-            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+        with txl.if_(warp_id == _W_EPILOGUE), txl.then_():
+            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                 rem = txl.local_scalar("uint64")
                 txl.ptx.mapa.shared__cluster.u64(
                     rem, tmem_finished.ptr_to([0]), txl.uint32(pair_leader_rank + 1 - id_in_pair)

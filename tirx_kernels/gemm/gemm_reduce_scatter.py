@@ -301,8 +301,8 @@ class GEMMMPMCQueue(MPMCQueue):
         fetched_task_idx1: tvm_tirx.ir.Var,
     ):
         txl.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), txl.int32(1))
-        with txl.If(self.head_r[0] < self.num_tot_tasks):
-            with txl.Then():
+        with txl.if_(self.head_r[0] < self.num_tot_tasks):
+            with txl.then_():
                 txl.assign(self.masked_pos[0], self.head_r[0] & self.mask)
                 # The task-type slot is a declared synchronization word: the
                 # producer publishes a non-negative type into it and this
@@ -323,7 +323,7 @@ class GEMMMPMCQueue(MPMCQueue):
                 txl.ptx.ld.global_.s32(
                     fetched_task_idx1[0], self.task_idxs.ptr_to([self.masked_pos[0], 1])
                 )
-            with txl.Else():
+            with txl.else_():
                 txl.assign(fetched_task_type[0], -1)
 
 
@@ -335,22 +335,22 @@ class RSMPMCQueue(MPMCQueue):
         fetched_task_idx1: tvm_tirx.ir.Var,
         rs_rem: tvm_tirx.ir.Var,
     ):
-        with txl.If(rs_rem[0] >= 0):
-            with txl.Then():
+        with txl.if_(rs_rem[0] >= 0):
+            with txl.then_():
                 txl.assign(self.head_r[0], rs_rem[0])
                 txl.assign(rs_rem[0], -1)
-            with txl.Else():
+            with txl.else_():
                 txl.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), txl.int32(1))
-        with txl.If(self.head_r[0] < self.num_tot_tasks):
-            with txl.Then():
+        with txl.if_(self.head_r[0] < self.num_tot_tasks):
+            with txl.then_():
                 txl.assign(self.masked_pos[0], self.head_r[0] & self.mask)
                 txl.ptx.ld.global_.acquire.sys.b32(
                     fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
                 )
-                with txl.If(fetched_task_type[0] < 0):
-                    with txl.Then():
+                with txl.if_(fetched_task_type[0] < 0):
+                    with txl.then_():
                         txl.assign(rs_rem[0], self.head_r[0])
-                    with txl.Else():
+                    with txl.else_():
                         txl.ptx.st.global_.s32(
                             self.task_types.ptr_to([self.masked_pos[0]]), txl.int32(-1)
                         )
@@ -360,7 +360,7 @@ class RSMPMCQueue(MPMCQueue):
                         txl.ptx.ld.global_.s32(
                             fetched_task_idx1[0], self.task_idxs.ptr_to([self.masked_pos[0], 1])
                         )
-            with txl.Else():
+            with txl.else_():
                 txl.assign(fetched_task_type[0], -1)
 
 
@@ -382,10 +382,10 @@ class MixedDynamicTileScheduler:
         self.packed_value = packed_value
 
     def publish(self, cbx, lane_id):
-        with txl.If(lane_id == 0):
-            with txl.Then():
-                with txl.If(cbx == 0):
-                    with txl.Then():
+        with txl.if_(lane_id == 0):
+            with txl.then_():
+                with txl.if_(cbx == 0):
+                    with txl.then_():
                         self.sch_pipe.c2p.wait(0, self.sch_pipe.c2p_state.phase)
                         self.rs_queue.dequeue(
                             self.fetched_task_type,
@@ -393,8 +393,8 @@ class MixedDynamicTileScheduler:
                             self.fetched_task_idx1,
                             self.rs_rem,
                         )
-                        with txl.If(self.fetched_task_type[0] < 0):
-                            with txl.Then():
+                        with txl.if_(self.fetched_task_type[0] < 0):
+                            with txl.then_():
                                 self.gemm_queue.dequeue(
                                     self.fetched_task_type,
                                     self.fetched_task_idx0,
@@ -438,8 +438,8 @@ class Semaphore:
         self.state = txl.alloc_tensor([1], "uint64", scope="local", align=8)
 
     def semaphore_notify(self, signal_rank, tid, m_idx, n_idx, rs_queue):
-        with txl.If(tid % 128 == 0):
-            with txl.Then():
+        with txl.if_(tid % 128 == 0):
+            with txl.then_():
                 txl.ptx.fence.sc.sys()
                 txl.assign(
                     self.state[0],
@@ -455,8 +455,8 @@ class Semaphore:
                         + 1
                     ),
                 )
-                with txl.If(self.state[0] == self.cnt):
-                    with txl.Then():
+                with txl.if_(self.state[0] == self.cnt):
+                    with txl.then_():
                         rs_queue.enqueue(signal_rank, TaskType.RS.value, m_idx, n_idx)
 
 
@@ -537,20 +537,20 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
 
     @txl.kernel(allowed_func_calls=_NVSHMEM_RUNTIME_FUNC_CALLS)
     def test_mma_ss_tma_2sm_persistent(
-        A: txl.Tensor((M, K_LOCAL), txl.f16),
-        B: txl.Tensor((N, K_LOCAL), txl.f16),
-        gemm_out: txl.Tensor((M, N), txl.f16),
-        semaphore: txl.Tensor((LOCAL_M // TILE_M, N // TILE_N), txl.u64),
-        out: txl.Tensor((LOCAL_M, N), txl.f16),
-        gemm_task_types: txl.Tensor((CAPACITY,), txl.i32),
-        gemm_task_idxs: txl.Tensor((CAPACITY, 2), txl.i32),
-        gemm_head: txl.Tensor((1,), txl.i32),
-        gemm_tail: txl.Tensor((1,), txl.i32),
-        rs_task_types: txl.Tensor((CAPACITY,), txl.i32),
-        rs_task_idxs: txl.Tensor((CAPACITY, 2), txl.i32),
-        rs_head: txl.Tensor((1,), txl.i32),
-        rs_tail: txl.Tensor((1,), txl.i32),
-        exit_barrier: txl.Tensor((2,), txl.u32),
+        A: txl.Tensor((M, K_LOCAL), "float16"),
+        B: txl.Tensor((N, K_LOCAL), "float16"),
+        gemm_out: txl.Tensor((M, N), "float16"),
+        semaphore: txl.Tensor((LOCAL_M // TILE_M, N // TILE_N), "uint64"),
+        out: txl.Tensor((LOCAL_M, N), "float16"),
+        gemm_task_types: txl.Tensor((CAPACITY,), "int32"),
+        gemm_task_idxs: txl.Tensor((CAPACITY, 2), "int32"),
+        gemm_head: txl.Tensor((1,), "int32"),
+        gemm_tail: txl.Tensor((1,), "int32"),
+        rs_task_types: txl.Tensor((CAPACITY,), "int32"),
+        rs_task_idxs: txl.Tensor((CAPACITY, 2), "int32"),
+        rs_head: txl.Tensor((1,), "int32"),
+        rs_tail: txl.Tensor((1,), "int32"),
+        exit_barrier: txl.Tensor((2,), "uint32"),
     ):
         host = prepare_host(
             {
@@ -600,12 +600,12 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
         warp_id = warp_id_in_cta % WARP_NUMBER
         tid = txl.thread_id()
         lane_id = txl.lane_id()
-        rank = txl.alloc_local((1,), txl.i32)
+        rank = txl.alloc_local((1,), "int32")
         txl.assign(rank[0], txl.nvshmem.my_pe())
 
         smem = txl.smem_pool()
         pool = smem.pool
-        tmem_addr = smem.alloc((1,), txl.u32, align=4)
+        tmem_addr = smem.alloc((1,), "uint32", align=4)
         smem_pipe = txl.Pipeline(
             smem,
             PIPELINE_DEPTH,
@@ -622,28 +622,28 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
             init_empty=128 * NUM_CONSUMER,
             empty_phase_offset=1,
         )
-        packed_buf = smem.alloc((4,), txl.u32, align=16)
+        packed_buf = smem.alloc((4,), "uint32", align=16)
         sch_pipe = SchedulerPipeline(smem, cbx)
         pool.move_base_to(SMEM_RESERVED_BYTES)
         A_smem = smem.alloc(
-            (PIPELINE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), a_type, swizzle=txl.SW128B
+            (PIPELINE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), a_type, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM
         )
-        B_smem = smem.alloc((PIPELINE_DEPTH, BLK_N, BLK_K), b_type, swizzle=txl.SW128B).buf
-        D_smem = smem.alloc((NUM_CONSUMER, BLK_M, EPI_TILE), d_type, swizzle=txl.SW128B).buf
+        B_smem = smem.alloc((PIPELINE_DEPTH, BLK_N, BLK_K), b_type, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
+        D_smem = smem.alloc((NUM_CONSUMER, BLK_M, EPI_TILE), d_type, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
         if smem.bytes > SM100_SMEM_CAPACITY:
             raise ValueError(
                 f"GemmRS shared-memory usage {smem.bytes} exceeds {SM100_SMEM_CAPACITY} bytes"
             )
 
-        reg = txl.alloc_local((TMEM_LD_SIZE,), txl.f32)
-        reg_fp16 = txl.alloc_local((TMEM_LD_SIZE // 2,), txl.u32, align=16)
-        copy_words = txl.alloc_local((4,), txl.u32)
-        descA = txl.alloc_local((1,), txl.u64)
-        descB = txl.alloc_local((1,), txl.u64)
-        descI = txl.alloc_local((1,), txl.u32)
-        stage = txl.alloc_local((1,), txl.i32)
-        tmem_addr_local = txl.alloc_local((1,), txl.u32)
-        offset = txl.alloc_local((1,), txl.i32)
+        reg = txl.alloc_local((TMEM_LD_SIZE,), "float32")
+        reg_fp16 = txl.alloc_local((TMEM_LD_SIZE // 2,), "uint32", align=16)
+        copy_words = txl.alloc_local((4,), "uint32")
+        descA = txl.alloc_local((1,), "uint64")
+        descB = txl.alloc_local((1,), "uint64")
+        descI = txl.alloc_local((1,), "uint32")
+        stage = txl.alloc_local((1,), "int32")
+        tmem_addr_local = txl.alloc_local((1,), "uint32")
+        offset = txl.alloc_local((1,), "int32")
         sem = Semaphore(cnt=2 * WORLD_SIZE, buffer=semaphore)
         gemm_queue = GEMMMPMCQueue(
             CAPACITY,
@@ -691,7 +691,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
             trans_b=False,
             n_cta_groups=CTA_GROUP,
         )
-        with txl.If((wg_id == 0) & (warp_id == 0)), txl.Then():
+        with txl.if_((wg_id == 0) & (warp_id == 0)), txl.then_():
             txl.ptx[f"tcgen05.alloc.cta_group::{CTA_GROUP}.sync.aligned.shared::cta.b32"](
                 txl.address_of(tmem_addr[0]), txl.uint32(N_COLS)
             )
@@ -723,12 +723,12 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
             else:
                 epilogue1()
 
-        with txl.While(tile_scheduler.valid()):
-            with txl.If(tile_scheduler.fetched_task_type[0] == TaskType.RS.value), txl.Then():
+        with txl.while_(tile_scheduler.valid()):
+            with txl.if_(tile_scheduler.fetched_task_type[0] == TaskType.RS.value), txl.then_():
                 m_idx = tile_scheduler.fetched_task_idx0[0]
                 n_idx = tile_scheduler.fetched_task_idx1[0]
                 txl.assign(offset[0], tid)
-                with txl.While(offset[0] < TILE_M // 2 * TILE_N // 8):
+                with txl.while_(offset[0] < TILE_M // 2 * TILE_N // 8):
                     m_start = offset[0] // (TILE_N // 8)
                     n_start = offset[0] % (TILE_N // 8) * 8
                     if WORLD_SIZE == 1:
@@ -778,13 +778,13 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
                         )
                     txl.assign(offset[0], offset[0] + NUM_THREADS)
 
-            with txl.If(tile_scheduler.fetched_task_type[0] == TaskType.GEMM.value), txl.Then():
+            with txl.if_(tile_scheduler.fetched_task_type[0] == TaskType.GEMM.value), txl.then_():
                 m_idx = tile_scheduler.fetched_task_idx0[0]
                 n_idx = tile_scheduler.fetched_task_idx1[0]
 
                 def emit_producer_roles():
                     def tma_body():
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
 
                             def tma_load(_is_remain, ks):
                                 smem_pipe.empty.wait(ks, smem_cycle.phase)
@@ -814,8 +814,8 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
                                     (n_idx * CTA_GROUP + cbx) * BLK_N,
                                     smem_full_cta0.ptr_to([ks]),
                                 )
-                                with txl.If(cbx == 0):
-                                    with txl.Then():
+                                with txl.if_(cbx == 0):
+                                    with txl.then_():
                                         smem_pipe.full.arrive(
                                             ks,
                                             NUM_CONSUMER
@@ -829,8 +829,8 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
 
                             def tma_drain(ks):
                                 smem_pipe.empty.wait(ks, smem_cycle.phase)
-                                with txl.If(cbx == 0):
-                                    with txl.Then():
+                                with txl.if_(cbx == 0):
+                                    with txl.then_():
                                         smem_pipe.full.arrive(ks, remote=0)
 
                             partitioned_loop(tma_load, tma_done, tma_drain)
@@ -839,7 +839,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
                         # Preserve the source's warpgroup-local lowering in the
                         # descriptor/TMEM address path.
                         pw = warp_id
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             tmem_pipe.empty.wait(pw, tmem_cycle.phase)
                             txl.ptx.tcgen05.fence__after_thread_sync()
 
@@ -860,10 +860,10 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
                                         sdo=8 * BLK_K * F16_BYTES // F128_BYTES,
                                         swizzle=SWIZZLE,
                                     )
-                                    with txl.If(ki == 0):
-                                        with txl.Then():
-                                            with txl.If(stage[0] == 0):
-                                                with txl.Then():
+                                    with txl.if_(ki == 0):
+                                        with txl.then_():
+                                            with txl.if_(stage[0] == 0):
+                                                with txl.then_():
                                                     txl.ptx[_MMA_CHAIN](
                                                         txl.cast(pw * MMA_N, "uint32"),
                                                         descA[0],
@@ -872,7 +872,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
                                                         *_MMA_ZERO_MASKS,
                                                         False,
                                                     )
-                                                with txl.Else():
+                                                with txl.else_():
                                                     txl.ptx[_MMA_CHAIN](
                                                         txl.cast(pw * MMA_N, "uint32"),
                                                         descA[0],
@@ -881,7 +881,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
                                                         *_MMA_ZERO_MASKS,
                                                         True,
                                                     )
-                                        with txl.Else():
+                                        with txl.else_():
                                             txl.ptx[_MMA_CHAIN](
                                                 txl.cast(pw * MMA_N, "uint32"),
                                                 descA[0],
@@ -909,7 +909,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
 
                 # setmaxnreg is warpgroup-collective. Preserve the original
                 # producer scope, with K owning its TMA/scheduler/MMA/idle partition.
-                with txl.If(wg_id == NUM_CONSUMER), txl.Then():
+                with txl.if_(wg_id == NUM_CONSUMER), txl.then_():
                     producer_regs.emit()
                     emit_producer_roles()
 
@@ -943,7 +943,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
                             )
                         txl.cuda.warpgroup_sync(consumer_wg)
                         txl.ptx.fence.proxy.async_.shared__cta()
-                        with txl.If((consumer_lane == 0) & (consumer_wid == 0)), txl.Then():
+                        with txl.if_((consumer_lane == 0) & (consumer_wid == 0)), txl.then_():
                             txl.ptx[_TMA_S2G](
                                 txl.address_of(D_tensor_map),
                                 n_idx * BLK_N * CTA_GROUP + i * EPI_TILE,
@@ -965,7 +965,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
         txl.ptx.barrier.cluster.arrive()
         txl.ptx.barrier.cluster.wait()
         if WORLD_SIZE > 1:
-            with txl.If((cbx == 0) & (tid == 0)), txl.Then():
+            with txl.if_((cbx == 0) & (tid == 0)), txl.then_():
                 txl.cuda.func_call(
                     "exit_barrier_arrive_and_wait",
                     exit_barrier.ptr_to([0]),
@@ -978,7 +978,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False, b
             txl.ptx.barrier.cluster.wait()
         # Spell the teardown boundary exactly as the original: shared load to a
         # register, then collective relinquish/dealloc after every local and peer user.
-        with txl.If((wg_id == 0) & (warp_id == 0)), txl.Then():
+        with txl.if_((wg_id == 0) & (warp_id == 0)), txl.then_():
             txl.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
             txl.ptx.ld.shared.u32(tmem_addr_local[0], tmem_addr.ptr_to([0]))
             txl.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](

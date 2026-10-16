@@ -298,21 +298,21 @@ class GEMMMPMCQueue(MPMCQueue):
         rank,
     ):
         txl.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), txl.int32(1))
-        with txl.If(self.head_r[0] < self.num_tot_tasks):
-            with txl.Then():
+        with txl.if_(self.head_r[0] < self.num_tot_tasks):
+            with txl.then_():
                 # TODO: modify the wait logic to make it faster
                 remote_rank = (
                     rank + (self.head_r[0] // (LOCAL_GEMM_M_CLUSTERS * GEMM_N_CLUSTERS))
                 ) % WORLD_SIZE
-                with txl.If(remote_rank != rank):
-                    with txl.Then():
+                with txl.if_(remote_rank != rank):
+                    with txl.then_():
                         sem.semaphore_wait(remote_rank)
 
                 txl.assign(self.masked_pos[0], self.head_r[0] & self.mask)
                 txl.ptx.ld.global_.acquire.gpu.b32(
                     fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
                 )
-                with txl.While(fetched_task_type[0] < 0):
+                with txl.while_(fetched_task_type[0] < 0):
                     txl.cuda.nano_sleep(40)
                     txl.ptx.ld.global_.acquire.gpu.b32(
                         fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
@@ -324,7 +324,7 @@ class GEMMMPMCQueue(MPMCQueue):
                 txl.ptx.ld.global_.s32(
                     fetched_task_idx1[0], self.task_idxs.ptr_to([self.masked_pos[0], 1])
                 )
-            with txl.Else():
+            with txl.else_():
                 txl.assign(fetched_task_type[0], -1)
 
 
@@ -356,10 +356,10 @@ class SingleDynamicTileScheduler:
         rank,
         lane_id,
     ):
-        with txl.If(lane_id == 0):
-            with txl.Then():
-                with txl.If(cbx == 0):
-                    with txl.Then():
+        with txl.if_(lane_id == 0):
+            with txl.then_():
+                with txl.if_(cbx == 0):
+                    with txl.then_():
                         self.sch_pipe.empty.wait(
                             self.producer_state.stage, self.producer_state.phase
                         )
@@ -403,8 +403,8 @@ class SingleDynamicTileScheduler:
 
     def receive(self, lane_id):
         if ENABLE_WARP_BROADCAST:
-            with txl.If(lane_id == 0):
-                with txl.Then():
+            with txl.if_(lane_id == 0):
+                with txl.then_():
                     self._fetch()
             txl.ptx.shfl_sync.idx.b32(
                 self.rs_rem[0],
@@ -501,16 +501,16 @@ def _prepare_host(params):
 
 def _make_device_kernel(*, backend_config=None):
     def test_mma_ss_tma_2sm_persistent(
-        A: txl.Tensor((LOCAL_M, K), txl.f16),
-        B: txl.Tensor((LOCAL_N, K), txl.f16),
-        ag_out: txl.Tensor((M, K), txl.f16),
-        semaphore: txl.Tensor((WORLD_SIZE,), txl.u64),
-        out: txl.Tensor((M, LOCAL_N), txl.f16),
-        profiler_buffer: txl.Tensor((PROFILER_BUFFER_SIZE,), txl.u64),
-        gemm_task_types: txl.Tensor((CAPACITY,), txl.i32),
-        gemm_task_idxs: txl.Tensor((CAPACITY, 2), txl.i32),
-        gemm_head: txl.Tensor((1,), txl.i32),
-        gemm_tail: txl.Tensor((1,), txl.i32),
+        A: txl.Tensor((LOCAL_M, K), "float16"),
+        B: txl.Tensor((LOCAL_N, K), "float16"),
+        ag_out: txl.Tensor((M, K), "float16"),
+        semaphore: txl.Tensor((WORLD_SIZE,), "uint64"),
+        out: txl.Tensor((M, LOCAL_N), "float16"),
+        profiler_buffer: txl.Tensor((PROFILER_BUFFER_SIZE,), "uint64"),
+        gemm_task_types: txl.Tensor((CAPACITY,), "int32"),
+        gemm_task_idxs: txl.Tensor((CAPACITY, 2), "int32"),
+        gemm_head: txl.Tensor((1,), "int32"),
+        gemm_tail: txl.Tensor((1,), "int32"),
     ):
         host = _prepare_host(
             {
@@ -562,8 +562,8 @@ def _make_device_kernel(*, backend_config=None):
         # Shared-memory ownership. Padding preserves the source's externally
         # visible cluster addresses while each live region has one typed owner.
         smem = txl.smem_pool()
-        tmem_addr = smem.alloc((1,), txl.u32, align=4)
-        smem.alloc((32 - smem.bytes,), txl.u8)
+        tmem_addr = smem.alloc((1,), "uint32", align=4)
+        smem.alloc((32 - smem.bytes,), "uint8")
         ab_pipe = txl.Pipeline(
             smem,
             PIPELINE_DEPTH,
@@ -586,9 +586,9 @@ def _make_device_kernel(*, backend_config=None):
         )
         if smem.bytes != 128:
             raise AssertionError(f"unexpected main-pipeline header size: {smem.bytes}")
-        smem.alloc((512 - smem.bytes,), txl.u8)
-        packed_buf = smem.alloc((1,), txl.u64, align=8)
-        smem.alloc((544 - smem.bytes,), txl.u8)
+        smem.alloc((512 - smem.bytes,), "uint8")
+        packed_buf = smem.alloc((1,), "uint64", align=8)
+        smem.alloc((544 - smem.bytes,), "uint8")
         sch_pipe = txl.Pipeline(
             smem,
             1,
@@ -601,7 +601,7 @@ def _make_device_kernel(*, backend_config=None):
         )
         if smem.bytes != 560:
             raise AssertionError(f"unexpected scheduler header size: {smem.bytes}")
-        smem.alloc((1024 - smem.bytes,), txl.u8)
+        smem.alloc((1024 - smem.bytes,), "uint8")
         A_smem = smem.alloc((PIPELINE_DEPTH, NUM_CONSUMER * BLK_M, BLK_K), a_type, swizzle=SWIZZLE)
         B_smem = smem.alloc((PIPELINE_DEPTH, BLK_N, BLK_K), b_type, swizzle=SWIZZLE)
         D_smem = smem.alloc((NUM_CONSUMER * BLK_M, EPI_TILE), d_type, swizzle=SWIZZLE)
@@ -681,8 +681,8 @@ def _make_device_kernel(*, backend_config=None):
             tile_scheduler.receive(lane_id)
 
         # alloc TMEM
-        with txl.If((wg_id == 0) & (warp_id == 0)):
-            with txl.Then():
+        with txl.if_((wg_id == 0) & (warp_id == 0)):
+            with txl.then_():
                 txl.ptx[f"tcgen05.alloc.cta_group::{CTA_GROUP}.sync.aligned.shared::cta.b32"](
                     tmem_addr.ptr_to([0]), txl.uint32(N_COLS)
                 )
@@ -715,17 +715,17 @@ def _make_device_kernel(*, backend_config=None):
             else:
                 epilogue1()
 
-        with txl.While(tile_scheduler.valid()):
-            with txl.If(tile_scheduler.fetched_task_type[0] == TaskType.GEMM.value):
-                with txl.Then():
+        with txl.while_(tile_scheduler.valid()):
+            with txl.if_(tile_scheduler.fetched_task_type[0] == TaskType.GEMM.value):
+                with txl.then_():
                     m_idx = tile_scheduler.fetched_task_idx0[0]
                     n_idx = tile_scheduler.fetched_task_idx1[0]
 
                     def emit_producer_roles():
                         def tma_body():
                             # GMEM -> SMEM  (tma)
-                            with txl.If(txl.cuda.elect_sync()):
-                                with txl.Then():
+                            with txl.if_(txl.cuda.elect_sync()):
+                                with txl.then_():
                                     # Materialized, not plain: this is bound out
                                     # here but read inside `tma_load`, which the
                                     # pipeline emits once per unrolled stage. A
@@ -738,13 +738,13 @@ def _make_device_kernel(*, backend_config=None):
                                     def tma_load(is_remain, ks, tile_idx):
                                         stage_k = tile_idx * BLK_K
                                         ab_pipe.empty.wait(ks, ab_state.phase)
-                                        with txl.If(
+                                        with txl.if_(
                                             txl.And(
                                                 rank[0] * LOCAL_GEMM_M_CLUSTERS <= m_idx,
                                                 m_idx < (rank[0] + 1) * LOCAL_GEMM_M_CLUSTERS,
                                             )
                                         ):
-                                            with txl.Then():
+                                            with txl.then_():
                                                 m_start0 = (
                                                     (m_idx % LOCAL_GEMM_M_CLUSTERS)
                                                     * NUM_CONSUMER
@@ -776,7 +776,7 @@ def _make_device_kernel(*, backend_config=None):
                                                         tma_finished.ptr_to([ks])
                                                     ),
                                                 )
-                                            with txl.Else():
+                                            with txl.else_():
                                                 m_start0 = (
                                                     m_idx * NUM_CONSUMER * CTA_GROUP + cbx
                                                 ) * BLK_M
@@ -812,8 +812,8 @@ def _make_device_kernel(*, backend_config=None):
                                                 tma_finished.ptr_to([ks])
                                             ),
                                         )
-                                        with txl.If(cbx == 0):
-                                            with txl.Then():
+                                        with txl.if_(cbx == 0):
+                                            with txl.then_():
                                                 ab_pipe.full.arrive(
                                                     ks,
                                                     tx_count=NUM_CONSUMER
@@ -824,15 +824,15 @@ def _make_device_kernel(*, backend_config=None):
 
                                     def tma_load_epilogue(ks):
                                         ab_pipe.empty.wait(ks, ab_state.phase)
-                                        with txl.If(cbx == 0):
-                                            with txl.Then():
+                                        with txl.if_(cbx == 0):
+                                            with txl.then_():
                                                 ab_pipe.full.arrive(ks)
 
                                     partitioned_loop(ab_state, tma_load, skip, tma_load_epilogue)
 
                         def mma_body():
-                            with txl.If(txl.cuda.elect_sync()):
-                                with txl.Then():
+                            with txl.if_(txl.cuda.elect_sync()):
+                                with txl.then_():
                                     out_pipe.empty.wait(warp_id, out_state.phase)
                                     txl.ptx.tcgen05.fence__after_thread_sync()
 
@@ -855,7 +855,7 @@ def _make_device_kernel(*, backend_config=None):
                                                 swizzle=SWIZZLE,
                                             )
 
-                                            with txl.If(
+                                            with txl.if_(
                                                 txl.And(
                                                     txl.And(tile_idx == 0, ki == 0),
                                                     txl.Or(
@@ -864,7 +864,7 @@ def _make_device_kernel(*, backend_config=None):
                                                     ),
                                                 )
                                             ):
-                                                with txl.Then():
+                                                with txl.then_():
                                                     txl.ptx[_MMA_CHAIN](
                                                         txl.cast(warp_id * MMA_N, "uint32"),
                                                         descA[0],
@@ -873,7 +873,7 @@ def _make_device_kernel(*, backend_config=None):
                                                         *_MMA_ZERO_MASKS,
                                                         False,
                                                     )
-                                                with txl.Else():
+                                                with txl.else_():
                                                     txl.ptx[_MMA_CHAIN](
                                                         txl.cast(warp_id * MMA_N, "uint32"),
                                                         descA[0],
@@ -904,11 +904,11 @@ def _make_device_kernel(*, backend_config=None):
                     # setmaxnreg is warpgroup-collective, and the original keeps
                     # the functional warp dispatch inside that same reconvergence
                     # scope. K owns the transition without changing its predicate.
-                    with txl.If(
+                    with txl.if_(
                         (NUM_CONSUMER * WARP_NUMBER <= warp_id_in_cta)
                         & (warp_id_in_cta < (NUM_CONSUMER + 1) * WARP_NUMBER)
                     ):
-                        with txl.Then():
+                        with txl.then_():
                             producer_regs.emit()
                             emit_producer_roles()
 
@@ -946,8 +946,8 @@ def _make_device_kernel(*, backend_config=None):
                             # thread has observed completion and the warpgroup has
                             # rendezvoused.
                             if i > 0:
-                                with txl.If((lane_id == 0) & (warp_id == 0)):
-                                    with txl.Then():
+                                with txl.if_((lane_id == 0) & (warp_id == 0)):
+                                    with txl.then_():
                                         txl.ptx.cp.async_.bulk.wait_group(0)
                                 txl.cuda.warpgroup_sync(wg_id)
 
@@ -963,8 +963,8 @@ def _make_device_kernel(*, backend_config=None):
                             txl.cuda.warpgroup_sync(wg_id)
                             txl.ptx.fence.proxy.async_.shared__cta()
                             # st to gmem
-                            with txl.If((lane_id == 0) & (warp_id == 0)):
-                                with txl.Then():
+                            with txl.if_((lane_id == 0) & (warp_id == 0)):
+                                with txl.then_():
                                     m_st = (
                                         m_idx * NUM_CONSUMER * CTA_GROUP + wg_id * CTA_GROUP + cbx
                                     ) * BLK_M
@@ -980,8 +980,8 @@ def _make_device_kernel(*, backend_config=None):
                         # The last store has no following TMEM load to hide its
                         # latency, but it still must complete before this staging
                         # buffer is reused by the next scheduled tile.
-                        with txl.If((lane_id == 0) & (warp_id == 0)):
-                            with txl.Then():
+                        with txl.if_((lane_id == 0) & (warp_id == 0)):
+                            with txl.then_():
                                 txl.ptx.cp.async_.bulk.wait_group(0)
                         txl.cuda.warpgroup_sync(wg_id)
 
@@ -992,8 +992,8 @@ def _make_device_kernel(*, backend_config=None):
         txl.ptx.barrier.cluster.wait()
 
         # dealloc TMEM
-        with txl.If((wg_id == 0) & (warp_id == 0)):
-            with txl.Then():
+        with txl.if_((wg_id == 0) & (warp_id == 0)):
+            with txl.then_():
                 txl.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
                 txl.ptx.ld.shared.u32(tmem_addr_local[0], tmem_addr.ptr_to([0]))
                 txl.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](

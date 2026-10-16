@@ -203,7 +203,7 @@ def get_kernel(
 
     @txl.kernel()
     def stable_sort_topk_by_value(
-        out_idx: txl.Tensor((num_rows * k,), txl.i32), out_val: txl.Tensor((num_rows * k,), dtype)
+        out_idx: txl.Tensor((num_rows * k,), "int32"), out_val: txl.Tensor((num_rows * k,), dtype)
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=num_rows, block=block_threads // 32 * 32),
@@ -257,8 +257,8 @@ def get_kernel(
             # static k only turns the operand into an immediate.  It folds away
             # only at the six rungs where k == BLOCK_THREADS * ITEMS_PER_THREAD.
             pos = tx * items_per_thread + i
-            with txl.If(pos < k):
-                with txl.Then():
+            with txl.if_(pos < k):
+                with txl.then_():
                     slot = thread_base + txl.cast(i, "int64")
                     # Source order (:3108-3115): load the value, complement it,
                     # then load the index.
@@ -275,7 +275,7 @@ def get_kernel(
                             ),
                         )
                     txl.assign(values[i], ld_global_u32(out_idx, slot))
-                with txl.Else():
+                with txl.else_():
                     # ~0u is maximal within [0, end_bit) and every real key fits
                     # in end_bit bits, so padding sorts to the tail and is never
                     # written.
@@ -305,7 +305,7 @@ def get_kernel(
         # --- blocked writeback (:3124-3132) --------------------------------
         with txl.unroll(items_per_thread) as i3:
             pos3 = tx * items_per_thread + i3
-            with txl.If(pos3 < k), txl.Then():
+            with txl.if_(pos3 < k), txl.then_():
                 slot3 = thread_base + txl.cast(i3, "int64")
                 st_global_u32(out_idx, slot3, values[i3])
                 # The same helper as the load: the map is an involution.

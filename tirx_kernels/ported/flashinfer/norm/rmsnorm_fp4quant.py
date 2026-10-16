@@ -281,7 +281,7 @@ def _process_scale_block(
     input_dtype: txl.constexpr,
 ):
     num_scale_blocks = H // block_size
-    with txl.If(sf_index < num_scale_blocks), txl.Then():
+    with txl.if_(sf_index < num_scale_blocks), txl.then_():
         block_start = sf_index * block_size
         x_base = actual_row * H + block_start
 
@@ -772,7 +772,7 @@ def get_kernel(
         shared_raw = txl.smem_pool().alloc((smem_bytes,), "uint8", align=1024)
 
         if cluster_n > 1:
-            with txl.If(tid == 0), txl.Then():
+            with txl.if_(tid == 0), txl.then_():
                 txl.ptx.mbarrier.init.shared.b64(shared_raw.ptr_to([mbar_offset]), txl.uint32(1))
             txl.ptx.fence.mbarrier_init.release.cluster()
             txl.ptx.barrier.cluster.arrive.relaxed()
@@ -782,7 +782,7 @@ def get_kernel(
             local_col: txl.int32 = (thread_in_row + vb * tpr) * 8
             absolute_col: txl.int32 = block_y * cols + local_col
             col_valid: txl.bool = absolute_col < H
-            with txl.If(row_valid), txl.Then():
+            with txl.if_(row_valid), txl.then_():
                 source_bytes: txl.uint32 = txl.uint32(16)
                 if not full_columns:
                     source_bytes = txl.cast(txl.if_then_else(col_valid, 16, 0), "uint32")
@@ -824,7 +824,7 @@ def get_kernel(
             txl.ptx.mul.f32x2(product[0], x_f32_pairs[pair], x_f32_pairs[pair])
             txl.ptx.mov.b64(x_sq[pair * 2], x_sq[pair * 2 + 1], product[0])
 
-        local_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
+        local_sum = txl.local_scalar("float32", init=txl.float32(0.0))
         for value in range(total_values):
             txl.assign(local_sum, _add_f32(local_sum, x_sq[value]))
 
@@ -832,15 +832,15 @@ def get_kernel(
         warp_sum: txl.float32 = local_sum
 
         if warps_per_row > 1 and cluster_n == 1:
-            with txl.If(lane == 0), txl.Then():
+            with txl.if_(lane == 0), txl.then_():
                 reduce_index: txl.int32 = row_warp + warp_in_row * rows
                 txl.ptx.st.shared.b32(
                     shared_raw.ptr_to([reduce_base + reduce_index * 4]),
                     txl.reinterpret(warp_sum, ty="uint32"),
                 )
             txl.ptx.bar.sync(txl.uint32(0))
-            final_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
-            with txl.If(lane < warps_per_row), txl.Then():
+            final_sum = txl.local_scalar("float32", init=txl.float32(0.0))
+            with txl.if_(lane < warps_per_row), txl.then_():
                 reduce_word = txl.alloc_local((1,), "uint32")
                 reduce_index: txl.int32 = row_warp + lane * rows
                 txl.ptx.ld.shared.b32(
@@ -850,12 +850,12 @@ def get_kernel(
             txl.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
             sum_sq: txl.float32 = final_sum
         elif cluster_n > 1:
-            with txl.If(warp == 0), txl.Then():
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(warp == 0), txl.then_():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                         shared_raw.ptr_to([mbar_offset]), txl.uint32(expected_bytes)
                     )
-            with txl.If(lane < cluster_n), txl.Then():
+            with txl.if_(lane < cluster_n), txl.then_():
                 reduce_index: txl.int32 = (
                     row_warp + warp_in_row * rows + cta_rank * rows * warps_per_row
                 )
@@ -868,10 +868,10 @@ def get_kernel(
                 )
             _cluster_mbarrier_wait(shared_raw.ptr_to([mbar_offset]))
 
-            final_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
+            final_sum = txl.local_scalar("float32", init=txl.float32(0.0))
             for iteration in range(_ceil_div(total_partials_per_row, 32)):
                 partial: txl.int32 = lane + iteration * 32
-                with txl.If(partial < total_partials_per_row), txl.Then():
+                with txl.if_(partial < total_partials_per_row), txl.then_():
                     partial_warp: txl.int32 = partial % warps_per_row
                     partial_cta: txl.int32 = partial // warps_per_row
                     reduce_index: txl.int32 = (
@@ -909,7 +909,7 @@ def get_kernel(
         else:
             txl.ptx.bar.sync(txl.uint32(0))
 
-        with txl.If(row_valid), txl.Then():
+        with txl.if_(row_valid), txl.then_():
             if scale_blocks_per_thread <= 7:
                 for scale_iteration in range(scale_blocks_per_thread):
                     sf_index: txl.int32 = thread_in_row + scale_iteration * tpr
@@ -930,8 +930,8 @@ def get_kernel(
                         input_dtype=input_dtype,
                     )
             else:
-                scale_iteration = txl.local_scalar(txl.i32, init=txl.int32(0))
-                with txl.While(scale_iteration < scale_blocks_per_thread):
+                scale_iteration = txl.local_scalar("int32", init=txl.int32(0))
+                with txl.while_(scale_iteration < scale_blocks_per_thread):
                     sf_index0: txl.int32 = thread_in_row + scale_iteration * tpr
                     _process_scale_block(
                         x,
@@ -975,11 +975,11 @@ def get_kernel(
     def flashinfer_rmsnorm_fp4quant(
         x: txl.Tensor((txl.int64(),), input_dtype),
         weight: txl.Tensor((H,), input_dtype),
-        y: txl.Tensor((txl.int64(),), txl.u8),
-        scales: txl.Tensor((txl.int64(),), txl.u8),
-        global_scale: txl.Tensor((1,), txl.f32),
-        runtime_M: txl.i32,
-        runtime_eps: txl.f32,
+        y: txl.Tensor((txl.int64(),), "uint8"),
+        scales: txl.Tensor((txl.int64(),), "uint8"),
+        global_scale: txl.Tensor((1,), "float32"),
+        runtime_M: "int32",
+        runtime_eps: "float32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(

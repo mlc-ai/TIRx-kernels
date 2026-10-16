@@ -449,20 +449,20 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any], *, backend_config=
 
     @txl.kernel()
     def _recurrent_kda_decode_one_warp(
-        q: txl.Tensor((txl.int64(),), txl.bf16),
-        k: txl.Tensor((txl.int64(),), txl.bf16),
-        v: txl.Tensor((txl.int64(),), txl.bf16),
-        g: txl.Tensor((txl.int64(),), txl.bf16),
-        beta: txl.Tensor((txl.int64(),), txl.bf16),
-        state: txl.Tensor((txl.int64(),), txl.bf16),
-        out: txl.Tensor((txl.int64(),), txl.bf16),
-        a_log: txl.Tensor((txl.int64(),), txl.f32),
-        dt_bias: txl.Tensor((txl.int64(),), txl.f32),
-        cu_seqlens: txl.Tensor((txl.int64(),), txl.i32),
-        ssm_state_indices: txl.Tensor((txl.int64(),), txl.i32),
-        scale: txl.f32,
-        eps: txl.f32,
-        lower_bound: txl.f32,
+        q: txl.Tensor((txl.int64(),), "bfloat16"),
+        k: txl.Tensor((txl.int64(),), "bfloat16"),
+        v: txl.Tensor((txl.int64(),), "bfloat16"),
+        g: txl.Tensor((txl.int64(),), "bfloat16"),
+        beta: txl.Tensor((txl.int64(),), "bfloat16"),
+        state: txl.Tensor((txl.int64(),), "bfloat16"),
+        out: txl.Tensor((txl.int64(),), "bfloat16"),
+        a_log: txl.Tensor((txl.int64(),), "float32"),
+        dt_bias: txl.Tensor((txl.int64(),), "float32"),
+        cu_seqlens: txl.Tensor((txl.int64(),), "int32"),
+        ssm_state_indices: txl.Tensor((txl.int64(),), "int32"),
+        scale: "float32",
+        eps: "float32",
+        lower_bound: "float32",
     ):
         # TIRX_TRANSCRIBE_START recurrent_kda_decode_one_warp
         # --- lane and CTA coordinates (recurrent_kda.py:229-246) ----------------
@@ -512,7 +512,7 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any], *, backend_config=
         # Runs before the state load so inactive rows are defined even when the
         # token loop stores nothing.  Valid only because NUM_TOKENS == 1 makes the
         # token-axis index equal to batch_idx.
-        with txl.If(tidx < TILE_ROWS), txl.Then():
+        with txl.if_(tidx < TILE_ROWS), txl.then_():
             _store_bf16_bits(
                 out,
                 gidx((batch_idx * NUM_VALUE_HEADS + value_head_idx) * HEAD_DIM + v_offset + tidx),
@@ -636,7 +636,7 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any], *, backend_config=
             # --- V load, hoisted only at TILE_ROWS == 16 (recurrent_kda.py:359-364)
             v_loaded = txl.local_scalar("float32", init=txl.float32(0.0))
             if TILE_ROWS == 16:
-                with txl.If(tidx < TILE_ROWS), txl.Then():
+                with txl.if_(tidx < TILE_ROWS), txl.then_():
                     txl.assign(
                         v_loaded, _bf16_to_f32(_load_bf16_bits(v, gidx(v_base + v_offset + tidx)))
                     )
@@ -729,7 +729,7 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any], *, backend_config=
 
             # --- late V load for the other schedules (recurrent_kda.py:437-439)
             if TILE_ROWS != 16:
-                with txl.If(tidx < TILE_ROWS), txl.Then():
+                with txl.if_(tidx < TILE_ROWS), txl.then_():
                     txl.assign(
                         v_loaded, _bf16_to_f32(_load_bf16_bits(v, gidx(v_base + v_offset + tidx)))
                     )
@@ -769,7 +769,7 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any], *, backend_config=
             # The source rebinds h_out to seq_idx at :463.  At NUM_TOKENS == 1 that
             # is the same slot the prologue loaded from, and a negative slot cannot
             # reach here because it clears is_active (:327).
-            with txl.If(is_active != 0), txl.Then():
+            with txl.if_(is_active != 0), txl.then_():
                 write_base = txl.local_scalar(
                     "int64",
                     init=txl.cast(seq_idx, "int64") * txl.cast(STATE_SLOT_STRIDE, "int64")

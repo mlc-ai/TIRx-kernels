@@ -55,9 +55,9 @@ def test_tensormap_parameter_uses_addressable_pointer_type():
 def test_flat_and_with_entries_generate_the_same_ir():
     def build(managed):
         @txl.kernel()
-        def probe(out: txl.Tensor((txl.int64(),), txl.i32), n: txl.i32):
+        def probe(out: txl.Tensor((txl.int64(),), "int32"), n: "int32"):
             def body():
-                tile = txl.smem_pool().alloc((32,), txl.i32)
+                tile = txl.smem_pool().alloc((32,), "int32")
                 txl.ptx.st.shared.b32(tile.ptr_to([txl.thread_id()]), txl.cta_id())
                 txl.ptx.st.global_.b32(out.ptr_to([txl.thread_id()]), txl.cta_id())
 
@@ -84,7 +84,7 @@ def test_host_preparation_and_tail_remain_outside_device_region():
         return descriptor
 
     @txl.kernel()
-    def probe(a: txl.Tensor((txl.int64(),), txl.f32), n: txl.i32):
+    def probe(a: txl.Tensor((txl.int64(),), "float32"), n: "int32"):
         descriptor = prepare(a)
         with txl.device_entry(launch=txl.cuda.LaunchConfig(grid=n, block=32)):
             txl.keep_alive(txl.address_of(descriptor))
@@ -106,9 +106,9 @@ def test_host_preparation_and_tail_remain_outside_device_region():
 def test_launch_only_values_stay_on_host(device_uses_n):
     @txl.kernel()
     def probe(
-        out: txl.Tensor((txl.int64(),), txl.i32),
-        n: txl.i32,
-        stream: txl.Tensor((txl.int64(),), txl.u8),
+        out: txl.Tensor((txl.int64(),), "int32"),
+        n: "int32",
+        stream: txl.Tensor((txl.int64(),), "uint8"),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(n + 1) // 2, block=32, stream=stream.data)
@@ -139,7 +139,7 @@ def test_device_entry_requires_a_concrete_launch_record():
 
 def test_host_is_an_ordinary_annotated_parameter():
     @txl.kernel()
-    def probe(*, host: txl.i32):
+    def probe(*, host: "int32"):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=host, block=32))
 
     assert probe.func.params[0].name == "host"
@@ -150,7 +150,7 @@ def test_invalid_blocks_are_rejected(block):
     with pytest.raises((TypeError, ValueError)):
 
         @txl.kernel()
-        def probe(n: txl.i32):
+        def probe(n: "int32"):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=1, block=n if block == "dynamic" else block)
             )
@@ -166,7 +166,7 @@ def test_entry_must_be_unique_and_at_function_scope(kind):
             if kind == "missing":
                 return
             if kind == "branch":
-                with txl.If(txl.int32(1) == 1), txl.Then():
+                with txl.if_(txl.int32(1) == 1), txl.then_():
                     txl.device_entry(launch=config)
             elif kind == "loop":
                 with txl.serial(2):
@@ -212,7 +212,7 @@ def test_failures_restore_tracing_state(monkeypatch, managed, failure):
         @txl.kernel()
         def probe():
             def body():
-                txl.smem_pool().alloc((32,), txl.i32)
+                txl.smem_pool().alloc((32,), "int32")
                 if failure == "body":
                     raise ValueError("body failed")
 
@@ -232,7 +232,7 @@ def test_failures_restore_tracing_state(monkeypatch, managed, failure):
     @txl.kernel()
     def next_kernel():
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32))
-        txl.smem_pool().alloc((32,), txl.i32)
+        txl.smem_pool().alloc((32,), "int32")
 
     assert next_kernel.warps == 1
 
@@ -286,10 +286,10 @@ def test_native_tensor_arguments_check_shared_shapes(host, tmp_path):
     size = txl.Var("size", txl.int64)
 
     @txl.kernel()
-    def copy_tensor(x: txl.Tensor((size,), txl.f32), y: txl.Tensor((size,), txl.f32)):
+    def copy_tensor(x: txl.Tensor((size,), "float32"), y: txl.Tensor((size,), "float32")):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=(x.shape[0] + 31) // 32, block=32))
         i = txl.cta_id() * 32 + txl.thread_id()
-        with txl.If(i < x.shape[0]), txl.Then():
+        with txl.if_(i < x.shape[0]), txl.then_():
             value = txl.local_scalar("float32")
             txl.ptx.ld.global_.f32(value, x.ptr_to([i]))
             txl.ptx.st.global_.f32(y.ptr_to([i]), value)
@@ -317,7 +317,7 @@ def test_dynamic_launch_and_host_descriptors_execute(host, prepare_map, tmp_path
         pytest.skip("tensor map encoding requires SM90 or newer")
 
     @txl.kernel()
-    def coordinates(out: txl.Tensor((txl.int64(),), txl.i32), n: txl.i32):
+    def coordinates(out: txl.Tensor((txl.int64(),), "int32"), n: "int32"):
         if prepare_map:
             descriptor = txl.stack_alloca("tensormap", 1)
             txl.cu_tensor_map_encode_tiled(

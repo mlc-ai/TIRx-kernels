@@ -85,7 +85,7 @@ TMEM_ALLOC_COLUMNS = spec.TMEM_CAPACITY_COLUMNS
 
 # Element dtype and the narrow-operand spellings that follow from it. The
 # element dtype selects the descriptor and these mnemonics and nothing else.
-_ELEM = {"bfloat16": txl.bf16, "float16": txl.f16}
+_ELEM = {"bfloat16": "bfloat16", "float16": "float16"}
 _MUL_HALF = {"bfloat16": "mul.bf16x2", "float16": "mul.f16x2"}
 _ADD_WIDE = {"bfloat16": "add.rn.f32.bf16", "float16": "add.rn.f32.f16"}
 _CVT_WIDE = {"bfloat16": "cvt.f32.bf16", "float16": "cvt.f32.f16"}
@@ -120,20 +120,20 @@ def _log2_soft(x):
     most 1: the range is [1, 2], `r = (x - 1) / (x + 1)` is bounded by 1/3, and
     six odd terms land within 1.6e-7 of the true value across the range.
     """
-    one = txl.local_scalar(txl.f32, init=txl.float32(1.0))
-    num = txl.local_scalar(txl.f32)
-    den = txl.local_scalar(txl.f32)
+    one = txl.local_scalar("float32", init=txl.float32(1.0))
+    num = txl.local_scalar("float32")
+    den = txl.local_scalar("float32")
     txl.ptx["sub.f32"](num, x, one)
     txl.ptx["add.f32"](den, x, one)
-    r = txl.local_scalar(txl.f32)
+    r = txl.local_scalar("float32")
     txl.ptx["div.rn.f32"](r, num, den)
-    r2 = txl.local_scalar(txl.f32)
+    r2 = txl.local_scalar("float32")
     txl.ptx["mul.f32"](r2, r, r)
-    acc = txl.local_scalar(txl.f32, init=txl.float32(_LOG2_SERIES[-1]))
+    acc = txl.local_scalar("float32", init=txl.float32(_LOG2_SERIES[-1]))
     for c in reversed(_LOG2_SERIES[:-1]):
-        cv = txl.local_scalar(txl.f32, init=txl.float32(c))
+        cv = txl.local_scalar("float32", init=txl.float32(c))
         txl.ptx["fma.rn.f32"](acc, acc, r2, cv)
-    out = txl.local_scalar(txl.f32)
+    out = txl.local_scalar("float32")
     txl.ptx["mul.f32"](out, acc, r)
     return out
 
@@ -233,8 +233,8 @@ def _gemm(d, a, b, idesc, accumulate, n_iter, unroll, pred=None):
     b_cur = txl.local_scalar("uint64")
     txl.assign(a_cur, a_desc)
     txl.assign(b_cur, b_desc)
-    it = txl.local_scalar(txl.i32, init=txl.int32(0))
-    with txl.While(it < txl.int32(n_iter)):
+    it = txl.local_scalar("int32", init=txl.int32(0))
+    with txl.while_(it < txl.int32(n_iter)):
         for u in range(unroll):
             _mma(
                 MMA_F16,
@@ -342,7 +342,7 @@ def _bwd_load(
     # every TMA issue behind it. `lane == 0` is a per-lane comparison ptxas
     # cannot read as an election, and it rebuilds one around the group.
     qdo_leader = txl.local_scalar("uint32", init=txl.cuda.elect_sync())
-    with txl.If(qdo_leader != txl.uint32(0)), txl.Then():
+    with txl.if_(qdo_leader != txl.uint32(0)), txl.then_():
         # The Q/dO pipeline is acquired before the transfer is announced
         # (:1152-1155); it runs once, so the wait is on the initial phase.
         p_qdo.empty.wait(0, 1)
@@ -416,14 +416,14 @@ def _gather_or_zero(smem, addr, kv, row, col, src_row, head_dim, live):
             smem.ptr_to([addr]), kv.ptr_to([src_row * head_dim + col]), 16, 16
         )
         return
-    # `txl.If(cond)` opens the frame; Then/Else nest inside it. The
-    # `with txl.If(c), txl.Then():` shorthand is if-without-else only.
-    with txl.If(live):
-        with txl.Then():
+    # `txl.if_(cond)` opens the frame; Then/Else nest inside it. The
+    # `with txl.if_(c), txl.then_():` shorthand is if-without-else only.
+    with txl.if_(live):
+        with txl.then_():
             txl.ptx["cp.async.cg.shared.global"](
                 smem.ptr_to([addr]), kv.ptr_to([src_row * head_dim + col]), 16, 16
             )
-        with txl.Else():
+        with txl.else_():
             txl.ptx["st.shared.v4.b32"](
                 smem.ptr_to([addr]), txl.uint32(0), txl.uint32(0), txl.uint32(0), txl.uint32(0)
             )
@@ -465,7 +465,7 @@ def _bwd_load_kv(
         for i in range(rows_per_warp):
             row = i * 4 + lwarp
             gidx = tile_index * txl.int32(block) + txl.int32(row)
-            v = txl.local_scalar(txl.i32, init=txl.int32(-1))
+            v = txl.local_scalar("int32", init=txl.int32(-1))
             # The bound is the allocation extent, not `topk`: rows past the
             # length are read and then discarded. It is also dead whenever the
             # extent is a whole number of blocks, which every compiled shape
@@ -477,7 +477,7 @@ def _bwd_load_kv(
             else:
                 issue = lane0_rd
             txl.ptx["ld.global.b32"](v, topk_idxs.ptr_to([token * max_topk + gidx]), pred=issue)
-            bc = txl.local_scalar(txl.i32)
+            bc = txl.local_scalar("int32")
             txl.ptx.shfl_sync.idx.b32(bc, v, txl.uint32(0), txl.uint32(31), txl.uint32(0xFFFFFFFF))
             txl.assign(r[i], bc)
         return r
@@ -512,7 +512,7 @@ def _bwd_load_kv(
                 )
             if groups == 9:
                 # The ninth group is the d576 tail: 64 dims, so only 8 lanes.
-                with txl.If(lane < txl.int32(8)), txl.Then():
+                with txl.if_(lane < txl.int32(8)), txl.then_():
                     slot = (lane % txl.int32(8)) * txl.int32(8)
                     tcol = txl.int32(8 * 64) + slot
                     _gather_or_zero(
@@ -531,22 +531,22 @@ def _bwd_load_kv(
         txl.ptx["mbarrier.arrive.shared.b64"](p_k.full.buf.ptr_to([0]), txl.uint32(1))
 
     st = txl.PipelineState(1, phase=0)
-    tile_index = txl.local_scalar(txl.i32, init=tile_count - txl.int32(1))
+    tile_index = txl.local_scalar("int32", init=tile_count - txl.int32(1))
 
     # The highest-index tile is the ragged one and is peeled, so the loop body
     # never carries the ragged-tile test (:1343-1393).
     r0 = read_indices(tile_index)
     p_k.empty.wait(0, st.phase ^ 1)
-    with txl.If(full_tiles):
-        with txl.Then():
+    with txl.if_(full_tiles):
+        with txl.then_():
             gather_rows(tile_index, r0, is_first=False)
-        with txl.Else():
+        with txl.else_():
             gather_rows(tile_index, r0, is_first=True)
     publish()
     st.advance()
     txl.assign(tile_index, tile_index - txl.int32(1))
 
-    with txl.While(tile_index >= txl.int32(0)):
+    with txl.while_(tile_index >= txl.int32(0)):
         r = read_indices(tile_index)
         p_k.empty.wait(0, st.phase ^ 1)
         gather_rows(tile_index, r, is_first=False)
@@ -583,14 +583,14 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
         desc_dq: txl.Ptr(txl.TensorMap),
         kv: txl.Tensor((txl.int64(),), elem),
         dq: txl.Tensor((txl.int64(),), elem),
-        ws_dkv: txl.Tensor((txl.int64(),), txl.f32),
-        topk_idxs: txl.Tensor((txl.int64(),), txl.i32),
-        topk_length: txl.Tensor((txl.int64(),), txl.i32),
-        ws: txl.Tensor((txl.int64(),), txl.f32),
-        seqlen_q: txl.i32,
-        seqlen_kv: txl.i32,
-        plane: txl.i32,
-        scale: txl.f32,
+        ws_dkv: txl.Tensor((txl.int64(),), "float32"),
+        topk_idxs: txl.Tensor((txl.int64(),), "int32"),
+        topk_length: txl.Tensor((txl.int64(),), "int32"),
+        ws: txl.Tensor((txl.int64(),), "float32"),
+        seqlen_q: "int32",
+        seqlen_kv: "int32",
+        plane: "int32",
+        scale: "float32",
     ):
         # ---- kernel body starts here ----
         txl.device_entry(
@@ -607,23 +607,23 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
 
         # `topk` is CTA-uniform: one value per query token.
         if has_topk_length:
-            topk = txl.local_scalar(txl.i32)
+            topk = txl.local_scalar("int32")
             txl.ptx["ld.global.b32"](topk, topk_length.ptr_to([token]))
         else:
             txl.keep_alive(topk_length.data)
-            topk = txl.local_scalar(txl.i32, init=txl.int32(max_topk))
+            topk = txl.local_scalar("int32", init=txl.int32(max_topk))
 
         # An empty or malformed row contributes nothing to dKV and its dQ tile is
         # zero. This runs BEFORE any pipeline init or TMEM allocation, and that
         # ordering is load-bearing: a CTA that exited after arriving on a
         # pipeline init would strand the rest of the grid.
-        with txl.If(topk <= txl.int32(0)), txl.Then():
-            i = txl.local_scalar(txl.i32, init=tid)
-            with txl.While(i < txl.int32(head_dim * block)):
+        with txl.if_(topk <= txl.int32(0)), txl.then_():
+            i = txl.local_scalar("int32", init=tid)
+            with txl.while_(i < txl.int32(head_dim * block)):
                 head_offset = i // txl.int32(head_dim)
                 dim_idx = i % txl.int32(head_dim)
                 head_idx = head_block * block + head_offset
-                with txl.If(head_idx < txl.int32(num_head)), txl.Then():
+                with txl.if_(head_idx < txl.int32(num_head)), txl.then_():
                     zero = txl.local_scalar("uint16", init=txl.uint16(0))
                     txl.ptx["st.global.b16"](
                         dq.ptr_to([token * (num_head * head_dim) + head_idx * head_dim + dim_idx]),
@@ -636,7 +636,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
         # instead. That is the same control flow: `topk` is CTA-uniform, so
         # every thread of a CTA takes the same arm and the collectives below are
         # either all executed or all skipped.
-        with txl.If(topk > txl.int32(0)), txl.Then():
+        with txl.if_(topk > txl.int32(0)), txl.then_():
             txl.keep_alive(ws_dkv.data)
             tile_count = (topk + txl.int32(block - 1)) // txl.int32(block)
 
@@ -674,7 +674,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
             OFF_DQ = OFF_K
             OFF_DQ4 = OFF_K + 2 * p_bytes
 
-            smem = txl.alloc_tensor((shared_bytes,), txl.u8, scope="shared.dyn", align=1024)
+            smem = txl.alloc_tensor((shared_bytes,), "uint8", scope="shared.dyn", align=1024)
             pool = txl.smem_pool(base=smem)
             smem_base = txl.local_scalar("uint32")
             txl.assign(smem_base, txl.cuda.cvta_generic_to_shared(smem.ptr_to([0])))
@@ -694,7 +694,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
             p_ds = txl.Pipeline(pool, 1, full="mbar", empty="tcgen05", init_full=128, init_empty=1)
             p_dkv = txl.Pipeline(pool, 2, full="tcgen05", empty="mbar", init_full=1, init_empty=256)
 
-            tmem_hold = pool.alloc((1,), txl.i32, align=4)
+            tmem_hold = pool.alloc((1,), "int32", align=4)
             txl.ptx["fence.mbarrier_init.release.cluster"]()
             txl.ptx.bar.sync(txl.uint32(0), txl.uint32(BWD_THREADS))
 
@@ -802,7 +802,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
                 st_ds_m = txl.PipelineState(1, phase=0)
                 st_dkv = txl.PipelineState(2, phase=0)
                 # `accumulate` for dQ: 0 on the first processed tile, 1 after.
-                acc_dq = txl.local_scalar(txl.i32, init=0)
+                acc_dq = txl.local_scalar("int32", init=0)
                 # The dKV generations per tile: 2 at d512, 3 at d576.
                 # Q and dO arrive once: a CTA owns one query token.
                 p_qdo.full.wait(0, 0)
@@ -811,8 +811,8 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
                 # (:1491, :1759) -- not per tile.
                 p_dq.empty.wait(0, 1)
 
-                idx = txl.local_scalar(txl.i32, init=tile_count - txl.int32(1))
-                with txl.While(idx >= txl.int32(0)):
+                idx = txl.local_scalar("int32", init=tile_count - txl.int32(1))
+                with txl.while_(idx >= txl.int32(0)):
                     p_k.full.wait(0, st_k.phase)
                     p_s.empty.wait(0, st_s.phase ^ 1)
                     # S = Q @ K^T over the whole head dimension: one
@@ -852,7 +852,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
                     # that accumulation is what fuses dV and dK.
                     p_p.full.wait(0, st_p.phase)
                     p_dkv.empty.wait(st_dkv.stage, st_dkv.phase ^ 1)
-                    with txl.If(idx != tile_count - txl.int32(1)), txl.Then():
+                    with txl.if_(idx != tile_count - txl.int32(1)), txl.then_():
                         # WAR against the PREVIOUS generation's T2R reads.
                         # Skipped on the first processed tile and compensated
                         # by one unpaired arrive after the loop (:1752-1757).
@@ -991,7 +991,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
             with r_compute:
                 rwarp = txl.warp_id_in_role()
                 rtid = txl.tid_in_role()
-                with txl.If(rwarp == txl.int32(0)), txl.Then():
+                with txl.if_(rwarp == txl.int32(0)), txl.then_():
                     txl.ptx["tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"](
                         txl.cuda.cvta_generic_to_shared(tmem_hold.ptr_to([0])),
                         txl.uint32(TMEM_ALLOC_COLUMNS),
@@ -1011,28 +1011,28 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
 
                 p_lse.full.wait(0, 0)
                 p_sum.full.wait(0, 0)
-                lse_lo = txl.local_scalar(txl.f32)
-                lse_hi = txl.local_scalar(txl.f32)
+                lse_lo = txl.local_scalar("float32")
+                lse_hi = txl.local_scalar("float32")
                 txl.ptx["ld.shared.b32"](lse_lo, smem.ptr_to([OFF_LSE + base_row * txl.int32(4)]))
                 txl.ptx["ld.shared.b32"](
                     lse_hi, smem.ptr_to([OFF_LSE + (base_row + txl.int32(8)) * txl.int32(4)])
                 )
-                sum_lo = txl.local_scalar(txl.f32)
-                sum_hi = txl.local_scalar(txl.f32)
+                sum_lo = txl.local_scalar("float32")
+                sum_hi = txl.local_scalar("float32")
                 txl.ptx["ld.shared.b32"](sum_lo, smem.ptr_to([OFF_SUM + base_row * txl.int32(4)]))
                 txl.ptx["ld.shared.b32"](
                     sum_hi, smem.ptr_to([OFF_SUM + (base_row + txl.int32(8)) * txl.int32(4)])
                 )
 
-                scale_log2e = txl.local_scalar(txl.f32)
+                scale_log2e = txl.local_scalar("float32")
                 txl.ptx["mul.f32"](scale_log2e, scale, txl.float32(1.4426950408889634))
 
                 st_s = txl.PipelineState(1, phase=0)
                 st_dp = txl.PipelineState(1, phase=0)
                 st_p = txl.PipelineState(1, phase=0)
                 st_ds = txl.PipelineState(1, phase=0)
-                idx = txl.local_scalar(txl.i32, init=tile_count - txl.int32(1))
-                with txl.While(idx >= txl.int32(0)):
+                idx = txl.local_scalar("int32", init=tile_count - txl.int32(1))
+                with txl.while_(idx >= txl.int32(0)):
                     p_s.full.wait(0, st_s.phase)
                     p_p.empty.wait(0, st_p.phase ^ 1)
                     rs = txl.alloc_local([32], "float32")
@@ -1174,7 +1174,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
                     for off in (TMEM_DQ0_OFFSET, TMEM_DQ1_OFFSET, TMEM_DQ2_OFFSET, TMEM_DQ3_OFFSET)
                 ]
                 for i in range(4):
-                    with txl.If(rwarp == txl.int32(0)), txl.Then():
+                    with txl.if_(rwarp == txl.int32(0)), txl.then_():
                         # A TMA-store pipeline acquires on the bulk group; it
                         # has no smem barrier at all.
                         txl.ptx["cp.async.bulk.wait_group.read"](txl.int32(0))
@@ -1213,7 +1213,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
                     txl.ptx.bar.sync(
                         txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1])
                     )
-                    with txl.If(txl.And(rwarp == txl.int32(0), lane == 0)), txl.Then():
+                    with txl.if_(txl.And(rwarp == txl.int32(0), lane == 0)), txl.then_():
                         for h in range(2):
                             txl.ptx[TMA_S2G](
                                 txl.address_of(desc_dq),
@@ -1232,7 +1232,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
                     # which d576's dQ columns 512:576 reach mdQ; omitting it
                     # leaves them whatever `torch.empty_like` left there, which
                     # a d512 test cannot detect.
-                    with txl.If(rwarp == txl.int32(0)), txl.Then():
+                    with txl.if_(rwarp == txl.int32(0)), txl.then_():
                         txl.ptx["cp.async.bulk.wait_group.read"](txl.int32(0))
                     txl.ptx.bar.sync(
                         txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1])
@@ -1276,7 +1276,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
                     txl.ptx.bar.sync(
                         txl.uint32(BAR_COMPUTE_SYNC[0]), txl.uint32(BAR_COMPUTE_SYNC[1])
                     )
-                    with txl.If(txl.And(rwarp == txl.int32(0), lane == 0)), txl.Then():
+                    with txl.if_(txl.And(rwarp == txl.int32(0), lane == 0)), txl.then_():
                         txl.ptx[TMA_S2G](
                             txl.address_of(desc_dq),
                             txl.int32(512),
@@ -1295,7 +1295,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
                 # may free sdQ or exit.
                 txl.ptx["cp.async.bulk.wait_group.read"](txl.int32(0))
 
-                with txl.If(rwarp == txl.int32(0)), txl.Then():
+                with txl.if_(rwarp == txl.int32(0)), txl.then_():
                     # Barrier 9 is compute warp 4 plus the 8 reduce warps: the
                     # reduce warps must be drained out of TMEM before its
                     # columns are handed back (:120, :1095).
@@ -1371,13 +1371,13 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
                         # With a whole number of tiles every row is in range,
                         # so the read needs no bound (:2202); the ragged case
                         # keeps it (:2205).
-                        with txl.If(full_tiles):
-                            with txl.Then():
+                        with txl.if_(full_tiles):
+                            with txl.then_():
                                 txl.ptx["ld.global.b32"](
                                     r[i], topk_idxs.ptr_to([token * txl.int32(max_topk) + g])
                                 )
-                            with txl.Else():
-                                with txl.If(g < topk), txl.Then():
+                            with txl.else_():
+                                with txl.if_(g < topk), txl.then_():
                                     txl.ptx["ld.global.b32"](
                                         r[i], topk_idxs.ptr_to([token * txl.int32(max_topk) + g])
                                     )
@@ -1414,8 +1414,8 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length, bac
                     txl.ptx.bar.sync(txl.uint32(BAR_REDUCE_SYNC[0]), txl.uint32(BAR_REDUCE_SYNC[1]))
 
                 st_r = txl.PipelineState(2, phase=0)
-                ridx = txl.local_scalar(txl.i32, init=tile_count - txl.int32(1))
-                with txl.While(ridx >= txl.int32(0)):
+                ridx = txl.local_scalar("int32", init=tile_count - txl.int32(1))
+                with txl.while_(ridx >= txl.int32(0)):
                     r = rows_for(ridx)
 
                     # --- generation A: dKV0, dKV1 (:2223-2235) --------------
@@ -1519,19 +1519,19 @@ SUM_ODO_ELEM_PER_LOAD = 4
 
 def _shfl_bfly_f32(value, lane_xor, membermask):
     """One ``shfl.sync.bfly.b32`` on an f32, reinterpreted through u32."""
-    out = txl.local_scalar(txl.u32)
+    out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out, txl.reinterpret(value, ty=txl.u32), txl.uint32(lane_xor), txl.uint32(31), membermask
+        out, txl.reinterpret(value, ty="uint32"), txl.uint32(lane_xor), txl.uint32(31), membermask
     )
-    return txl.reinterpret(out, ty=txl.f32)
+    return txl.reinterpret(out, ty="float32")
 
 
 def _butterfly_sum_f32(value, lane_xors):
     """Sum across the lanes an xor-mask set spans; clamp 31 keeps it in-group."""
-    membermask = txl.local_scalar(txl.u32, init=txl.tvm_warp_activemask())
+    membermask = txl.local_scalar("uint32", init=txl.gpu_warp_activemask())
     for lane_xor in lane_xors:
         peer = _shfl_bfly_f32(value, lane_xor, membermask)
-        total = txl.local_scalar(txl.f32)
+        total = txl.local_scalar("float32")
         txl.ptx.add.f32(total, value, peer)
         value = total
     return value
@@ -1557,13 +1557,13 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk, backend_config=N
     def sum_odo(
         out: txl.Tensor((txl.int64(),), elem),
         dout: txl.Tensor((txl.int64(),), elem),
-        lse: txl.Tensor((txl.int64(),), txl.f32),
-        attn_sink: txl.Tensor((txl.int64(),), txl.f32),
-        ws: txl.Tensor((txl.int64(),), txl.f32),
-        seqlen_q: txl.i32,
-        plane: txl.i32,
-        sum_odo_scale: txl.f32,
-        lse_scale: txl.f32,
+        lse: txl.Tensor((txl.int64(),), "float32"),
+        attn_sink: txl.Tensor((txl.int64(),), "float32"),
+        ws: txl.Tensor((txl.int64(),), "float32"),
+        seqlen_q: "int32",
+        plane: "int32",
+        sum_odo_scale: "float32",
+        lse_scale: "float32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -1580,14 +1580,14 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk, backend_config=N
         tidx = tid % SUM_ODO_THREADS_D
         tidy = tid // SUM_ODO_THREADS_D
 
-        log2_e = txl.local_scalar(txl.f32)
+        log2_e = txl.local_scalar("float32")
         txl.ptx.neg.f32(log2_e, lse_scale)  # lse_scale is -log2(e) (:489)
 
         for arm in range(q_arms):
             idx_q_t = tidy + arm * SUM_ODO_THREADS_Q
             idx_q = idx_q_t + block_q * q_block
-            with txl.If((idx_q_t < txl.int32(block_q)) & (idx_q < seqlen_q)), txl.Then():
-                acc = txl.local_scalar(txl.f32, init=txl.float32(0.0))
+            with txl.if_((idx_q_t < txl.int32(block_q)) & (idx_q < seqlen_q)), txl.then_():
+                acc = txl.local_scalar("float32", init=txl.float32(0.0))
                 base_o = idx_q * (num_head * head_dim_v) + head * head_dim_v
                 # Unrolled over the head dimension. This kernel is purely
                 # bandwidth-bound and its grid scales with the head count, so
@@ -1603,7 +1603,7 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk, backend_config=N
                     txl.ptx["ld.global.v2.b32"](dw[0], dw[1], dout.ptr_to([base_o + d]))
                     narrow = []
                     for half in range(2):
-                        prod = txl.local_scalar(txl.u32)
+                        prod = txl.local_scalar("uint32")
                         txl.ptx[mul_half](prod, ow[half], dw[half])
                         # The narrow multiply is load-bearing: forming the
                         # product in fp32 instead shifts every delta by ~1e-3
@@ -1617,7 +1617,7 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk, backend_config=N
                     # the result joins the accumulator, with a plain add.f32
                     # (:682-683). Accumulating each element straight into `acc`
                     # would collapse all three of those into one add family.
-                    frag = txl.local_scalar(txl.f32)
+                    frag = txl.local_scalar("float32")
                     txl.ptx[cvt_wide](frag, narrow[0])
                     for nv in narrow[1:]:
                         # `add.rn.f32.<narrow>` takes the narrow value first.
@@ -1626,46 +1626,46 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk, backend_config=N
 
                 total = _butterfly_sum_f32(acc, (1, 2, 4))
 
-                with txl.If(tidx == txl.int32(0)), txl.Then():
-                    lse_v = txl.local_scalar(txl.f32)
-                    sink_v = txl.local_scalar(txl.f32)
+                with txl.if_(tidx == txl.int32(0)), txl.then_():
+                    lse_v = txl.local_scalar("float32")
+                    sink_v = txl.local_scalar("float32")
                     txl.ptx["ld.global.b32"](lse_v, lse.ptr_to([idx_q * num_head + head]))
                     txl.ptx["ld.global.b32"](sink_v, attn_sink.ptr_to([head]))
 
-                    lse_log2 = txl.local_scalar(txl.f32)
-                    sink_log2 = txl.local_scalar(txl.f32)
+                    lse_log2 = txl.local_scalar("float32")
+                    sink_log2 = txl.local_scalar("float32")
                     txl.ptx["mul.f32"](lse_log2, lse_v, log2_e)
                     txl.ptx["mul.f32"](sink_log2, sink_v, log2_e)
-                    m = txl.local_scalar(txl.f32)
+                    m = txl.local_scalar("float32")
                     txl.ptx["max.f32"](m, lse_log2, sink_log2)
                     # exp2 of each shifted term, summed, then log2: the
                     # numerically safe fold of the sink into the denominator.
-                    a = txl.local_scalar(txl.f32)
-                    b = txl.local_scalar(txl.f32)
+                    a = txl.local_scalar("float32")
+                    b = txl.local_scalar("float32")
                     txl.ptx["sub.f32"](a, lse_log2, m)
                     txl.ptx["sub.f32"](b, sink_log2, m)
-                    ea = txl.local_scalar(txl.f32)
-                    eb = txl.local_scalar(txl.f32)
+                    ea = txl.local_scalar("float32")
+                    eb = txl.local_scalar("float32")
                     txl.ptx["ex2.approx.f32"](ea, a)
                     txl.ptx["ex2.approx.f32"](eb, b)
-                    ssum = txl.local_scalar(txl.f32)
+                    ssum = txl.local_scalar("float32")
                     txl.ptx["add.f32"](ssum, ea, eb)
                     lg = _log2_soft(ssum)
-                    with_sink = txl.local_scalar(txl.f32)
+                    with_sink = txl.local_scalar("float32")
                     txl.ptx["add.f32"](with_sink, m, lg)
-                    scaled = txl.local_scalar(txl.f32)
+                    scaled = txl.local_scalar("float32")
                     txl.ptx["neg.f32"](scaled, with_sink)
 
                     # lse == +inf means the row selected nothing; the sink must
                     # not resurrect it (:703-704).
                     is_inf = txl.local_scalar("uint32")
                     txl.ptx["setp.eq.f32"](is_inf, lse_v, txl.float32(float("inf")))
-                    out_lse = txl.local_scalar(txl.f32)
+                    out_lse = txl.local_scalar("float32")
                     txl.ptx["selp.f32"](
                         out_lse, txl.float32(float("-inf")), scaled, txl.ptx.pred(is_inf)
                     )
 
-                    scaled_odo = txl.local_scalar(txl.f32)
+                    scaled_odo = txl.local_scalar("float32")
                     txl.ptx["mul.f32"](scaled_odo, sum_odo_scale, total)
                     slot = idx_q * num_head + head
                     txl.ptx["st.global.b32"](ws.ptr_to([slot]), scaled_odo)
@@ -1692,9 +1692,9 @@ def make_convert_kernel(*, head_dim, dtype, max_topk, backend_config=None):
 
     @txl.kernel()
     def convert(
-        ws_dkv: txl.Tensor((txl.int64(),), txl.f32),
+        ws_dkv: txl.Tensor((txl.int64(),), "float32"),
         dkv: txl.Tensor((txl.int64(),), elem),
-        seqlen_kv: txl.i32,
+        seqlen_kv: "int32",
     ):
         # ---- kernel body starts here ----
         txl.device_entry(
@@ -1711,12 +1711,12 @@ def make_convert_kernel(*, head_dim, dtype, max_topk, backend_config=None):
         tidy = tid // threads_d
 
         seq_id = block_seq * seq_block + tidy
-        with txl.If(seq_id < seqlen_kv), txl.Then():
+        with txl.if_(seq_id < seqlen_kv), txl.then_():
             row = seq_id * head_dim
             for i in range(head_dim_main // 64):
                 for j in range(2):
                     src = tidx + j * 32 + i * 64
-                    v = txl.local_scalar(txl.f32)
+                    v = txl.local_scalar("float32")
                     txl.ptx["ld.global.b32"](v, ws_dkv.ptr_to([row + src]))
                     # Inverse of the 128-wide store's 4-wide fragment gather:
                     # a 4x8 transpose inside each 32-element block.
@@ -1727,7 +1727,7 @@ def make_convert_kernel(*, head_dim, dtype, max_topk, backend_config=None):
             if has_tail:
                 for j in range(2):
                     src = tidx + j * 32 + head_dim_main
-                    v = txl.local_scalar(txl.f32)
+                    v = txl.local_scalar("float32")
                     txl.ptx["ld.global.b32"](v, ws_dkv.ptr_to([row + src]))
                     # A DIFFERENT inverse: the 64-wide tail store used a 2-wide
                     # fragment, so its scramble is not the 128-wide one.
@@ -1755,11 +1755,11 @@ def make_sum_dsink_kernel(*, num_head, backend_config=None):
 
     @txl.kernel()
     def sum_dsink(
-        ws: txl.Tensor((txl.int64(),), txl.f32),
-        attn_sink: txl.Tensor((txl.int64(),), txl.f32),
-        d_sink: txl.Tensor((txl.int64(),), txl.f32),
-        seqlen_q: txl.i32,
-        plane: txl.i32,
+        ws: txl.Tensor((txl.int64(),), "float32"),
+        attn_sink: txl.Tensor((txl.int64(),), "float32"),
+        d_sink: txl.Tensor((txl.int64(),), "float32"),
+        seqlen_q: "int32",
+        plane: "int32",
     ):
         # ---- kernel body starts here ----
         txl.device_entry(
@@ -1775,36 +1775,36 @@ def make_sum_dsink_kernel(*, num_head, backend_config=None):
         tid = txl.thread_id()
 
         log2_e = txl.float32(1.4426950408889634)
-        sink_v = txl.local_scalar(txl.f32)
+        sink_v = txl.local_scalar("float32")
         txl.ptx["ld.global.b32"](sink_v, attn_sink.ptr_to([head]))
-        sink_log2 = txl.local_scalar(txl.f32)
+        sink_log2 = txl.local_scalar("float32")
         txl.ptx["mul.f32"](sink_log2, sink_v, log2_e)
 
         # `q_end` clamps the last block; the stride is the warp width, so a
         # thread walks its own column of the 256-query block.
-        q_end = txl.local_scalar(txl.i32, init=(q_block + 1) * DSINK_BLOCK_Q)
-        with txl.If(q_end > seqlen_q), txl.Then():
+        q_end = txl.local_scalar("int32", init=(q_block + 1) * DSINK_BLOCK_Q)
+        with txl.if_(q_end > seqlen_q), txl.then_():
             txl.assign(q_end, seqlen_q)
 
-        acc = txl.local_scalar(txl.f32, init=txl.float32(0.0))
-        q_idx = txl.local_scalar(txl.i32, init=q_block * DSINK_BLOCK_Q + tid)
-        with txl.While(q_idx < q_end):
+        acc = txl.local_scalar("float32", init=txl.float32(0.0))
+        q_idx = txl.local_scalar("int32", init=q_block * DSINK_BLOCK_Q + tid)
+        with txl.while_(q_idx < q_end):
             slot = q_idx * num_head + head
-            sl = txl.local_scalar(txl.f32)
+            sl = txl.local_scalar("float32")
             txl.ptx["ld.global.b32"](sl, ws.ptr_to([plane + slot]))
-            arg = txl.local_scalar(txl.f32)
+            arg = txl.local_scalar("float32")
             txl.ptx["add.f32"](arg, sink_log2, sl)
-            p_sink = txl.local_scalar(txl.f32)
+            p_sink = txl.local_scalar("float32")
             txl.ptx["ex2.approx.f32"](p_sink, arg)
-            odo = txl.local_scalar(txl.f32)
+            odo = txl.local_scalar("float32")
             txl.ptx["ld.global.b32"](odo, ws.ptr_to([slot]))
             txl.ptx["fma.rn.f32"](acc, p_sink, odo, acc)
             txl.assign(q_idx, q_idx + DSINK_THREADS)
 
         total = _butterfly_sum_f32(acc, (1, 2, 4, 8, 16))
 
-        with txl.If(tid == 0), txl.Then():
-            prev = txl.local_scalar(txl.f32)
+        with txl.if_(tid == 0), txl.then_():
+            prev = txl.local_scalar("float32")
             txl.ptx.atom.global_.add.f32(prev, d_sink.ptr_to([head]), total)
 
     return sum_dsink

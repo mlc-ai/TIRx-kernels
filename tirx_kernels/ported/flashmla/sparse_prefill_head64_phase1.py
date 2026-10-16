@@ -396,14 +396,14 @@ def make_kernel(
 
     @txl.kernel()
     def sparse_flashmla_prefill_head64_phase1_kernel(
-        q: txl.Tensor((s_q, h_q, d_qk), txl.bf16),
-        kv: txl.Tensor((s_kv * stride_kv_s_kv,), txl.bf16),
-        indices: txl.Tensor((s_q * stride_indices_s_q,), txl.i32),
-        attn_sink: txl.Tensor((h_q,), txl.f32),
-        topk_length: txl.Tensor((s_q,), txl.i32),
-        out: txl.Tensor((s_q, h_q, D_V), txl.bf16),
-        max_logits: txl.Tensor((s_q, h_q), txl.f32),
-        lse: txl.Tensor((s_q, h_q), txl.f32),
+        q: txl.Tensor((s_q, h_q, d_qk), "bfloat16"),
+        kv: txl.Tensor((s_kv * stride_kv_s_kv,), "bfloat16"),
+        indices: txl.Tensor((s_q * stride_indices_s_q,), "int32"),
+        attn_sink: txl.Tensor((h_q,), "float32"),
+        topk_length: txl.Tensor((s_q,), "int32"),
+        out: txl.Tensor((s_q, h_q, D_V), "bfloat16"),
+        max_logits: txl.Tensor((s_q, h_q), "float32"),
+        lse: txl.Tensor((s_q, h_q), "float32"),
     ):
         host = prepare_host(
             {
@@ -453,8 +453,8 @@ def make_kernel(
         # rather than merged: a collective keeps the original's branch and loop
         # placement exactly.
         def prefetch(tensor_map):
-            with txl.If(warp_idx == 0), txl.Then():
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(warp_idx == 0), txl.then_():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     txl.ptx.prefetch.tensormap(txl.address_of(tensor_map))
 
         if have_rope:
@@ -472,22 +472,22 @@ def make_kernel(
         pool = smem.pool
 
         u_base = pool.offset
-        k_rope = smem.alloc((B_TOPK, Q_ROPE_DIM), "bfloat16", swizzle=txl.SW64B).buf
-        k_nope = smem.alloc((NUM_BUFS, B_TOPK, D_V), "bfloat16", swizzle=txl.SW128B).buf
+        k_rope = smem.alloc((B_TOPK, Q_ROPE_DIM), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_64B_ATOM).buf
+        k_nope = smem.alloc((NUM_BUFS, B_TOPK, D_V), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
         u_end = pool.offset
         # q_nope aliases the last k_nope stage: Q moves to TMEM before that
         # stage is used.
         pool.move_base_to(u_end - B_H * D_V * BF16_BYTES)
-        q_nope = smem.alloc((B_H, D_V), "bfloat16", swizzle=txl.SW128B).buf
+        q_nope = smem.alloc((B_H, D_V), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
         # o_smem aliases the front of the region: O is only written in the
         # epilogue.
         pool.move_base_to(u_base)
-        o_smem = smem.alloc((B_H, D_V), "bfloat16", swizzle=txl.SW128B).buf
+        o_smem = smem.alloc((B_H, D_V), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
         pool.move_base_to(u_end)
 
         p_exchange_buf = pool.alloc((4, 32 * (B_TOPK // 2)), "float32")
         s_q_rope_base = pool.offset
-        q_rope = smem.alloc((B_H, Q_ROPE_DIM), "bfloat16", swizzle=txl.SW64B).buf
+        q_rope = smem.alloc((B_H, Q_ROPE_DIM), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_64B_ATOM).buf
         q_rope_end = pool.offset
         # s_smem_gemm aliases q_rope: Q RoPE moves to TMEM before the first S
         # tile is stored.
@@ -617,9 +617,9 @@ def make_kernel(
         # Not a role: warp 0 is a sub-range of the softmax role's warps and a
         # role owns a contiguous *disjoint* range. The original spells this on
         # the raw warp id too.
-        with txl.If(warp_idx == 0), txl.Then():
+        with txl.if_(warp_idx == 0), txl.then_():
             prologue_token = iket_range("h64-q-load")
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 bar_prologue_q_nope.init(1)
                 bar_prologue_q_rope.init(1)
                 txl.ptx.fence.mbarrier_init.release.cluster()
@@ -651,7 +651,7 @@ def make_kernel(
                 # The five NUM_BUFS rings are initialized by hand under one
                 # shared leader predicate rather than through five `bar.init()`
                 # calls; transcribed as written (orig:634-651).
-                with txl.If(bar_qk_nope_done.leader), txl.Then():
+                with txl.if_(bar_qk_nope_done.leader), txl.then_():
                     for init_stage in range(NUM_BUFS):
                         txl.ptx.mbarrier.init.shared.b64(
                             bar_qk_nope_done.ptr_to([init_stage]), txl.uint32(1)
@@ -719,15 +719,15 @@ def make_kernel(
                 # retrieve_mask_and_reduce_p.
                 p = txl.alloc_local((B_TOPK // 2,), "float32")
                 p_peer = txl.alloc_local((B_TOPK // 2,), "float32")
-                with txl.If(warp_idx < 2):
-                    with txl.Then():
+                with txl.if_(warp_idx < 2):
+                    with txl.then_():
                         tmem_load(p, txl.uint32(tmem_p_col), B_TOPK // 2)
                         tmem_load(
                             p_peer,
                             txl.cuda.get_tmem_addr(txl.uint32(tmem_p_col), 0, B_TOPK // 2),
                             B_TOPK // 2,
                         )
-                    with txl.Else():
+                    with txl.else_():
                         tmem_load(p_peer, txl.uint32(tmem_p_col), B_TOPK // 2)
                         tmem_load(
                             p,
@@ -828,11 +828,11 @@ def make_kernel(
                 )
                 new_max = txl.local_scalar("float32")
                 scale_for_old = txl.local_scalar("float32")
-                with txl.If(should_scale_o == txl.uint32(0)):
-                    with txl.Then():
+                with txl.if_(should_scale_o == txl.uint32(0)):
+                    with txl.then_():
                         txl.assign(scale_for_old, txl.float32(1.0))
                         txl.assign(new_max, mi)
-                    with txl.Else():
+                    with txl.else_():
                         txl.assign(new_max, txl.max(cur_pi_max, mi))
                         txl.ptx.ex2.approx.ftz.f32(scale_for_old, mi - new_max)
                 txl.assign(mi, new_max)
@@ -861,7 +861,7 @@ def make_kernel(
                 txl.ptx.fma.rn.f32(li_tmp, li, scale_for_old, cur_sum)
                 txl.assign(li, li_tmp)
 
-                with txl.If(k > 0), txl.Then():
+                with txl.if_(k > 0), txl.then_():
                     prev_buf = txl.local_scalar("int32", init=ring_mod3(k - 1))
                     prev_phase = txl.local_scalar("int32", init=ring_phase_parity(k - 1))
                     pv_wait_token = iket_range("h64-pv-wait")
@@ -891,7 +891,7 @@ def make_kernel(
                         s_words[s_word + 2],
                         s_words[s_word + 3],
                     )
-                with txl.If((k > 0) & (should_scale_o != txl.uint32(0))), txl.Then():
+                with txl.if_((k > 0) & (should_scale_o != txl.uint32(0))), txl.then_():
                     txl.ptx.tcgen05.fence__after_thread_sync()
                     # CUDA common_subroutine.h:147-168 rescale_O.
                     o_rescale = txl.alloc_local((32,), "float32")
@@ -918,7 +918,7 @@ def make_kernel(
             # orig:874-1007. Epilogue scalar exchange, O TMEM readback, output
             # scaling/bf16 staging, and the two elected-warp O TMA stores.
             epilogue_token = iket_range("h64-output")
-            with txl.If(real_mi == txl.float32(-float("inf"))), txl.Then():
+            with txl.if_(real_mi == txl.float32(-float("inf"))), txl.then_():
                 txl.assign(li, txl.float32(0.0))
                 txl.assign(mi, txl.float32(-float("inf")))
 
@@ -930,7 +930,7 @@ def make_kernel(
             )
             txl.assign(li, li + peer_li)
 
-            with txl.If(idx_in_warpgroup < B_H), txl.Then():
+            with txl.if_(idx_in_warpgroup < B_H), txl.then_():
                 cur_lse = txl.local_scalar("float32")
                 cur_lse_log = txl.log(li)
                 txl.ptx.fma.rn.f32(cur_lse, mi, txl.float32(LN_2), cur_lse_log)
@@ -981,13 +981,13 @@ def make_kernel(
             txl.ptx.vote_sync.any.pred(
                 have_valid_indices, txl.Not(li == txl.float32(0.0)), txl.uint32(0xFFFFFFFF)
             )
-            with txl.If(have_valid_indices == txl.uint32(0)), txl.Then():
+            with txl.if_(have_valid_indices == txl.uint32(0)), txl.then_():
                 for o_zero_i in range(64):
                     txl.ptx.mov.b32(o_epi[o_zero_i], txl.float32(0.0))
                 txl.assign(output_scale, txl.float32(1.0))
             for epi_c in range(2):
                 for epi_k in range((D_V // 4) // 64):
-                    with txl.If(have_valid_indices != txl.uint32(0)), txl.Then():
+                    with txl.if_(have_valid_indices != txl.uint32(0)), txl.then_():
                         # orig:927-935, CUDA phase1.cuh:314-317 TMEM O load/fence.
                         tmem_load(
                             o_epi,
@@ -1039,8 +1039,8 @@ def make_kernel(
                         )
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx.bar.sync(txl.uint32(BAR_WG0_SYNC), 128)
-                    with txl.If(warp_idx == 0), txl.Then():
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(warp_idx == 0), txl.then_():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             # orig:976-988, CUDA phase1.cuh:335-342 first half.
                             txl.ptx[TMA_S2G_2D](
                                 txl.address_of(out_part0_tensormap),
@@ -1052,8 +1052,8 @@ def make_kernel(
                                     ty=txl.Ptr("bfloat16", (o_smem.ptr_to([0, 0])).ty.scope),
                                 ),
                             )
-                    with txl.If(warp_idx == 1), txl.Then():
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(warp_idx == 1), txl.then_():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             # orig:991-1003, CUDA phase1.cuh:343-350 second half.
                             txl.ptx[TMA_S2G_2D](
                                 txl.address_of(out_part1_tensormap),
@@ -1066,7 +1066,7 @@ def make_kernel(
                                 ),
                             )
 
-            with txl.If(warp_idx == 0), txl.Then():
+            with txl.if_(warp_idx == 0), txl.then_():
                 txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
                     txl.uint32(0), txl.uint32(512)
                 )
@@ -1078,7 +1078,7 @@ def make_kernel(
             wg1_warp_idx = warp_idx - 4
             # This warp's 16 interleaved NoPE rows: split the 64-row dim into
             # (stripe, warp, row) and pick this warp, merging stripe x row.
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 with txl.serial(num_k_blocks_buf, unroll=False) as k:
                     selected_idx = txl.alloc_local((WG1_ROWS_PER_WARP, 4), "int32")
                     max_indices = txl.local_scalar("int32", init=txl.int32(-1))
@@ -1110,15 +1110,15 @@ def make_kernel(
                     is_all_rows_invalid = (min_indices == s_kv) | (max_indices == -1)
                     should_skip_tma = is_all_rows_invalid & (k >= NUM_BUFS)
 
-                    with txl.If(k == 2), txl.Then():
+                    with txl.if_(k == 2), txl.then_():
                         bar_prologue_utccp_nope.wait(0, 0)
 
                     cur_buf = txl.local_scalar("int32", init=ring_mod3(k))
                     cur_phase = txl.local_scalar("int32", init=ring_phase_parity(k))
                     bar_sv_done.wait(cur_buf, txl.bitwise_xor(cur_phase, txl.int32(1)))
 
-                    with txl.If(txl.Not(should_skip_tma)):
-                        with txl.Then():
+                    with txl.if_(txl.Not(should_skip_tma)):
+                        with txl.then_():
                             for row_group in range(WG1_ROWS_PER_WARP):
                                 for col_atom in range((D_V // 2) // 64):
                                     dst_part0_offset = (
@@ -1171,7 +1171,7 @@ def make_kernel(
                                         ),
                                         txl.uint64(KV_TMA_CACHE_HINT),
                                     )
-                        with txl.Else():
+                        with txl.else_():
                             # orig:1103, unannotated: a declared uint local, and
                             # the original re-casts it at both use sites.
                             tx_bytes = txl.local_scalar(
@@ -1195,7 +1195,7 @@ def make_kernel(
             design-cluster ruling (a) put outside the chain helper's scope.
             """
             mma_token = iket_range("h64-qk-pv-issue")
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 if have_rope:
                     bar_prologue_q_rope.arrive(0, tx_count=B_H * (d_qk - D_V) * BF16_BYTES)
                     bar_prologue_q_rope.wait(0, 0)
@@ -1242,7 +1242,7 @@ def make_kernel(
                     bar_prologue_utccp_rope.wait(0, 0)
 
                 with txl.serial(num_k_blocks_buf + 1, unroll=False) as k:
-                    with txl.If(k < num_k_blocks_buf), txl.Then():
+                    with txl.if_(k < num_k_blocks_buf), txl.then_():
                         cur_buf = txl.local_scalar("int32", init=ring_mod3(k))
                         cur_phase = txl.local_scalar("int32", init=ring_phase_parity(k))
                         bar_p_free.wait(
@@ -1265,7 +1265,7 @@ def make_kernel(
                                 _qk_rope_chain(qk_rope_desc)
                             commit(bar_qk_rope_done, 0)
 
-                        with txl.If(k == 0), txl.Then():
+                        with txl.if_(k == 0), txl.then_():
                             bar_prologue_utccp_nope.wait(0, 0)
 
                         for kv_nope_part_idx in range(2):
@@ -1293,7 +1293,7 @@ def make_kernel(
                                 _qk_nope_chain(qk_nope_desc, cur_buf, kv_nope_part_idx)
                         commit(bar_qk_nope_done, cur_buf)
 
-                    with txl.If(k > 0), txl.Then():
+                    with txl.if_(k > 0), txl.then_():
                         cur_buf_prev = txl.local_scalar("int32", init=ring_mod3(k - 1))
                         bar_so_ready.wait(0, txl.bitwise_and(k - 1, txl.int32(1)))
                         txl.ptx.tcgen05.fence__after_thread_sync()
@@ -1406,7 +1406,7 @@ def make_kernel(
         def valid_mask_producer():
             """warp 9 — orig:1466-1500, CUDA common_subroutine.h:14-44."""
             valid_mask_token = iket_range("h64-valid-mask")
-            with txl.If(lane_idx < B_TOPK // 8), txl.Then():
+            with txl.if_(lane_idx < B_TOPK // 8), txl.then_():
                 lane_indices = txl.alloc_local((8,), "int32")
                 with txl.serial(num_k_blocks_buf, unroll=False) as k:
                     abs_pos_start = k * B_TOPK

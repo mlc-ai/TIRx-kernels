@@ -394,14 +394,14 @@ def get_kernel(
     @txl.kernel()
     def radix_topk_single_cta(
         inp: txl.Tensor((num_rows * length,), dtype),
-        out_idx: txl.Tensor((num_rows * k,), txl.i32),
+        out_idx: txl.Tensor((num_rows * k,), "int32"),
         out_val: txl.Tensor((num_rows * k,), dtype),
-        aux: txl.Tensor((aux_elems,), txl.i32),
-        lengths_g: txl.Tensor((num_rows,), txl.i32),
-        row_starts_g: txl.Tensor((num_rows,), txl.i32),
-        pt_starts_g: txl.Tensor((num_rows,), txl.i32),
-        row_to_batch_g: txl.Tensor((num_rows,), txl.i32),
-        aux_stride: txl.i64,
+        aux: txl.Tensor((aux_elems,), "int32"),
+        lengths_g: txl.Tensor((num_rows,), "int32"),
+        row_starts_g: txl.Tensor((num_rows,), "int32"),
+        pt_starts_g: txl.Tensor((num_rows,), "int32"),
+        row_to_batch_g: txl.Tensor((num_rows,), "int32"),
+        aux_stride: "int64",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=grid, block=BLOCK_THREADS // 32 * 32),
@@ -421,7 +421,7 @@ def get_kernel(
 
         # --- persistent row loop (:1218-1220) -----------------------------
         row_idx = txl.local_scalar("int32", init=group_id)
-        with txl.While(row_idx < num_rows):
+        with txl.while_(row_idx < num_rows):
             # --- per-row header (:1221-1247) ------------------------------
             row_start = txl.int32(0)
             page_start = txl.int32(0)
@@ -447,7 +447,7 @@ def get_kernel(
                 if basic_trivial:
                     txl.assign(take_main[0], txl.int32(0))
                     with txl.serial(tx, row_len, step=BLOCK_THREADS) as i0:
-                        with txl.If(i0 < k), txl.Then():
+                        with txl.if_(i0 < k), txl.then_():
                             out_i = row_out + txl.cast(i0, "int64")
                             st_i32(out_idx, out_i, i0)
                             copy_value(
@@ -462,30 +462,30 @@ def get_kernel(
             if page_table:
                 if row_to_batch:
                     batch_idx = ld_i32(row_to_batch_g, row_idx)
-                with txl.If(row_len <= k), txl.Then():
+                with txl.if_(row_len <= k), txl.then_():
                     txl.assign(take_main[0], txl.int32(0))
                     src0 = txl.cast(batch_idx, "int64") * aux_stride
                     with txl.serial(tx, k, step=BLOCK_THREADS) as i1:
                         page_id = txl.local_scalar("int32", init=txl.int32(-1))
-                        with txl.If(i1 < row_len), txl.Then():
+                        with txl.if_(i1 < row_len), txl.then_():
                             txl.assign(
                                 page_id, ld_i32(aux, src0 + txl.cast(page_start + i1, "int64"))
                             )
                         st_i32(out_idx, row_out + txl.cast(i1, "int64"), page_id)
             if ragged:
                 offset = ld_i32(aux, txl.cast(row_idx, "int64"))
-                with txl.If(row_len <= k), txl.Then():
+                with txl.if_(row_len <= k), txl.then_():
                     txl.assign(take_main[0], txl.int32(0))
                     with txl.serial(tx, k, step=BLOCK_THREADS) as i2:
                         val2 = txl.local_scalar("int32", init=txl.int32(-1))
-                        with txl.If(i2 < row_len), txl.Then():
+                        with txl.if_(i2 < row_len), txl.then_():
                             txl.assign(val2, i2 + offset)
                         st_i32(out_idx, row_out + txl.cast(i2, "int64"), val2)
 
             static_main = basic and not basic_trivial
             with (
-                nullcontext() if static_main else txl.If(take_main[0] == 1),
-                nullcontext() if static_main else txl.Then(),
+                nullcontext() if static_main else txl.if_(take_main[0] == 1),
+                nullcontext() if static_main else txl.then_(),
             ):
                 # === Stage 1: stage the row as monotone keys (:605-623) ====
                 if basic:
@@ -505,7 +505,7 @@ def get_kernel(
                 bar_sync()
 
                 # scalar caches (:669-677)
-                with txl.If(tx == 0), txl.Then():
+                with txl.if_(tx == 0), txl.then_():
                     st_shared_pair_u32(s_scalars, 0, txl.uint32(0), txl.uint32(k))
                     st_shared_u32(s_scalars, 4, txl.uint32(0))
                 bar_sync()
@@ -514,7 +514,7 @@ def get_kernel(
                 with txl.serial(0, rounds) as rnd:
                     shift = txl.int32(obits) - (rnd + 1) * 8
                     mask = txl.local_scalar("uint32", init=txl.uint32(0))
-                    with txl.If(rnd != 0), txl.Then():
+                    with txl.if_(rnd != 0), txl.then_():
                         txl.assign(
                             mask,
                             txl.shift_left(
@@ -532,7 +532,7 @@ def get_kernel(
 
                     with txl.serial(tx, row_len, step=BLOCK_THREADS, unroll=2) as ih:
                         key = txl.cast(ld_key(s_ordered, ih), "uint32")
-                        with txl.If(txl.bitwise_and(key, mask) == prefix), txl.Then():
+                        with txl.if_(txl.bitwise_and(key, mask) == prefix), txl.then_():
                             bucket = txl.bitwise_and(
                                 txl.shift_right(key, txl.cast(shift, "uint32")), txl.uint32(0xFF)
                             )
@@ -547,33 +547,33 @@ def get_kernel(
                     with txl.unroll(8) as step:
                         stride = txl.shift_left(txl.int32(1), step)
                         acc = txl.local_scalar("uint32", init=txl.uint32(0))
-                        with txl.If(tx < RADIX), txl.Then():
+                        with txl.if_(tx < RADIX), txl.then_():
                             txl.assign(acc, ld_shared_u32(s_suffix, tx))
-                            with txl.If(tx + stride < RADIX), txl.Then():
+                            with txl.if_(tx + stride < RADIX), txl.then_():
                                 txl.assign(acc, acc + ld_shared_u32(s_suffix, tx + stride))
                         bar_sync()
-                        with txl.If(tx < RADIX), txl.Then():
+                        with txl.if_(tx < RADIX), txl.then_():
                             st_shared_u32(s_suffix, tx, acc)
                         bar_sync()
 
                     # threshold bucket (:753-767)
-                    with txl.If(tx == 0), txl.Then():
+                    with txl.if_(tx == 0), txl.then_():
                         st_shared_pair_u32(s_scalars, 2, txl.uint32(0), remaining_k)
                     bar_sync()
-                    with txl.If(tx < RADIX), txl.Then():
+                    with txl.if_(tx < RADIX), txl.then_():
                         count_ge = ld_shared_u32(s_suffix, tx)
                         count_gt = txl.local_scalar("uint32", init=txl.uint32(0))
-                        with txl.If(tx + 1 < RADIX), txl.Then():
+                        with txl.if_(tx + 1 < RADIX), txl.then_():
                             txl.assign(count_gt, ld_shared_u32(s_suffix, tx + 1))
                         with (
-                            txl.If(txl.And(count_ge >= remaining_k, count_gt < remaining_k)),
-                            txl.Then(),
+                            txl.if_(txl.And(count_ge >= remaining_k, count_gt < remaining_k)),
+                            txl.then_(),
                         ):
                             st_shared_pair_u32(
                                 s_scalars, 2, txl.cast(tx, "uint32"), remaining_k - count_gt
                             )
                     bar_sync()
-                    with txl.If(tx == 0), txl.Then():
+                    with txl.if_(tx == 0), txl.then_():
                         found = ld_shared_pair_u32(s_scalars, 2)
                         st_shared_pair_u32(
                             s_scalars,
@@ -590,7 +590,7 @@ def get_kernel(
                     pivot = txl.bitwise_and(pivot, txl.uint32(0xFFFF))
 
                 # === Stage 3: row-wide gt (and eq) counts (:782-830) =======
-                with txl.If(tx == 0), txl.Then():
+                with txl.if_(tx == 0), txl.then_():
                     if deterministic:
                         st_shared_pair_u32(s_suffix, 0, txl.uint32(0), txl.uint32(0))
                     else:
@@ -615,10 +615,10 @@ def get_kernel(
                     if deterministic:
                         txl.assign(my_eq, my_eq + shfl_down_u32(my_eq, delta))
                 lane = txl.bitwise_and(tx, txl.int32(31))
-                with txl.If(txl.And(lane == 0, my_gt > txl.uint32(0))), txl.Then():
+                with txl.if_(txl.And(lane == 0, my_gt > txl.uint32(0))), txl.then_():
                     atom_shared_add_u32(s_suffix, 0, my_gt)
                 if deterministic:
-                    with txl.If(txl.And(lane == 0, my_eq > txl.uint32(0))), txl.Then():
+                    with txl.if_(txl.And(lane == 0, my_eq > txl.uint32(0))), txl.then_():
                         atom_shared_add_u32(s_suffix, 1, my_eq)
                 bar_sync()
                 gt_count = ld_shared_u32(s_suffix, 0)
@@ -634,14 +634,14 @@ def get_kernel(
 
                 if not deterministic:
                     # === Stage 4a: non-deterministic collect (:906-963) ====
-                    with txl.If(tx == 0), txl.Then():
+                    with txl.if_(tx == 0), txl.then_():
                         st_shared_u32(s_hist, 0, txl.uint32(0))
-                        with txl.If(gt_count > txl.uint32(0)), txl.Then():
+                        with txl.if_(gt_count > txl.uint32(0)), txl.then_():
                             st_shared_u32(s_hist, 1, atom_shared_add_u32(s_scalars, 4, gt_count))
                     bar_sync()
                     with txl.serial(tx, row_len, step=BLOCK_THREADS, unroll=2) as i:
                         key3 = txl.cast(ld_key(s_ordered, i), "uint32")
-                        with txl.If(key3 > pivot), txl.Then():
+                        with txl.if_(key3 > pivot), txl.then_():
                             local_pos = atom_shared_add_u32(s_hist, 0, txl.uint32(1))
                             pos = txl.cast(ld_shared_u32(s_hist, 1) + local_pos, "int32")
                             _emit(
@@ -660,11 +660,11 @@ def get_kernel(
                     bar_sync()
                     with txl.serial(tx, row_len, step=BLOCK_THREADS, unroll=2) as i:
                         key4 = txl.cast(ld_key(s_ordered, i), "uint32")
-                        with txl.If(key4 == pivot), txl.Then():
+                        with txl.if_(key4 == pivot), txl.then_():
                             pos2 = txl.cast(
                                 atom_shared_add_u32(s_scalars, 4, txl.uint32(1)), "int32"
                             )
-                            with txl.If(pos2 < k), txl.Then():
+                            with txl.if_(pos2 < k), txl.then_():
                                 _emit(
                                     out_idx,
                                     out_val,
@@ -681,9 +681,9 @@ def get_kernel(
                 else:
                     # === Stage 4b: deterministic collect (:1023-1138) ======
                     eq_count = ld_shared_u32(s_suffix, 1)
-                    with txl.If(tx == 0), txl.Then():
+                    with txl.if_(tx == 0), txl.then_():
                         need = txl.local_scalar("uint32", init=txl.uint32(0))
-                        with txl.If(txl.uint32(k) > gt_count), txl.Then():
+                        with txl.if_(txl.uint32(k) > gt_count), txl.then_():
                             txl.assign(need, txl.uint32(k) - gt_count)
                         st_shared_quad_u32(s_hist, 0, txl.uint32(0), txl.uint32(0), gt_count, need)
                         st_shared_u32(s_hist, 4, txl.uint32(0))
@@ -693,11 +693,11 @@ def get_kernel(
                     eq_base = collect_plan[2]
                     eq_limit = collect_plan[3]
                     gt_limit = txl.local_scalar("uint32", init=txl.uint32(0))
-                    with txl.If(txl.uint32(k) > gt_base), txl.Then():
+                    with txl.if_(txl.uint32(k) > gt_base), txl.then_():
                         txl.assign(gt_limit, txl.uint32(k) - gt_base)
 
-                    with txl.If(eq_limit == txl.uint32(0)):
-                        with txl.Then():
+                    with txl.if_(eq_limit == txl.uint32(0)):
+                        with txl.then_():
                             sel = txl.local_scalar("uint32", init=txl.uint32(0))
                             with txl.serial(tx, row_len, step=BLOCK_THREADS) as id1:
                                 key5 = txl.cast(ld_key(s_ordered, id1), "uint32")
@@ -713,7 +713,7 @@ def get_kernel(
                             rake_off = _raking_offset(tx)
                             st_shared_u32(s_scan, rake_off, sel)
                             bar_sync()
-                            with txl.If(tx < RAKING_THREADS), txl.Then():
+                            with txl.if_(tx < RAKING_THREADS), txl.then_():
                                 rake_base = tx * RAKING_STRIDE
                                 cache = txl.alloc_local([RAKING_SEGMENT], "uint32")
                                 total = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -727,19 +727,19 @@ def get_kernel(
                                     txl.assign(scan_run, scan_run + cache[j])
                             bar_sync()
                             pre = ld_shared_u32(s_scan, rake_off)
-                            with txl.If(txl.And(sel > txl.uint32(0), pre < gt_limit)), txl.Then():
+                            with txl.if_(txl.And(sel > txl.uint32(0), pre < gt_limit)), txl.then_():
                                 emit_pos = txl.local_scalar("uint32")
                                 emit_end = txl.local_scalar("uint32")
                                 done = txl.local_scalar("int32")
                                 txl.assign(emit_pos, pre)
                                 txl.assign(emit_end, pre + sel)
-                                with txl.If(emit_end > gt_limit), txl.Then():
+                                with txl.if_(emit_end > gt_limit), txl.then_():
                                     txl.assign(emit_end, gt_limit)
                                 txl.assign(done, 0)
                                 with txl.serial(tx, row_len, step=BLOCK_THREADS) as id3:
-                                    with txl.If(done == 0), txl.Then():
+                                    with txl.if_(done == 0), txl.then_():
                                         key6 = txl.cast(ld_key(s_ordered, id3), "uint32")
-                                        with txl.If(key6 > pivot), txl.Then():
+                                        with txl.if_(key6 > pivot), txl.then_():
                                             _emit(
                                                 out_idx,
                                                 out_val,
@@ -754,10 +754,10 @@ def get_kernel(
                                                 dtype,
                                             )
                                             txl.assign(emit_pos, emit_pos + txl.uint32(1))
-                                            with txl.If(emit_pos == emit_end), txl.Then():
+                                            with txl.if_(emit_pos == emit_end), txl.then_():
                                                 txl.assign(done, 1)
                             bar_sync()
-                        with txl.Else():
+                        with txl.else_():
                             sel_gt = txl.local_scalar("uint32")
                             sel_eq = txl.local_scalar("uint32")
                             txl.assign(sel_gt, txl.uint32(0))
@@ -777,7 +777,7 @@ def get_kernel(
                             rake_off2 = _raking_offset(tx) * 2
                             st_shared_pair_u32(s_scan, rake_off2, sel_gt, sel_eq)
                             bar_sync()
-                            with txl.If(tx < RAKING_THREADS), txl.Then():
+                            with txl.if_(tx < RAKING_THREADS), txl.then_():
                                 rake_base2 = tx * RAKING_STRIDE * 2
                                 cache_gt = txl.alloc_local([RAKING_SEGMENT], "uint32")
                                 cache_eq = txl.alloc_local([RAKING_SEGMENT], "uint32")
@@ -807,8 +807,8 @@ def get_kernel(
                             txl.assign(cur_eq, seg_out[1])
                             with txl.serial(tx, row_len, step=BLOCK_THREADS) as i8:
                                 key8 = txl.cast(ld_key(s_ordered, i8), "uint32")
-                                with txl.If(txl.And(key8 > pivot, cur_gt < gt_limit)):
-                                    with txl.Then():
+                                with txl.if_(txl.And(key8 > pivot, cur_gt < gt_limit)):
+                                    with txl.then_():
                                         _emit(
                                             out_idx,
                                             out_val,
@@ -823,10 +823,10 @@ def get_kernel(
                                             dtype,
                                         )
                                         txl.assign(cur_gt, cur_gt + txl.uint32(1))
-                                    with txl.Else():
+                                    with txl.else_():
                                         with (
-                                            txl.If(txl.And(key8 == pivot, cur_eq < eq_limit)),
-                                            txl.Then(),
+                                            txl.if_(txl.And(key8 == pivot, cur_eq < eq_limit)),
+                                            txl.then_(),
                                         ):
                                             _emit(
                                                 out_idx,

@@ -115,15 +115,15 @@ HBC = 16 // CS
 
 
 def _f32(v):
-    return txl.local_scalar(txl.f32, init=v)
+    return txl.local_scalar("float32", init=v)
 
 
 def _i32(v):
-    return txl.local_scalar(txl.i32, init=v)
+    return txl.local_scalar("int32", init=v)
 
 
 def _u32(v):
-    return txl.local_scalar(txl.u32, init=v)
+    return txl.local_scalar("uint32", init=v)
 
 
 def _bf16_lo(word):
@@ -136,7 +136,7 @@ def _bf16_hi(word):
 
 def _load_route_weights(topk_w, base, rsf, topk):
     """The token is warp-uniform; each pair is naturally eight-byte aligned."""
-    weights = txl.alloc_local((topk,), txl.f32)
+    weights = txl.alloc_local((topk,), "float32")
     for pair in range(topk // 2):
         txl.ptx.ld.global_.nc.v2.f32(
             weights[2 * pair], weights[2 * pair + 1], topk_w.ptr_to([base + 2 * pair])
@@ -164,7 +164,7 @@ def _route_sum_bf16x2(values, weights, topk, packed_f32):
         for route in range(topk):
             txl.ptx.fma.rn.f32(a0, _bf16_lo(values[route]), weights[route], a0)
             txl.ptx.fma.rn.f32(a1, _bf16_hi(values[route]), weights[route], a1)
-    packed = txl.local_scalar(txl.u32)
+    packed = txl.local_scalar("uint32")
     txl.ptx.cvt.rn.bf16x2.f32(packed, a1, a0)
     return packed
 
@@ -231,21 +231,21 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
 
     @txl.kernel()
     def alphamoe_cluster(
-        topk_ids: txl.Tensor((txl.int64(),), txl.i32),
-        topk_w: txl.Tensor((txl.int64(),), txl.f32),
-        hidden: txl.Tensor((txl.int64(),), txl.i32),
-        w1s: txl.Tensor((txl.int64(),), txl.f32),
-        w2s: txl.Tensor((txl.int64(),), txl.f32),
-        out: txl.Tensor((txl.int64(),), "uint64" if TAGGED else txl.u16),
-        final_out: txl.Tensor((txl.int64(),), txl.u16),
-        sync_ctr: txl.Tensor((txl.int64(),), txl.u32),
-        xq_g: txl.Tensor((txl.int64(),), txl.u32),
-        xs_g: txl.Tensor((txl.int64(),), txl.f32),
-        xflag_g: txl.Tensor((txl.int64(),), txl.u32),
+        topk_ids: txl.Tensor((txl.int64(),), "int32"),
+        topk_w: txl.Tensor((txl.int64(),), "float32"),
+        hidden: txl.Tensor((txl.int64(),), "int32"),
+        w1s: txl.Tensor((txl.int64(),), "float32"),
+        w2s: txl.Tensor((txl.int64(),), "float32"),
+        out: txl.Tensor((txl.int64(),), "uint64" if TAGGED else "uint16"),
+        final_out: txl.Tensor((txl.int64(),), "uint16"),
+        sync_ctr: txl.Tensor((txl.int64(),), "uint32"),
+        xq_g: txl.Tensor((txl.int64(),), "uint32"),
+        xs_g: txl.Tensor((txl.int64(),), "float32"),
+        xflag_g: txl.Tensor((txl.int64(),), "uint32"),
         tm_w1h: txl.Ptr(txl.TensorMap),
         tm_w2: txl.Ptr(txl.TensorMap),
-        rsf: txl.f32,
-        epoch: txl.u32,
+        rsf: "float32",
+        epoch: "uint32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=G, block=NWARPS * 32, cluster=(CS,)),
@@ -262,35 +262,35 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
         cl = cta // CS
 
         smem = txl.smem_pool()
-        a_tile = smem.alloc((STAGES, BM, BK), txl.f8e4m3, align=1024, swizzle=txl.SW128B)
-        b_gu = smem.alloc((NB * KB, NT, BK), txl.f8e4m3, align=1024, swizzle=txl.SW128B)
+        a_tile = smem.alloc((STAGES, BM, BK), "float8_e4m3fn", align=1024, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        b_gu = smem.alloc((NB * KB, NT, BK), "float8_e4m3fn", align=1024, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
         if RANK_ACT:
-            b_act = smem.alloc((2 * CS, NT, CH), txl.f8e4m3, align=1024, swizzle=txl.SW64B)
-            s_amx = smem.alloc((2, CS, NT), txl.f32, align=16)
+            b_act = smem.alloc((2 * CS, NT, CH), "float8_e4m3fn", align=1024, swizzle=txl.SwizzleMode.SWIZZLE_64B_ATOM)
+            s_amx = smem.alloc((2, CS, NT), "float32", align=16)
         else:
-            b_act = smem.alloc((2, NT, BK), txl.f8e4m3, align=1024, swizzle=txl.SW128B)
-            s_hvx = smem.alloc((2, CH, NT), txl.f32, align=16)
-        s_xs = smem.alloc((NB, NT * KB), txl.f32, align=16)
-        s_prod = smem.alloc((2, 2 * KB, NT), txl.f32, align=16)
-        s_ids = smem.alloc((P + 16,), txl.i32, align=16)
-        s_mask = smem.alloc((E * MW,), txl.u32, align=16)
-        s_cnt = smem.alloc((E,), txl.i32, align=16)
-        s_chunk = smem.alloc((P + 16,), txl.i32, align=16)
-        s_wsum = smem.alloc((NWARPS,), txl.i32, align=16)
-        s_task = smem.alloc((TASK_RING, TASK_W), txl.i32, align=16)
-        s_amax = smem.alloc((NT, 4), txl.f32, align=16)
-        s_scl = smem.alloc((NT, 2), txl.f32, align=16)
-        s_misc = smem.alloc((8,), txl.i32, align=16)
+            b_act = smem.alloc((2, NT, BK), "float8_e4m3fn", align=1024, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+            s_hvx = smem.alloc((2, CH, NT), "float32", align=16)
+        s_xs = smem.alloc((NB, NT * KB), "float32", align=16)
+        s_prod = smem.alloc((2, 2 * KB, NT), "float32", align=16)
+        s_ids = smem.alloc((P + 16,), "int32", align=16)
+        s_mask = smem.alloc((E * MW,), "uint32", align=16)
+        s_cnt = smem.alloc((E,), "int32", align=16)
+        s_chunk = smem.alloc((P + 16,), "int32", align=16)
+        s_wsum = smem.alloc((NWARPS,), "int32", align=16)
+        s_task = smem.alloc((TASK_RING, TASK_W), "int32", align=16)
+        s_amax = smem.alloc((NT, 4), "float32", align=16)
+        s_scl = smem.alloc((NT, 2), "float32", align=16)
+        s_misc = smem.alloc((8,), "int32", align=16)
         if TAGGED:
-            with txl.If(tid == 0), txl.Then():
+            with txl.if_(tid == 0), txl.then_():
                 txl.ptx.red.relaxed.gpu.global_.add.u32(sync_ctr.ptr_to([cta]), txl.uint32(1))
-        s_stg = smem.alloc((2, NT, BM), txl.u16, align=128)
+        s_stg = smem.alloc((2, NT, BM), "uint16", align=128)
 
         def s_up_ptr(ch, t4):
             return txl.ptx.addr(s_stg.ptr_to([0, 0, 0]), (ch * NT + t4) * 4)
 
-        s_ridx = smem.alloc((TASK_RING,), txl.i32, align=16)
-        tmem_slot = smem.alloc((1,), txl.u32, align=4)
+        s_ridx = smem.alloc((TASK_RING,), "int32", align=16)
+        tmem_slot = smem.alloc((1,), "uint32", align=4)
 
         full_bar = txl.TMABar(smem, STAGES)
         empty_bar = txl.TCGen05Bar(smem, STAGES)
@@ -344,35 +344,35 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
         txl.ptx.fence.mbarrier_init.release.cluster()
 
         if not TAGGED:
-            with txl.If(txl.And(cta == 0, tid == 0)), txl.Then():
+            with txl.if_(txl.And(cta == 0, tid == 0)), txl.then_():
                 txl.ptx.st.global_.u32(
                     sync_ctr.ptr_to(
                         [txl.cast((epoch + txl.uint32(1)) % txl.uint32(WORK_SLOTS), "int32")]
                     ),
                     txl.uint32(0),
                 )
-        with txl.If(warp == 1), txl.Then():
+        with txl.if_(warp == 1), txl.then_():
             txl.ptx["tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"](
                 txl.address_of(tmem_slot[0]), txl.uint32(TMEM_COLS)
             )
             txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"]()
-        with txl.If(txl.And(warp == 0, lane == 0)), txl.Then():
+        with txl.if_(txl.And(warp == 0, lane == 0)), txl.then_():
             txl.ptx.prefetch.tensormap(txl.address_of(tm_w1h))
             txl.ptx.prefetch.tensormap(txl.address_of(tm_w2))
         if not TAGGED or M == 8:
-            with txl.If(tid < (M + G - 1) // G), txl.Then():
+            with txl.if_(tid < (M + G - 1) // G), txl.then_():
                 row = cta + G * tid
-                with txl.If(row < M), txl.Then():
+                with txl.if_(row < M), txl.then_():
                     txl.ptx["cp.async.bulk.prefetch.L2.global"](
                         hidden.ptr_to([row * (HID // 2)]), txl.uint32(HID * 2)
                     )
 
         for i in range((MASK_COUNT + NTHREADS - 1) // NTHREADS):
             idx = tid + NTHREADS * i
-            with txl.If(idx < MASK_COUNT), txl.Then():
+            with txl.if_(idx < MASK_COUNT), txl.then_():
                 txl.ptx.st.shared.u32(s_mask.ptr_to([idx]), txl.uint32(0))
         for i in range((NB * B_BYTES + NTHREADS * 16 - 1) // (NTHREADS * 16)):
-            with txl.If((tid + NTHREADS * i) * 16 < NB * B_BYTES), txl.Then():
+            with txl.if_((tid + NTHREADS * i) * 16 < NB * B_BYTES), txl.then_():
                 txl.ptx.st.shared.v4.b32(
                     txl.ptx.addr(b_gu[0].ptr_to(0, 0), (tid + NTHREADS * i) * 16),
                     txl.uint32(0),
@@ -380,32 +380,32 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     txl.uint32(0),
                     txl.uint32(0),
                 )
-        idv = txl.alloc_local((IDS_PER_T,), txl.i32)
+        idv = txl.alloc_local((IDS_PER_T,), "int32")
         for i in range(ROUTE_IDS):
             txl.assign(idv[i], txl.int32(0))
             p = tid + NTHREADS * i
-            with txl.If(p < P), txl.Then():
+            with txl.if_(p < P), txl.then_():
                 txl.ptx.ld.global_.nc.s32(idv[i], topk_ids.ptr_to([p]))
         txl.cuda.cta_sync()
         for i in range(ROUTE_IDS):
             p = tid + NTHREADS * i
-            with txl.If(p < P), txl.Then():
+            with txl.if_(p < P), txl.then_():
                 v = idv[i]
                 txl.ptx.st.shared.s32(s_ids.ptr_to([p]), v)
                 t_p = p // TOPK
                 bit = txl.shift_left(txl.uint32(1), txl.cast(t_p % 32, "uint32"))
-                old_m = txl.local_scalar(txl.u32)
+                old_m = txl.local_scalar("uint32")
                 txl.ptx.atom.shared.or_.b32(old_m, s_mask.ptr_to([v * MW + t_p // 32]), bit)
         txl.cuda.cta_sync()
-        cnt_l = txl.alloc_local((EPT,), txl.i32)
-        nch_l = txl.alloc_local((EPT,), txl.i32)
+        cnt_l = txl.alloc_local((EPT,), "int32")
+        nch_l = txl.alloc_local((EPT,), "int32")
         local_sum = _i32(txl.int32(0))
         for i in range(ROUTE_EPT):
             e_i = tid * EPT + i
             txl.assign(cnt_l[i], txl.int32(0))
-            with txl.If(e_i < E), txl.Then():
+            with txl.if_(e_i < E), txl.then_():
                 for w_ in range(MW):
-                    mwv = txl.local_scalar(txl.u32)
+                    mwv = txl.local_scalar("uint32")
                     txl.ptx.ld.shared.u32(mwv, s_mask.ptr_to([e_i * MW + w_]))
                     txl.assign(cnt_l[i], cnt_l[i] + txl.cast(txl.popcount(mwv), "int32"))
             txl.assign(nch_l[i], (cnt_l[i] + (NT - 1)) // NT)
@@ -413,25 +413,25 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
         incl = _i32(local_sum)
         if M != 1:
             for d in (1, 2, 4, 8, 16):
-                o = txl.local_scalar(txl.i32)
+                o = txl.local_scalar("int32")
                 txl.ptx.shfl_sync.up.b32(
                     o, incl, txl.uint32(d), txl.uint32(0), txl.uint32(0xFFFFFFFF)
                 )
                 txl.assign(incl, incl + txl.Select(lane >= d, o, txl.int32(0)))
-            with txl.If(lane == 31), txl.Then():
+            with txl.if_(lane == 31), txl.then_():
                 txl.ptx.st.shared.s32(s_wsum.ptr_to([warp]), incl)
             txl.cuda.cta_sync()
         pre = _i32(txl.int32(0))
         tot = _i32(txl.int32(0))
         for w in range(0 if M == 1 else NWARPS):
-            v_w = txl.local_scalar(txl.i32)
+            v_w = txl.local_scalar("int32")
             txl.ptx.ld.shared.s32(v_w, s_wsum.ptr_to([w]))
             txl.assign(pre, pre + txl.Select(warp > w, v_w, txl.int32(0)))
             txl.assign(tot, tot + v_w)
         excl = _i32(pre + incl - local_sum)
         for i in range(ROUTE_EPT):
             e_i = tid * EPT + i
-            with txl.If(e_i < E), txl.Then():
+            with txl.if_(e_i < E), txl.then_():
                 txl.ptx.st.shared.s32(s_cnt.ptr_to([e_i]), cnt_l[i])
                 with txl.serial(0, nch_l[i]) as c_:
                     txl.ptx.st.shared.s32(
@@ -439,45 +439,45 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     )
             txl.assign(excl, excl + nch_l[i])
         if M == 1:
-            with txl.If(tid < TOPK), txl.Then():
-                route_e = txl.local_scalar(txl.i32)
+            with txl.if_(tid < TOPK), txl.then_():
+                route_e = txl.local_scalar("int32")
                 txl.ptx.ld.global_.nc.s32(route_e, topk_ids.ptr_to([tid]))
                 txl.ptx.st.shared.s32(s_chunk.ptr_to([tid]), route_e)
-            with txl.If(tid == 0), txl.Then():
+            with txl.if_(tid == 0), txl.then_():
                 txl.ptx.st.shared.s32(s_misc.ptr_to([0]), txl.int32(TOPK))
         else:
-            with txl.If(tid == 0), txl.Then():
+            with txl.if_(tid == 0), txl.then_():
                 txl.ptx.st.shared.s32(s_misc.ptr_to([0]), tot)
         txl.cuda.cta_sync()
 
         txl.ptx.barrier.cluster.arrive.relaxed()
-        with txl.If(warp == 0), txl.Then():
+        with txl.if_(warp == 0), txl.then_():
             txl.cuda.iket.mark("tables-ready")
-        C = txl.local_scalar(txl.i32)
+        C = txl.local_scalar("int32")
         txl.ptx.ld.shared.s32(C, s_misc.ptr_to([0]))
-        generation = txl.local_scalar(txl.u32)
+        generation = txl.local_scalar("uint32")
         if not TAGGED:
             txl.assign(generation, epoch)
         # Shape-only round-robin ownership removes the global work counter and
         # the per-item peer-index handoff at every routed shape.
         dyn = txl.int32(0) != txl.int32(0)
-        tmem_base = txl.local_scalar(txl.u32)
+        tmem_base = txl.local_scalar("uint32")
         txl.ptx.ld.shared.u32(tmem_base, tmem_slot.ptr_to([0]))
 
         def rcp_refined(scale):
-            rcp0 = txl.local_scalar(txl.f32)
+            rcp0 = txl.local_scalar("float32")
             txl.ptx.rcp.approx.ftz.f32(rcp0, scale)
-            rerr = txl.local_scalar(txl.f32)
+            rerr = txl.local_scalar("float32")
             txl.ptx[FMA_F32](rerr, txl.float32(0.0) - scale, rcp0, txl.float32(1.0))
-            rcp1 = txl.local_scalar(txl.f32)
+            rcp1 = txl.local_scalar("float32")
             txl.ptx[FMA_F32](rcp1, rerr, rcp0, rcp0)
             return rcp1
 
         def div_rn(x, scale, rcp1):
             q0 = _f32(x * rcp1)
-            err = txl.local_scalar(txl.f32)
+            err = txl.local_scalar("float32")
             txl.ptx[FMA_F32](err, txl.float32(0.0) - q0, scale, x)
-            q = txl.local_scalar(txl.f32)
+            q = txl.local_scalar("float32")
             txl.ptx[FMA_F32](q, err, rcp1, q0)
             return q
 
@@ -485,12 +485,12 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
             if TAGGED:
                 for chunk in range((M * HID // 2 + G * threads - 1) // (G * threads)):
                     pair = cta * threads + thread + chunk * G * threads
-                    with txl.If(pair < M * HID // 2), txl.Then():
+                    with txl.if_(pair < M * HID // 2), txl.then_():
                         token = pair // (HID // 2)
                         column_pair = pair % (HID // 2)
                         records = txl.alloc_local((TOPK,), "uint64")
                         pending = _u32(txl.uint32(1))
-                        with txl.While(pending != txl.uint32(0)):
+                        with txl.while_(pending != txl.uint32(0)):
                             txl.assign(pending, txl.uint32(0))
                             for route in range(TOPK):
                                 txl.ptx.ld.relaxed.gpu.global_.u64(
@@ -502,7 +502,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                                     txl.shift_right(records[route], txl.uint64(32)), "uint32"
                                 )
                                 txl.assign(pending, pending | (stamp ^ generation))
-                        values = txl.alloc_local((TOPK,), txl.u32)
+                        values = txl.alloc_local((TOPK,), "uint32")
                         for route in range(TOPK):
                             txl.assign(values[route], txl.cast(records[route], "uint32"))
                         weights = _load_route_weights(topk_w, token * TOPK, rsf, TOPK)
@@ -520,23 +520,23 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 if M == 64:
                     # Read-only weights can overlap the producers' completion wait.
                     weight_chunks = (M * HID // 2 + G * threads - 1) // (G * threads)
-                    route_weights = txl.alloc_local((weight_chunks, TOPK), txl.f32)
+                    route_weights = txl.alloc_local((weight_chunks, TOPK), "float32")
                     for chunk in range(weight_chunks):
                         pair = cta * threads + thread + chunk * G * threads
-                        with txl.If(pair < M * HID // 2), txl.Then():
+                        with txl.if_(pair < M * HID // 2), txl.then_():
                             token = pair // (HID // 2)
                             for route in range(TOPK):
                                 txl.ptx.ld.global_.nc.f32(
                                     route_weights[chunk, route],
                                     topk_w.ptr_to([token * TOPK + route]),
                                 )
-                with txl.If(thread == 0), txl.Then():
-                    completed = txl.local_scalar(txl.u32)
+                with txl.if_(thread == 0), txl.then_():
+                    completed = txl.local_scalar("uint32")
                     # Consecutive release RMWs publish all producers; acquire
                     # the completed sequence before the CTA shares its results.
                     target_count = _u32(generation * txl.uint32(G))
                     txl.ptx.ld.relaxed.gpu.global_.u32(completed, sync_ctr.ptr_to([PRODUCERS_DONE]))
-                    with txl.While(completed != target_count):
+                    with txl.while_(completed != target_count):
                         txl.ptx.ld.relaxed.gpu.global_.u32(
                             completed, sync_ctr.ptr_to([PRODUCERS_DONE])
                         )
@@ -544,11 +544,11 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 txl.cuda.cta_sync()
                 for chunk in range((M * HID // 2 + G * threads - 1) // (G * threads)):
                     pair = cta * threads + thread + chunk * G * threads
-                    with txl.If(pair < M * HID // 2), txl.Then():
+                    with txl.if_(pair < M * HID // 2), txl.then_():
                         token = pair // (HID // 2)
                         col = pair % (HID // 2) * 2
-                        values = txl.alloc_local((TOPK,), txl.u32)
-                        weights = txl.alloc_local((TOPK,), txl.f32)
+                        values = txl.alloc_local((TOPK,), "uint32")
+                        weights = txl.alloc_local((TOPK,), "float32")
                         if M == 64:
                             for route in range(TOPK):
                                 txl.ptx.ld.relaxed.gpu.global_.u32(
@@ -578,13 +578,13 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 task_empty.arrive(ts.stage)
             else:
                 txl.cuda.warp_sync()
-                with txl.If(lane == 0), txl.Then():
+                with txl.if_(lane == 0), txl.then_():
                     task_empty.arrive(ts.stage)
             ts.advance()
 
         def remote_u32(ptr, peer_):
             """shared::cluster address of this CTA-local pointer in CTA `peer_` of the cluster."""
-            r = txl.local_scalar(txl.u32)
+            r = txl.local_scalar("uint32")
             txl.ptx.mapa.shared__cluster.u32(
                 r, txl.cuda.cvta_generic_to_shared(ptr), txl.cast(peer_, "uint32")
             )
@@ -592,8 +592,8 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
 
         def cluster_wait(bar, stage, phase):
             """mbarrier phase wait with cluster-scope acquire (tracked bytes were written by the peer)."""
-            ok = txl.local_scalar(txl.u32, init=txl.uint32(0))
-            with txl.While(ok == txl.uint32(0)):
+            ok = txl.local_scalar("uint32", init=txl.uint32(0))
+            with txl.while_(ok == txl.uint32(0)):
                 txl.ptx.mbarrier.try_wait.parity.acquire.cluster.shared.b64(
                     ok, bar.ptr_to([stage]), txl.cast(phase, "uint32")
                 )
@@ -602,7 +602,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
             """T consecutive lanes quantize one (token row, k-block) unit; lane `sub` owns 128/T values.
             Destination: B row `n` of buffer `gbuf` (shared) or the global fp8 row buffer."""
             NW = 64 // T
-            w = txl.alloc_local((NW,), txl.u32)
+            w = txl.alloc_local((NW,), "uint32")
             src = hidden.ptr_to([tok * (HID // 2) + kb * (BK // 2) + sub * NW])
             for i in range(NW // 4):
                 txl.ptx.ld.global_.nc.v4.b32(
@@ -619,7 +619,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
             amax = _f32(txl.max(txl.max(am4[0], am4[1]), txl.max(am4[2], am4[3])))
             m_ = T // 2
             while m_ >= 1:
-                o = txl.local_scalar(txl.f32)
+                o = txl.local_scalar("float32")
                 txl.ptx.shfl_sync.bfly.b32(
                     o, amax, txl.uint32(m_), txl.uint32(0x1F), txl.uint32(0xFFFFFFFF)
                 )
@@ -629,11 +629,11 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
             rcp1 = rcp_refined(scale)
 
             for i in range(NW // 8):
-                qw = txl.alloc_local((4,), txl.u32)
+                qw = txl.alloc_local((4,), "uint32")
                 for jx in range(4):
                     a = 8 * i + 2 * jx
-                    h_lo = txl.local_scalar(txl.u16)
-                    h_hi = txl.local_scalar(txl.u16)
+                    h_lo = txl.local_scalar("uint16")
+                    h_hi = txl.local_scalar("uint16")
                     txl.ptx.cvt.rn.satfinite.e4m3x2.f32(
                         h_lo, _bf16_hi(w[a]) * rcp1, _bf16_lo(w[a]) * rcp1
                     )
@@ -663,7 +663,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                         qw[2],
                         qw[3],
                     )
-            with txl.If(sub == 0), txl.Then():
+            with txl.if_(sub == 0), txl.then_():
                 if to_global:
                     txl.ptx.st.global_.f32(xs_g.ptr_to([tok * KB + kb]), scale)
                 else:
@@ -681,14 +681,14 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 if (ps + 1) * (256 // T) <= UNITS:
                     quant_unit_T(T, u // KB, u % KB, txl.int32(0), u // KB, sub)
                 else:
-                    with txl.If(u < UNITS), txl.Then():
+                    with txl.if_(u < UNITS), txl.then_():
                         quant_unit_T(T, u // KB, u % KB, txl.int32(0), u // KB, sub)
             for n in range(M, NT):
-                with txl.If(tq8 < KB), txl.Then():
+                with txl.if_(tq8 < KB), txl.then_():
                     txl.ptx.st.shared.f32(s_xs.ptr_to([0, n * KB + tq8]), txl.float32(0.0))
             txl.ptx.fence.proxy.async_.shared__cta()
             txl.cuda.warp_sync()
-            with txl.If(lane == 0), txl.Then():
+            with txl.if_(lane == 0), txl.then_():
                 bready.arrive(0)
 
         def first_item_quant(slot, ntok_):
@@ -702,26 +702,26 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 for ps in range((max_rows * KB * T + NQUANT - 1) // NQUANT):
                     u = (tq + NQUANT * ps) // T
                     sub = tq % T
-                    with txl.If(u < units), txl.Then():
-                        tok = txl.local_scalar(txl.i32)
+                    with txl.if_(u < units), txl.then_():
+                        tok = txl.local_scalar("int32")
                         txl.ptx.ld.shared.s32(tok, s_task.ptr_to([slot, TOK_OFF + u // KB]))
                         quant_unit_T(T, u // KB, u % KB, txl.int32(0), tok, sub)
 
-            with txl.If(ntok_ <= 2):
-                with txl.Then():
+            with txl.if_(ntok_ <= 2):
+                with txl.then_():
                     variant(8)
-                with txl.Else():
-                    with txl.If(ntok_ <= 4):
-                        with txl.Then():
+                with txl.else_():
+                    with txl.if_(ntok_ <= 4):
+                        with txl.then_():
                             variant(4)
-                        with txl.Else():
-                            with txl.If(ntok_ <= 8):
-                                with txl.Then():
+                        with txl.else_():
+                            with txl.if_(ntok_ <= 8):
+                                with txl.then_():
                                     variant(2)
-                                with txl.Else():
+                                with txl.else_():
                                     variant(1)
             for n in range(NT):
-                with txl.If(txl.And(n >= ntok_, tq < KB)), txl.Then():
+                with txl.if_(txl.And(n >= ntok_, tq < KB)), txl.then_():
                     txl.ptx.st.shared.f32(s_xs.ptr_to([0, n * KB + tq]), txl.float32(0.0))
 
         roles = txl.specialize()
@@ -741,60 +741,60 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 rst = txl.PipelineState(TASK_RING, phase=0)
                 idx = _i32(cl)
                 nxt_idx = _i32(txl.int32(0))
-                nxt = txl.local_scalar(txl.u32, init=txl.uint32(0))
+                nxt = txl.local_scalar("uint32", init=txl.uint32(0))
                 work_slot = txl.cast(generation % txl.uint32(WORK_SLOTS), "int32")
                 lane_lt = txl.shift_left(txl.uint32(1), txl.cast(lane, "uint32")) - txl.uint32(1)
                 running = _i32(txl.int32(1))
                 txl.ptx.barrier.cluster.wait()
                 txl.cuda.iket.mark("sched-start")
 
-                with txl.If(txl.And(dyn, txl.And(rank == 0, lane == 0))), txl.Then():
+                with txl.if_(txl.And(dyn, txl.And(rank == 0, lane == 0))), txl.then_():
                     txl.ptx.atom.relaxed.gpu.global_.add.u32(
                         nxt, sync_ctr.ptr_to([work_slot]), txl.uint32(1)
                     )
-                with txl.While(running == 1):
+                with txl.while_(running == 1):
                     tk_s = _rng("s-decode")
                     e = _i32(txl.int32(-1))
                     c = _i32(txl.int32(0))
                     ntok = _i32(txl.int32(0))
                     mask0 = _u32(txl.uint32(0))
-                    with txl.If(idx < C), txl.Then():
-                        packed = txl.local_scalar(txl.i32)
+                    with txl.if_(idx < C), txl.then_():
+                        packed = txl.local_scalar("int32")
                         txl.ptx.ld.shared.s32(packed, s_chunk.ptr_to([idx]))
                         txl.assign(e, txl.bitwise_and(packed, txl.int32(0xFFFF)))
                         txl.assign(c, txl.shift_right(packed, txl.int32(16)))
                     task_empty.wait(ts.stage, ts.phase ^ 1)
-                    with txl.If(e >= 0), txl.Then():
+                    with txl.if_(e >= 0), txl.then_():
                         if M == 1:
                             txl.assign(ntok, txl.int32(1))
                             txl.assign(mask0, txl.uint32(1))
                         else:
-                            cnt_e = txl.local_scalar(txl.i32)
+                            cnt_e = txl.local_scalar("int32")
                             txl.ptx.ld.shared.s32(cnt_e, s_cnt.ptr_to([e]))
                             txl.assign(ntok, txl.min(cnt_e - c * NT, txl.int32(NT)))
                             txl.ptx.ld.shared.u32(mask0, s_mask.ptr_to([e * MW]))
 
-                    with txl.If(lane == 0), txl.Then():
+                    with txl.if_(lane == 0), txl.then_():
                         txl.ptx.st.shared.s32(s_task.ptr_to([ts.stage, 0]), e)
                         txl.ptx.st.shared.s32(s_task.ptr_to([ts.stage, 1]), c)
                         txl.ptx.st.shared.s32(s_task.ptr_to([ts.stage, 2]), ntok)
                         txl.ptx.st.shared.u32(s_task.ptr_to([ts.stage, 3]), mask0)
                         task_hdr.arrive(ts.stage)
-                    with txl.If(e >= 0), txl.Then():
+                    with txl.if_(e >= 0), txl.then_():
                         t_l = _i32(txl.int32(0))
                         route_id = _i32(txl.int32(0))
                         if SHARED_B:
                             if M == 1:
-                                with txl.If(lane == 0), txl.Then():
+                                with txl.if_(lane == 0), txl.then_():
                                     txl.assign(route_id, idx)
                                     if M < 32 and M != 16:
                                         # Warm the readonly weight cache for the route reducer.
-                                        cached_weight = txl.local_scalar(txl.f32)
+                                        cached_weight = txl.local_scalar("float32")
                                         txl.ptx.ld.global_.nc.f32(
                                             cached_weight, topk_w.ptr_to([route_id])
                                         )
                             else:
-                                with txl.If(lane < M), txl.Then():
+                                with txl.if_(lane < M), txl.then_():
                                     txl.assign(t_l, lane)
                                     routed = txl.bitwise_and(
                                         txl.shift_right(mask0, txl.cast(lane, "uint32")),
@@ -802,20 +802,20 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                                     ) == txl.uint32(1)
                                     k_l = _i32(txl.int32(0))
                                     for kk in range(TOPK):
-                                        idk = txl.local_scalar(txl.i32)
+                                        idk = txl.local_scalar("int32")
                                         txl.ptx.ld.shared.s32(idk, s_ids.ptr_to([lane * TOPK + kk]))
                                         txl.assign(k_l, txl.Select(idk == e, txl.int32(kk), k_l))
-                                    with txl.If(routed), txl.Then():
+                                    with txl.if_(routed), txl.then_():
                                         txl.assign(route_id, lane * TOPK + k_l)
                                         if M < 32 and M != 16:
-                                            cached_weight = txl.local_scalar(txl.f32)
+                                            cached_weight = txl.local_scalar("float32")
                                             txl.ptx.ld.global_.nc.f32(
                                                 cached_weight, topk_w.ptr_to([route_id])
                                             )
                         else:
                             base = _i32(txl.int32(0))
                             for w_ in range(MW):
-                                mwv = txl.local_scalar(txl.u32)
+                                mwv = txl.local_scalar("uint32")
                                 txl.ptx.ld.shared.u32(mwv, s_mask.ptr_to([e * MW + w_]))
                                 mine_t = txl.bitwise_and(
                                     txl.shift_right(mwv, txl.cast(lane, "uint32")), txl.uint32(1)
@@ -825,7 +825,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                                     + txl.cast(txl.popcount(txl.bitwise_and(mwv, lane_lt)), "int32")
                                     - c * NT
                                 )
-                                with txl.If(txl.And(mine_t, txl.And(r >= 0, r < NT))), txl.Then():
+                                with txl.if_(txl.And(mine_t, txl.And(r >= 0, r < NT))), txl.then_():
                                     txl.ptx.st.shared.s32(
                                         s_task.ptr_to([ts.stage, TOK_OFF + r]),
                                         txl.int32(32 * w_) + lane,
@@ -835,34 +835,34 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                             if FIRST_TILE:
                                 # The token list is complete: publish it before the global route-weight
                                 # and scale loads so the quantizer warps start the item's B tile at once.
-                                with txl.If(lane == 0), txl.Then():
+                                with txl.if_(lane == 0), txl.then_():
                                     task_tok.arrive(ts.stage)
-                            with txl.If(lane < NT), txl.Then():
+                            with txl.if_(lane < NT), txl.then_():
                                 txl.ptx.ld.shared.s32(
                                     t_l,
                                     s_task.ptr_to([ts.stage, TOK_OFF + txl.min(lane, ntok - 1)]),
                                 )
                                 k_l = _i32(txl.int32(0))
                                 for kk in range(TOPK):
-                                    idk = txl.local_scalar(txl.i32)
+                                    idk = txl.local_scalar("int32")
                                     txl.ptx.ld.shared.s32(idk, s_ids.ptr_to([t_l * TOPK + kk]))
                                     txl.assign(k_l, txl.Select(idk == e, txl.int32(kk), k_l))
                                 txl.assign(route_id, t_l * TOPK + k_l)
                                 if M < 32 and M != 16:
-                                    cached_weight = txl.local_scalar(txl.f32)
+                                    cached_weight = txl.local_scalar("float32")
                                     txl.ptx.ld.global_.nc.f32(
                                         cached_weight, topk_w.ptr_to([route_id])
                                     )
-                        w1v = txl.local_scalar(txl.f32)
+                        w1v = txl.local_scalar("float32")
                         txl.ptx.ld.global_.nc.f32(w1v, w1s.ptr_to([e * (2 * KB) + lane]))
                         w2v = _f32(txl.float32(0.0))
-                        with txl.If(lane < KB), txl.Then():
+                        with txl.if_(lane < KB), txl.then_():
                             txl.ptx.ld.global_.nc.f32(w2v, w2s.ptr_to([e * KB + lane]))
                         txl.cuda.warp_sync()
                         txl.ptx.st.shared.f32(s_task.ptr_to([ts.stage, W1_OFF + lane]), w1v)
-                        with txl.If(lane < KB), txl.Then():
+                        with txl.if_(lane < KB), txl.then_():
                             txl.ptx.st.shared.f32(s_task.ptr_to([ts.stage, W2_OFF + lane]), w2v)
-                        with txl.If(lane < NT), txl.Then():
+                        with txl.if_(lane < NT), txl.then_():
                             if not FIRST_TILE:
                                 txl.ptx.st.shared.s32(
                                     s_task.ptr_to([ts.stage, TOK_OFF + lane]), t_l
@@ -870,7 +870,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                             else:
                                 # Entries [0, ntok) were published with task_tok and may already be
                                 # read by the quantizer warps; only fill the padding rows here.
-                                with txl.If(lane >= ntok), txl.Then():
+                                with txl.if_(lane >= ntok), txl.then_():
                                     txl.ptx.st.shared.s32(
                                         s_task.ptr_to([ts.stage, TOK_OFF + lane]), t_l
                                     )
@@ -878,18 +878,18 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                                 s_task.ptr_to([ts.stage, RID_OFF + lane]), route_id
                             )
                     txl.cuda.warp_sync()
-                    with txl.If(lane == 0), txl.Then():
+                    with txl.if_(lane == 0), txl.then_():
                         if FIRST_TILE:
-                            with txl.If(e < 0), txl.Then():
+                            with txl.if_(e < 0), txl.then_():
                                 task_tok.arrive(ts.stage)
                         task_full.arrive(ts.stage)
                     ts.advance()
 
-                    with txl.If(dyn):
-                        with txl.Then():
-                            with txl.If(rank == 0):
-                                with txl.Then():
-                                    nxt_b = txl.local_scalar(txl.u32)
+                    with txl.if_(dyn):
+                        with txl.then_():
+                            with txl.if_(rank == 0):
+                                with txl.then_():
+                                    nxt_b = txl.local_scalar("uint32")
                                     txl.ptx.shfl_sync.idx.b32(
                                         nxt_b,
                                         nxt,
@@ -898,35 +898,35 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                                         txl.uint32(0xFFFFFFFF),
                                     )
                                     txl.assign(nxt_idx, txl.int32(NCL) + txl.cast(nxt_b, "int32"))
-                                    with txl.If(lane == 0), txl.Then():
+                                    with txl.if_(lane == 0), txl.then_():
                                         ridx_free.wait(rst.stage, rst.phase ^ 1)
                                         r_slot = remote_u32(s_ridx.ptr_to([rst.stage]), peer)
                                         r_bar = remote_u32(ridx_full.ptr_to([rst.stage]), peer)
                                         txl.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.b32(
                                             r_slot, txl.cast(nxt_idx, "uint32"), r_bar
                                         )
-                                        with txl.If(nxt_idx < C), txl.Then():
+                                        with txl.if_(nxt_idx < C), txl.then_():
                                             txl.ptx.atom.relaxed.gpu.global_.add.u32(
                                                 nxt, sync_ctr.ptr_to([work_slot]), txl.uint32(1)
                                             )
-                                with txl.Else():
-                                    with txl.If(lane == 0), txl.Then():
+                                with txl.else_():
+                                    with txl.if_(lane == 0), txl.then_():
                                         ridx_full.arrive(rst.stage, tx_count=4)
                                     cluster_wait(ridx_full, rst.stage, rst.phase)
                                     txl.ptx.ld.shared.s32(nxt_idx, s_ridx.ptr_to([rst.stage]))
                                     txl.cuda.warp_sync()
-                                    with txl.If(lane == 0), txl.Then():
+                                    with txl.if_(lane == 0), txl.then_():
                                         txl.ptx.mbarrier.arrive.release.cluster.shared__cluster.b64(
                                             remote_u32(ridx_free.ptr_to([rst.stage]), peer)
                                         )
                             rst.advance()
-                        with txl.Else():
+                        with txl.else_():
                             txl.assign(nxt_idx, idx + txl.int32(NCL))
                     _rng_end(tk_s)
-                    with txl.If(e < 0):
-                        with txl.Then():
+                    with txl.if_(e < 0):
+                        with txl.then_():
                             txl.assign(running, txl.int32(0))
-                        with txl.Else():
+                        with txl.else_():
                             txl.assign(idx, nxt_idx)
 
             with idle_role:
@@ -938,7 +938,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     tk_i = _rng("i-rowpub")
                     for r_ in range(ROWS_PER_CTA):
                         row = cta + G * r_
-                        with txl.If(row < M), txl.Then():
+                        with txl.if_(row < M), txl.then_():
                             quant_unit_T(
                                 RQ_T,
                                 txl.int32(0),
@@ -949,7 +949,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                                 to_global=True,
                             )
                         txl.cuda.warp_sync()
-                        with txl.If(txl.And(row < M, lane == 0)), txl.Then():
+                        with txl.if_(txl.And(row < M, lane == 0)), txl.then_():
                             txl.ptx.st.release.gpu.global_.u32(xflag_g.ptr_to([row]), generation)
                     _rng_end(tk_i)
                 if GLOBAL_Q and not FIRST_TILE:
@@ -957,7 +957,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                         row = cta + G * r_
                         # The idle and quantizer warps rendezvous at distinct sites.
                         txl.ptx.barrier.cta.sync(txl.uint32(BAR_ROWS), txl.uint32(NQUANT + 32))
-                        with txl.If(txl.And(row < M, lane == 0)), txl.Then():
+                        with txl.if_(txl.And(row < M, lane == 0)), txl.then_():
                             txl.ptx.st.release.gpu.global_.u32(xflag_g.ptr_to([row]), generation)
                 # Cluster slot-release agent (see v47 notes): release the peer's slot k%2 once this
                 # CTA published item k's activation (aq_full) and, in the rank path, its down MMAs
@@ -969,7 +969,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     )
                 )
                 k_i = _i32(txl.int32(0))
-                with txl.While(k_i + txl.int32(2) < n_items):
+                with txl.while_(k_i + txl.int32(2) < n_items):
                     par_i = _i32(k_i % 2)
                     ph_i = _i32((k_i // 2) % 2)
                     aq_full.wait(par_i, ph_i)
@@ -977,7 +977,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                         act_empty.wait(par_i, ph_i)
                         txl.ptx.tcgen05.fence__after_thread_sync()
                     txl.cuda.warp_sync()
-                    with txl.If(lane == 0), txl.Then():
+                    with txl.if_(lane == 0), txl.then_():
                         txl.ptx.mbarrier.arrive.release.cluster.shared__cluster.b64(
                             remote_u32(slot_free.ptr_to([par_i]), peer)
                         )
@@ -985,7 +985,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 txl.ptx.barrier.cluster.wait()
 
             with prod_role:
-                with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+                with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                     st = txl.PipelineState(STAGES, phase=0)
                     ts = txl.PipelineState(TASK_RING, phase=0)
                     e = _i32(txl.int32(0))
@@ -1037,7 +1037,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     def peek_next(dst):
                         nst = _i32(ts.stage + 1)
                         nph = _i32(ts.phase)
-                        with txl.If(nst == TASK_RING), txl.Then():
+                        with txl.if_(nst == TASK_RING), txl.then_():
                             txl.assign(nst, txl.int32(0))
                             txl.assign(nph, nph ^ 1)
                         task_hdr.wait(nst, nph)
@@ -1047,20 +1047,20 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     e_nxt = _i32(txl.int32(-1))
                     txl.cuda.iket.mark("prod-start")
 
-                    with txl.If(cl < C), txl.Then():
-                        packed0 = txl.local_scalar(txl.i32)
+                    with txl.if_(cl < C), txl.then_():
+                        packed0 = txl.local_scalar("int32")
                         txl.ptx.ld.shared.s32(packed0, s_chunk.ptr_to([cl]))
                         txl.assign(e_cur, txl.bitwise_and(packed0, txl.int32(0xFFFF)))
-                    with txl.If(e_cur >= 0), txl.Then():
+                    with txl.if_(e_cur >= 0), txl.then_():
                         txl.assign(e, e_cur)
                         tk_p = _rng("p-gu")
                         with txl.serial(0, KB) as kb:
                             issue_gu(kb)
                         _rng_end(tk_p)
                     task_hdr.wait(ts.stage, ts.phase)
-                    with txl.While(e_cur >= 0):
+                    with txl.while_(e_cur >= 0):
                         peek_next(e_nxt)
-                        with txl.If(e_nxt >= 0), txl.Then():
+                        with txl.if_(e_nxt >= 0), txl.then_():
                             txl.assign(e, e_nxt)
                             tk_p = _rng("p-gu")
                             with txl.serial(0, KB) as kb:
@@ -1081,7 +1081,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 txl.ptx.barrier.cluster.wait()
 
             with mma_role:
-                with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+                with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                     sst = txl.PipelineState(STAGES, phase=0)
                     tst = txl.PipelineState(NTB, phase=0)
                     ts = txl.PipelineState(TASK_RING, phase=0)
@@ -1146,7 +1146,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                         mma_issue(bview)
                         txl.ptx.tcgen05.fence__before_thread_sync()
                         empty_bar.arrive(sst.stage)
-                        with txl.If(tst.stage % 4 == 3), txl.Then():
+                        with txl.if_(tst.stage % 4 == 3), txl.then_():
                             tfull.arrive(tst.stage)
                         sst.advance()
                         tst.advance()
@@ -1165,7 +1165,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                         mma_issue_d(act_par)
                         txl.ptx.tcgen05.fence__before_thread_sync()
                         empty_bar.arrive(sst.stage)
-                        with txl.If(tst.stage % 4 == 3), txl.Then():
+                        with txl.if_(tst.stage % 4 == 3), txl.then_():
                             tfull.arrive(tst.stage)
                         sst.advance()
                         tst.advance()
@@ -1179,7 +1179,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     def peek_next(dst):
                         nst = _i32(ts.stage + 1)
                         nph = _i32(ts.phase)
-                        with txl.If(nst == TASK_RING), txl.Then():
+                        with txl.if_(nst == TASK_RING), txl.then_():
                             txl.assign(nst, txl.int32(0))
                             txl.assign(nph, nph ^ 1)
                         task_hdr.wait(nst, nph)
@@ -1208,11 +1208,11 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     e_nxt = _i32(txl.int32(-1))
                     task_hdr.wait(ts.stage, ts.phase)
                     txl.ptx.ld.shared.s32(e_cur, s_task.ptr_to([ts.stage, 0]))
-                    with txl.If(e_cur >= 0), txl.Then():
+                    with txl.if_(e_cur >= 0), txl.then_():
                         gu_mmas()
-                    with txl.While(e_cur >= 0):
+                    with txl.while_(e_cur >= 0):
                         peek_next(e_nxt)
-                        with txl.If(e_nxt >= 0), txl.Then():
+                        with txl.if_(e_nxt >= 0), txl.then_():
                             gu_mmas()
                         tk_m = _rng("mma-wait-act")
                         aq_full.wait(ast.stage, ast.phase)
@@ -1257,21 +1257,21 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 cch = tq % 8
                 kbg = tq // 8
 
-                with txl.If(tq < NT), txl.Then():
-                    with txl.If(txl.int32(0) + tq < nrows), txl.Then():
+                with txl.if_(tq < NT), txl.then_():
+                    with txl.if_(txl.int32(0) + tq < nrows), txl.then_():
                         tokf = tok_of(tq)
-                        fl = txl.local_scalar(txl.u32, init=txl.uint32(0))
+                        fl = txl.local_scalar("uint32", init=txl.uint32(0))
                         txl.ptx.ld.acquire.gpu.global_.b32(fl, xflag_g.ptr_to([tokf]))
-                        with txl.While(fl != generation):
+                        with txl.while_(fl != generation):
                             txl.ptx.ld.acquire.gpu.global_.b32(fl, xflag_g.ptr_to([tokf]))
                 txl.ptx.bar.sync(txl.uint32(BAR_QUANT), txl.uint32(NQUANT))
-                wv = txl.alloc_local((4 * NT,), txl.u32)
-                xv2 = [txl.local_scalar(txl.f32) for _ in range(2)]
+                wv = txl.alloc_local((4 * NT,), "uint32")
+                xv2 = [txl.local_scalar("float32") for _ in range(2)]
                 for n in range(NT):
                     if isinstance(nrows, int) and n >= nrows:
                         continue
                     cond = txl.int32(n) < nrows
-                    with txl.If(cond), txl.Then():
+                    with txl.if_(cond), txl.then_():
                         tok = tok_of(n)
                         txl.ptx.ld.global_.nc.v4.b32(
                             wv[4 * n],
@@ -1287,13 +1287,13 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     txl.assign(xv2[half], txl.float32(0.0))
                     if isinstance(nrows, int) and 8 * half >= nrows:
                         continue
-                    with txl.If(n < nrows), txl.Then():
+                    with txl.if_(n < nrows), txl.then_():
                         tok = tok_of(n)
                         txl.ptx.ld.global_.nc.f32(xv2[half], xs_g.ptr_to([tok * KB + kb2]))
                 for n in range(NT):
                     if isinstance(nrows, int) and n >= nrows:
                         continue
-                    with txl.If(txl.int32(n) < nrows), txl.Then():
+                    with txl.if_(txl.int32(n) < nrows), txl.then_():
                         txl.ptx.st.shared.v4.b32(
                             b_gu[gbuf * KB + kbg].ptr_to(n, cch * 16),
                             wv[4 * n],
@@ -1314,9 +1314,9 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     rem = idx % (KB * NT)
                     kb2 = rem // NT
                     n2 = rem % NT
-                    wv = txl.local_scalar(txl.f32)
+                    wv = txl.local_scalar("float32")
                     txl.ptx.ld.shared.f32(wv, s_task.ptr_to([ts.stage, W1_OFF + tile * KB + kb2]))
-                    xv = txl.local_scalar(txl.f32)
+                    xv = txl.local_scalar("float32")
                     txl.ptx.ld.shared.f32(xv, s_xs.ptr_to([xbuf, n2 * KB + kb2]))
                     txl.ptx.st.shared.f32(s_prod.ptr_to([gbuf, tile * KB + kb2, n2]), wv * xv)
 
@@ -1324,7 +1324,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 tk_q = _rng("q-quant")
                 for r_ in range(ROWS_PER_CTA):
                     row = cta + G * r_
-                    with txl.If(row < M), txl.Then():
+                    with txl.if_(row < M), txl.then_():
                         quant_unit_T(
                             8, txl.int32(0), tq // 8, txl.int32(0), row, tq % 8, to_global=True
                         )
@@ -1336,17 +1336,17 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 prologue_quant(tq)
                 bready.wait(0, 0)
                 _rng_end(tk_q)
-                with txl.While(running == 1):
+                with txl.while_(running == 1):
                     read_task(ts, e, ntok)
-                    with txl.If(e < 0):
-                        with txl.Then():
+                    with txl.if_(e < 0):
+                        with txl.then_():
                             txl.assign(running, txl.int32(0))
-                        with txl.Else():
+                        with txl.else_():
                             tk_q = _rng("q-prod")
                             prod_empty.wait(gst.stage, gst.phase ^ 1)
                             scale_products(_i32(gst.stage), txl.int32(0))
                             txl.ptx.bar.sync(txl.uint32(BAR_QUANT), txl.uint32(NQUANT))
-                            with txl.If(lane == 0), txl.Then():
+                            with txl.if_(lane == 0), txl.then_():
                                 bq_full.arrive(gst.stage)
                             gst.advance()
                             _rng_end(tk_q)
@@ -1363,7 +1363,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     tk_q = _rng("q-gather")
 
                     def tok_of(n):
-                        t_ = txl.local_scalar(txl.i32)
+                        t_ = txl.local_scalar("int32")
                         txl.ptx.ld.shared.s32(t_, s_task.ptr_to([ts.stage, TOK_OFF + n]))
                         return t_
 
@@ -1374,13 +1374,13 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     scale_products(gbuf, gbuf)
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx.bar.sync(txl.uint32(BAR_QUANT), txl.uint32(NQUANT))
-                    with txl.If(lane == 0), txl.Then():
+                    with txl.if_(lane == 0), txl.then_():
                         bq_full.arrive(gst.stage)
                     gst.advance()
                     _rng_end(tk_q)
 
                 first_q = _i32(txl.int32(1))
-                with txl.While(running == 1):
+                with txl.while_(running == 1):
                     if FIRST_TILE:
                         # The token list (task_tok) is published before the scheduler's global scale
                         # loads; task_full (scales) is only required by scale_products below.
@@ -1389,14 +1389,14 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                         txl.ptx.ld.shared.s32(ntok, s_task.ptr_to([ts.stage, 2]))
                     else:
                         read_task(ts, e, ntok)
-                    with txl.If(e < 0):
-                        with txl.Then():
+                    with txl.if_(e < 0):
+                        with txl.then_():
                             if FIRST_TILE:
                                 task_full.wait(ts.stage, ts.phase)
                             txl.assign(running, txl.int32(0))
-                        with txl.Else():
-                            with txl.If(first_q == 1):
-                                with txl.Then():
+                        with txl.else_():
+                            with txl.if_(first_q == 1):
+                                with txl.then_():
                                     tk_q = _rng("q-quant0")
                                     first_item_quant(ts.stage, ntok)
                                     if FIRST_TILE:
@@ -1405,11 +1405,11 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                                     scale_products(_i32(gst.stage), _i32(gst.stage))
                                     txl.ptx.fence.proxy.async_.shared__cta()
                                     txl.ptx.bar.sync(txl.uint32(BAR_QUANT), txl.uint32(NQUANT))
-                                    with txl.If(lane == 0), txl.Then():
+                                    with txl.if_(lane == 0), txl.then_():
                                         bq_full.arrive(gst.stage)
                                     gst.advance()
                                     _rng_end(tk_q)
-                                with txl.Else():
+                                with txl.else_():
                                     quantize_item()
                             txl.assign(first_q, txl.int32(0))
                     release_task(ts, False)
@@ -1430,10 +1430,10 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
             ntok = _i32(txl.int32(0))
             if RANK_ACT:
                 items = _i32(txl.int32(0))
-            acc = txl.alloc_local((NT,), txl.f32)
-            pv = txl.alloc_local((4 * NT,), txl.f32)
-            acts = txl.alloc_local((NT,), txl.f32)
-            hv = txl.alloc_local((NT,), txl.f32)
+            acc = txl.alloc_local((NT,), "float32")
+            pv = txl.alloc_local((4 * NT,), "float32")
+            acts = txl.alloc_local((NT,), "float32")
+            hv = txl.alloc_local((NT,), "float32")
 
             def named_bar():
                 txl.ptx.bar.sync(txl.uint32(BAR_MATH), txl.uint32(NMATH))
@@ -1455,16 +1455,16 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 txl.ptx.tcgen05.wait__ld.sync.aligned()
                 txl.ptx.tcgen05.fence__before_thread_sync()
                 txl.cuda.warp_sync()
-                with txl.If(lane == 0), txl.Then():
+                with txl.if_(lane == 0), txl.then_():
                     for q in range(4):
                         tempty.arrive(s0 + q)
 
             def promote(gbuf, prow, off, nblk):
                 for q4 in range(nblk // 4):
-                    x0 = txl.local_scalar(txl.f32)
-                    x1 = txl.local_scalar(txl.f32)
-                    x2 = txl.local_scalar(txl.f32)
-                    x3 = txl.local_scalar(txl.f32)
+                    x0 = txl.local_scalar("float32")
+                    x1 = txl.local_scalar("float32")
+                    x2 = txl.local_scalar("float32")
+                    x3 = txl.local_scalar("float32")
                     txl.ptx.ld.shared.v4.f32(x0, x1, x2, x3, s_prod.ptr_to([gbuf, prow, 4 * q4]))
                     if M in (16, 64, 128):
                         pair01 = txl.local_scalar("uint64")
@@ -1503,7 +1503,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     for q in range(4):
                         promote(gbuf, tile_row + 4 * kk + q, q * NT, nblk)
                 txl.cuda.warp_sync()
-                with txl.If(lane == 0), txl.Then():
+                with txl.if_(lane == 0), txl.then_():
                     prod_empty.arrive(gst.stage)
                 gst.advance()
                 _rng_end(tk_w)
@@ -1513,15 +1513,15 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 `slot` is the task slot of this item; the epilogue scales land in `acts_dst`."""
                 tk_w = _rng("m-swiglu")
 
-                with txl.If(items >= txl.int32(2)), txl.Then():
+                with txl.if_(items >= txl.int32(2)), txl.then_():
                     act_empty.wait(par, xst.phase ^ 1)
 
                     txl.ptx.tcgen05.fence__after_thread_sync()
-                with txl.If(tm == 0), txl.Then():
+                with txl.if_(tm == 0), txl.then_():
                     afull.arrive(par, tx_count=nblk * 4)
                     actfull.arrive(par, tx_count=nblk * CH)
 
-                with txl.If(txl.Not(is_gate)), txl.Then():
+                with txl.if_(txl.Not(is_gate)), txl.then_():
                     for q4 in range(nblk // 4):
                         txl.ptx.st.shared.v4.f32(
                             s_up_ptr(ch_l, 4 * q4),
@@ -1531,29 +1531,29 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                             acc[4 * q4 + 3],
                         )
                 named_bar()
-                with txl.If(is_gate), txl.Then():
+                with txl.if_(is_gate), txl.then_():
                     for q4 in range(nblk // 4):
-                        u4 = [txl.local_scalar(txl.f32) for _ in range(4)]
+                        u4 = [txl.local_scalar("float32") for _ in range(4)]
                         txl.ptx.ld.shared.v4.f32(u4[0], u4[1], u4[2], u4[3], s_up_ptr(ch_l, 4 * q4))
                         for q in range(4):
                             t_ = 4 * q4 + q
-                            ex = txl.local_scalar(txl.f32)
+                            ex = txl.local_scalar("float32")
                             txl.ptx.ex2.approx.ftz.f32(ex, acc[t_] * txl.float32(-LOG2E))
-                            sig = txl.local_scalar(txl.f32)
+                            sig = txl.local_scalar("float32")
                             txl.ptx.rcp.approx.ftz.f32(sig, ex + txl.float32(1.0))
                             txl.assign(hv[t_], acc[t_] * sig * u4[q])
                     for t_ in range(nblk):
-                        am = txl.local_scalar(txl.f32)
+                        am = txl.local_scalar("float32")
                         txl.ptx.redux_sync.max.abs.f32(am, hv[t_], txl.uint32(0xFFFFFFFF))
-                        with txl.If(lane == 0), txl.Then():
+                        with txl.if_(lane == 0), txl.then_():
                             txl.ptx.st.shared.f32(s_amax.ptr_to([t_, mw]), am)
                 named_bar()
                 # The peer's idle warp releases slot `par` once the peer consumed our item k-2 push
                 # and its down MMAs finished reading the activation slot (see idle_role).
                 cluster_wait(xchg_free, par, xst.phase ^ 1)
-                with txl.If(txl.And(mw == 0, lane < nblk)), txl.Then():
-                    am0 = txl.local_scalar(txl.f32)
-                    am1 = txl.local_scalar(txl.f32)
+                with txl.if_(txl.And(mw == 0, lane < nblk)), txl.then_():
+                    am0 = txl.local_scalar("float32")
+                    am1 = txl.local_scalar("float32")
                     txl.ptx.ld.shared.v2.f32(am0, am1, s_amax.ptr_to([lane, 0]))
                     am = _f32(txl.max(am0, am1))
                     txl.ptx.st.shared.f32(s_amx.ptr_to([par, rank, lane]), am)
@@ -1564,9 +1564,9 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     )
                 cluster_wait(afull, par, xst.phase)
                 named_bar()
-                with txl.If(txl.And(mw == 0, lane < nblk)), txl.Then():
-                    am0 = txl.local_scalar(txl.f32)
-                    am1 = txl.local_scalar(txl.f32)
+                with txl.if_(txl.And(mw == 0, lane < nblk)), txl.then_():
+                    am0 = txl.local_scalar("float32")
+                    am1 = txl.local_scalar("float32")
                     txl.ptx.ld.shared.f32(am0, s_amx.ptr_to([par, rank, lane]))
                     txl.ptx.ld.shared.f32(am1, s_amx.ptr_to([par, peer, lane]))
                     am = _f32(txl.max(am0, am1))
@@ -1576,16 +1576,16 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
 
                 txl.ptx.fence.proxy.async_.shared__cta()
                 col = ch_l
-                scs = txl.alloc_local((NT,), txl.f32)
-                rcps = txl.alloc_local((NT,), txl.f32)
-                qbs = txl.alloc_local((NT,), txl.u16)
+                scs = txl.alloc_local((NT,), "float32")
+                rcps = txl.alloc_local((NT,), "float32")
+                qbs = txl.alloc_local((NT,), "uint16")
                 for t_ in range(nblk):
                     txl.ptx.ld.shared.v2.f32(scs[t_], acts_dst[t_], s_scl.ptr_to([t_, 0]))
-                with txl.If(is_gate), txl.Then():
+                with txl.if_(is_gate), txl.then_():
                     for t_ in range(nblk):
                         txl.ptx.rcp.approx.ftz.f32(rcps[t_], scs[t_])
                     for t_ in range(nblk):
-                        rerr = txl.local_scalar(txl.f32)
+                        rerr = txl.local_scalar("float32")
                         txl.ptx[FMA_F32](
                             rerr, txl.float32(0.0) - scs[t_], rcps[t_], txl.float32(1.0)
                         )
@@ -1596,7 +1596,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                         )
                     for t_ in range(nblk):
                         w0 = _u32(txl.cast(qbs[t_], "uint32"))
-                        w1 = txl.local_scalar(txl.u32)
+                        w1 = txl.local_scalar("uint32")
                         txl.ptx.shfl_sync.down.b32(
                             w1, w0, txl.uint32(1), txl.uint32(0x1F), txl.uint32(0xFFFFFFFF)
                         )
@@ -1605,10 +1605,10 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                             w1, w0, txl.uint32(2), txl.uint32(0x1F), txl.uint32(0xFFFFFFFF)
                         )
                         txl.assign(w0, txl.bitwise_or(w0, txl.shift_left(w1, txl.uint32(16))))
-                        with txl.If(lane % 4 == 0), txl.Then():
+                        with txl.if_(lane % 4 == 0), txl.then_():
                             txl.ptx.st.shared.b32(b_act[par * CS + rank].ptr_to(t_, col), w0)
                     for t_ in range(nblk, NT):
-                        with txl.If(lane % 4 == 0), txl.Then():
+                        with txl.if_(lane % 4 == 0), txl.then_():
                             txl.ptx.st.shared.b32(
                                 b_act[par * CS + rank].ptr_to(t_, col), txl.uint32(0)
                             )
@@ -1617,23 +1617,23 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                             )
                 txl.ptx.fence.proxy.async_.shared__cta()
                 named_bar()
-                with txl.If(tm == 0), txl.Then():
+                with txl.if_(tm == 0), txl.then_():
                     r_bar = remote_u32(actfull.ptr_to([par]), peer)
                     src = b_act[par * CS + rank].ptr_to(0, 0)
                     txl.ptx[BULK_S2C](remote_u32(src, peer), src, txl.uint32(nblk * CH), r_bar)
                 cluster_wait(actfull, par, xst.phase)
                 named_bar()
-                with txl.If(tm == 0), txl.Then():
+                with txl.if_(tm == 0), txl.then_():
                     aq_full.arrive(par)
                 _rng_end(tk_w)
 
             def swiglu_exchange_legacy(par, slot, acts_dst, nblk):
                 """Legacy fp32 slice exchange used on shapes where paired timing favors it."""
                 tk_w = _rng("m-swiglu")
-                with txl.If(tm == 0), txl.Then():
+                with txl.if_(tm == 0), txl.then_():
                     hvfull.arrive(par, tx_count=nblk * CH * 4)
 
-                with txl.If(txl.Not(is_gate)), txl.Then():
+                with txl.if_(txl.Not(is_gate)), txl.then_():
                     for q4 in range(nblk // 4):
                         txl.ptx.st.shared.v4.f32(
                             s_up_ptr(ch_l, 4 * q4),
@@ -1643,15 +1643,15 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                             acc[4 * q4 + 3],
                         )
                 named_bar()
-                with txl.If(is_gate), txl.Then():
+                with txl.if_(is_gate), txl.then_():
                     for q4 in range(nblk // 4):
-                        u4 = [txl.local_scalar(txl.f32) for _ in range(4)]
+                        u4 = [txl.local_scalar("float32") for _ in range(4)]
                         txl.ptx.ld.shared.v4.f32(u4[0], u4[1], u4[2], u4[3], s_up_ptr(ch_l, 4 * q4))
                         for q in range(4):
                             t_ = 4 * q4 + q
-                            ex = txl.local_scalar(txl.f32)
+                            ex = txl.local_scalar("float32")
                             txl.ptx.ex2.approx.ftz.f32(ex, acc[t_] * txl.float32(-LOG2E))
-                            sig = txl.local_scalar(txl.f32)
+                            sig = txl.local_scalar("float32")
                             txl.ptx.rcp.approx.ftz.f32(sig, ex + txl.float32(1.0))
                             txl.assign(hv[t_], acc[t_] * sig * u4[q])
                     # The peer's idle warp releases s_hvx slot `par` once the peer consumed our
@@ -1668,7 +1668,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                             hv[4 * q4 + 3],
                             r_bar,
                         )
-                with txl.If(txl.Not(is_gate)), txl.Then():
+                with txl.if_(txl.Not(is_gate)), txl.then_():
                     cluster_wait(hvfull, par, xst.phase)
                     for q4 in range(nblk // 4):
                         txl.ptx.ld.shared.v4.f32(
@@ -1679,16 +1679,16 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                             s_hvx.ptr_to([par, ch_l, 4 * q4]),
                         )
                 for t_ in range(nblk):
-                    am = txl.local_scalar(txl.f32)
+                    am = txl.local_scalar("float32")
                     txl.ptx.redux_sync.max.abs.f32(am, hv[t_], txl.uint32(0xFFFFFFFF))
-                    with txl.If(lane == 0), txl.Then():
+                    with txl.if_(lane == 0), txl.then_():
                         txl.ptx.st.shared.f32(s_amax.ptr_to([t_, mw]), am)
                 named_bar()
-                with txl.If(txl.And(mw == 0, lane < nblk)), txl.Then():
-                    am0 = txl.local_scalar(txl.f32)
-                    am1 = txl.local_scalar(txl.f32)
-                    am2 = txl.local_scalar(txl.f32)
-                    am3 = txl.local_scalar(txl.f32)
+                with txl.if_(txl.And(mw == 0, lane < nblk)), txl.then_():
+                    am0 = txl.local_scalar("float32")
+                    am1 = txl.local_scalar("float32")
+                    am2 = txl.local_scalar("float32")
+                    am3 = txl.local_scalar("float32")
                     txl.ptx.ld.shared.v4.f32(am0, am1, am2, am3, s_amax.ptr_to([lane, 0]))
                     am = _f32(txl.max(txl.max(am0, am1), txl.max(am2, am3)))
                     sc = _f32(txl.max(am, txl.float32(1.0e-8)) * txl.float32(INV_FP8_MAX))
@@ -1697,15 +1697,15 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
 
                 txl.ptx.fence.proxy.async_.shared__cta()
                 col = txl.Select(is_gate, rank * CH, peer * CH) + ch_l
-                scs = txl.alloc_local((NT,), txl.f32)
-                rcps = txl.alloc_local((NT,), txl.f32)
-                qbs = txl.alloc_local((NT,), txl.u16)
+                scs = txl.alloc_local((NT,), "float32")
+                rcps = txl.alloc_local((NT,), "float32")
+                qbs = txl.alloc_local((NT,), "uint16")
                 for t_ in range(nblk):
                     txl.ptx.ld.shared.v2.f32(scs[t_], acts_dst[t_], s_scl.ptr_to([t_, 0]))
                 for t_ in range(nblk):
                     txl.ptx.rcp.approx.ftz.f32(rcps[t_], scs[t_])
                 for t_ in range(nblk):
-                    rerr = txl.local_scalar(txl.f32)
+                    rerr = txl.local_scalar("float32")
                     txl.ptx[FMA_F32](rerr, txl.float32(0.0) - scs[t_], rcps[t_], txl.float32(1.0))
                     txl.ptx[FMA_F32](rcps[t_], rerr, rcps[t_], rcps[t_])
                 for t_ in range(nblk):
@@ -1718,7 +1718,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     txl.ptx.st.shared.u8(b_act[par].ptr_to(t_, col), txl.uint8(0))
                 txl.ptx.fence.proxy.async_.shared__cta()
                 named_bar()
-                with txl.If(tm == 0), txl.Then():
+                with txl.if_(tm == 0), txl.then_():
                     aq_full.arrive(par)
                 _rng_end(tk_w)
 
@@ -1728,12 +1728,12 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     txl.ptx.ld.shared.u32(mask_w, s_task.ptr_to([ts.stage, 3]))
 
                 def quad_loop(nblk):
-                    routes = txl.alloc_local((nblk,), txl.i32)
+                    routes = txl.alloc_local((nblk,), "int32")
                     for t_ in range(nblk):
                         txl.ptx.ld.shared.s32(routes[t_], s_task.ptr_to([ts.stage, RID_OFF + t_]))
                     with txl.serial(0, HBC // 4) as hh:
                         drain_quad()
-                        w2s4 = [txl.local_scalar(txl.f32) for _ in range(4)]
+                        w2s4 = [txl.local_scalar("float32") for _ in range(4)]
                         for q in range(4):
                             txl.ptx.ld.shared.f32(
                                 w2s4[q], s_task.ptr_to([ts.stage, W2_OFF + rank * HBC + 4 * hh + q])
@@ -1753,7 +1753,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                                         )
                                     else:
                                         valid = txl.local_scalar("bool", init=t_ < ntok)
-                                    payload = txl.local_scalar(txl.u32)
+                                    payload = txl.local_scalar("uint32")
                                     lo = _f32(
                                         pv[(2 * pair) * NT + t_] * (w2s4[2 * pair] * acts[t_])
                                     )
@@ -1774,7 +1774,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                                 h = rank * HBC + 4 * hh + q
                                 for t_ in range(nblk):
                                     valid = txl.local_scalar("bool", init=t_ < ntok)
-                                    value = txl.local_scalar(txl.u16)
+                                    value = txl.local_scalar("uint16")
                                     txl.ptx.cvt.rn.bf16.f32(
                                         value, pv[q * NT + t_] * (w2s4[q] * acts[t_])
                                     )
@@ -1787,15 +1787,15 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 if SHARED_B:
                     quad_loop(M)
                 else:
-                    with txl.If(ntok <= 4):
-                        with txl.Then():
+                    with txl.if_(ntok <= 4):
+                        with txl.then_():
                             quad_loop(4)
-                        with txl.Else():
+                        with txl.else_():
                             if M == 128:
-                                with txl.If(ntok <= 8):
-                                    with txl.Then():
+                                with txl.if_(ntok <= 8):
+                                    with txl.then_():
                                         quad_loop(8)
-                                    with txl.Else():
+                                    with txl.else_():
                                         quad_loop(NT)
                             else:
                                 quad_loop(NT)
@@ -1803,7 +1803,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
             def peek_next(dst):
                 nst = _i32(ts.stage + 1)
                 nph = _i32(ts.phase)
-                with txl.If(nst == TASK_RING), txl.Then():
+                with txl.if_(nst == TASK_RING), txl.then_():
                     txl.assign(nst, txl.int32(0))
                     txl.assign(nph, nph ^ 1)
                 task_hdr.wait(nst, nph)
@@ -1813,7 +1813,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 tk_w = _rng("m-quant")
                 prologue_quant(128 + tm)
                 _rng_end(tk_w)
-            acts_n = txl.alloc_local((NT,), txl.f32)
+            acts_n = txl.alloc_local((NT,), "float32")
             for t_ in range(NT):
                 txl.assign(acts_n[t_], txl.float32(0.0))
             e_nxt = _i32(txl.int32(-1))
@@ -1835,17 +1835,17 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     gu_drain(M)
                     swiglu(slot, acts_dst, M)
                 else:
-                    with txl.If(count <= 4):
-                        with txl.Then():
+                    with txl.if_(count <= 4):
+                        with txl.then_():
                             gu_drain(4)
                             swiglu(slot, acts_dst, 4)
-                        with txl.Else():
+                        with txl.else_():
                             if M == 128:
-                                with txl.If(count <= 8):
-                                    with txl.Then():
+                                with txl.if_(count <= 8):
+                                    with txl.then_():
                                         gu_drain(8)
                                         swiglu(slot, acts_dst, 8)
-                                    with txl.Else():
+                                    with txl.else_():
                                         gu_drain(NT)
                                         swiglu(slot, acts_dst, NT)
                             else:
@@ -1854,18 +1854,18 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
 
             txl.ptx.barrier.cluster.wait()
             read_task(ts, e, ntok)
-            with txl.If(e >= 0), txl.Then():
+            with txl.if_(e >= 0), txl.then_():
                 process_gu(ts.stage, ntok, acts)
-            with txl.While(e >= 0):
+            with txl.while_(e >= 0):
                 nst = _i32(ts.stage + 1)
                 nph = _i32(ts.phase)
-                with txl.If(nst == TASK_RING), txl.Then():
+                with txl.if_(nst == TASK_RING), txl.then_():
                     txl.assign(nst, txl.int32(0))
                     txl.assign(nph, nph ^ 1)
                 task_full.wait(nst, nph)
                 txl.ptx.ld.shared.s32(e_nxt, s_task.ptr_to([nst, 0]))
                 txl.ptx.ld.shared.s32(ntok_n, s_task.ptr_to([nst, 2]))
-                with txl.If(e_nxt >= 0), txl.Then():
+                with txl.if_(e_nxt >= 0), txl.then_():
                     process_gu(nst, ntok_n, acts_n)
                 tk_w = _rng("m-d")
                 d_epilogue()
@@ -1878,29 +1878,29 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
             release_task(ts, False)
             if not TAGGED:
                 named_bar()
-                with txl.If(tm == 0), txl.Then():
+                with txl.if_(tm == 0), txl.then_():
                     txl.ptx.red.release.gpu.global_.add.u32(
                         sync_ctr.ptr_to([PRODUCERS_DONE]), txl.uint32(1)
                     )
 
         txl.cuda.cta_sync()
         if M == 8:
-            with txl.If(warp == 1), txl.Then():
+            with txl.if_(warp == 1), txl.then_():
                 txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
                     tmem_base, txl.uint32(TMEM_COLS)
                 )
         if M >= 8:
             if TAGGED:
-                with txl.If(warp < 3), txl.Then():
+                with txl.if_(warp < 3), txl.then_():
                     txl.ptx.ld.relaxed.gpu.global_.u32(generation, sync_ctr.ptr_to([cta]))
             finalize_routes(tid, NTHREADS, True)
         if M != 8:
-            with txl.If(warp == 1), txl.Then():
+            with txl.if_(warp == 1), txl.then_():
                 txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
                     tmem_base, txl.uint32(TMEM_COLS)
                 )
 
-        with txl.If(dyn), txl.Then():
+        with txl.if_(dyn), txl.then_():
             txl.ptx.barrier.cluster.arrive()
             txl.ptx.barrier.cluster.wait()
 
@@ -1941,16 +1941,16 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
 
     @txl.kernel()
     def alphamoe_wide_m1(
-        topk_ids: txl.Tensor((txl.int64(),), txl.i32),
-        topk_w: txl.Tensor((txl.int64(),), txl.f32),
-        hidden: txl.Tensor((txl.int64(),), txl.i32),
-        w1s: txl.Tensor((txl.int64(),), txl.f32),
-        w2s: txl.Tensor((txl.int64(),), txl.f32),
+        topk_ids: txl.Tensor((txl.int64(),), "int32"),
+        topk_w: txl.Tensor((txl.int64(),), "float32"),
+        hidden: txl.Tensor((txl.int64(),), "int32"),
+        w1s: txl.Tensor((txl.int64(),), "float32"),
+        w2s: txl.Tensor((txl.int64(),), "float32"),
         out: txl.Tensor((txl.int64(),), "uint64"),
-        final_out: txl.Tensor((txl.int64(),), txl.u16),
+        final_out: txl.Tensor((txl.int64(),), "uint16"),
         tm_w1: txl.Ptr(txl.TensorMap),
         tm_w2: txl.Ptr(txl.TensorMap),
-        rsf: txl.f32,
+        rsf: "float32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=G, block=NWARPS * 32, cluster=(CS8,)),
@@ -1966,14 +1966,14 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
         cl = cta // CS8
 
         e_pre = _i32(txl.int32(0))
-        with txl.If(txl.And(warp == 0, lane == 0)), txl.Then():
+        with txl.if_(txl.And(warp == 0, lane == 0)), txl.then_():
             txl.ptx.ld.global_.nc.s32(e_pre, topk_ids.ptr_to([cl]))
         QT = 16
         QNW = 64 // QT
-        wpre = txl.alloc_local((QNW,), txl.u32)
+        wpre = txl.alloc_local((QNW,), "uint32")
         for j in range(QNW):
             txl.assign(wpre[j], txl.uint32(0))
-        with txl.If(warp == MATH_WARP0 + 2), txl.Then():
+        with txl.if_(warp == MATH_WARP0 + 2), txl.then_():
             q_kb = rank * KBC + lane // QT
             txl.ptx.ld.global_.nc.v4.b32(
                 wpre[0],
@@ -1984,14 +1984,14 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
             )
 
         smem = txl.smem_pool()
-        a_tile = smem.alloc((STAGES, BM, BK), txl.f8e4m3, align=1024, swizzle=txl.SW128B)
-        b_gu = smem.alloc((KBC, NT, BK), txl.f8e4m3, align=1024, swizzle=txl.SW128B)
-        b_act = smem.alloc((NT, BK), txl.f8e4m3, align=1024, swizzle=txl.SW128B)
-        s_red = smem.alloc((CS8, BM, 2), txl.f32, align=16)
-        s_xs = smem.alloc((4,), txl.f32, align=16)
-        s_amax = smem.alloc((4,), txl.f32, align=16)
-        s_misc = smem.alloc((4,), txl.i32, align=16)
-        tmem_slot = smem.alloc((1,), txl.u32, align=4)
+        a_tile = smem.alloc((STAGES, BM, BK), "float8_e4m3fn", align=1024, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        b_gu = smem.alloc((KBC, NT, BK), "float8_e4m3fn", align=1024, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        b_act = smem.alloc((NT, BK), "float8_e4m3fn", align=1024, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_red = smem.alloc((CS8, BM, 2), "float32", align=16)
+        s_xs = smem.alloc((4,), "float32", align=16)
+        s_amax = smem.alloc((4,), "float32", align=16)
+        s_misc = smem.alloc((4,), "int32", align=16)
+        tmem_slot = smem.alloc((1,), "uint32", align=4)
 
         full_bar = txl.TMABar(smem, STAGES)
         tfull = txl.TCGen05Bar(smem, STAGES)
@@ -2006,48 +2006,48 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
         red_full.init(1)
         act_full.init(4)
         txl.ptx.fence.mbarrier_init.release.cluster()
-        with txl.If(warp == 1), txl.Then():
+        with txl.if_(warp == 1), txl.then_():
             txl.ptx["tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"](
                 txl.address_of(tmem_slot[0]), txl.uint32(TMEM_COLS)
             )
             txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"]()
-        with txl.If(txl.And(warp == 0, lane == 0)), txl.Then():
+        with txl.if_(txl.And(warp == 0, lane == 0)), txl.then_():
             txl.ptx.prefetch.tensormap(txl.address_of(tm_w1))
             txl.ptx.prefetch.tensormap(txl.address_of(tm_w2))
 
         txl.cuda.cta_sync()
-        with txl.If(tid == 0), txl.Then():
+        with txl.if_(tid == 0), txl.then_():
             red_full.arrive(0, tx_count=(CS8 - 1) * RED_BYTES)
         txl.ptx.barrier.cluster.arrive.relaxed()
 
         def remote_u32(ptr, peer_):
-            r = txl.local_scalar(txl.u32)
+            r = txl.local_scalar("uint32")
             txl.ptx.mapa.shared__cluster.u32(
                 r, txl.cuda.cvta_generic_to_shared(ptr), txl.cast(peer_, "uint32")
             )
             return r
 
         def cluster_wait(bar, stage, phase):
-            ok = txl.local_scalar(txl.u32, init=txl.uint32(0))
-            with txl.While(ok == txl.uint32(0)):
+            ok = txl.local_scalar("uint32", init=txl.uint32(0))
+            with txl.while_(ok == txl.uint32(0)):
                 txl.ptx.mbarrier.try_wait.parity.acquire.cluster.shared.b64(
                     ok, bar.ptr_to([stage]), txl.cast(phase, "uint32")
                 )
 
         def rcp_refined(scale):
-            rcp0 = txl.local_scalar(txl.f32)
+            rcp0 = txl.local_scalar("float32")
             txl.ptx.rcp.approx.ftz.f32(rcp0, scale)
-            rerr = txl.local_scalar(txl.f32)
+            rerr = txl.local_scalar("float32")
             txl.ptx[FMA_F32](rerr, txl.float32(0.0) - scale, rcp0, txl.float32(1.0))
-            rcp1 = txl.local_scalar(txl.f32)
+            rcp1 = txl.local_scalar("float32")
             txl.ptx[FMA_F32](rcp1, rerr, rcp0, rcp0)
             return rcp1
 
         def named_bar():
             txl.ptx.bar.sync(txl.uint32(BAR_MATH), txl.uint32(NMATH))
 
-        with txl.If(warp == 0), txl.Then():
-            with txl.If(lane == 0), txl.Then():
+        with txl.if_(warp == 0), txl.then_():
+            with txl.if_(lane == 0), txl.then_():
                 e = e_pre
                 tk_p = _rng("p-gu")
                 for u in range(KBC):
@@ -2083,9 +2083,9 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
                 txl.cuda.iket.mark("e-ready")
             txl.ptx.barrier.cluster.wait()
 
-        with txl.If(warp == 1), txl.Then():
-            with txl.If(lane == 0), txl.Then():
-                tmem_base = txl.local_scalar(txl.u32)
+        with txl.if_(warp == 1), txl.then_():
+            with txl.if_(lane == 0), txl.then_():
+                tmem_base = txl.local_scalar("uint32")
                 txl.ptx.ld.shared.u32(tmem_base, tmem_slot.ptr_to([0]))
 
                 def mma_stage(s, bview, wait_full=True):
@@ -2132,7 +2132,7 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
                 _rng_end(tk_m)
             txl.ptx.barrier.cluster.wait()
 
-        with txl.If(warp >= MATH_WARP0), txl.Then():
+        with txl.if_(warp >= MATH_WARP0), txl.then_():
             tm = (warp % 4) * 32 + lane
             # Every route writes every record on each ordered launch. The phase
             # and its two BF16 values must remain one aligned scalar u64 access.
@@ -2142,27 +2142,27 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
             phase = _u32(
                 txl.cast(txl.shift_right(old_record, txl.uint64(32)), "uint32") ^ txl.uint32(1)
             )
-            tmem_base = txl.local_scalar(txl.u32)
+            tmem_base = txl.local_scalar("uint32")
             txl.ptx.ld.shared.u32(tmem_base, tmem_slot.ptr_to([0]))
 
             e_ready.wait(0, 0)
-            e = txl.local_scalar(txl.i32)
+            e = txl.local_scalar("int32")
             txl.ptx.ld.shared.s32(e, s_misc.ptr_to([0]))
-            w1v = txl.alloc_local((2 * KBC,), txl.f32)
+            w1v = txl.alloc_local((2 * KBC,), "float32")
             for t_ in range(2):
                 txl.ptx.ld.global_.nc.v2.f32(
                     w1v[t_ * KBC],
                     w1v[t_ * KBC + 1],
                     w1s.ptr_to([e * (2 * KB) + t_ * KB + rank * KBC]),
                 )
-            w2v = txl.alloc_local((HBC,), txl.f32)
+            w2v = txl.alloc_local((HBC,), "float32")
             txl.ptx.ld.global_.nc.v2.f32(w2v[0], w2v[1], w2s.ptr_to([e * KB + rank * HBC]))
 
             tk_w = _rng("m-quant")
             T = QT
             NW = QNW
             assert KBC * T == 32
-            with txl.If(tm < KBC * T), txl.Then():
+            with txl.if_(tm < KBC * T), txl.then_():
                 u = tm // T
                 sub = tm % T
                 w = wpre
@@ -2174,7 +2174,7 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
                     )
                 m_ = T // 2
                 while m_ >= 1:
-                    o = txl.local_scalar(txl.f32)
+                    o = txl.local_scalar("float32")
                     txl.ptx.shfl_sync.bfly.b32(
                         o, amax, txl.uint32(m_), txl.uint32(0x1F), txl.uint32(0xFFFFFFFF)
                     )
@@ -2182,11 +2182,11 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
                     m_ //= 2
                 scale = _f32(txl.max(amax, txl.float32(1.0e-8)) * txl.float32(INV_FP8_MAX))
                 rcp1 = rcp_refined(scale)
-                qw = txl.alloc_local((2,), txl.u32)
+                qw = txl.alloc_local((2,), "uint32")
                 for jx in range(2):
                     a = 2 * jx
-                    h_lo = txl.local_scalar(txl.u16)
-                    h_hi = txl.local_scalar(txl.u16)
+                    h_lo = txl.local_scalar("uint16")
+                    h_hi = txl.local_scalar("uint16")
                     txl.ptx.cvt.rn.satfinite.e4m3x2.f32(
                         h_lo, _bf16_hi(w[a]) * rcp1, _bf16_lo(w[a]) * rcp1
                     )
@@ -2201,7 +2201,7 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
                         ),
                     )
                 txl.ptx.st.shared.v2.b32(b_gu[u].ptr_to(0, sub * (BK // T)), qw[0], qw[1])
-                with txl.If(sub == 0), txl.Then():
+                with txl.if_(sub == 0), txl.then_():
                     txl.ptx.st.shared.f32(s_xs.ptr_to([u]), scale)
 
             ZCH = (KBC + 1) * (NT - 1) * 8
@@ -2212,7 +2212,7 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
                 n_ = 1 + rem // 8
                 c_ = rem % 8
                 cond = txl.int32(1) == 1 if (i + 1) * NMATH <= ZCH else j < ZCH
-                with txl.If(cond), txl.Then():
+                with txl.if_(cond), txl.then_():
                     base = txl.Select(
                         tile == 0,
                         txl.cuda.cvta_generic_to_shared(b_gu[0].ptr_to(0, 0)),
@@ -2231,17 +2231,17 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
                     )
             txl.ptx.fence.proxy.async_.shared__cta()
             txl.cuda.warp_sync()
-            with txl.If(lane == 0), txl.Then():
+            with txl.if_(lane == 0), txl.then_():
                 bready.arrive(0)
             bready.wait(0, 0)
             _rng_end(tk_w)
 
-            xs = txl.alloc_local((KBC,), txl.f32)
+            xs = txl.alloc_local((KBC,), "float32")
             txl.ptx.ld.shared.v2.f32(xs[0], xs[1], s_xs.ptr_to([0]))
 
             tk_w = _rng("m-gu")
-            gu_values = txl.alloc_local((2 * KBC,), txl.f32)
-            part = txl.alloc_local((2,), txl.f32)
+            gu_values = txl.alloc_local((2 * KBC,), "float32")
+            part = txl.alloc_local((2,), "float32")
             for t_ in range(2):
                 txl.assign(part[t_], txl.float32(0.0))
             tfull.wait(2 * KBC - 1, 0)
@@ -2259,17 +2259,17 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
             tk_w = _rng("m-reduce")
             txl.ptx.barrier.cluster.wait()
             txl.ptx.st.shared.v2.f32(s_red.ptr_to([rank, tm, 0]), part[0], part[1])
-            g1 = txl.local_scalar(txl.f32)
-            u1 = txl.local_scalar(txl.f32)
+            g1 = txl.local_scalar("float32")
+            u1 = txl.local_scalar("float32")
             txl.ptx.shfl_sync.down.b32(
                 g1, part[0], txl.uint32(1), txl.uint32(0x1F), txl.uint32(0xFFFFFFFF)
             )
             txl.ptx.shfl_sync.down.b32(
                 u1, part[1], txl.uint32(1), txl.uint32(0x1F), txl.uint32(0xFFFFFFFF)
             )
-            with txl.If(lane % 2 == 0), txl.Then():
+            with txl.if_(lane % 2 == 0), txl.then_():
                 for p in range(CS8):
-                    with txl.If(p != rank), txl.Then():
+                    with txl.if_(p != rank), txl.then_():
                         r_dst = remote_u32(s_red.ptr_to([rank, tm, 0]), p)
                         r_bar = remote_u32(red_full.ptr_to([0]), p)
                         txl.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
@@ -2281,7 +2281,7 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
                             r_bar,
                         )
             cluster_wait(red_full, 0, 0)
-            parts = txl.alloc_local((CS8, 2), txl.f32)
+            parts = txl.alloc_local((CS8, 2), "float32")
             for r_ in range(CS8):
                 txl.ptx.ld.shared.v2.f32(parts[r_, 0], parts[r_, 1], s_red.ptr_to([r_, tm, 0]))
             gsum = _f32(txl.float32(0.0))
@@ -2292,37 +2292,37 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
             _rng_end(tk_w)
 
             tk_w = _rng("m-swiglu")
-            ex = txl.local_scalar(txl.f32)
+            ex = txl.local_scalar("float32")
             txl.ptx.ex2.approx.ftz.f32(ex, gsum * txl.float32(-LOG2E))
-            sig = txl.local_scalar(txl.f32)
+            sig = txl.local_scalar("float32")
             txl.ptx.rcp.approx.ftz.f32(sig, ex + txl.float32(1.0))
             hv = _f32(gsum * sig * usum)
-            am = txl.local_scalar(txl.f32)
+            am = txl.local_scalar("float32")
             txl.ptx.redux_sync.max.abs.f32(am, hv, txl.uint32(0xFFFFFFFF))
-            with txl.If(lane == 0), txl.Then():
+            with txl.if_(lane == 0), txl.then_():
                 txl.ptx.st.shared.f32(s_amax.ptr_to([warp % 4]), am)
             named_bar()
-            am0 = txl.local_scalar(txl.f32)
-            am1 = txl.local_scalar(txl.f32)
-            am2 = txl.local_scalar(txl.f32)
-            am3 = txl.local_scalar(txl.f32)
+            am0 = txl.local_scalar("float32")
+            am1 = txl.local_scalar("float32")
+            am2 = txl.local_scalar("float32")
+            am3 = txl.local_scalar("float32")
             txl.ptx.ld.shared.v4.f32(am0, am1, am2, am3, s_amax.ptr_to([0]))
             amx = _f32(txl.max(txl.max(am0, am1), txl.max(am2, am3)))
             sc = _f32(txl.max(amx, txl.float32(1.0e-8)) * txl.float32(INV_FP8_MAX))
             rcp_a = rcp_refined(sc)
-            qb = txl.local_scalar(txl.u16)
+            qb = txl.local_scalar("uint16")
             txl.ptx.cvt.rn.satfinite.e4m3x2.f32(qb, txl.float32(0.0), hv * rcp_a)
             txl.ptx.st.shared.u8(b_act.ptr_to(0, tm), txl.cast(qb, "uint8"))
             txl.ptx.fence.proxy.async_.shared__cta()
             txl.cuda.warp_sync()
-            with txl.If(lane == 0), txl.Then():
+            with txl.if_(lane == 0), txl.then_():
                 act_full.arrive(0)
             afac = _f32(sc)
             _rng_end(tk_w)
 
             tk_w = _rng("m-d")
-            rounded = txl.alloc_local((HBC,), txl.u16)
-            down_values = txl.alloc_local((HBC,), txl.f32)
+            rounded = txl.alloc_local((HBC,), "uint16")
+            down_values = txl.alloc_local((HBC,), "float32")
             tfull.wait(2 * KBC + HBC - 1, 0)
             txl.ptx.tcgen05.fence__after_thread_sync()
             for hh in range(HBC):
@@ -2333,7 +2333,7 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
             txl.ptx.tcgen05.fence__before_thread_sync()
             # Every math warp has drained TMEM before this collective release.
             named_bar()
-            with txl.If(warp == MATH_WARP0), txl.Then():
+            with txl.if_(warp == MATH_WARP0), txl.then_():
                 txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
                     tmem_base, txl.uint32(TMEM_COLS)
                 )
@@ -2344,18 +2344,18 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
             record = txl.local_scalar("uint64")
             txl.ptx.mov.b64(record, payload, phase)
             txl.ptx.st.relaxed.gpu.global_.u64(out.ptr_to([record_index]), record)
-            with txl.If(cl == TOPK - 1), txl.Then():
+            with txl.if_(cl == TOPK - 1), txl.then_():
                 # One byte address lets the nine polls use constant offsets.
                 record_base = txl.local_scalar("uint64")
                 txl.assign(record_base, txl.reinterpret(out.ptr_to([rank * BM + tm]), ty="uint64"))
-                weights = txl.alloc_local((TOPK,), txl.f32)
+                weights = txl.alloc_local((TOPK,), "float32")
                 for route in range(TOPK):
                     txl.ptx.ld.global_.nc.f32(weights[route], topk_w.ptr_to([route]))
                 records = txl.alloc_local((TOPK - 1,), "uint64")
                 for route in range(TOPK - 1):
                     txl.ptx.mov.b64(records[route], txl.uint32(0), phase ^ txl.uint32(1))
                 pending = _u32(txl.uint32(1))
-                with txl.While(pending != txl.uint32(0)):
+                with txl.while_(pending != txl.uint32(0)):
                     txl.assign(pending, txl.uint32(0))
                     for route in range(TOPK - 1):
                         # Keep the payload from a completed publication while others wait.
@@ -2379,7 +2379,7 @@ def build_wide_kernel(G, M, TOPK, E, HID, INTER, *, backend_config=None):
                     txl.assign(
                         pending, txl.cast(stamp_sum != phase * txl.uint32(TOPK - 1), "uint32")
                     )
-                values = txl.alloc_local((TOPK,), txl.u32)
+                values = txl.alloc_local((TOPK,), "uint32")
                 for route in range(TOPK - 1):
                     txl.assign(values[route], txl.cast(records[route], "uint32"))
                 txl.assign(values[TOPK - 1], payload)
@@ -3004,24 +3004,24 @@ def _check_route_rounding(packed_f32: bool, *, backend_config=None) -> None:
 
     @txl.kernel()
     def check(
-        expert: txl.Tensor((txl.int64(),), txl.u32),
-        weight: txl.Tensor((txl.int64(),), txl.f32),
-        scale: txl.Tensor((txl.int64(),), txl.f32),
-        output: txl.Tensor((txl.int64(),), txl.u32),
+        expert: txl.Tensor((txl.int64(),), "uint32"),
+        weight: txl.Tensor((txl.int64(),), "float32"),
+        scale: txl.Tensor((txl.int64(),), "float32"),
+        output: txl.Tensor((txl.int64(),), "uint32"),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=4, block=1 * 32), backend_config=backend_config
         )
 
         row = txl.cta_id()
-        values = txl.alloc_local((TOPK,), txl.u32)
+        values = txl.alloc_local((TOPK,), "uint32")
         for route in range(TOPK):
             txl.ptx.ld.global_.u32(values[route], expert.ptr_to([row * TOPK + route]))
-        rsf = txl.local_scalar(txl.f32)
+        rsf = txl.local_scalar("float32")
         txl.ptx.ld.global_.f32(rsf, scale.ptr_to([row]))
         route_weights = _load_route_weights(weight, row * TOPK, rsf, TOPK)
         packed = _route_sum_bf16x2(values, route_weights, TOPK, packed_f32)
-        with txl.If(txl.thread_id() == 0), txl.Then():
+        with txl.if_(txl.thread_id() == 0), txl.then_():
             txl.ptx.st.global_.u32(output.ptr_to([row]), packed)
 
     check.compile()(

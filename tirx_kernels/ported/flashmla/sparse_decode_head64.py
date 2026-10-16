@@ -317,20 +317,20 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
 
     @txl.kernel()
     def sparse_flashmla_decode_head64_main(
-        q: txl.Tensor((txl.int64(),), txl.bf16),
-        kv: txl.Tensor((txl.int64(),), txl.bf16),
-        indices: txl.Tensor((txl.int64(),), txl.i32),
-        topk_length: txl.Tensor((txl.int64(),), txl.i32),
-        attn_sink: txl.Tensor((txl.int64(),), txl.f32),
-        lse: txl.Tensor((txl.int64(),), txl.f32),
-        out: txl.Tensor((txl.int64(),), txl.bf16),
-        lse_accum: txl.Tensor((txl.int64(),), txl.f32),
-        o_accum: txl.Tensor((txl.int64(),), txl.f32),
-        tile_scheduler_metadata: txl.Tensor((txl.int64(),), txl.i32),
-        num_splits: txl.Tensor((txl.int64(),), txl.i32),
-        extra_kv: txl.Tensor((txl.int64(),), txl.bf16),
-        extra_indices: txl.Tensor((txl.int64(),), txl.i32),
-        extra_topk_length: txl.Tensor((txl.int64(),), txl.i32),
+        q: txl.Tensor((txl.int64(),), "bfloat16"),
+        kv: txl.Tensor((txl.int64(),), "bfloat16"),
+        indices: txl.Tensor((txl.int64(),), "int32"),
+        topk_length: txl.Tensor((txl.int64(),), "int32"),
+        attn_sink: txl.Tensor((txl.int64(),), "float32"),
+        lse: txl.Tensor((txl.int64(),), "float32"),
+        out: txl.Tensor((txl.int64(),), "bfloat16"),
+        lse_accum: txl.Tensor((txl.int64(),), "float32"),
+        o_accum: txl.Tensor((txl.int64(),), "float32"),
+        tile_scheduler_metadata: txl.Tensor((txl.int64(),), "int32"),
+        num_splits: txl.Tensor((txl.int64(),), "int32"),
+        extra_kv: txl.Tensor((txl.int64(),), "bfloat16"),
+        extra_indices: txl.Tensor((txl.int64(),), "int32"),
+        extra_topk_length: txl.Tensor((txl.int64(),), "int32"),
         kv_rope_tensormap: txl.Ptr(txl.TensorMap),
         kv_nope_tensormap: txl.Ptr(txl.TensorMap),
         extra_kv_rope_tensormap: txl.Ptr(txl.TensorMap),
@@ -338,39 +338,39 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
         q_strided_tensormap: txl.Ptr(txl.TensorMap),
         q_tail_tensormap: txl.Ptr(txl.TensorMap),
         out_tensormap: txl.Ptr(txl.TensorMap),
-        sm_scale_div_log2: txl.f32,
-        stride_q_b: txl.i32,
-        stride_q_s_q: txl.i32,
-        stride_q_h_q: txl.i32,
-        stride_kv_block: txl.i32,
-        stride_kv_row: txl.i32,
-        stride_indices_b: txl.i32,
-        stride_indices_s_q: txl.i32,
-        stride_lse_b: txl.i32,
-        stride_lse_s_q: txl.i32,
-        stride_o_b: txl.i32,
-        stride_o_s_q: txl.i32,
-        stride_o_h_q: txl.i32,
-        stride_extra_kv_block: txl.i32,
-        stride_extra_kv_row: txl.i32,
-        tma_coords_step_per_block: txl.i32,
-        tma_coords_step_per_extra_block: txl.i32,
-        stride_extra_indices_b: txl.i32,
-        stride_extra_indices_s_q: txl.i32,
-        stride_lse_accum_split: txl.i32,
-        stride_lse_accum_s_q: txl.i32,
-        stride_o_accum_split: txl.i32,
-        stride_o_accum_s_q: txl.i32,
-        stride_o_accum_h_q: txl.i32,
-        b: txl.i32,
-        s_q: txl.i32,
-        topk: txl.i32,
-        extra_topk: txl.i32,
-        num_blocks: txl.i32,
-        extra_num_blocks: txl.i32,
-        page_block_size: txl.i32,
-        extra_page_block_size: txl.i32,
-        num_sm_parts: txl.i32,
+        sm_scale_div_log2: "float32",
+        stride_q_b: "int32",
+        stride_q_s_q: "int32",
+        stride_q_h_q: "int32",
+        stride_kv_block: "int32",
+        stride_kv_row: "int32",
+        stride_indices_b: "int32",
+        stride_indices_s_q: "int32",
+        stride_lse_b: "int32",
+        stride_lse_s_q: "int32",
+        stride_o_b: "int32",
+        stride_o_s_q: "int32",
+        stride_o_h_q: "int32",
+        stride_extra_kv_block: "int32",
+        stride_extra_kv_row: "int32",
+        tma_coords_step_per_block: "int32",
+        tma_coords_step_per_extra_block: "int32",
+        stride_extra_indices_b: "int32",
+        stride_extra_indices_s_q: "int32",
+        stride_lse_accum_split: "int32",
+        stride_lse_accum_s_q: "int32",
+        stride_o_accum_split: "int32",
+        stride_o_accum_s_q: "int32",
+        stride_o_accum_h_q: "int32",
+        b: "int32",
+        s_q: "int32",
+        topk: "int32",
+        extra_topk: "int32",
+        num_blocks: "int32",
+        extra_num_blocks: "int32",
+        page_block_size: "int32",
+        extra_page_block_size: "int32",
+        num_sm_parts: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(s_q, num_sm_parts, 1), block=12 * 32),
@@ -382,8 +382,8 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
         warp_idx = txl.warp_id()
         lane_idx = txl.lane_id()
         idx_in_warpgroup = txl.cuda.thread_in_warpgroup()
-        with txl.If(warp_idx == 0), txl.Then():
-            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+        with txl.if_(warp_idx == 0), txl.then_():
+            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                 for _prefetch_i in range(8):
                     txl.ptx.prefetch.tensormap(txl.address_of(out_tensormap))
                 txl.ptx.prefetch.tensormap(txl.address_of(q_strided_tensormap))
@@ -395,28 +395,28 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
         pool = smem.pool
         u_base = pool.offset
         if is_v32:
-            k_union = smem.alloc((NUM_BUFS, B_TOPK, D_V + 64), "bfloat16", swizzle=txl.SW128B).buf
+            k_union = smem.alloc((NUM_BUFS, B_TOPK, D_V + 64), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
             k_union_end = pool.offset
             k_full = k_union
             pool.move_base_to(u_base)
-            k_rope = smem.alloc((NUM_BUFS, B_TOPK, D_V + 64), "bfloat16", swizzle=txl.SW64B).buf
+            k_rope = smem.alloc((NUM_BUFS, B_TOPK, D_V + 64), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_64B_ATOM).buf
             pool.move_base_to(k_union_end)
         else:
-            k_full = smem.alloc((NUM_BUFS, B_TOPK, D_V), "bfloat16", swizzle=txl.SW128B).buf
+            k_full = smem.alloc((NUM_BUFS, B_TOPK, D_V), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
             k_union_end = pool.offset
             pool.move_base_to(u_base)
-            k_rope = smem.alloc((NUM_BUFS, B_TOPK, 64), "bfloat16", swizzle=txl.SW128B).buf
+            k_rope = smem.alloc((NUM_BUFS, B_TOPK, 64), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
             pool.move_base_to(k_union_end)
         raw_nope = pool.alloc((NUM_BUFS, B_TOPK, d_nope // 8), "uint64", align=1024)
         kv_union_end = pool.offset
         pool.move_base_to(u_base)
-        q_sw128 = smem.alloc((B_H, 512), "bfloat16", swizzle=txl.SW128B).buf
+        q_sw128 = smem.alloc((B_H, 512), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
         q_sw128_end = pool.offset
         if is_v32:
             pool.move_base_to(q_sw128_end)
-            q_sw64 = smem.alloc((B_H, 64), "bfloat16", swizzle=txl.SW64B).buf
+            q_sw64 = smem.alloc((B_H, 64), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_64B_ATOM).buf
         o_union_base = pool.offset
-        o_smem = smem.alloc((B_H, D_V), "bfloat16", swizzle=txl.SW128B).buf
+        o_smem = smem.alloc((B_H, D_V), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
         o_bf16_end = pool.offset
         pool.move_base_to(o_union_base)
         o_accum_storage = pool.alloc(((B_H - 1) * (D_V + 8) + D_V,), "float32", align=1024)
@@ -495,11 +495,11 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
             # [start_block, end_block) slice of it this partition owns.  All
             # three roles walk the schedule with exactly this arithmetic.
             topk_len = txl.local_scalar("int32", init=topk)
-            with txl.If(have_topk_length), txl.Then():
+            with txl.if_(have_topk_length), txl.then_():
                 txl.ptx.ld.global_.nc.s32(topk_len, topk_length.ptr_to([batch_idx]))
             orig_topk_padded = txl.max(((topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK, B_TOPK)
             extra_topk_len = txl.local_scalar("int32", init=extra_topk)
-            with txl.If(have_extra_topk_length), txl.Then():
+            with txl.if_(have_extra_topk_length), txl.then_():
                 txl.ptx.ld.global_.nc.s32(extra_topk_len, extra_topk_length.ptr_to([batch_idx]))
             total_topk_padded = (
                 orig_topk_padded + ((extra_topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK
@@ -532,8 +532,8 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
             # descriptor prefetch.  tma_explicit deduplicates the two normal KV
             # descriptors and intentionally does not prefetch src_selector
             # candidates, matching the source's normal-only KV prefetch.
-            with txl.If(warp_idx == 0), txl.Then():
-                with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+            with txl.if_(warp_idx == 0), txl.then_():
+                with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                     txl.ptx.mbarrier.init.shared.b64(
                         bar_last_store_done.ptr_to([0]), txl.uint32(128)
                     )
@@ -584,7 +584,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
             rs_index = txl.PipelineState(NUM_INDEX_BUFS, phase=0)
             scale_pair = txl.cuda.make_float2(sm_scale_div_log2, sm_scale_div_log2)
             attn_sink_log2 = txl.local_scalar("float32", init=txl.float32(-float("inf")))
-            with txl.If(have_attn_sink), txl.Then():
+            with txl.if_(have_attn_sink), txl.then_():
                 attn_sink_val = txl.local_scalar("float32")
                 txl.ptx.ld.global_.nc.f32(attn_sink_val, attn_sink.ptr_to([idx_in_warpgroup % B_H]))
                 txl.assign(attn_sink_log2, attn_sink_val * LOG_2_E)
@@ -602,7 +602,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
             ) = unpack_scheduler_meta(7)
             # The CUDA return exits only the local run_main_loop lambda.  Guard
             # its body so inactive partitions still reach WG0's TMEM dealloc.
-            with txl.If(sched_begin_req < b), txl.Then():
+            with txl.if_(sched_begin_req < b), txl.then_():
                 with txl.serial(sched_begin_req, sched_end_req + 1, unroll=False) as batch_idx:
                     _, _, _, start_block, end_block = batch_block_range(
                         batch_idx,
@@ -660,15 +660,15 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
 
                         p = txl.alloc_local((B_TOPK // 2,), "float32")
                         p_peer = txl.alloc_local((B_TOPK // 2,), "float32")
-                        with txl.If(warp_idx < 2):
-                            with txl.Then():
+                        with txl.if_(warp_idx < 2):
+                            with txl.then_():
                                 _tmem_load(p, txl.uint32(400), B_TOPK // 2)
                                 _tmem_load(
                                     p_peer,
                                     txl.cuda.get_tmem_addr(txl.uint32(400), 0, B_TOPK // 2),
                                     B_TOPK // 2,
                                 )
-                            with txl.Else():
+                            with txl.else_():
                                 _tmem_load(p_peer, txl.uint32(400), B_TOPK // 2)
                                 _tmem_load(
                                     p,
@@ -729,14 +729,14 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                         )
                         with txl.unroll(B_TOPK // 2) as p_i:
                             with (
-                                txl.If(
+                                txl.if_(
                                     txl.bitwise_and(
                                         txl.shift_right(valid_word, txl.cast(p_i, "uint32")),
                                         txl.uint32(1),
                                     )
                                     == txl.uint32(0)
                                 ),
-                                txl.Then(),
+                                txl.then_(),
                             ):
                                 txl.ptx.mov.b32(p[p_i], txl.float32(-float("inf")))
 
@@ -761,11 +761,11 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                         )
                         new_max = txl.local_scalar("float32")
                         scale_for_old = txl.local_scalar("float32")
-                        with txl.If(should_scale_o == txl.uint32(0)):
-                            with txl.Then():
+                        with txl.if_(should_scale_o == txl.uint32(0)):
+                            with txl.then_():
                                 txl.assign(scale_for_old, 1.0)
                                 txl.assign(new_max, mi)
-                            with txl.Else():
+                            with txl.else_():
                                 txl.assign(new_max, txl.max(cur_pi_max, mi))
                                 txl.ptx.ex2.approx.ftz.f32(scale_for_old, mi - new_max)
                         txl.assign(mi, new_max)
@@ -810,10 +810,10 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                 s_words[s_word + 3],
                             )
                         with (
-                            txl.If(
+                            txl.if_(
                                 txl.And(block_idx != start_block, should_scale_o != txl.uint32(0))
                             ),
-                            txl.Then(),
+                            txl.then_(),
                         ):
                             scale_for_old_pair = txl.cuda.make_float2(scale_for_old, scale_for_old)
                             txl.ptx.tcgen05.fence__after_thread_sync()
@@ -833,13 +833,13 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
 
                         txl.ptx.fence.proxy.async_.shared__cta()
                         bar_so_ready.arrive(rs_buf.stage)
-                        with txl.If(block_idx != end_block - 1), txl.Then():
+                        with txl.if_(block_idx != end_block - 1), txl.then_():
                             rs_buf.advance()
                             rs_index.advance()
 
                     # kernel.cuh:301-333.  Empty-row repair, li exchange, LSE
                     # store, final SV wait, and ring advance.
-                    with txl.If(real_mi == txl.float32(-float("inf"))), txl.Then():
+                    with txl.if_(real_mi == txl.float32(-float("inf"))), txl.then_():
                         txl.assign(li, 0.0)
                         txl.assign(mi, txl.float32(-float("inf")))
                     # Every WG0 warp read its peer's per-block maximum from this
@@ -851,9 +851,9 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                     peer_li = txl.local_scalar("float32")
                     txl.ptx.ld.shared.f32(peer_li, rowwise_buf.ptr_to([idx_in_warpgroup ^ 64]))
                     txl.assign(li, li + peer_li)
-                    with txl.If(idx_in_warpgroup < B_H), txl.Then():
-                        with txl.If(is_no_split):
-                            with txl.Then():
+                    with txl.if_(idx_in_warpgroup < B_H), txl.then_():
+                        with txl.if_(is_no_split):
+                            with txl.then_():
                                 cur_lse = txl.local_scalar("float32")
                                 txl.ptx.fma.rn.f32(cur_lse, mi, txl.float32(LN_2), txl.log(li))
                                 txl.ptx.st.global_.f32(
@@ -870,7 +870,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                         cur_lse,
                                     ),
                                 )
-                            with txl.Else():
+                            with txl.else_():
                                 txl.ptx.st.global_.f32(
                                     lse_accum.ptr_to(
                                         [
@@ -885,15 +885,15 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                     rs_buf.advance()
                     rs_index.advance()
                     txl.ptx.tcgen05.fence__after_thread_sync()
-                    with txl.If(txl.And(use_pdl, is_last_batch)), txl.Then():
+                    with txl.if_(txl.And(use_pdl, is_last_batch)), txl.then_():
                         txl.ptx.griddepcontrol.launch_dependents()
 
                     # kernel.cuh:335-421.  Keep no-split TMA output and split
                     # fp32 bulk output as distinct epilogues; attn_sink is only
                     # applied here for no-split and is deferred to combine for
                     # split output exactly as in the CUDA source.
-                    with txl.If(is_no_split):
-                        with txl.Then():
+                    with txl.if_(is_no_split):
+                        with txl.then_():
                             sink_exp = txl.local_scalar("float32")
                             txl.ptx.ex2.approx.ftz.f32(sink_exp, attn_sink_log2 - mi)
                             output_scale = txl.local_scalar(
@@ -956,8 +956,8 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                     )
                                 txl.ptx.fence.proxy.async_.shared__cta()
                                 txl.ptx.bar.sync(txl.uint32(BAR_WG0_SYNC), 128)
-                                with txl.If(warp_idx == 0), txl.Then():
-                                    with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+                                with txl.if_(warp_idx == 0), txl.then_():
+                                    with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                                         txl.ptx[_TMA_S2G_4D](
                                             txl.address_of(out_tensormap),
                                             txl.int32(col_base),
@@ -975,8 +975,8 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                             ),
                                         )
                                 warp1_col_base = col_base + D_V // 4
-                                with txl.If(warp_idx == 1), txl.Then():
-                                    with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+                                with txl.if_(warp_idx == 1), txl.then_():
+                                    with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                                         txl.ptx[_TMA_S2G_4D](
                                             txl.address_of(out_tensormap),
                                             txl.int32(warp1_col_base),
@@ -999,7 +999,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                             emit_no_split_epilogue(2)
                             emit_no_split_epilogue(3)
                             txl.ptx.cp.async_.bulk.commit_group()
-                        with txl.Else():
+                        with txl.else_():
                             output_scale = txl.local_scalar(
                                 "float32",
                                 init=txl.if_then_else(li == 0.0, 0.0, txl.cuda.fdividef(1.0, li)),
@@ -1033,7 +1033,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                     )
                             txl.ptx.fence.proxy.async_.shared__cta()
                             txl.ptx.bar.sync(txl.uint32(BAR_WG0_SYNC), 128)
-                            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+                            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                                 # One int32 row index per store: handing
                                 # ptr_to the open sum lets the index
                                 # widening distribute over it, so each of
@@ -1060,7 +1060,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                     # control flow distinct from the empty-role lanes.
                     txl.ptx.barrier.sync(txl.uint32(BAR_EVERYONE_SYNC), txl.uint32(NUM_THREADS))
 
-            with txl.If(warp_idx == 0), txl.Then():
+            with txl.if_(warp_idx == 0), txl.then_():
                 txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
                     txl.uint32(0), txl.uint32(512)
                 )
@@ -1094,7 +1094,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                         ty="uint64",
                     )
                     extra_k_scales_ptr_u64 = txl.local_scalar("uint64", init=txl.uint64(0))
-                    with txl.If(have_extra_kv), txl.Then():
+                    with txl.if_(have_extra_kv), txl.then_():
                         txl.assign(
                             extra_k_scales_ptr_u64,
                             txl.reinterpret(
@@ -1117,7 +1117,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                 batch_epoch = txl.PipelineState(1, phase=0)
 
                 # The CUDA return exits only this role's run_main_loop lambda.
-                with txl.If(sched_begin_req < b), txl.Then():
+                with txl.if_(sched_begin_req < b), txl.then_():
                     with txl.serial(sched_begin_req, sched_end_req + 1, unroll=False) as batch_idx:
                         (topk_len, extra_topk_len, orig_topk_padded, start_block, end_block) = (
                             batch_block_range(
@@ -1323,7 +1323,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                 )
                                 with txl.unroll(B_TOPK // 4) as row4:
                                     row = row4 * 4
-                                    with txl.If(row + 4 < B_TOPK), txl.Then():
+                                    with txl.if_(row + 4 < B_TOPK), txl.then_():
                                         next_index_words = next_indices.view("uint32")
                                         txl.ptx.ld.shared.v4.u32(
                                             next_index_words[0],
@@ -1340,7 +1340,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                             txl.address_of(kv_nope_tensormap), ty="uint64"
                                         ),
                                     )
-                                    with txl.If(have_extra_kv), txl.Then():
+                                    with txl.if_(have_extra_kv), txl.then_():
                                         txl.assign(
                                             selected_nope_tensormap,
                                             (
@@ -1404,7 +1404,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                 )
                                 with txl.unroll(B_TOPK // 4) as row4:
                                     row = row4 * 4
-                                    with txl.If(row + 4 < B_TOPK), txl.Then():
+                                    with txl.if_(row + 4 < B_TOPK), txl.then_():
                                         next_index_words = next_indices.view("uint32")
                                         txl.ptx.ld.shared.v4.u32(
                                             next_index_words[0],
@@ -1450,7 +1450,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                                 )
                                             ),
                                         )
-                                        with txl.If(have_extra_kv), txl.Then():
+                                        with txl.if_(have_extra_kv), txl.then_():
                                             txl.assign(
                                                 selected_rope_tensormap,
                                                 txl.if_then_else(
@@ -1529,8 +1529,8 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
 
                                 pair_indices = txl.alloc_local((2,), "int32")
                                 pair_index_words = pair_indices.view("uint32")
-                                with txl.If(is_extra):
-                                    with txl.Then():
+                                with txl.if_(is_extra):
+                                    with txl.then_():
                                         txl.ptx.ld.global_.nc.v2.u32(
                                             pair_index_words[0],
                                             pair_index_words[1],
@@ -1538,7 +1538,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                                 [extra_indices_base + abs_pos]
                                             ),
                                         )
-                                    with txl.Else():
+                                    with txl.else_():
                                         txl.ptx.ld.global_.nc.v2.u32(
                                             pair_index_words[0],
                                             pair_index_words[1],
@@ -1603,8 +1603,8 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                         # The offset is unguarded here (unlike the
                                         # V32 arm, which zeroes it), so the load stays
                                         # inside the validity branch.
-                                        with txl.If(txl.Cast(token_valid, "bool")):
-                                            with txl.Then():
+                                        with txl.if_(txl.Cast(token_valid, "bool")):
+                                            with txl.then_():
                                                 txl.ptx.ld.global_.nc.u64(
                                                     words[pair_i],
                                                     txl.reinterpret(
@@ -1612,7 +1612,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                                         ty=PtrType(PrimType("uint64")),
                                                     ),
                                                 )
-                                            with txl.Else():
+                                            with txl.else_():
                                                 txl.ptx.mov.b64(words[pair_i], txl.uint64(0))
 
                                 valid_mask = txl.local_scalar("int8", init=txl.int8(0))
@@ -1767,7 +1767,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                     coord_words[0],
                                     coord_words[1],
                                 )
-                                with txl.If(lane_idx % 4 == 0), txl.Then():
+                                with txl.if_(lane_idx % 4 == 0), txl.then_():
                                     txl.ptx.st.shared.b8(
                                         is_token_valid.ptr_to([rs_index.stage, lane_idx // 4]),
                                         txl.reinterpret(valid_mask, ty="uint8"),
@@ -1780,7 +1780,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                 start_block, txl.min(num_orig_blocks, end_block), unroll=False
                             ) as block_idx:
                                 process_index_block(block_idx, False)
-                            with txl.If(txl.And(have_extra_kv, have_extra_indices)), txl.Then():
+                            with txl.if_(txl.And(have_extra_kv, have_extra_indices)), txl.then_():
                                 with txl.serial(
                                     txl.max(start_block, num_orig_blocks), end_block, unroll=False
                                 ) as block_idx:
@@ -1789,22 +1789,22 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                         txl.ptx.barrier.sync(txl.uint32(BAR_EVERYONE_SYNC), txl.uint32(NUM_THREADS))
                         batch_epoch.advance()
 
-            with txl.If(selected_wg1_role == 4):
-                with txl.Then():
+            with txl.if_(selected_wg1_role == 4):
+                with txl.then_():
                     run_wg1_role(4)
-                with txl.Else():
-                    with txl.If(selected_wg1_role == 5):
-                        with txl.Then():
+                with txl.else_():
+                    with txl.if_(selected_wg1_role == 5):
+                        with txl.then_():
                             run_wg1_role(5)
-                        with txl.Else():
-                            with txl.If(selected_wg1_role == 6):
-                                with txl.Then():
+                        with txl.else_():
+                            with txl.if_(selected_wg1_role == 6):
+                                with txl.then_():
                                     run_wg1_role(6)
-                                with txl.Else():
-                                    with txl.If(selected_wg1_role == 7):
-                                        with txl.Then():
+                                with txl.else_():
+                                    with txl.if_(selected_wg1_role == 7):
+                                        with txl.then_():
                                             run_wg1_role(7)
-                                        with txl.Else():
+                                        with txl.else_():
                                             run_wg1_role(-1)
 
         def dequant():
@@ -1839,7 +1839,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
             batch_epoch = txl.PipelineState(1, phase=0)
 
             # The CUDA return exits only this role's run_main_loop lambda.
-            with txl.If(sched_begin_req < b), txl.Then():
+            with txl.if_(sched_begin_req < b), txl.then_():
                 with txl.serial(sched_begin_req, sched_end_req + 1, unroll=False) as batch_idx:
                     _, _, _, start_block, end_block = batch_block_range(
                         batch_idx,
@@ -1945,7 +1945,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                             with txl.unroll(cols_per_group) as local_col:
                                 raw_fp8x8 = txl.local_scalar("uint64")
                                 txl.ptx.mov.b64(raw_fp8x8, cur_raw_fp8x8)
-                                with txl.If(local_col + 1 < cols_per_group), txl.Then():
+                                with txl.if_(local_col + 1 < cols_per_group), txl.then_():
                                     txl.ptx.ld.shared.u64(
                                         cur_raw_fp8x8,
                                         cur_raw_nope_base_uint_addr
@@ -1995,13 +1995,13 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
             # 384-thread per-batch barrier.
             selected_wg1_role = txl.local_scalar("int32", init=-1)
             with q_mma:
-                with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+                with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                     txl.assign(selected_wg1_role, 4)
             with raw_nope_tma:
-                with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+                with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                     txl.assign(selected_wg1_role, 5)
             with rope_tma:
-                with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+                with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                     txl.assign(selected_wg1_role, 6)
             with index_scale:
                 txl.assign(selected_wg1_role, 7)
@@ -2015,27 +2015,27 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
 def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False, *, backend_config=None):
     @txl.kernel()
     def sparse_decode_head64_combine(
-        lse: txl.Tensor((txl.int64(),), txl.f32),
-        out: txl.Tensor((txl.int64(),), txl.bf16),
-        lse_accum: txl.Tensor((txl.int64(),), txl.f32),
-        o_accum: txl.Tensor((txl.int64(),), txl.f32),
-        num_splits: txl.Tensor((txl.int64(),), txl.i32),
-        attn_sink: txl.Tensor((txl.int64(),), txl.f32),
-        stride_lse_b: txl.i32,
-        stride_lse_s_q: txl.i32,
-        stride_o_b: txl.i32,
-        stride_o_s_q: txl.i32,
-        stride_o_h_q: txl.i32,
-        stride_lse_accum_split: txl.i32,
-        stride_lse_accum_s_q: txl.i32,
-        stride_o_accum_split: txl.i32,
-        stride_o_accum_s_q: txl.i32,
-        stride_o_accum_h_q: txl.i32,
-        b: txl.i32,
-        s_q: txl.i32,
-        h_q: txl.i32,
-        d_v: txl.i32,
-        num_sm_parts: txl.i32,
+        lse: txl.Tensor((txl.int64(),), "float32"),
+        out: txl.Tensor((txl.int64(),), "bfloat16"),
+        lse_accum: txl.Tensor((txl.int64(),), "float32"),
+        o_accum: txl.Tensor((txl.int64(),), "float32"),
+        num_splits: txl.Tensor((txl.int64(),), "int32"),
+        attn_sink: txl.Tensor((txl.int64(),), "float32"),
+        stride_lse_b: "int32",
+        stride_lse_s_q: "int32",
+        stride_o_b: "int32",
+        stride_o_s_q: "int32",
+        stride_o_h_q: "int32",
+        stride_lse_accum_split: "int32",
+        stride_lse_accum_s_q: "int32",
+        stride_o_accum_split: "int32",
+        stride_o_accum_s_q: "int32",
+        stride_o_accum_h_q: "int32",
+        b: "int32",
+        s_q: "int32",
+        h_q: "int32",
+        d_v: "int32",
+        num_sm_parts: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -2063,16 +2063,16 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False, *, backend_co
         h_block_base = txl.local_scalar("int32", init=h_block_idx * 8)
         head_idx = txl.local_scalar("int32", init=h_block_base + warp_idx)
         num_valid_heads = txl.local_scalar("int32", init=txl.min(8, h_q - h_block_base))
-        with txl.If(warp_idx >= num_valid_heads), txl.Then():
-            txl.Return(txl.int32(0))
+        with txl.if_(warp_idx >= num_valid_heads), txl.then_():
+            txl.return_(txl.int32(0))
 
         start_split = txl.local_scalar("int32")
         txl.ptx.ld.global_.nc.s32(start_split, num_splits.ptr_to([batch_idx]))
         end_split = txl.local_scalar("int32")
         txl.ptx.ld.global_.nc.s32(end_split, num_splits.ptr_to([batch_idx + 1]))
         my_num_splits = txl.local_scalar("int32", init=end_split - start_split)
-        with txl.If(my_num_splits == 1), txl.Then():
-            txl.Return(txl.int32(0))
+        with txl.if_(my_num_splits == 1), txl.then_():
+            txl.return_(txl.int32(0))
 
         txl.cuda.trap_when_assert_failed(my_num_splits <= max_splits)
 
@@ -2134,7 +2134,7 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False, *, backend_co
         with txl.unroll(lse_fragments) as lse_i:
             split_idx = txl.local_scalar("int32", init=lse_i * 32 + lane_idx)
             txl.ptx.mov.b32(local_lse[lse_i], txl.float32(-float("inf")))
-            with txl.If(split_idx < my_num_splits), txl.Then():
+            with txl.if_(split_idx < my_num_splits), txl.then_():
                 txl.ptx.ld.global_.f32(
                     local_lse[lse_i],
                     g_lse_accum.ptr_to([split_idx * stride_lse_accum_split + warp_idx]),
@@ -2186,18 +2186,18 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False, *, backend_co
                 txl.log2(sum_lse[0]) + max_lse[0],
             ),
         )
-        with txl.If(lane_idx == 0), txl.Then():
+        with txl.if_(lane_idx == 0), txl.then_():
             txl.ptx.st.global_.f32(g_lse.ptr_to([warp_idx]), global_lse[0] / txl.float32(LOG_2_E))
 
         if have_attn_sink:
             sink = txl.local_scalar("float32")
             txl.ptx.ld.global_.nc.f32(sink, attn_sink.ptr_to([head_idx]))
-            with txl.If(global_lse[0] != txl.float32(float("inf"))):
-                with txl.Then():
+            with txl.if_(global_lse[0] != txl.float32(float("inf"))):
+                with txl.then_():
                     sink_lse_exp = txl.alloc_local((1,), "float32")
                     txl.ptx.ex2.approx.ftz.f32(sink_lse_exp[0], sink * LOG_2_E - global_lse[0])
                     txl.assign(global_lse[0], global_lse[0] + txl.log2(1.0 + sink_lse_exp[0]))
-                with txl.Else():
+                with txl.else_():
                     txl.assign(
                         global_lse[0],
                         txl.if_then_else(
@@ -2229,7 +2229,7 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False, *, backend_co
                         datas[elem_i, vec_i],
                         result[elem_i, vec_i],
                     )
-                with txl.If(split_idx != my_num_splits - 1), txl.Then():
+                with txl.if_(split_idx != my_num_splits - 1), txl.then_():
                     txl.ptx.ld.global_.v4.u32(
                         data_words[elem_i, 0],
                         data_words[elem_i, 1],

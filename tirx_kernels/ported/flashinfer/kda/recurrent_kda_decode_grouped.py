@@ -477,23 +477,23 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any], *, backend_config=N
 
     @txl.kernel()
     def _recurrent_kda_decode_grouped(
-        q: txl.Tensor((QK_ELEMENTS,), txl.bf16),
-        k: txl.Tensor((QK_ELEMENTS,), txl.bf16),
-        v: txl.Tensor((V_ELEMENTS,), txl.bf16),
-        g: txl.Tensor((V_ELEMENTS,), txl.bf16),
-        beta: txl.Tensor((BETA_ELEMENTS,), txl.bf16),
-        a_log: txl.Tensor((A_LOG_ELEMENTS,), txl.f32),
-        dt_bias: txl.Tensor((DT_BIAS_ELEMENTS,), txl.f32),
-        cu: txl.Tensor((CU_ELEMENTS,), txl.i32),
-        ssm_idx: txl.Tensor((SSM_IDX_ELEMENTS,), txl.i32),
-        nat: txl.Tensor((NAT_ELEMENTS,), txl.i32),
-        state: txl.Tensor((STATE_ELEMENTS,), txl.bf16),
-        out: txl.Tensor((V_ELEMENTS,), txl.bf16),
-        q_total: txl.i32,
-        g_stride_q: txl.i32,
-        state_slot_stride: txl.i64,
-        scale: txl.f32,
-        lower_bound: txl.f32,
+        q: txl.Tensor((QK_ELEMENTS,), "bfloat16"),
+        k: txl.Tensor((QK_ELEMENTS,), "bfloat16"),
+        v: txl.Tensor((V_ELEMENTS,), "bfloat16"),
+        g: txl.Tensor((V_ELEMENTS,), "bfloat16"),
+        beta: txl.Tensor((BETA_ELEMENTS,), "bfloat16"),
+        a_log: txl.Tensor((A_LOG_ELEMENTS,), "float32"),
+        dt_bias: txl.Tensor((DT_BIAS_ELEMENTS,), "float32"),
+        cu: txl.Tensor((CU_ELEMENTS,), "int32"),
+        ssm_idx: txl.Tensor((SSM_IDX_ELEMENTS,), "int32"),
+        nat: txl.Tensor((NAT_ELEMENTS,), "int32"),
+        state: txl.Tensor((STATE_ELEMENTS,), "bfloat16"),
+        out: txl.Tensor((V_ELEMENTS,), "bfloat16"),
+        q_total: "int32",
+        g_stride_q: "int32",
+        state_slot_stride: "int64",
+        scale: "float32",
+        lower_bound: "float32",
     ):
         # TIRX_TRANSCRIBE_START recurrent_kda_decode_grouped
         # --- CTA and thread coordinates (recurrent_kda.py:512-524) -------------
@@ -508,8 +508,8 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any], *, backend_config=N
         tid = txl.thread_id()
         lane = txl.lane_id()
         wid = txl.warp_id()
-        h = txl.local_scalar(txl.i32)
-        d = txl.local_scalar(txl.i32)
+        h = txl.local_scalar("int32")
+        d = txl.local_scalar("int32")
         txl.assign(h, hv // RATIO)
         txl.assign(d, tid % HEAD_DIM)  # phase-A element base
         if NUM_TOKENS == 1:
@@ -520,8 +520,8 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any], *, backend_config=N
         else:
             # The recurrent loop reuses both coordinates for every token.
             # Compute them once rather than rebuilding their address DAG.
-            v_idx_local = txl.local_scalar(txl.i32)
-            part_local = txl.local_scalar(txl.i32)
+            v_idx_local = txl.local_scalar("int32")
+            part_local = txl.local_scalar("int32")
             txl.assign(v_idx_local, vz * CPB + tid // KS)
             txl.assign(part_local, tid % KS)
             v_idx: txl.int32 = v_idx_local
@@ -530,10 +530,10 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any], *, backend_config=N
         # --- shared memory (recurrent_kda.py:526-541) --------------------------
         # The pool is the single owner of type, layout, offsets, and total size.
         smem = txl.smem_pool()
-        s_eg = smem.alloc((NUM_TOKENS * HEAD_DIM,), txl.f32, align=16)
-        s_kr = smem.alloc((NUM_TOKENS * HEAD_DIM,), txl.f32, align=16)
-        s_qr = smem.alloc((NUM_TOKENS * HEAD_DIM,), txl.f32, align=16)
-        s_red = smem.alloc((NUM_TOKENS * 16,), txl.f32, align=16)
+        s_eg = smem.alloc((NUM_TOKENS * HEAD_DIM,), "float32", align=16)
+        s_kr = smem.alloc((NUM_TOKENS * HEAD_DIM,), "float32", align=16)
+        s_qr = smem.alloc((NUM_TOKENS * HEAD_DIM,), "float32", align=16)
+        s_red = smem.alloc((NUM_TOKENS * 16,), "float32", align=16)
 
         # --- row bounds (recurrent_kda.py:543-544) -----------------------------
         token_base: txl.int32 = _load_i32(cu, n)
@@ -682,8 +682,8 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any], *, backend_config=N
             slot: txl.int32 = slots[t]
             in_row = t < seq_len
             active = txl.And(in_row, slot >= 0)
-            with txl.If(active):
-                with txl.Then():
+            with txl.if_(active):
+                with txl.then_():
                     pidx_b: txl.int32 = token_base + t
                     base_t: txl.int32 = t * HEAD_DIM + part * 8
 
@@ -788,7 +788,7 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any], *, backend_config=N
                         _st_global_granule_no_alloc(
                             state, write_base + txl.cast(gi * KS * 8 + part * 8, "int64"), words_w
                         )
-                with txl.Else():
+                with txl.else_():
                     # Pad rows still own their output element: the host allocates `out`
                     # uninitialized because the kernel defines every slot.
                     _store_bf16_bits_pred(
@@ -802,7 +802,7 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any], *, backend_config=N
         # Carrier tokens owned by no row.  Reachable only in the T == 1 decode
         # layout: spec mode sizes `out` as N*NUM_TOKENS while cu_seqlens must step
         # by T, so q_total == cu[n_seq] there and this loop is empty.
-        with txl.If(txl.And(txl.And(n == 0, vz == 0), tid < HEAD_DIM)), txl.Then():
+        with txl.if_(txl.And(txl.And(n == 0, vz == 0), tid < HEAD_DIM)), txl.then_():
             covered: txl.int32 = _load_i32(cu, NUM_SEQS)
             with txl.serial(covered, q_total, unroll=False) as pos:
                 for e in range(EPT):

@@ -166,17 +166,17 @@ def _make_kernel(log_max_splits, *, backend_config=None):
     smem_bytes = o_ring_offset + _STAGES * _TILE_M * _K_BLOCK * 4
 
     def kernel_body(
-        o_partial: txl.Tensor((txl.int64(),), txl.f32),
-        lse_partial: txl.Tensor((txl.int64(),), txl.f32),
-        out: txl.Tensor((txl.int64(),), txl.bf16),
-        lse: txl.Tensor((txl.int64(),), txl.f32),
-        batch: txl.i32,
-        num_heads: txl.i32,
-        seqlen_q: txl.i32,
-        num_splits: txl.i32,
-        seqlen_div_mul: txl.i32,
-        seqlen_div_s1: txl.i32,
-        seqlen_div_s2: txl.i32,
+        o_partial: txl.Tensor((txl.int64(),), "float32"),
+        lse_partial: txl.Tensor((txl.int64(),), "float32"),
+        out: txl.Tensor((txl.int64(),), "bfloat16"),
+        lse: txl.Tensor((txl.int64(),), "float32"),
+        batch: "int32",
+        num_heads: "int32",
+        seqlen_q: "int32",
+        num_splits: "int32",
+        seqlen_div_mul: "int32",
+        seqlen_div_s1: "int32",
+        seqlen_div_s2: "int32",
     ):
         # CUDA TRANSCRIPTION START
         row_tiles = txl.ceildiv(seqlen_q * num_heads, _TILE_M)
@@ -187,7 +187,7 @@ def _make_kernel(log_max_splits, *, backend_config=None):
         )
         tid = txl.thread_id()
 
-        arena = txl.alloc_tensor((smem_bytes,), txl.u8, scope="shared.dyn", align=1024)
+        arena = txl.alloc_tensor((smem_bytes,), "uint8", scope="shared.dyn", align=1024)
 
         def _view(shape, dtype, byte_offset):
             return txl.decl_tensor(
@@ -199,9 +199,9 @@ def _make_kernel(log_max_splits, *, backend_config=None):
                 align=128,
             )
 
-        s_lse = _view((physical_splits * _TILE_M,), txl.f32, 0)
-        s_max_valid = _view((_TILE_M,), txl.i32, max_split_offset)
-        s_o = _view((_STAGES * _TILE_M * _K_BLOCK,), txl.f32, o_ring_offset)
+        s_lse = _view((physical_splits * _TILE_M,), "float32", 0)
+        s_max_valid = _view((_TILE_M,), "int32", max_split_offset)
+        s_o = _view((_STAGES * _TILE_M * _K_BLOCK,), "float32", o_ring_offset)
 
         def _lse_index(split, row):
             linear = split * _TILE_M + row
@@ -245,8 +245,8 @@ def _make_kernel(log_max_splits, *, backend_config=None):
         def _load_o_stage(split, stage):
             for row in (row0, row1):
                 flat = txl.local_scalar("int32", init=row_tile * _TILE_M + row)
-                with txl.If(flat < row_extent):
-                    with txl.Then():
+                with txl.if_(flat < row_extent):
+                    with txl.then_():
                         partial_row = _partial_row_index(split, flat)
                         txl.ptx["cp.async.cg.shared.global"](
                             s_o.ptr_to([_o_index(stage, row, col0)]),
@@ -264,19 +264,19 @@ def _make_kernel(log_max_splits, *, backend_config=None):
         with txl.unroll(slots) as slot:
             split = txl.local_scalar("int32", init=lse_split0 + slot * 8)
             dst = s_lse.ptr_to([_lse_index(split, lse_row)])
-            with txl.If((lse_flat < row_extent) & (split < num_splits)):
-                with txl.Then():
+            with txl.if_((lse_flat < row_extent) & (split < num_splits)):
+                with txl.then_():
                     txl.ptx["cp.async.ca.shared.global"](
                         dst, lse_partial.ptr_to([_partial_row_index(split, lse_flat)]), 4, 4
                     )
-                with txl.Else():
+                with txl.else_():
                     txl.ptx.st.shared.b32(dst, txl.uint32(0xFF800000))
         txl.ptx.cp.async_.commit_group()
 
         # Prime three generations of the four-stage partial-O ring.
         for stage in range(_STAGES - 1):
-            with txl.If(txl.int32(stage) < num_splits):
-                with txl.Then():
+            with txl.if_(txl.int32(stage) < num_splits):
+                with txl.then_():
                     _load_o_stage(txl.int32(stage), txl.int32(stage))
             txl.ptx.cp.async_.commit_group()
 
@@ -397,14 +397,14 @@ def _make_kernel(log_max_splits, *, backend_config=None):
                 s_lse.ptr_to([_lse_index(stats_split0 + slot * 8, stats_row)]),
                 txl.reinterpret(lse_regs[slot], ty="uint32"),
             )
-        with txl.If(stats_split0 == 0):
-            with txl.Then():
+        with txl.if_(stats_split0 == 0):
+            with txl.then_():
                 txl.ptx.st.shared.b32(
                     s_max_valid.ptr_to([stats_row]), txl.reinterpret(local_last, ty="uint32")
                 )
                 stats_flat = txl.local_scalar("int32", init=row_tile * _TILE_M + stats_row)
-                with txl.If((dim_tile == 0) & (stats_flat < row_extent)):
-                    with txl.Then():
+                with txl.if_((dim_tile == 0) & (stats_flat < row_extent)):
+                    with txl.then_():
                         head, query = _decode_row(stats_flat)
                         out_index = (batch_idx * seqlen_q + query) * num_heads + head
                         txl.ptx.st.global_.b32(
@@ -441,8 +441,8 @@ def _make_kernel(log_max_splits, *, backend_config=None):
             weight1 = txl.reinterpret(weight1_bits, ty="float32")
 
             next_split = txl.local_scalar("int32", init=split + (_STAGES - 1))
-            with txl.If(next_split <= thread_max):
-                with txl.Then():
+            with txl.if_(next_split <= thread_max):
+                with txl.then_():
                     _load_o_stage(next_split, load_stage)
             txl.ptx.cp.async_.commit_group()
             txl.assign(load_stage, txl.bitwise_and(load_stage + 1, txl.int32(_STAGES - 1)))
@@ -471,8 +471,8 @@ def _make_kernel(log_max_splits, *, backend_config=None):
                 (row1, weight1, part1, acc1),
             ):
                 flat = txl.local_scalar("int32", init=row_tile * _TILE_M + row)
-                with txl.If((flat < row_extent) & (weight > txl.float32(0.0))):
-                    with txl.Then():
+                with txl.if_((flat < row_extent) & (weight > txl.float32(0.0))):
+                    with txl.then_():
                         for pair in range(2):
                             packed_weight = txl.local_scalar("uint64")
                             packed_part = txl.local_scalar("uint64")
@@ -494,8 +494,8 @@ def _make_kernel(log_max_splits, *, backend_config=None):
 
         for row, word0, word1 in ((row0, packed[0], packed[1]), (row1, packed[2], packed[3])):
             flat = txl.local_scalar("int32", init=row_tile * _TILE_M + row)
-            with txl.If(flat < row_extent):
-                with txl.Then():
+            with txl.if_(flat < row_extent):
+                with txl.then_():
                     head, query = _decode_row(flat)
                     out_index = (
                         ((batch_idx * seqlen_q + query) * num_heads + head) * _HEAD_DIM
@@ -507,17 +507,17 @@ def _make_kernel(log_max_splits, *, backend_config=None):
 
     @txl.kernel()
     def combine(
-        o_partial: txl.Tensor((txl.int64(),), txl.f32),
-        lse_partial: txl.Tensor((txl.int64(),), txl.f32),
-        out: txl.Tensor((txl.int64(),), txl.bf16),
-        lse: txl.Tensor((txl.int64(),), txl.f32),
-        batch: txl.i32,
-        num_heads: txl.i32,
-        seqlen_q: txl.i32,
-        num_splits: txl.i32,
-        seqlen_div_mul: txl.i32,
-        seqlen_div_s1: txl.i32,
-        seqlen_div_s2: txl.i32,
+        o_partial: txl.Tensor((txl.int64(),), "float32"),
+        lse_partial: txl.Tensor((txl.int64(),), "float32"),
+        out: txl.Tensor((txl.int64(),), "bfloat16"),
+        lse: txl.Tensor((txl.int64(),), "float32"),
+        batch: "int32",
+        num_heads: "int32",
+        seqlen_q: "int32",
+        num_splits: "int32",
+        seqlen_div_mul: "int32",
+        seqlen_div_s1: "int32",
+        seqlen_div_s2: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(

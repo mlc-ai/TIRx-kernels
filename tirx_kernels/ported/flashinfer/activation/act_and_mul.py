@@ -158,7 +158,7 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, *, backend_config=
 
         # Main vector loop (source: #pragma unroll 1 grid-stride loop).
         idx = txl.local_scalar("uint32", init=tid)
-        with txl.While(idx < n_vec):
+        with txl.while_(idx < n_vec):
             txl.ptx.ld.global_.nc.v4.b32(
                 x_bits[0],
                 x_bits[1],
@@ -216,7 +216,7 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, *, backend_config=
         # Scalar remainder loop (source: #pragma unroll 1; dead when REM == 0).
         if rem > 0:
             ridx = txl.local_scalar("uint32", init=tid)
-            with txl.While(ridx < rem):
+            with txl.while_(ridx < rem):
                 xr16 = txl.local_scalar("uint16")
                 yr16 = txl.local_scalar("uint16")
                 ob16 = txl.local_scalar("uint16")

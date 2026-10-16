@@ -18,14 +18,14 @@ whether Python executes its body while constructing that program.
 ```python
 # before: tracing the cold branch rebinds the later store's coordinate.
 output_row = quad * 8 + (lane >> 2)
-with txl.If(needs_correction), txl.Then():
+with txl.if_(needs_correction), txl.then_():
     output_row = row_base + lane
     correct(output_row)
 store(output_row, value)
 
 # after: the correction uses its own coordinate.
 output_row = quad * 8 + (lane >> 2)
-with txl.If(needs_correction), txl.Then():
+with txl.if_(needs_correction), txl.then_():
     correction_row = row_base + lane
     correct(correction_row)
 store(output_row, value)

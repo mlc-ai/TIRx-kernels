@@ -94,12 +94,12 @@ def make_kernel(hidden_size: int, *, backend_config=None):
     # original's 34.
     @txl.kernel()
     def rmsnorm(
-        inp: txl.Tensor((txl.int64(),), txl.f16),
-        wgt: txl.Tensor((txl.int64(),), txl.f16),
-        out: txl.Tensor((txl.int64(),), txl.f16),
+        inp: txl.Tensor((txl.int64(),), "float16"),
+        wgt: txl.Tensor((txl.int64(),), "float16"),
+        out: txl.Tensor((txl.int64(),), "float16"),
         # This Tensor parameter is 1-D, so the [batch, hidden] shape cannot carry the row
         # count the way the original's match_buffer does; it is an argument.
-        batch_size: txl.i32,
+        batch_size: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=SM_COUNT, block=bdy * 32),
@@ -114,8 +114,8 @@ def make_kernel(hidden_size: int, *, backend_config=None):
         # orig:L667-670. swizzle=None is the identity — a plain row-major tirx
         # buffer, addressed through ptr_to and raw ld/st like the original.
         smem = txl.smem_pool()
-        x_smem = smem.alloc([hidden_size], txl.f32)
-        sum_sq_smem = smem.alloc([bdy], txl.f32)
+        x_smem = smem.alloc([hidden_size], "float32")
+        sum_sq_smem = smem.alloc([bdy], "float32")
 
         # orig:L671-682. A traced body has no annotated-declaration form, so
         # every register array is an explicit local.
@@ -183,14 +183,14 @@ def make_kernel(hidden_size: int, *, backend_config=None):
             txl.ptx.mov.b32(dst[2 * i + 1], txl.cuda.float2_y(pk))
 
         txl.assign(row, bx)
-        with txl.While(row < batch_size):
+        with txl.while_(row < batch_size):
             # ---- pass 1: read x, accumulate sum(x^2), stage x in f32 smem ---
             txl.assign(ss[0], txl.float32(0.0))
             with txl.serial(n_tiles) as ki:
                 for kv in range(vec):
                     txl.ptx.mov.b32(xv[kv], txl.float32(0.0))
                 st = (ki * nthreads + tid) * vec
-                with txl.If(st < hidden_size), txl.Then():
+                with txl.if_(st < hidden_size), txl.then_():
                     txl.ptx[LD_G_V4](
                         iw[0], iw[1], iw[2], iw[3], inp.ptr_to([gidx(row * hidden_size + st)])
                     )
@@ -204,18 +204,18 @@ def make_kernel(hidden_size: int, *, backend_config=None):
 
             # ---- CTA reduction: warp butterfly, then warp 0 over the warps --
             warp_sum(ss)
-            with txl.If(lane == 0), txl.Then():
+            with txl.if_(lane == 0), txl.then_():
                 txl.ptx[ST_S_F32](sum_sq_smem.ptr_to([warp]), ss[0])
             cta_sync(0)
-            with txl.If(warp == 0):
-                with txl.Then():
-                    with txl.If(lane < bdy):
-                        with txl.Then():
+            with txl.if_(warp == 0):
+                with txl.then_():
+                    with txl.if_(lane < bdy):
+                        with txl.then_():
                             txl.ptx[LD_S_F32](ss[0], sum_sq_smem.ptr_to([lane]))
-                        with txl.Else():
+                        with txl.else_():
                             txl.assign(ss[0], txl.float32(0.0))
                     warp_sum(ss)
-                    with txl.If(lane == 0), txl.Then():
+                    with txl.if_(lane == 0), txl.then_():
                         txl.ptx[ST_S_F32](sum_sq_smem.ptr_to([0]), ss[0])
             cta_sync(0)
             txl.ptx[LD_S_F32](ss[0], sum_sq_smem.ptr_to([0]))
@@ -227,7 +227,7 @@ def make_kernel(hidden_size: int, *, backend_config=None):
                     txl.ptx.mov.b32(wf[kv], txl.float32(0.0))
                     txl.ptx.mov.b32(xv[kv], txl.float32(0.0))
                 st = (ki * nthreads + tid) * vec
-                with txl.If(st < hidden_size), txl.Then():
+                with txl.if_(st < hidden_size), txl.then_():
                     txl.ptx[LD_G_V4](ww[0], ww[1], ww[2], ww[3], wgt.ptr_to([gidx(st)]))
                     txl.ptx[LD_S_V4](xv[0], xv[1], xv[2], xv[3], x_smem.ptr_to([st]))
                     txl.ptx[LD_S_V4](xv[4], xv[5], xv[6], xv[7], x_smem.ptr_to([st + 4]))
@@ -250,7 +250,7 @@ def make_kernel(hidden_size: int, *, backend_config=None):
                         txl.cuda.make_float2(xf[2 * pair], xf[2 * pair + 1]),
                         txl.cuda.make_float2(wf[2 * pair], wf[2 * pair + 1]),
                     )
-                with txl.If(st < hidden_size), txl.Then():
+                with txl.if_(st < hidden_size), txl.then_():
                     for pair in range(vec // 2):
                         txl.ptx[CVT_F16X2](ow[pair], xf[2 * pair + 1], xf[2 * pair])
                     txl.ptx[ST_G_V4](

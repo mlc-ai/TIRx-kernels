@@ -16,7 +16,7 @@ store, not merely after the shared writes.
 ```python
 txl.ptx["fence.proxy.async.shared::cta"]()
 txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
-with txl.If(warp == txl.int32(0)), txl.Then():
+with txl.if_(warp == txl.int32(0)), txl.then_():
     txl.ptx["cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group..."](...)
     txl.ptx["cp.async.bulk.commit_group"]()
 # Here: reductions that read the activation fragments and touch their own

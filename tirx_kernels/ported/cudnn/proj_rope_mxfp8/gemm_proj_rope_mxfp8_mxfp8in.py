@@ -64,7 +64,7 @@ def _advance(state):
 
 def _wait_plain(barrier, phase):
     ready = txl.local_scalar("uint32", init=txl.uint32(0))
-    with txl.While(ready == txl.uint32(0)):
+    with txl.while_(ready == txl.uint32(0)):
         txl.ptx.mbarrier.try_wait.parity.shared.b64(
             ready, barrier, txl.cast(phase, "uint32"), txl.uint32(_TRY_WAIT_TICKS)
         )
@@ -275,7 +275,7 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
         mma_role = roles.role("mma", warps=[12])
         tma_role = roles.role("tma", warps=[13])
 
-        smem = txl.alloc_tensor((_SHARED_BYTES,), txl.u8, scope="shared.dyn", align=1024)
+        smem = txl.alloc_tensor((_SHARED_BYTES,), "uint8", scope="shared.dyn", align=1024)
         protocol_pool = txl.smem_pool(base=smem)
         ab_pipe = txl.Pipeline(
             protocol_pool,
@@ -295,8 +295,8 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
         )
         if protocol_pool.bytes != _TMEM_DEALLOC_OFFSET:
             raise AssertionError("pipeline protocol layout changed")
-        protocol_pool.alloc((1,), txl.u64, align=8)
-        tmem_slot = protocol_pool.alloc((1,), txl.u32, align=4)
+        protocol_pool.alloc((1,), "uint64", align=8)
+        tmem_slot = protocol_pool.alloc((1,), "uint32", align=4)
         if protocol_pool.bytes != _TMEM_PTR_OFFSET + 4:
             raise AssertionError("TMEM protocol layout changed")
 
@@ -305,32 +305,32 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
             txl.ptx.prefetch.tensormap(txl.address_of(b_map))
 
         # Initialize AB then ACC exactly at the two source publication edges.
-        with txl.If(warp == 0):
-            with txl.Then():
-                with txl.If(_elected()):
-                    with txl.Then():
+        with txl.if_(warp == 0):
+            with txl.then_():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         with txl.unroll(0, _AB_STAGES) as stage:
                             txl.ptx.mbarrier.init.shared.b64(
                                 ab_pipe.full.ptr_to([stage]), txl.uint32(1)
                             )
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         with txl.unroll(0, _AB_STAGES) as stage:
                             txl.ptx.mbarrier.init.shared.b64(
                                 ab_pipe.empty.ptr_to([stage]), txl.uint32(1)
                             )
         txl.ptx.fence.mbarrier_init.release.cluster()
         txl.ptx.bar.sync(txl.uint32(0), txl.uint32(448))
-        with txl.If(warp == 0):
-            with txl.Then():
-                with txl.If(_elected()):
-                    with txl.Then():
+        with txl.if_(warp == 0):
+            with txl.then_():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         with txl.unroll(0, _ACC_STAGES) as stage:
                             txl.ptx.mbarrier.init.shared.b64(
                                 acc_pipe.full.ptr_to([stage]), txl.uint32(1)
                             )
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         with txl.unroll(0, _ACC_STAGES) as stage:
                             txl.ptx.mbarrier.init.shared.b64(
                                 acc_pipe.empty.ptr_to([stage]), txl.uint32(4)
@@ -366,10 +366,10 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
         # CuTe expresses the same 13-warp TMEM allocation rendezvous at two
         # branch-local PCs. One physical PC preserves its participants/count and
         # avoids divergent named-barrier diagnostics under synccheck.
-        with txl.If(warp < txl.uint32(13)):
-            with txl.Then():
-                with txl.If(warp == 0):
-                    with txl.Then():
+        with txl.if_(warp < txl.uint32(13)):
+            with txl.then_():
+                with txl.if_(warp == 0):
+                    with txl.then_():
                         txl.ptx["tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"](
                             tmem_slot.ptr_to([0]), txl.uint32(_TMEM_COLUMNS)
                         )
@@ -380,7 +380,7 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
             work = txl.local_scalar("int32", init=cluster_work_id)
             sfa_words = txl.alloc_local((4,), "uint32")
             sfb_words = txl.alloc_local((8,), "uint32")
-            with txl.While(work < total_work):
+            with txl.while_(work < total_work):
                 m_idx, head = scheduler_coords(work)
                 with txl.serial(k_dim // _K_TILE) as k_tile:
                     handle_stage = txl.local_scalar("int32", init=tma_state.stage)
@@ -428,8 +428,8 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
                     )
                     txl.ptx.bar.warp.sync(txl.uint32(0xFFFFFFFF))
                     txl.ptx["fence.proxy.async.shared::cta"]()
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                                 ab_pipe.full.ptr_to([handle_stage]), txl.uint32(40_960)
                             )
@@ -441,8 +441,8 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
                                 ab_pipe.full.ptr_to([handle_stage]),
                                 txl.uint64(0),
                             )
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             txl.ptx[_TMA_G2S_2D](
                                 smem_base + _B_OFFSET + handle_stage * _B_STAGE_BYTES,
                                 txl.address_of(b_map),
@@ -463,7 +463,7 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
             acc_state = txl.PipelineState(_ACC_STAGES, phase=1)
             work = txl.local_scalar("int32", init=cluster_work_id)
             accumulate = txl.local_scalar("uint32")
-            with txl.While(work < total_work):
+            with txl.while_(work < total_work):
                 acc_stage = txl.local_scalar("int32", init=acc_state.stage)
                 acc_phase = txl.local_scalar("int32", init=acc_state.phase)
                 _wait_plain(acc_pipe.empty.ptr_to([acc_stage]), acc_phase)
@@ -479,16 +479,16 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
                     handle_phase = txl.local_scalar("int32", init=mma_state.phase)
                     _wait_plain(ab_pipe.full.ptr_to([handle_stage]), handle_phase)
                     _advance(mma_state)
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             txl.ptx["tcgen05.cp.cta_group::1.32x128b.warpx4"](
                                 txl.cast(tmem_base + _SFA_TMEM_COLUMN, "uint32"),
                                 sfa_descriptor
                                 + txl.cast(handle_stage * (_SFA_STAGE_BYTES // 16), "uint64"),
                             )
                     for half in range(2):
-                        with txl.If(_elected()):
-                            with txl.Then():
+                        with txl.if_(_elected()):
+                            with txl.then_():
                                 txl.ptx["tcgen05.cp.cta_group::1.32x128b.warpx4"](
                                     txl.cast(tmem_base + _SFB_TMEM_COLUMN + half * 4, "uint32"),
                                     sfb_descriptor
@@ -517,8 +517,8 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
                                 txl.shift_right(sfb_tmem_addr, txl.uint32(26)), txl.uint32(0x30)
                             ),
                         )
-                        with txl.If(_elected()):
-                            with txl.Then():
+                        with txl.if_(_elected()):
+                            with txl.then_():
                                 txl.ptx[_MMA_MXFP8](
                                     txl.cast(tmem_base + acc_stage * _HEAD_DIM, "uint32"),
                                     a_descriptor
@@ -535,14 +535,14 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
                                     txl.ptx.pred(txl.cast(accumulate, "bool")),
                                 )
                         txl.assign(accumulate, txl.uint32(1))
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             txl.ptx[
                                 "tcgen05.commit.cta_group::1.mbarrier::arrive::one."
                                 "shared::cluster.b64"
                             ](ab_pipe.empty.ptr_to([handle_stage]))
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         txl.ptx[
                             "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64"
                         ](acc_pipe.full.ptr_to([acc_stage]))
@@ -561,11 +561,11 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
             drain = txl.alloc_local((drain_count,), "float32")
             staged_words = txl.alloc_local((drain_count // 2,), "uint32")
 
-            with txl.While(work < total_work):
+            with txl.while_(work < total_work):
                 m_idx, head = scheduler_coords(work)
                 token_base = m_idx * _TILE_M
-                with txl.If(warp < 4):
-                    with txl.Then():
+                with txl.if_(warp < 4):
+                    with txl.then_():
                         acc_stage = txl.local_scalar("int32", init=acc_state.stage)
                         acc_phase = txl.local_scalar("int32", init=acc_state.phase)
                         _wait_plain(acc_pipe.full.ptr_to([acc_stage]), acc_phase)
@@ -618,8 +618,8 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
                                         staged_words[vector * 2],
                                         staged_words[vector * 2 + 1],
                                     )
-                        with txl.If(_elected()):
-                            with txl.Then():
+                        with txl.if_(_elected()):
+                            with txl.then_():
                                 txl.ptx.mbarrier.arrive.shared.b64(
                                     acc_pipe.empty.ptr_to([acc_stage]), txl.uint32(1)
                                 )
@@ -632,8 +632,8 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
                 col_amax0 = txl.local_scalar("float32", init=txl.float32(0.0))
                 col_amax1 = txl.local_scalar("float32", init=txl.float32(0.0))
 
-                with txl.If(fc == 2):
-                    with txl.Then():
+                with txl.if_(fc == 2):
+                    with txl.then_():
                         lib = lane % 16
                         pcol0 = 128 + 4 * lib
                         roff = 32 * (lane // 16)
@@ -690,7 +690,7 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
                             txl.assign(values1[row_index], v1)
                             txl.assign(col_amax0, _absmax(col_amax0, v0))
                             txl.assign(col_amax1, _absmax(col_amax1, v1))
-                    with txl.Else():
+                    with txl.else_():
                         for row_index in range(_BLOCK):
                             shared_byte = _SACC_OFFSET + 2 * (
                                 (tok0 + row_index) * _SACC_STRIDE + f0
@@ -747,8 +747,8 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
                         "uint32",
                     )
                     token = token_base + tok0 + row_index
-                    with txl.If((lane % 16) == 0):
-                        with txl.Then():
+                    with txl.if_((lane % 16) == 0):
+                        with txl.then_():
                             row_scale_offset = (token * num_heads + head) * (
                                 _HEAD_DIM // _BLOCK
                             ) + row_block
@@ -776,24 +776,24 @@ def _make_kernel(tokens, k_dim, num_heads, *, backend_config=None):
                 txl.ptx.bar.sync(txl.uint32(1), txl.uint32(384))
                 advance_work(work)
 
-            with txl.If(warp == 0):
-                with txl.Then():
+            with txl.if_(warp == 0):
+                with txl.then_():
                     txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"]()
                     txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
                         tmem_base, txl.uint32(_TMEM_COLUMNS)
                     )
 
     kernel.__annotations__ = {
-        "x_code": txl.Tensor((tokens * k_dim,), txl.u8),
-        "x_scale": txl.Tensor((tokens * (k_dim // _BLOCK),), txl.u8),
-        "w_code": txl.Tensor((num_heads * _HEAD_DIM * k_dim,), txl.u8),
-        "w_scale": txl.Tensor((num_heads * _HEAD_DIM * (k_dim // _BLOCK),), txl.u8),
-        "cos": txl.Tensor((tokens * _QK_ROPE,), txl.bf16),
-        "sin": txl.Tensor((tokens * _QK_ROPE,), txl.bf16),
-        "out_fp8_row": txl.Tensor((tokens * num_heads * _HEAD_DIM,), txl.u8),
-        "out_scales_row": txl.Tensor((tokens * num_heads * (_HEAD_DIM // _BLOCK),), txl.u8),
-        "out_fp8_col": txl.Tensor((tokens * num_heads * _HEAD_DIM,), txl.u8),
-        "out_scales_col": txl.Tensor(((tokens // _BLOCK) * num_heads * _HEAD_DIM,), txl.u8),
+        "x_code": txl.Tensor((tokens * k_dim,), "uint8"),
+        "x_scale": txl.Tensor((tokens * (k_dim // _BLOCK),), "uint8"),
+        "w_code": txl.Tensor((num_heads * _HEAD_DIM * k_dim,), "uint8"),
+        "w_scale": txl.Tensor((num_heads * _HEAD_DIM * (k_dim // _BLOCK),), "uint8"),
+        "cos": txl.Tensor((tokens * _QK_ROPE,), "bfloat16"),
+        "sin": txl.Tensor((tokens * _QK_ROPE,), "bfloat16"),
+        "out_fp8_row": txl.Tensor((tokens * num_heads * _HEAD_DIM,), "uint8"),
+        "out_scales_row": txl.Tensor((tokens * num_heads * (_HEAD_DIM // _BLOCK),), "uint8"),
+        "out_fp8_col": txl.Tensor((tokens * num_heads * _HEAD_DIM,), "uint8"),
+        "out_scales_col": txl.Tensor(((tokens // _BLOCK) * num_heads * _HEAD_DIM,), "uint8"),
     }
     return txl.kernel()(kernel)
 

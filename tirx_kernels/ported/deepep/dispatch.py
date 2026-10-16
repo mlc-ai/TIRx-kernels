@@ -220,20 +220,20 @@ def _build_dispatch_kernel(
 
     @txl.kernel()
     def deepep_dispatch(
-        x: txl.Tensor((txl.int64(),), txl.u8),
-        topk_idx: txl.Tensor((txl.int64(),), txl.i64),
-        topk_weights: txl.Tensor((txl.int64(),), txl.f32),
-        copied_topk_idx: txl.Tensor((txl.int64(),), txl.i64),
-        psum_rank: txl.Tensor((NUM_RANKS,), txl.i32),
-        psum_expert: txl.Tensor((EXPERTS_PER_RANK + 1,), txl.i32),
-        num_unaligned: txl.Tensor((EXPERTS_PER_RANK,), txl.i32),
-        dst_slot_idx: txl.Tensor((txl.int64(),), txl.i32),
-        peer_ws_ptrs: txl.Tensor((NUM_RANKS,), txl.i64),
-        peer_buf_ptrs: txl.Tensor((NUM_RANKS,), txl.i64),
-        workspace_addr: txl.i64,
-        buffer_addr: txl.i64,
-        num_tokens: txl.i32,
-        rank_idx: txl.i32,
+        x: txl.Tensor((txl.int64(),), "uint8"),
+        topk_idx: txl.Tensor((txl.int64(),), "int64"),
+        topk_weights: txl.Tensor((txl.int64(),), "float32"),
+        copied_topk_idx: txl.Tensor((txl.int64(),), "int64"),
+        psum_rank: txl.Tensor((NUM_RANKS,), "int32"),
+        psum_expert: txl.Tensor((EXPERTS_PER_RANK + 1,), "int32"),
+        num_unaligned: txl.Tensor((EXPERTS_PER_RANK,), "int32"),
+        dst_slot_idx: txl.Tensor((txl.int64(),), "int32"),
+        peer_ws_ptrs: txl.Tensor((NUM_RANKS,), "int64"),
+        peer_buf_ptrs: txl.Tensor((NUM_RANKS,), "int64"),
+        workspace_addr: "int64",
+        buffer_addr: "int64",
+        num_tokens: "int32",
+        rank_idx: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -264,14 +264,14 @@ def _build_dispatch_kernel(
 
         # --- NVLink barrier (comm.cuh:88-129), SM 0 only --------------------
         def nvlink_barrier(tag):
-            with txl.If(sm_idx == 0), txl.Then():
+            with txl.if_(sm_idx == 0), txl.then_():
                 counter_ptr = _gptr(ws_u64, WS_BARRIER_COUNTER)
                 cnt = txl.alloc_local([1], "uint64")
                 _ld_volatile_u64(cnt[0], counter_ptr)
                 status = txl.cast(txl.bitwise_and(cnt[0], txl.uint64(3)), "int32")
                 phase = txl.bitwise_and(status, 1)
                 sign = status // 2
-                with txl.If(thread_idx < NUM_RANKS), txl.Then():
+                with txl.if_(thread_idx < NUM_RANKS), txl.then_():
                     delta = txl.Select(sign == 0, txl.int32(1), txl.int32(-1))
                     txl.ptx.red.release.sys.global_.add.s32(
                         _gptr(_peer_u64(peer_ws_ptrs, thread_idx), WS_BARRIER_SIGNAL + phase * 4),
@@ -279,18 +279,18 @@ def _build_dispatch_kernel(
                     )
                 # comm.cuh:107 __syncthreads (SM 0's CTA only)
                 txl.ptx.bar.sync(txl.uint32(0), txl.uint32(num_threads))
-                with txl.If(thread_idx == 0), txl.Then():
+                with txl.if_(thread_idx == 0), txl.then_():
                     old = txl.alloc_local([1], "uint64")
                     txl.ptx.atom.global_.add.u64(old[0], counter_ptr, txl.uint64(1))
                     target = txl.Select(sign == 0, txl.int32(NUM_RANKS), txl.int32(0))
                     sig = txl.alloc_local([1], "int32")
                     sig_ptr = _gptr(ws_u64, WS_BARRIER_SIGNAL + phase * 4)
                     _ld_acquire_sys_s32(sig[0], sig_ptr)
-                    start_clock = txl.local_scalar(txl.u64, init=txl.cuda.clock64())
-                    with txl.While(sig[0] != target):
+                    start_clock = txl.local_scalar("uint64", init=txl.cuda.clock64())
+                    with txl.while_(sig[0] != target):
                         with (
-                            txl.If(txl.cuda.clock64() - start_clock >= txl.uint64(TIMEOUT_CYCLES)),
-                            txl.Then(),
+                            txl.if_(txl.cuda.clock64() - start_clock >= txl.uint64(TIMEOUT_CYCLES)),
+                            txl.then_(),
                         ):
                             txl.cuda.printf(
                                 "DeepEP NVLink barrier timeout, tag: %d, nvl: %d, "
@@ -310,13 +310,13 @@ def _build_dispatch_kernel(
         # Reset the atomic sender counters up front. Every CTA allocates only
         # after the following native grid sync, which is gated behind this
         # store on SM 0.
-        with txl.If(txl.And(sm_idx == 0, thread_idx < NUM_RANKS)), txl.Then():
+        with txl.if_(txl.And(sm_idx == 0, thread_idx < NUM_RANKS)), txl.then_():
             txl.ptx.st.global_.s32(_gptr(ws_u64, WS_SENDER_COUNTER + thread_idx * 4), txl.int32(0))
         nvlink_barrier(2)
         txl.cuda.grid_sync()
 
-        with txl.If(warp < NUM_NOTIFY_WARPS):
-            with txl.Then():
+        with txl.if_(warp < NUM_NOTIFY_WARPS):
+            with txl.then_():
                 # =================================================================
                 # NOTIFY ROLE: warps 0..3 (dispatch.cuh:79-258)
                 # =================================================================
@@ -341,10 +341,10 @@ def _build_dispatch_kernel(
                     i = global_warp_idx + notify_it * notify_stride
                     e64 = txl.alloc_local([1], "int64")
                     txl.assign(e64[0], txl.int64(-1))
-                    with txl.If(lane < NUM_TOPK), txl.Then():
+                    with txl.if_(lane < NUM_TOPK), txl.then_():
                         txl.ptx["ld.global.nc.s64"](e64[0], topk_idx.ptr_to([i * NUM_TOPK + lane]))
                     dst_expert = txl.cast(e64[0], "int32")
-                    with txl.If(dst_expert >= 0), txl.Then():
+                    with txl.if_(dst_expert >= 0), txl.then_():
                         txl.ptx.atom.shared.add.s32(
                             atom_dst[0],
                             rank_expert_count.ptr_to([NUM_RANKS + dst_expert]),
@@ -356,8 +356,8 @@ def _build_dispatch_kernel(
                     master = txl.alloc_local([1], "uint32")
                     txl.ptx.bfind.u32(master[0], match_mask[0])
                     with (
-                        txl.If(txl.And(txl.cast(master[0], "int32") == lane, dst_rank >= 0)),
-                        txl.Then(),
+                        txl.if_(txl.And(txl.cast(master[0], "int32") == lane, dst_rank >= 0)),
+                        txl.then_(),
                     ):
                         txl.ptx.atom.shared.add.s32(
                             atom_dst[0], rank_expert_count.ptr_to([dst_rank]), txl.int32(1)
@@ -377,7 +377,7 @@ def _build_dispatch_kernel(
                         ),
                     )
 
-                with txl.If(sm_idx == 0), txl.Then():
+                with txl.if_(sm_idx == 0), txl.then_():
                     # Wait all SMs, decode, clean (dispatch.cuh:121-147)
                     with txl.serial(
                         0,
@@ -387,15 +387,15 @@ def _build_dispatch_kernel(
                         i = thread_idx + _it * NUM_NOTIFY_THREADS
                         status = txl.alloc_local([1], "uint64")
                         _ld_volatile_u64(status[0], _gptr(ws_u64, WS_NOTIFY_REDUCTION + i * 8))
-                        start_clock = txl.local_scalar(txl.u64, init=txl.cuda.clock64())
-                        with txl.While(
+                        start_clock = txl.local_scalar("uint64", init=txl.cuda.clock64())
+                        with txl.while_(
                             txl.cast(status[0] >> txl.uint64(32), "int64") != txl.int64(num_sms)
                         ):
                             with (
-                                txl.If(
+                                txl.if_(
                                     txl.cuda.clock64() - start_clock >= txl.uint64(TIMEOUT_CYCLES)
                                 ),
-                                txl.Then(),
+                                txl.then_(),
                             ):
                                 txl.cuda.printf(
                                     "DeepEP notify (GPU reduction) timeout, rank: %d, "
@@ -443,7 +443,7 @@ def _build_dispatch_kernel(
                     txl.ptx.bar.sync(txl.uint32(1), txl.uint32(NUM_NOTIFY_THREADS))
 
                     # Wait for every peer's counts; consume and clean (dispatch.cuh:184-201)
-                    start_clock = txl.local_scalar(txl.u64, init=txl.cuda.clock64())
+                    start_clock = txl.local_scalar("uint64", init=txl.cuda.clock64())
                     with txl.serial(
                         0,
                         (NUM_COUNT_SLOTS - thread_idx + NUM_NOTIFY_THREADS - 1)
@@ -452,13 +452,13 @@ def _build_dispatch_kernel(
                         i = thread_idx + _it * NUM_NOTIFY_THREADS
                         count = txl.alloc_local([1], "int64")
                         _ld_volatile_s64(count[0], _gptr(ws_u64, WS_COUNT_RECV + i * 8))
-                        decoded = txl.local_scalar(txl.i64, init=-count[0] - 1)
-                        with txl.While(decoded < 0):
+                        decoded = txl.local_scalar("int64", init=-count[0] - 1)
+                        with txl.while_(decoded < 0):
                             with (
-                                txl.If(
+                                txl.if_(
                                     txl.cuda.clock64() - start_clock >= txl.uint64(TIMEOUT_CYCLES)
                                 ),
-                                txl.Then(),
+                                txl.then_(),
                             ):
                                 txl.cuda.printf(
                                     "DeepEP notify timeout, rank: %d, thread: %d, count: %d\n",
@@ -504,16 +504,16 @@ def _build_dispatch_kernel(
                     # (kDoCPUSync=false: host-workspace write compiled out)
 
                     # Prefix sums, one warp each (dispatch.cuh:234-257)
-                    with txl.If(warp == 0), txl.Then():
+                    with txl.if_(warp == 0), txl.then_():
                         # Inclusive prefix over 8 rank counts -> psum_rank[0:8)
                         value = txl.alloc_local([1], "int32")
                         txl.assign(value[0], 0)
-                        with txl.If(lane < NUM_RANKS), txl.Then():
+                        with txl.if_(lane < NUM_RANKS), txl.then_():
                             txl.assign(value[0], _ld_shared_s32(rank_expert_count, lane))
                         scan = _warp_inclusive_sum(value[0], lane)
-                        with txl.If(lane < NUM_RANKS), txl.Then():
+                        with txl.if_(lane < NUM_RANKS), txl.then_():
                             txl.ptx.st.global_.s32(psum_rank.ptr_to([lane]), scan)
-                    with txl.If(warp == 1), txl.Then():
+                    with txl.if_(warp == 1), txl.then_():
                         # Exclusive prefix over the expert counts -> psum_expert[0:EPR+1)
                         psum = txl.alloc_local([1], "int32")
                         txl.assign(psum[0], 0)
@@ -521,17 +521,17 @@ def _build_dispatch_kernel(
                             idx = it * 32 + lane
                             value = txl.alloc_local([1], "int32")
                             txl.assign(value[0], 0)
-                            with txl.If(txl.And(idx >= 1, idx - 1 < EXPERTS_PER_RANK)), txl.Then():
+                            with txl.if_(txl.And(idx >= 1, idx - 1 < EXPERTS_PER_RANK)), txl.then_():
                                 txl.assign(
                                     value[0], _ld_shared_s32(rank_expert_count, NUM_RANKS + idx - 1)
                                 )
                             scan = psum[0] + _warp_inclusive_sum(value[0], lane)
-                            with txl.If(idx < EXPERTS_PER_RANK + 1), txl.Then():
+                            with txl.if_(idx < EXPERTS_PER_RANK + 1), txl.then_():
                                 txl.ptx.st.global_.s32(psum_expert.ptr_to([idx]), scan)
                             carry = txl.alloc_local([1], "uint32")
                             _shfl_idx(carry[0], scan, 31)
                             txl.assign(psum[0], txl.cast(carry[0], "int32"))
-            with txl.Else():
+            with txl.else_():
                 # =================================================================
                 # DISPATCH ROLE: one channel per warp (dispatch.cuh:259-394)
                 # =================================================================
@@ -546,7 +546,7 @@ def _build_dispatch_kernel(
 
                 phase = txl.alloc_local([1], "uint32")
                 txl.assign(phase[0], txl.uint32(0))
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     txl.ptx.mbarrier.init.shared.b64(tma_mbar, txl.uint32(1))
                     txl.ptx.fence.mbarrier_init.release.cluster()
                 txl.cuda.warp_sync()
@@ -569,7 +569,7 @@ def _build_dispatch_kernel(
                     txl.cuda.warp_sync()
 
                     # TMA-load the token's hidden bytes into SMEM (dispatch.cuh:288-291)
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         txl.ptx[_BULK_G2S_CHAIN](
                             smem.ptr_to([tok_off]),
                             x.ptr_to([token_idx * HIDDEN_BYTES]),
@@ -582,7 +582,7 @@ def _build_dispatch_kernel(
                     # Load top-k into registers and SMEM metadata (dispatch.cuh:317-326)
                     stored_dst_rank = txl.alloc_local([1], "int32")
                     txl.assign(stored_dst_rank[0], -1)
-                    with txl.If(lane < NUM_TOPK), txl.Then():
+                    with txl.if_(lane < NUM_TOPK), txl.then_():
                         raw = txl.alloc_local([1], "int64")
                         txl.ptx["ld.global.nc.s64"](
                             raw[0], topk_idx.ptr_to([token_idx * NUM_TOPK + lane])
@@ -604,7 +604,7 @@ def _build_dispatch_kernel(
                     txl.cuda.warp_sync()
 
                     # Source metadata; last SMEM write before the fence (dispatch.cuh:331-333)
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         _st_shared_s32(
                             smem_i32,
                             tma_src_idx_base,
@@ -623,17 +623,17 @@ def _build_dispatch_kernel(
                     master = txl.alloc_local([1], "uint32")
                     txl.ptx.bfind.u32(master[0], match_mask[0])
                     with (
-                        txl.If(
+                        txl.if_(
                             txl.And(txl.cast(master[0], "int32") == lane, stored_dst_rank[0] >= 0)
                         ),
-                        txl.Then(),
+                        txl.then_(),
                     ):
                         txl.ptx.atom.global_.add.s32(
                             stored_slot[0],
                             _gptr(ws_u64, WS_SENDER_COUNTER + stored_dst_rank[0] * 4),
                             txl.int32(1),
                         )
-                    with txl.If(lane < NUM_TOPK), txl.Then():
+                    with txl.if_(lane < NUM_TOPK), txl.then_():
                         txl.ptx.st.global_.s32(
                             dst_slot_idx.ptr_to([token_idx * NUM_TOPK + lane]),
                             txl.Select(
@@ -645,7 +645,7 @@ def _build_dispatch_kernel(
                     txl.cuda.warp_sync()
 
                     # Publish expected bytes and wait TMA load arrival (dispatch.cuh:356-359)
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                             tma_mbar, txl.uint32(HIDDEN_BYTES)
                         )
@@ -654,7 +654,7 @@ def _build_dispatch_kernel(
                     txl.cuda.warp_sync()
 
                     # TMA-store the whole token slot to the destination rank (dispatch.cuh:372-379)
-                    with txl.If(stored_slot[0] >= 0), txl.Then():
+                    with txl.if_(stored_slot[0] >= 0), txl.then_():
                         txl.ptx[_BULK_S2G_CHAIN](
                             _gptr(
                                 _peer_u64(peer_buf_ptrs, stored_dst_rank[0]),
@@ -702,16 +702,16 @@ def _build_epilogue_kernel(
 
     @txl.kernel()
     def deepep_dispatch_copy_epilogue(
-        buffer_addr: txl.i64,
-        psum_rank: txl.Tensor((NUM_RANKS,), txl.i32),
-        psum_expert: txl.Tensor((EXPERTS_PER_RANK,), txl.i32),
-        recv_x: txl.Tensor((txl.int64(),), txl.u8),
-        recv_topk_idx: txl.Tensor((txl.int64(),), txl.i64),
-        recv_topk_weights: txl.Tensor((txl.int64(),), txl.f32),
-        recv_src_metadata: txl.Tensor((txl.int64(),), txl.i32),
-        num_unaligned: txl.Tensor((EXPERTS_PER_RANK,), txl.i32),
-        num_recv_tokens: txl.i32,
-        rank_idx: txl.i32,
+        buffer_addr: "int64",
+        psum_rank: txl.Tensor((NUM_RANKS,), "int32"),
+        psum_expert: txl.Tensor((EXPERTS_PER_RANK,), "int32"),
+        recv_x: txl.Tensor((txl.int64(),), "uint8"),
+        recv_topk_idx: txl.Tensor((txl.int64(),), "int64"),
+        recv_topk_weights: txl.Tensor((txl.int64(),), "float32"),
+        recv_src_metadata: txl.Tensor((txl.int64(),), "int32"),
+        num_unaligned: txl.Tensor((EXPERTS_PER_RANK,), "int32"),
+        num_recv_tokens: "int32",
+        rank_idx: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -745,7 +745,7 @@ def _build_epilogue_kernel(
 
         phase = txl.alloc_local([1], "uint32")
         txl.assign(phase[0], txl.uint32(0))
-        with txl.If(txl.cuda.elect_sync()), txl.Then():
+        with txl.if_(txl.cuda.elect_sync()), txl.then_():
             txl.ptx.mbarrier.init.shared.b64(tma_mbar, txl.uint32(1))
             txl.ptx.fence.mbarrier_init.release.cluster()
         txl.cuda.warp_sync()
@@ -777,13 +777,13 @@ def _build_epilogue_kernel(
         with txl.serial(0, epi_trips) as epi_it:
             i = global_warp_idx + epi_it * epi_stride
             # Locate the source rank of received token i via the inclusive prefix
-            with txl.While(i >= rank_end[0]):
+            with txl.while_(i >= rank_end[0]):
                 txl.assign(current_rank[0], current_rank[0] + 1)
                 txl.cuda.trap_when_assert_failed(current_rank[0] < NUM_RANKS)
                 stored_lane = current_rank[0] % 32
                 with (
-                    txl.If(txl.And(stored_lane == 0, current_rank[0] + lane < NUM_RANKS)),
-                    txl.Then(),
+                    txl.if_(txl.And(stored_lane == 0, current_rank[0] + lane < NUM_RANKS)),
+                    txl.then_(),
                 ):
                     # Plain ld.global (no .nc): PDL visibility rule (epilogue.cuh:59).
                     txl.ptx.ld.global_.s32(
@@ -815,7 +815,7 @@ def _build_epilogue_kernel(
             txl.cuda.warp_sync()
 
             # TMA-load the full token slot (hidden + metadata) (epilogue.cuh:89-93)
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 txl.ptx[_BULK_G2S_CHAIN](
                     smem.ptr_to([tok_off]),
                     _gptr(buf_u64, token_off),
@@ -830,7 +830,7 @@ def _build_epilogue_kernel(
             # to tolerate TMA latency (epilogue.cuh:96-100; plain ld, no .nc)
             dst_expert = txl.alloc_local([1], "int32")
             txl.assign(dst_expert[0], -1)
-            with txl.If(lane < NUM_TOPK), txl.Then():
+            with txl.if_(lane < NUM_TOPK), txl.then_():
                 txl.ptx.ld.global_.s32(dst_expert[0], _gptr(buf_u64, token_off + 14336 + lane * 4))
             txl.cuda.warp_sync()
 
@@ -851,20 +851,20 @@ def _build_epilogue_kernel(
             txl.cuda.trap_when_assert_failed(
                 txl.Or(txl.cast(dedup_master[0], "int32") == lane, dst_expert[0] == -1)
             )
-            with txl.If(lane < NUM_TOPK), txl.Then():
+            with txl.if_(lane < NUM_TOPK), txl.then_():
                 txl.ptx.st.global_.s64(
                     recv_topk_idx.ptr_to([i * NUM_TOPK + lane]), txl.cast(dst_expert[0], "int64")
                 )
             txl.cuda.warp_sync()
 
             # Wait TMA arrival (epilogue.cuh:126-127)
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 txl.cuda.mbarrier_wait(tma_mbar, phase[0])
                 txl.assign(phase[0], phase[0] ^ txl.uint32(1))
             txl.cuda.warp_sync()
 
             # TMA-store hidden to the output tensor (epilogue.cuh:138-142)
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 txl.ptx[_BULK_S2G_CHAIN](
                     recv_x.ptr_to([i * HIDDEN_BYTES]),
                     smem.ptr_to([tok_off]),
@@ -875,7 +875,7 @@ def _build_epilogue_kernel(
             txl.cuda.warp_sync()
 
             # Store top-k weights (epilogue.cuh:182-184)
-            with txl.If(lane < NUM_TOPK), txl.Then():
+            with txl.if_(lane < NUM_TOPK), txl.then_():
                 txl.ptx.st.global_.f32(
                     recv_topk_weights.ptr_to([i * NUM_TOPK + lane]),
                     _ld_shared_f32(smem_f32, tma_topk_w_base + lane),
@@ -883,7 +883,7 @@ def _build_epilogue_kernel(
             txl.cuda.warp_sync()
 
             # Write source metadata, non-cached mode (epilogue.cuh:192-201)
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 txl.ptx.st.global_.s32(
                     recv_src_metadata.ptr_to([i * (2 + NUM_TOPK) + 0]),
                     _ld_shared_s32(smem_i32, tma_src_idx_base),

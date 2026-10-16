@@ -10,7 +10,7 @@ import tirx_kernels.tirx_lite as txl
 
 
 @txl.kernel()
-def zero(out: txl.Tensor((txl.int64(),), txl.f32)):
+def zero(out: txl.Tensor((txl.int64(),), "float32")):
     txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32))
     txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 ```
@@ -58,6 +58,11 @@ backend. No Python shape-checking or data-pointer extraction wrapper is added.
 Use `.data` for a tensor's base pointer and `.ptr_to(indices)` for an indexed
 pointer. `Ptr` parameters retain the native raw-pointer calling convention.
 
+Use standard dtype strings such as `"float16"`, `"bfloat16"`, and `"uint32"`,
+and native enum members such as `txl.SwizzleMode.SWIZZLE_128B_ATOM` for swizzles.
+Warp intrinsics retain their native `gpu_warp_*` names, and storage synchronization
+uses `gpu_storage_sync`. `local_scalar` is forwarded directly to the native builder.
+
 Use distinct symbolic dimensions for independent extents. Reuse the same Var
 when tensors must agree or a dimension must equal a scalar argument:
 
@@ -74,7 +79,7 @@ def zero_matrix(
     txl.device_entry(launch=txl.cuda.LaunchConfig(grid=rows, block=32))
     with txl.serial((cols + 31) // 32) as iteration:
         col = iteration * 32 + txl.thread_id()
-        with txl.If(col < cols), txl.Then():
+        with txl.if_(col < cols), txl.then_():
             txl.ptx.st.global_.f32(out.ptr_to([txl.cta_id(), col]), txl.float32(0))
 ```
 
@@ -88,7 +93,18 @@ Native script APIs automatically insert void calls whenever an IRBuilder is
 active, independently of line tracing; non-void expressions remain values.
 Emission and source locations also work for helpers using the native `T` namespace. Instruction policies specific to lite remain in lite.
 Ordinary Python control flow still executes while constructing the kernel;
-`with txl.serial(...)` and `with txl.If(...)` construct runtime control flow.
+`with txl.serial(...)` and `with txl.if_(...)` construct runtime control flow.
+Control flow uses the native TIRx names directly: `if_`, `then_`, `else_`,
+`while_`, `break_`, `continue_`, and `return_`. Enter `then_()` and optional
+`else_()` frames inside `if_(condition)`:
+
+```python
+with txl.if_(condition):
+    with txl.then_():
+        ...
+    with txl.else_():
+        ...
+```
 
 ## Launch configuration
 
@@ -103,13 +119,13 @@ Launch expressions refer directly to the function's bound ABI parameters:
 
 ```python
 @txl.kernel()
-def zero(out: txl.Tensor((txl.int64(),), txl.f32), n: txl.i32):
+def zero(out: txl.Tensor((txl.int64(),), "float32"), n: "int32"):
     txl.device_entry(
         launch=txl.cuda.LaunchConfig(grid=(n + 127) // 128, block=128),
         kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
     )
     i = txl.cta_id() * 128 + txl.thread_id()
-    with txl.If(i < n), txl.Then():
+    with txl.if_(i < n), txl.then_():
         txl.ptx.st.global_.f32(out.ptr_to([i]), txl.float32(0))
 ```
 
@@ -124,7 +140,7 @@ and encode TensorMap descriptors and return them to the function:
 
 ```python
 @txl.kernel()
-def kernel(a: txl.Tensor((txl.int64(),), txl.bf16), num_ctas: txl.i32):
+def kernel(a: txl.Tensor((txl.int64(),), "bfloat16"), num_ctas: "int32"):
     descriptors = prepare_descriptors(a)
     with txl.device_entry(launch=txl.cuda.LaunchConfig(grid=num_ctas, block=384)):
         kernel_body(a, descriptors)

@@ -318,7 +318,7 @@ def mma_chain(mma, d, *, a, b, idesc, pred, accumulate, guard, dol=None, k_range
 
         a_desc = a.mma_desc(major=<from idesc trans_a>)   # once, if a is a view
         b_desc = b.mma_desc(major=<from idesc trans_b>)   # once
-        # guard="branch": ONE `If(pred != 0)` opens HERE -- between the
+        # guard="branch": ONE `if_(pred != 0)` opens HERE -- between the
         # encodes above and the MMAs below -- and no per-MMA predicate exists
         for kp in range(n_k):
             txl.ptx[mma](
@@ -433,10 +433,10 @@ def mma_chain(mma, d, *, a, b, idesc, pred, accumulate, guard, dol=None, k_range
         the ISA's two legal issue forms. ``"pred"``: every MMA carries ``@p``
         on *pred* (or, with ``pred=None``, no predicate operand at all).
         ``"branch"``: the descriptors are encoded first, then **one**
-        ``If(pred != 0)`` wraps the whole MMA loop, with no per-MMA predicate.
+        ``if_(pred != 0)`` wraps the whole MMA loop, with no per-MMA predicate.
         The distinction is WHERE the control-flow edge sits relative to this
         function's own descriptor encodes — and that placement is producible
-        only here: a caller's own ``If`` around the call puts the edge ABOVE
+        only here: a caller's own ``if_`` around the call puts the edge ABOVE
         the encodes, which measured with the losing cell (1.22 on FA4 s4096),
         not the winning one.
 
@@ -543,7 +543,7 @@ def mma_chain(mma, d, *, a, b, idesc, pred, accumulate, guard, dol=None, k_range
         )
     if guard == "branch" and pred is None:
         raise ValueError(
-            "guard='branch' emits `If(pred != 0)` around the MMA loop, so pred "
+            "guard='branch' emits `if_(pred != 0)` around the MMA loop, so pred "
             "must be an expression; pred=None (no predicate operand, caller "
             "manages convergence) is a guard='pred' mode."
         )
@@ -820,9 +820,9 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
             delta = 1 << step
             prior = txl.alloc_local([n], <dtype>)
             for i in range(n):                                  # ALL shuffles first
-                prior[i] = txl.tvm_warp_shuffle_up(
+                prior[i] = txl.gpu_warp_shuffle_up(
                     txl.uint32(0xFFFFFFFF), vals[i], delta, width, width)
-            with txl.If(lane >= delta), txl.Then():                 # then the guarded adds
+            with txl.if_(lane >= delta), txl.then_():                 # then the guarded adds
                 for i in range(n):
                     vals[i] = vals[i] + prior[i]
 
@@ -831,7 +831,7 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
 
         for i in range(1, n):
             carry = txl.alloc_local([1], <dtype>)
-            carry[0] = txl.tvm_warp_shuffle(txl.uint32(0xFFFFFFFF), vals[i-1], width-1, width, 32)
+            carry[0] = txl.gpu_warp_shuffle(txl.uint32(0xFFFFFFFF), vals[i-1], width-1, width, 32)
             vals[i] = vals[i] + carry[0]
 
     Why this form

@@ -162,11 +162,11 @@ def get_kernel(
     @txl.kernel()
     def nvfp4_quantize_per_token(
         in_global: txl.Tensor((txl.int64(),), dtype),
-        out_global: txl.Tensor((txl.int64(),), txl.u8),
-        sf_out: txl.Tensor((txl.int64(),), txl.u8),
-        pts_out: txl.Tensor((txl.int64(),), txl.f32),
-        m_rows: txl.i32,
-        gsi: txl.Tensor((txl.int64(),), txl.f32),
+        out_global: txl.Tensor((txl.int64(),), "uint8"),
+        sf_out: txl.Tensor((txl.int64(),), "uint8"),
+        pts_out: txl.Tensor((txl.int64(),), "float32"),
+        m_rows: "int32",
+        gsi: txl.Tensor((txl.int64(),), "float32"),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=m, block=_PER_TOKEN_WARPS * 32),
@@ -181,7 +181,7 @@ def get_kernel(
             txl.ptx.griddepcontrol.wait()
 
         smem = txl.smem_pool()
-        red_buf = smem.alloc([_PER_TOKEN_WARPS], txl.f32)
+        red_buf = smem.alloc([_PER_TOKEN_WARPS], "float32")
 
         # One CTA per row; 64-bit row bases (kernel:786-817).
         row_idx = bx
@@ -193,7 +193,7 @@ def get_kernel(
         sf_col = txl.local_scalar("int32")
         txl.assign(local_amax, txl.float32(0.0))
         txl.assign(sf_col, tx)
-        with txl.While(sf_col < nsb):
+        with txl.while_(sf_col < nsb):
             elem_off = in_row + sf_col * NVFP4_SF_VEC_SIZE
             v0 = ld_global_v4_u32(txl.address_of(in_global[elem_off]))
             v1 = ld_global_v4_u32(txl.address_of(in_global[elem_off + 8]))
@@ -206,11 +206,11 @@ def get_kernel(
         warp_amax = warp_reduce_max(local_amax)
         lane = txl.truncmod(tx, txl.int32(32))
         warp = txl.truncdiv(tx, txl.int32(32))
-        with txl.If(lane == 0), txl.Then():
+        with txl.if_(lane == 0), txl.then_():
             txl.ptx.st.shared.f32(red_buf.ptr_to([warp]), warp_amax)
         txl.ptx.bar.sync(txl.uint32(0), txl.uint32(_PER_TOKEN_THREADS))
         block_val = txl.local_scalar("float32", init=txl.float32(0.0))
-        with txl.If(lane < _PER_TOKEN_WARPS), txl.Then():
+        with txl.if_(lane < _PER_TOKEN_WARPS), txl.then_():
             txl.ptx.ld.shared.f32(block_val, red_buf.ptr_to([lane]))
         row_amax = warp_reduce_max(block_val)
 
@@ -220,21 +220,21 @@ def get_kernel(
         token_scale = txl.local_scalar("float32")
         txl.assign(encode_scale, txl.float32(0.0))
         txl.assign(token_scale, txl.float32(0.0))
-        with txl.If(row_amax == txl.float32(0.0)):
-            with txl.Then():
+        with txl.if_(row_amax == txl.float32(0.0)):
+            with txl.then_():
                 txl.assign(encode_scale, txl.float32(FLOAT32_MAX))
                 txl.assign(token_scale, txl.float32(0.0))
-            with txl.Else():
+            with txl.else_():
                 txl.assign(token_scale, mul_f32(row_amax, gs_inv))
                 txl.assign(encode_scale, rcp_approx_ftz(token_scale))
 
-        with txl.If(tx == 0), txl.Then():
+        with txl.if_(tx == 0), txl.then_():
             txl.ptx.st.global_.f32(pts_out.ptr_to([row_idx]), token_scale)
         txl.ptx.bar.sync(txl.uint32(0), txl.uint32(_PER_TOKEN_THREADS))
 
         # Pass 2: quantize with the row encode scale (kernel:846-875).
         sf_col2 = txl.local_scalar("int32", init=tx)
-        with txl.While(sf_col2 < nsb):
+        with txl.while_(sf_col2 < nsb):
             scale_fp8, packed64 = _process_block_pt(
                 in_global, in_row + sf_col2 * NVFP4_SF_VEC_SIZE, encode_scale, dtype=dtype
             )
@@ -246,7 +246,7 @@ def get_kernel(
         # Padding SF columns for swizzled layouts (kernel:877-882).
         if sf_layout != "linear":
             sf_pad = txl.local_scalar("int32", init=nsb + tx)
-            with txl.While(sf_pad < pad_cols):
+            with txl.while_(sf_pad < pad_cols):
                 st_global_u8(txl.address_of(sf_out[sf_offset(row_idx, sf_pad)]), txl.uint8(0))
                 txl.assign(sf_pad, sf_pad + _PER_TOKEN_THREADS)
 

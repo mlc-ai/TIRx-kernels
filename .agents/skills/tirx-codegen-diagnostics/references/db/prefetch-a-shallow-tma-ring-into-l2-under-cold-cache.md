@@ -32,8 +32,8 @@ PREFETCH = 2 if kv_stage <= 3 else 0
 with txl.serial(n_blocks - 1, unroll=False) as i:
     n = n_max - 2 - i
     if PREFETCH:
-        with txl.If(n - PREFETCH >= 0), txl.Then():
-            with txl.If(elected()), txl.Then():
+        with txl.if_(n - PREFETCH >= 0), txl.then_():
+            with txl.if_(elected()), txl.then_():
                 txl.ptx["cp.async.bulk.prefetch.tensor.4d.L2.global.tile"](
                     txl.address_of(tmap_k), txl.int32(0), txl.Cast("int32", n_pf * BLK_N), head, batch
                 )

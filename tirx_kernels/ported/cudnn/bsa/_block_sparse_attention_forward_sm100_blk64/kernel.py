@@ -109,17 +109,17 @@ def make_forward_kernel(*, backend_config=None, **config):
 
     @txl.kernel()
     def forward(
-        q: txl.Tensor((txl.int64(),), txl.bf16),
-        k: txl.Tensor((txl.int64(),), txl.bf16),
-        v: txl.Tensor((txl.int64(),), txl.bf16),
-        out_bf16: txl.Tensor((txl.int64(),), txl.bf16),
-        out_f32: txl.Tensor((txl.int64(),), txl.f32),
-        lse: txl.Tensor((txl.int64(),), txl.f32),
-        block_index: txl.Tensor((txl.int64(),), txl.i32),
-        block_sizes: txl.Tensor((txl.int64(),), txl.i32),
-        block_nums: txl.Tensor((txl.int64(),), txl.i32),
-        split_offsets: txl.Tensor((txl.int64(),), txl.i32),
-        softmax_scale: txl.f32,
+        q: txl.Tensor((txl.int64(),), "bfloat16"),
+        k: txl.Tensor((txl.int64(),), "bfloat16"),
+        v: txl.Tensor((txl.int64(),), "bfloat16"),
+        out_bf16: txl.Tensor((txl.int64(),), "bfloat16"),
+        out_f32: txl.Tensor((txl.int64(),), "float32"),
+        lse: txl.Tensor((txl.int64(),), "float32"),
+        block_index: txl.Tensor((txl.int64(),), "int32"),
+        block_sizes: txl.Tensor((txl.int64(),), "int32"),
+        block_nums: txl.Tensor((txl.int64(),), "int32"),
+        split_offsets: txl.Tensor((txl.int64(),), "int32"),
+        softmax_scale: "float32",
     ):
         # Numerically direct transcription of the sparse block/split contract.
         # The warp-specialized TMA/TMEM producer in ``source_kernel.py`` is the
@@ -167,7 +167,7 @@ def make_forward_kernel(*, backend_config=None, **config):
         with txl.unroll(4) as row_group:
             row = warp + row_group * 16
             query = q_block * QUERY_TILE + row
-            with txl.If(query < seqlen_q), txl.Then():
+            with txl.if_(query < seqlen_q), txl.then_():
                 row_max = txl.local_scalar("float32", init=txl.float32(-float("inf")))
                 row_sum = txl.local_scalar("float32", init=txl.float32(0.0))
                 accum = txl.alloc_local((4,), "float32")
@@ -175,7 +175,7 @@ def make_forward_kernel(*, backend_config=None, **config):
                     txl.assign(accum[j], txl.float32(0.0))
 
                 block_slot = txl.local_scalar("int32", init=0)
-                with txl.While(block_slot < raw_count):
+                with txl.while_(block_slot < raw_count):
                     meta_index = count_index * max_blocks + split_start + block_slot
                     sparse_id = _load_i32(block_index, meta_index)
                     block_size = txl.local_scalar("int32")
@@ -184,9 +184,9 @@ def make_forward_kernel(*, backend_config=None, **config):
                     else:
                         txl.assign(block_size, txl.int32(SPARSE_BLOCK))
                     token_in_block = txl.local_scalar("int32", init=0)
-                    with txl.While(token_in_block < block_size):
+                    with txl.while_(token_in_block < block_size):
                         token = sparse_id * SPARSE_BLOCK + token_in_block
-                        with txl.If(token < seqlen_kv), txl.Then():
+                        with txl.if_(token < seqlen_kv), txl.then_():
                             dot = txl.local_scalar("float32", init=txl.float32(0.0))
                             with txl.unroll(4) as j:
                                 dim = lane + j * 32
@@ -229,7 +229,7 @@ def make_forward_kernel(*, backend_config=None, **config):
                         txl.ptx.st.global_.f32(out_f32.ptr_to([out_idx]), accum[j] * inv_sum)
                     else:
                         _store_bf16(out_bf16, out_idx, accum[j] * inv_sum)
-                with txl.If(lane == 0), txl.Then():
+                with txl.if_(lane == 0), txl.then_():
                     lse_idx = (batch_idx * (num_heads * num_splits) + out_head) * seqlen_q + query
                     lse_value = txl.if_then_else(
                         valid_sum,
@@ -257,10 +257,10 @@ def make_combine_kernel(*, backend_config=None, **config):
 
     @txl.kernel()
     def combine(
-        out_partial: txl.Tensor((txl.int64(),), txl.f32),
-        lse_partial: txl.Tensor((txl.int64(),), txl.f32),
-        out: txl.Tensor((txl.int64(),), txl.bf16),
-        lse: txl.Tensor((txl.int64(),), txl.f32),
+        out_partial: txl.Tensor((txl.int64(),), "float32"),
+        lse_partial: txl.Tensor((txl.int64(),), "float32"),
+        out: txl.Tensor((txl.int64(),), "bfloat16"),
+        lse: txl.Tensor((txl.int64(),), "float32"),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(row_tiles, 2, batch), block=4 * 32),
@@ -274,16 +274,16 @@ def make_combine_kernel(*, backend_config=None, **config):
             txl.cuda.block_idx("z"),
         )
         tid = txl.thread_id()
-        raw = txl.alloc_tensor((smem_bytes,), txl.u8, scope="shared.dyn", align=1024)
+        raw = txl.alloc_tensor((smem_bytes,), "uint8", scope="shared.dyn", align=1024)
 
         def view(shape, dtype, byte_offset):
             return txl.decl_tensor(
                 shape, dtype, data=raw.data, byte_offset=byte_offset, scope="shared.dyn", align=128
             )
 
-        s_lse = view((lse_split_storage * 16,), txl.f32, 0)
-        s_max_split = view((16,), txl.i32, max_split_offset)
-        s_o = view((4 * 16 * 64,), txl.f32, o_ring_offset)
+        s_lse = view((lse_split_storage * 16,), "float32", 0)
+        s_max_split = view((16,), "int32", max_split_offset)
+        s_o = view((4 * 16 * 64,), "float32", o_ring_offset)
 
         def lse_smem_index(split, row):
             linear = split * 16 + row
@@ -299,7 +299,7 @@ def make_combine_kernel(*, backend_config=None, **config):
         def load_o_stage(split, stage, row0, row1, col):
             for row in (row0, row1):
                 flat_row = row_tile * 16 + row
-                with txl.If(flat_row < seqlen_q * num_heads), txl.Then():
+                with txl.if_(flat_row < seqlen_q * num_heads), txl.then_():
                     lidx = partial_lse_index(split, flat_row)
                     txl.ptx["cp.async.cg.shared.global"](
                         s_o.ptr_to([stage * 1024 + row * 64 + col]),
@@ -317,12 +317,12 @@ def make_combine_kernel(*, backend_config=None, **config):
         with txl.unroll(lse_slots_per_thread) as slot:
             split = lse_split0 + slot * 8
             dst = s_lse.ptr_to([lse_smem_index(split, lse_row)])
-            with txl.If((lse_flat_row < seqlen_q * num_heads) & (split < num_splits)):
-                with txl.Then():
+            with txl.if_((lse_flat_row < seqlen_q * num_heads) & (split < num_splits)):
+                with txl.then_():
                     txl.ptx["cp.async.ca.shared.global"](
                         dst, lse_partial.ptr_to([partial_lse_index(split, lse_flat_row)]), 4, 4
                     )
-                with txl.Else():
+                with txl.else_():
                     txl.ptx.st.shared.u32(dst, txl.uint32(0xFF800000))
         txl.ptx.cp.async_.commit_group()
 
@@ -351,7 +351,7 @@ def make_combine_kernel(*, backend_config=None, **config):
         local_last = txl.local_scalar("int32", init=txl.int32(-1))
         with txl.unroll(lse_slots_per_thread) as slot:
             txl.ptx.max.f32(local_max, local_max, lse_regs[slot])
-            with txl.If(lse_regs[slot] != txl.float32(-float("inf"))), txl.Then():
+            with txl.if_(lse_regs[slot] != txl.float32(-float("inf"))), txl.then_():
                 txl.assign(local_last, stats_split0 + slot * 8)
         for lane_xor in (4, 2, 1):
             other_max = _shfl_xor_f32(local_max, lane_xor)
@@ -370,21 +370,21 @@ def make_combine_kernel(*, backend_config=None, **config):
             txl.assign(local_sum, local_sum + _shfl_xor_f32(local_sum, lane_xor))
 
         inv_sum = txl.local_scalar("float32", init=txl.float32(0.0))
-        with txl.If((local_last >= 0) & (local_sum > txl.float32(0.0))), txl.Then():
+        with txl.if_((local_last >= 0) & (local_sum > txl.float32(0.0))), txl.then_():
             txl.ptx.rcp.rn.f32(inv_sum, local_sum)
         with txl.unroll(lse_slots_per_thread) as slot:
             txl.ptx.mul.f32(lse_regs[slot], lse_regs[slot], inv_sum)
             txl.ptx.st.shared.f32(
                 s_lse.ptr_to([lse_smem_index(stats_split0 + slot * 8, stats_row)]), lse_regs[slot]
             )
-        with txl.If(stats_split0 == 0), txl.Then():
+        with txl.if_(stats_split0 == 0), txl.then_():
             txl.ptx.st.shared.u32(
                 s_max_split.ptr_to([stats_row]), txl.reinterpret(local_last, ty="uint32")
             )
             flat_row = row_tile * 16 + stats_row
-            with txl.If((dim_tile == 0) & (flat_row < seqlen_q * num_heads)), txl.Then():
+            with txl.if_((dim_tile == 0) & (flat_row < seqlen_q * num_heads)), txl.then_():
                 final_lse = txl.local_scalar("float32", init=txl.float32(-float("inf")))
-                with txl.If(local_last >= 0), txl.Then():
+                with txl.if_(local_last >= 0), txl.then_():
                     lg = _log2(local_sum)
                     txl.ptx.fma.rn.f32(final_lse, lg, txl.float32(LN_2), local_max)
                 query = flat_row - (flat_row // seqlen_q) * seqlen_q
@@ -413,8 +413,8 @@ def make_combine_kernel(*, backend_config=None, **config):
         load_stage = txl.local_scalar("int32", init=3)
         compute_stage = txl.local_scalar("int32", init=0)
         split = txl.local_scalar("int32", init=0)
-        with txl.While(split <= max_split):
-            with txl.If(split + 3 <= max_split), txl.Then():
+        with txl.while_(split <= max_split):
+            with txl.if_(split + 3 <= max_split), txl.then_():
                 load_o_stage(split + 3, load_stage, row0, row1, col)
             txl.ptx.cp.async_.commit_group()
             weight0 = txl.local_scalar("float32")
@@ -445,10 +445,10 @@ def make_combine_kernel(*, backend_config=None, **config):
                 (acc1, part1, weight1, row1),
             ):
                 with (
-                    txl.If(
+                    txl.if_(
                         (row_tile * 16 + row < seqlen_q * num_heads) & (weight > txl.float32(0.0))
                     ),
-                    txl.Then(),
+                    txl.then_(),
                 ):
                     with txl.unroll(2) as pair:
                         weighted = txl.alloc_local((2,), "float32")
@@ -468,7 +468,7 @@ def make_combine_kernel(*, backend_config=None, **config):
 
         for row_acc, row in ((acc0, row0), (acc1, row1)):
             flat_row = row_tile * 16 + row
-            with txl.If(flat_row < seqlen_q * num_heads), txl.Then():
+            with txl.if_(flat_row < seqlen_q * num_heads), txl.then_():
                 packed0 = txl.local_scalar("uint32")
                 packed1 = txl.local_scalar("uint32")
                 txl.ptx.cvt.rn.bf16x2.f32(packed0, row_acc[1], row_acc[0])

@@ -133,7 +133,7 @@ def _umod(x, d):
 
 def _wait_barrier(barrier, phase):
     complete = txl.local_scalar("uint32", init=txl.uint32(0))
-    with txl.While(complete == txl.uint32(0)):
+    with txl.while_(complete == txl.uint32(0)):
         txl.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
             complete, barrier, txl.cast(phase, "uint32"), txl.uint32(TRY_WAIT_TICKS)
         )
@@ -198,28 +198,28 @@ class _PersistentScheduler:
             txl.assign(self.psum, 0)
             txl.assign(self.nmb, self.num_m_blocks)
             if self.is_k_grouped_psum:
-                with txl.While(self.grp < self.num_groups):
+                with txl.while_(self.grp < self.num_groups):
                     _load_grouped_layout(self.nxtk, self.grouped_layout, self.grp)
                     txl.assign(self.last, _uceil(self.kend, self.k_alignment) * self.k_alignment)
                     txl.assign(self.psum, self.nxtk - self.last)
                     txl.assign(self.kend, self.nxtk)
-                    with txl.If(self.psum > 0):
-                        with txl.Then():
-                            txl.Break()
+                    with txl.if_(self.psum > 0):
+                        with txl.then_():
+                            txl.break_()
                     txl.assign(self.grp, self.grp + 1)
             else:
-                with txl.While(self.grp < self.num_groups):
+                with txl.while_(self.grp < self.num_groups):
                     _load_grouped_layout(self.psum, self.grouped_layout, self.grp)
-                    with txl.If(self.psum > 0):
-                        with txl.Then():
-                            txl.Break()
+                    with txl.if_(self.psum > 0):
+                        with txl.then_():
+                            txl.break_()
                     txl.assign(self.grp, self.grp + 1)
                 txl.assign(self.nxt, self.grp + 1)
-                with txl.While(self.nxt < self.num_groups):
+                with txl.while_(self.nxt < self.num_groups):
                     _load_grouped_layout(self.nxtk, self.grouped_layout, self.nxt)
-                    with txl.If(self.nxtk > 0):
-                        with txl.Then():
-                            txl.Break()
+                    with txl.if_(self.nxtk > 0):
+                        with txl.then_():
+                            txl.break_()
                     txl.assign(self.nxt, self.nxt + 1)
         else:
             if self.is_m_grouped_psum:
@@ -233,33 +233,33 @@ class _PersistentScheduler:
         txl.assign(self.nb, self.it * self.num_sms + self.sm_idx)
         done = txl.local_scalar("int32", init=0)
         if self.is_m_grouped_masked:
-            with txl.While(done == 0):
-                with txl.If(self.grp == self.num_groups):
-                    with txl.Then():
+            with txl.while_(done == 0):
+                with txl.if_(self.grp == self.num_groups):
+                    with txl.then_():
                         txl.assign(self.valid, 0)
                         txl.assign(done, 1)
-                    with txl.Else():
+                    with txl.else_():
                         _load_grouped_layout(self.nmb, self.grouped_layout, self.grp)
                         txl.assign(self.nmb, _uceil(self.nmb, self.block_m))
-                        with txl.If(self.nb < (self.cum + self.nmb) * self.num_n_blocks):
-                            with txl.Then():
+                        with txl.if_(self.nb < (self.cum + self.nmb) * self.num_n_blocks):
+                            with txl.then_():
                                 txl.assign(done, 1)
-                            with txl.Else():
+                            with txl.else_():
                                 txl.assign(self.cum, self.cum + self.nmb)
                                 txl.assign(self.grp, self.grp + 1)
         else:
             if self.is_m_grouped_psum:
-                with txl.While(done == 0):
-                    with txl.If(self.nb < (self.cum + self.nmb) * self.num_n_blocks):
-                        with txl.Then():
+                with txl.while_(done == 0):
+                    with txl.if_(self.nb < (self.cum + self.nmb) * self.num_n_blocks):
+                        with txl.then_():
                             txl.assign(done, 1)
-                        with txl.Else():
+                        with txl.else_():
                             txl.assign(self.grp, self.grp + 1)
-                            with txl.If(self.grp == self.num_groups):
-                                with txl.Then():
+                            with txl.if_(self.grp == self.num_groups):
+                                with txl.then_():
                                     txl.assign(self.valid, 0)
                                     txl.assign(done, 1)
-                                with txl.Else():
+                                with txl.else_():
                                     txl.assign(
                                         self.last, (_uceil(self.psum, self.block_m) * self.block_m)
                                     )
@@ -270,16 +270,16 @@ class _PersistentScheduler:
                                     )
             else:
                 if self.is_k_grouped:
-                    with txl.While(done == 0):
-                        with txl.If(self.grp == self.num_groups):
-                            with txl.Then():
+                    with txl.while_(done == 0):
+                        with txl.if_(self.grp == self.num_groups):
+                            with txl.then_():
                                 txl.assign(self.valid, 0)
                                 txl.assign(done, 1)
-                            with txl.Else():
-                                with txl.If(self.nb < (self.vgrp + 1) * self.num_blocks):
-                                    with txl.Then():
+                            with txl.else_():
+                                with txl.if_(self.nb < (self.vgrp + 1) * self.num_blocks):
+                                    with txl.then_():
                                         txl.assign(done, 1)
-                                    with txl.Else():
+                                    with txl.else_():
                                         if self.track_sfk:
                                             txl.assign(
                                                 self.sfk,
@@ -288,7 +288,7 @@ class _PersistentScheduler:
                                         txl.assign(self.vgrp, self.vgrp + 1)
                                         if self.is_k_grouped_psum:
                                             txl.assign(self.grp, self.grp + 1)
-                                            with txl.While(self.grp < self.num_groups):
+                                            with txl.while_(self.grp < self.num_groups):
                                                 _load_grouped_layout(
                                                     self.nxtk, self.grouped_layout, self.grp
                                                 )
@@ -301,36 +301,36 @@ class _PersistentScheduler:
                                                 )
                                                 txl.assign(self.psum, self.nxtk - self.last)
                                                 txl.assign(self.kend, self.nxtk)
-                                                with txl.If(self.psum > 0):
-                                                    with txl.Then():
-                                                        txl.Break()
+                                                with txl.if_(self.psum > 0):
+                                                    with txl.then_():
+                                                        txl.break_()
                                                 txl.assign(self.grp, self.grp + 1)
                                         else:
                                             txl.assign(self.last, self.last + self.psum)
                                             txl.assign(self.grp, self.nxt)
                                             txl.assign(self.nxt, self.nxt + 1)
                                             txl.assign(self.psum, self.nxtk)
-                                            with txl.While(self.nxt < self.num_groups):
+                                            with txl.while_(self.nxt < self.num_groups):
                                                 _load_grouped_layout(
                                                     self.nxtk, self.grouped_layout, self.nxt
                                                 )
-                                                with txl.If(self.nxtk > 0):
-                                                    with txl.Then():
-                                                        txl.Break()
+                                                with txl.if_(self.nxtk > 0):
+                                                    with txl.then_():
+                                                        txl.break_()
                                                 txl.assign(self.nxt, self.nxt + 1)
                     txl.assign(self.cum, self.vgrp * self.num_m_blocks)
                 else:
                     if self.is_batched:
-                        with txl.If(self.nb >= self.num_blocks * self.num_groups):
-                            with txl.Then():
+                        with txl.if_(self.nb >= self.num_blocks * self.num_groups):
+                            with txl.then_():
                                 txl.assign(self.valid, 0)
-                            with txl.Else():
+                            with txl.else_():
                                 txl.assign(self.grp, self.nb // self.num_blocks)
                                 txl.assign(self.cum, self.grp * self.num_m_blocks)
                                 txl.assign(self.nmb, self.num_m_blocks)
                     else:
-                        with txl.If(self.nb >= self.num_blocks):
-                            with txl.Then():
+                        with txl.if_(self.nb >= self.num_blocks):
+                            with txl.then_():
                                 txl.assign(self.valid, 0)
 
     def advance(self):
@@ -627,11 +627,11 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
 
     @txl.kernel()
     def sm100_fp8_fp4_gemm_1d1d(
-        grouped_layout: txl.Tensor((txl.int64(),), txl.i32),
-        grouped_len: txl.i32,
-        shape_m: txl.i32,
-        shape_n: txl.i32,
-        shape_k: txl.i32,
+        grouped_layout: txl.Tensor((txl.int64(),), "int32"),
+        grouped_len: "int32",
+        shape_m: "int32",
+        shape_n: "int32",
+        shape_k: "int32",
         tensor_map_a: txl.Ptr(txl.TensorMap),
         tensor_map_b: txl.Ptr(txl.TensorMap),
         tensor_map_sfa: txl.Ptr(txl.TensorMap),
@@ -686,14 +686,14 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
             align=1024,
             swizzle=swizzle_b,
         )
-        smem_sfa = smem.alloc((stages, sf_block_m), txl.u32, align=16)
-        smem_sfb = smem.alloc((stages, sf_block_n), txl.u32, align=16)
+        smem_sfa = smem.alloc((stages, sf_block_m), "uint32", align=16)
+        smem_sfb = smem.alloc((stages, sf_block_n), "uint32", align=16)
         full_barriers = txl.TMABar(smem, stages)
         empty_barriers = txl.TCGen05Bar(smem, stages)
         with_sf_barriers = txl.MBarrier(smem, stages)
         tmem_full_barriers = txl.TCGen05Bar(smem, NUM_EPILOGUE_STAGES)
         tmem_empty_barriers = txl.MBarrier(smem, NUM_EPILOGUE_STAGES)
-        tmem_slot = smem.alloc((1,), txl.u32, align=4)
+        tmem_slot = smem.alloc((1,), "uint32", align=4)
         if smem.bytes != spec.smem_tmem_ptr_offset + 4:
             raise ValueError(
                 f"K SMEM layout ends at {smem.bytes}, expected {spec.smem_tmem_ptr_offset + 4}"
@@ -737,8 +737,8 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
             init_elected = txl.local_scalar("uint32")
             init_elected_lane = txl.local_scalar("uint32")
             txl.ptx.elect_sync(init_elected_lane, init_elected, txl.uint32(0xFFFFFFFF))
-            with txl.If(init_elected == txl.uint32(1)):
-                with txl.Then():
+            with txl.if_(init_elected == txl.uint32(1)):
+                with txl.then_():
                     with txl.unroll(0, stages) as s:
                         txl.ptx.mbarrier.init.shared.b64(full_barriers.ptr_to([s]), txl.uint32(1))
                         txl.ptx.mbarrier.init.shared.b64(empty_barriers.ptr_to([s]), txl.uint32(1))
@@ -806,8 +806,8 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
             ld_elected = txl.local_scalar("uint32")
             ld_elected_lane = txl.local_scalar("uint32")
             txl.ptx.elect_sync(ld_elected_lane, ld_elected, txl.uint32(0xFFFFFFFF))
-            with txl.If(ld_elected == txl.uint32(1)):
-                with txl.Then():
+            with txl.if_(ld_elected == txl.uint32(1)):
+                with txl.then_():
                     ld_pipe = txl.PipelineState(stages, phase=0)
                     ld_sched = _PersistentScheduler(
                         spec,
@@ -819,10 +819,10 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                         track_sfk=True,
                     )
                     ld_kblocks = txl.local_scalar("int32", init=0)
-                    with txl.While(ld_sched.valid == 1):
+                    with txl.while_(ld_sched.valid == 1):
                         ld_sched.next()
-                        with txl.If(ld_sched.valid == 1):
-                            with txl.Then():
+                        with txl.if_(ld_sched.valid == 1):
+                            with txl.then_():
                                 txl.assign(
                                     ld_kblocks,
                                     (
@@ -923,7 +923,7 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                 if use_effective_m:
                                     # `get_aligned_effective_m_in_block` for this block (sketch `:559`).
                                     ld_eff_m = txl.local_scalar("int32", init=block_m)
-                                    with txl.If(ld_m_local == ld_sched.nmb - 1), txl.Then():
+                                    with txl.if_(ld_m_local == ld_sched.nmb - 1), txl.then_():
                                         txl.assign(
                                             ld_eff_m,
                                             (
@@ -951,7 +951,7 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                     else:
                                         txl.assign(n_idx, n_idx + cta_in_cluster * load_block_n)
                                 ld_k = txl.local_scalar("int32", init=0)
-                                with txl.While(ld_k < ld_kblocks):
+                                with txl.while_(ld_k < ld_kblocks):
                                     _wait_barrier(
                                         empty_barriers.ptr_to([ld_pipe.stage]),
                                         txl.bitwise_xor(ld_pipe.phase, 1),
@@ -999,8 +999,8 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                             txl.uint64(EVICT_NORMAL),
                                         )
                                     arrival = txl.local_scalar("int32", init=arrival_bytes_ab)
-                                    with txl.If(ld_k % sfa_stages_per_load == 0):
-                                        with txl.Then():
+                                    with txl.if_(ld_k % sfa_stages_per_load == 0):
+                                        with txl.then_():
                                             txl.ptx[sf_load_chain](
                                                 smem_sfa.ptr_to([ld_pipe.stage, 0]),
                                                 txl.address_of(tensor_map_sfa),
@@ -1013,8 +1013,8 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                                 txl.uint64(EVICT_NORMAL),
                                             )
                                             txl.assign(arrival, arrival + block_m * 4)
-                                    with txl.If(ld_k % sfb_stages_per_load == 0):
-                                        with txl.Then():
+                                    with txl.if_(ld_k % sfb_stages_per_load == 0):
+                                        with txl.then_():
                                             txl.ptx[sf_load_chain](
                                                 smem_sfb.ptr_to([ld_pipe.stage, 0]),
                                                 txl.address_of(tensor_map_sfb),
@@ -1037,7 +1037,7 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
         # ===============================================================
 
         def mma_role_body():
-            with txl.If(is_leader_cta), txl.Then():
+            with txl.if_(is_leader_cta), txl.then_():
                 desc_a = txl.local_scalar("uint64")
                 desc_b = txl.local_scalar("uint64")
                 desc_sf = txl.local_scalar("uint64")
@@ -1105,10 +1105,10 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                 txl.ptx.elect_sync(mma_elected_lane, mma_elected, txl.uint32(0xFFFFFFFF))
                 txl.assign(mma_kblocks, 0)
                 txl.assign(mma_iter, 0)
-                with txl.While(mma_sched.valid == 1):
+                with txl.while_(mma_sched.valid == 1):
                     mma_sched.next()
-                    with txl.If(mma_sched.valid == 1):
-                        with txl.Then():
+                    with txl.if_(mma_sched.valid == 1):
+                        with txl.then_():
                             if use_effective_m:
                                 # `get_aligned_effective_m_in_block` for this block (sketch `:559`).
                                 mma_eff_m = txl.local_scalar("int32")
@@ -1121,7 +1121,7 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                     )[0],
                                 )
                                 txl.assign(mma_eff_m, block_m)
-                                with txl.If(mma_m_local == mma_sched.nmb - 1), txl.Then():
+                                with txl.if_(mma_m_local == mma_sched.nmb - 1), txl.then_():
                                     txl.assign(
                                         mma_eff_m,
                                         (
@@ -1163,9 +1163,9 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                 init=((mma_kblocks + (MMA_K_UNROLL - 1)) // MMA_K_UNROLL)
                                 * MMA_K_UNROLL,
                             )
-                            with txl.While(mma_k < mma_k_rounded):
+                            with txl.while_(mma_k < mma_k_rounded):
                                 with txl.unroll(0, MMA_K_UNROLL) as u:
-                                    with txl.If(mma_k < mma_kblocks), txl.Then():
+                                    with txl.if_(mma_k < mma_kblocks), txl.then_():
                                         _wait_barrier(
                                             with_sf_barriers.ptr_to([mma_pipe.stage]),
                                             mma_pipe.phase,
@@ -1190,8 +1190,8 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                         # One elected lane owns the UTCCP and UMMA issues.  Predicating the
                                         # instructions keeps the warp converged; branching on the elected
                                         # lane instead costs a BSSY/BSYNC pair per K block.
-                                        with txl.If(u % sfa_stages_per_load == 0):
-                                            with txl.Then():
+                                        with txl.if_(u % sfa_stages_per_load == 0):
+                                            with txl.then_():
                                                 with txl.unroll(0, num_sfa_chunks) as c:
                                                     txl.assign(
                                                         desc_sf,
@@ -1212,8 +1212,8 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                                         desc_sf,
                                                         pred=mma_elected,
                                                     )
-                                        with txl.If(u % sfb_stages_per_load == 0):
-                                            with txl.Then():
+                                        with txl.if_(u % sfb_stages_per_load == 0):
+                                            with txl.then_():
                                                 with txl.unroll(0, num_sfb_chunks) as c:
                                                     txl.assign(
                                                         desc_sf,
@@ -1239,7 +1239,7 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                             # only the leading `ceil_div(remaining_k, UMMA_K)`
                                             # steps of a partial final K block are valid.
                                             with (
-                                                txl.If(
+                                                txl.if_(
                                                     txl.Or(
                                                         mma_k < mma_kblocks - 1,
                                                         ki * UMMA_K
@@ -1253,7 +1253,7 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                                     if may_have_tail_k
                                                     else ki < umma_k_steps
                                                 ),
-                                                txl.Then(),
+                                                txl.then_(),
                                             ):
                                                 sfa_id = txl.local_scalar("uint32")
                                                 sfb_id = txl.local_scalar("uint32")
@@ -1363,8 +1363,8 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                 # A 2-CTA cluster needs one more accumulator wait before the
                 # barriers can be safely destroyed (source `:426`).
                 if cta_group > 1:
-                    with txl.If(mma_iter > 0):
-                        with txl.Then():
+                    with txl.if_(mma_iter > 0):
+                        with txl.then_():
                             _wait_barrier(
                                 tmem_empty_barriers.ptr_to([(mma_iter - 1) % NUM_EPILOGUE_STAGES]),
                                 txl.bitwise_and((mma_iter - 1) // NUM_EPILOGUE_STAGES, 1),
@@ -1387,23 +1387,23 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
             )
             tr_kblocks = txl.local_scalar("int32", init=0)
             sf_vals = txl.alloc_local((4,), "uint32")
-            with txl.While(tr_sched.valid == 1):
+            with txl.while_(tr_sched.valid == 1):
                 tr_sched.next()
-                with txl.If(tr_sched.valid == 1):
-                    with txl.Then():
+                with txl.if_(tr_sched.valid == 1):
+                    with txl.then_():
                         txl.assign(
                             tr_kblocks,
                             (_uceil(tr_sched.psum, block_k) if is_k_grouped else num_k_blocks),
                         )
                         tr_k = txl.local_scalar("int32", init=0)
-                        with txl.While(tr_k < tr_kblocks):
+                        with txl.while_(tr_k < tr_kblocks):
                             _wait_barrier(full_barriers.ptr_to([tr_pipe.stage]), tr_pipe.phase)
                             # The prior logical task may still read this stage through tcgen05's
                             # async proxy.  Complete that handoff before generic-proxy transpose
                             # stores reuse the same shared bytes.
                             txl.ptx.fence.proxy.async_.shared__cta()
-                            with txl.If(tr_k % sfa_stages_per_load == 0):
-                                with txl.Then():
+                            with txl.if_(tr_k % sfa_stages_per_load == 0):
+                                with txl.then_():
                                     with txl.unroll(0, num_sfa_chunks) as c:
                                         base = c * NUM_UTCCP_ALIGNED_ELEMS
                                         with txl.unroll(0, 4) as i:
@@ -1422,8 +1422,8 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                             sf_vals[3],
                                         )
                                     txl.ptx.fence.proxy.async_.shared__cta()
-                            with txl.If(tr_k % sfb_stages_per_load == 0):
-                                with txl.Then():
+                            with txl.if_(tr_k % sfb_stages_per_load == 0):
+                                with txl.then_():
                                     with txl.unroll(0, num_sfb_chunks) as c:
                                         base = c * NUM_UTCCP_ALIGNED_ELEMS
                                         with txl.unroll(0, 4) as i:
@@ -1471,10 +1471,10 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
             )
             values = txl.alloc_local((8,), "uint32")
             packed = txl.alloc_local((4,), "uint32")
-            with txl.While(ep_sched.valid == 1):
+            with txl.while_(ep_sched.valid == 1):
                 ep_sched.next()
-                with txl.If(ep_sched.valid == 1):
-                    with txl.Then():
+                with txl.if_(ep_sched.valid == 1):
+                    with txl.then_():
                         _wait_barrier(
                             tmem_full_barriers.ptr_to([accum_pipe_e.stage]), accum_pipe_e.phase
                         )
@@ -1503,7 +1503,7 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                         if use_effective_m:
                             # `get_aligned_effective_m_in_block` for this block (sketch `:559`).
                             ep_eff_m = txl.local_scalar("int32", init=block_m)
-                            with txl.If(ep_m_local == ep_sched.nmb - 1), txl.Then():
+                            with txl.if_(ep_m_local == ep_sched.nmb - 1), txl.then_():
                                 txl.assign(
                                     ep_eff_m,
                                     (
@@ -1522,9 +1522,9 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
 
                         if swap_ab:
                             with txl.unroll(0, num_swap_stores) as st:
-                                with txl.If(st < ep_stores), txl.Then():
-                                    with txl.If(ep_warp == 0):
-                                        with txl.Then():
+                                with txl.if_(st < ep_stores), txl.then_():
+                                    with txl.if_(ep_warp == 0):
+                                        with txl.then_():
                                             txl.ptx.cp.async_.bulk.wait_group(
                                                 NUM_TMA_STORE_STAGES - 1
                                             )
@@ -1613,8 +1613,8 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                                 packed[3],
                                             )
 
-                                    with txl.If(st == ep_stores - 1):
-                                        with txl.Then():
+                                    with txl.if_(st == ep_stores - 1):
+                                        with txl.then_():
                                             txl.ptx.tcgen05.fence__before_thread_sync()
                                             rem_s = txl.local_scalar("uint64")
                                             txl.ptx.mapa.shared__cluster.u64(
@@ -1631,8 +1631,8 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                         txl.uint32(EPILOGUE_NAMED_BARRIER),
                                         txl.uint32(num_store_threads),
                                     )
-                                    with txl.If(ep_warp == 0):
-                                        with txl.Then():
+                                    with txl.if_(ep_warp == 0):
+                                        with txl.then_():
                                             # The store is issued by one elected lane; predicate rather than
                                             # branch so the epilogue warp stays converged.
                                             ep_elected = txl.local_scalar("uint32")
@@ -1673,8 +1673,8 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                         else:
                             with txl.unroll(0, num_m_waves) as w:
                                 with txl.unroll(0, num_stores) as st:
-                                    with txl.If(ep_warp == 0):
-                                        with txl.Then():
+                                    with txl.if_(ep_warp == 0):
+                                        with txl.then_():
                                             txl.ptx.cp.async_.bulk.wait_group(
                                                 NUM_TMA_STORE_STAGES - 1
                                             )
@@ -1740,10 +1740,10 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                                 packed[3],
                                             )
 
-                                    with txl.If(
+                                    with txl.if_(
                                         txl.And(w == num_m_waves - 1, st == num_stores - 1)
                                     ):
-                                        with txl.Then():
+                                        with txl.then_():
                                             txl.ptx.tcgen05.fence__before_thread_sync()
                                             rem_e = txl.local_scalar("uint64")
                                             txl.ptx.mapa.shared__cluster.u64(
@@ -1760,8 +1760,8 @@ def build_kernel(spec: GemmSpec, *, backend_config=None):
                                         txl.uint32(EPILOGUE_NAMED_BARRIER),
                                         txl.uint32(num_store_threads),
                                     )
-                                    with txl.If(ep_warp == 0):
-                                        with txl.Then():
+                                    with txl.if_(ep_warp == 0):
+                                        with txl.then_():
                                             # The store is issued by one elected lane; predicate rather than
                                             # branch so the epilogue warp stays converged.
                                             ep_elected = txl.local_scalar("uint32")

@@ -21,16 +21,16 @@ every per-sequence slot.
 
 ```python
 # before: each slot's publish re-reads the image through cold global memory.
-with txl.If(warp == array_index), txl.Then():
-    with txl.If(_elected()), txl.Then():
+with txl.if_(warp == array_index), txl.then_():
+    with txl.if_(_elected()), txl.then_():
         with txl.serial(n_batch) as batch:
             _copy_image_global_to_slot(base_map, slot(batch))   # 4x ld.global.v4.b64
             _patch_slot(slot(batch), batch)
 
 # after: the image is register-resident before the ordering phase begins.
 payload = txl.alloc_local((16,), "uint64")
-with txl.If(warp == array_index), txl.Then():
-    with txl.If(_elected()), txl.Then():
+with txl.if_(warp == array_index), txl.then_():
+    with txl.if_(_elected()), txl.then_():
         for group in range(4):
             txl.ptx.ld.global_.v4.b64(
                 payload[group * 4],
@@ -40,8 +40,8 @@ with txl.If(warp == array_index), txl.Then():
                 _image_ptr(base_map, group * 32),
             )
 ...  # the work-ordering phase, independent of the images
-with txl.If(warp == array_index), txl.Then():
-    with txl.If(_elected()), txl.Then():
+with txl.if_(warp == array_index), txl.then_():
+    with txl.if_(_elected()), txl.then_():
         with txl.serial(n_batch) as batch:
             _store_image_from_registers(slot(batch), payload)
             _patch_slot(slot(batch), batch)

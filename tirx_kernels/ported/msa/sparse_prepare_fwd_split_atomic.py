@@ -90,21 +90,21 @@ Q_IDX_MASK = (1 << SLOT_SHIFT) - 1
 # ---------------------------------------------------------------------------
 @txl.kernel()
 def _kernel(
-    k2q_row_ptr: txl.Tensor((txl.int64(),), txl.i32),
-    k2q_q_indices: txl.Tensor((txl.int64(),), txl.i32),
-    scheduler_metadata: txl.Tensor((txl.int64(),), txl.i32),
-    work_count: txl.Tensor((txl.int64(),), txl.i32),
-    k2q_qsplit_indices: txl.Tensor((txl.int64(),), txl.i32),
-    split_counts: txl.Tensor((txl.int64(),), txl.i32),
-    cu_seqlens_q: txl.Tensor((txl.int64(),), txl.i32),
-    total_rows: txl.i32,
-    num_batches: txl.i32,
-    work_capacity: txl.i32,
-    nnz_capacity: txl.i32,
-    total_q: txl.i32,
-    num_heads_kv: txl.i32,
-    max_seqlen_q: txl.i32,
-    topk: txl.i32,
+    k2q_row_ptr: txl.Tensor((txl.int64(),), "int32"),
+    k2q_q_indices: txl.Tensor((txl.int64(),), "int32"),
+    scheduler_metadata: txl.Tensor((txl.int64(),), "int32"),
+    work_count: txl.Tensor((txl.int64(),), "int32"),
+    k2q_qsplit_indices: txl.Tensor((txl.int64(),), "int32"),
+    split_counts: txl.Tensor((txl.int64(),), "int32"),
+    cu_seqlens_q: txl.Tensor((txl.int64(),), "int32"),
+    total_rows: "int32",
+    num_batches: "int32",
+    work_capacity: "int32",
+    nnz_capacity: "int32",
+    total_q: "int32",
+    num_heads_kv: "int32",
+    max_seqlen_q: "int32",
+    topk: "int32",
 ):
     # CUDA TRANSCRIPTION START
     # sketch: static ABI/launch, one CTA per work item -> :445-446.
@@ -117,13 +117,13 @@ def _kernel(
     # The source's struct is allocated from the dynamic pool, not a static
     # `__shared__` array; the export shows `.extern .shared __dynamic_shmem__0`.
     pool = txl.smem_pool()
-    srow = pool.alloc((SROW_FIELDS,), txl.i32, align=16)
+    srow = pool.alloc((SROW_FIELDS,), "int32", align=16)
 
     # sketch: the oversized-grid early-out -> :447.  The grid is sized by the
     # work list's capacity because `work_count` is device-resident, so the tail
     # CTAs retire here.  It precedes every shared access, so the barrier below
     # is never reached by a partial CTA.
-    with txl.If(block < ld_global_i32(work_count, 0)), txl.Then():
+    with txl.if_(block < ld_global_i32(work_count, 0)), txl.then_():
         # sketch: the one metadata field every thread needs -> :451.
         work_base = block * WORK_FIELDS
         head_kv_idx = ld_global_i32(scheduler_metadata, work_base)
@@ -131,7 +131,7 @@ def _kernel(
         # sketch: thread 0 publishes the row -> :457-461.  The compiler sinks
         # the other four metadata loads into this block, which is what makes
         # all three shared slots load-bearing rather than redundant.
-        with txl.If(tidx == 0), txl.Then():
+        with txl.if_(tidx == 0), txl.then_():
             batch_idx_t0 = ld_global_i32(scheduler_metadata, work_base + 4)
             q_count_t0 = ld_global_i32(scheduler_metadata, work_base + 3)
             q_begin_t0 = ld_global_i32(scheduler_metadata, work_base + 2)
@@ -151,15 +151,15 @@ def _kernel(
         batch_idx = ld_shared_i32(srow, 2)
 
         # sketch: lane-strided edge emission -> :466-481.
-        qi = txl.local_scalar(txl.i32, init=tidx)
-        with txl.While(qi < row_count):
+        qi = txl.local_scalar("int32", init=tidx)
+        with txl.while_(qi < row_count):
             edge = row_start + qi
             q_idx = ld_global_i32(k2q_q_indices, head_kv_idx * nnz_capacity + edge)
             # sketch: the validity guard -> :470.  Well-formed input never takes
             # it -- a CSR row covers only filled entries -- but the guard exists
             # because the GPU index builder leaves its tail uninitialized and the
             # reference builder fills it with -1.
-            with txl.If(txl.And(q_idx >= 0, q_idx < max_seqlen_q)), txl.Then():
+            with txl.if_(txl.And(q_idx >= 0, q_idx < max_seqlen_q)), txl.then_():
                 # The address of `cu_seqlens_q[batch_idx]` is loop-invariant, but
                 # the export re-loads the value every edge: the atomic's memory
                 # clobber prevents hoisting it. The port leaves it in the body.
@@ -170,7 +170,7 @@ def _kernel(
                 # sketch: the capacity guard -> :477.  Signed compare against the
                 # value the atomic returned; also unreachable on well-formed
                 # input, where a (q_abs, head) group holds at most `topk` edges.
-                with txl.If(split_slot < topk), txl.Then():
+                with txl.if_(split_slot < topk), txl.then_():
                     st_global_i32(
                         k2q_qsplit_indices,
                         head_kv_idx * nnz_capacity + edge,

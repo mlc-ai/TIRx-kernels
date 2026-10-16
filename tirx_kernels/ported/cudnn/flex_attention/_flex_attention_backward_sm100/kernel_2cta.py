@@ -180,7 +180,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
     qhead_per_kvhead = heads // kv_heads
     deterministic = bool(config.get("deterministic", False))
     dtype = config["dtype"]
-    elem_type = {"float16": txl.f16, "bfloat16": txl.bf16}[dtype]
+    elem_type = {"float16": "float16", "bfloat16": "bfloat16"}[dtype]
     cvt_pack = {"float16": "cvt.rn.f16x2.f32", "bfloat16": "cvt.rn.bf16x2.f32"}[dtype]
     dtype_bits = 0x10 if dtype == "float16" else 0x490
     mask_heads = heads if "per_head" in config.get("mask_head_mode", "broadcast") else 1
@@ -340,25 +340,25 @@ def get_kernel_2cta(*, backend_config=None, **config):
         dk_map: txl.Ptr(txl.TensorMap),
         dk_output: txl.Tensor((txl.int64(),), elem_type),
         dv_output: txl.Tensor((txl.int64(),), elem_type),
-        cu_q: txl.Tensor((txl.int64(),), txl.i32),
-        cu_k: txl.Tensor((txl.int64(),), txl.i32),
-        partial_count: txl.Tensor((txl.int64(),), txl.i32),
-        partial_index: txl.Tensor((txl.int64(),), txl.i32),
-        full_count: txl.Tensor((txl.int64(),), txl.i32),
-        full_index: txl.Tensor((txl.int64(),), txl.i32),
-        cu_k_blocks: txl.Tensor((txl.int64(),), txl.i32),
-        dq_write_order: txl.Tensor((txl.int64(),), txl.i32),
-        dq_write_order_full: txl.Tensor((txl.int64(),), txl.i32),
-        partial_offset: txl.Tensor((txl.int64(),), txl.i32),
-        full_offset: txl.Tensor((txl.int64(),), txl.i32),
-        packed_mask: txl.Tensor((txl.int64(),), txl.u32),
-        sequence_desc: txl.Tensor((txl.int64(),), txl.i32),
-        work_desc: txl.Tensor((txl.int64(),), txl.i32),
-        dq_semaphore: txl.Tensor((txl.int64(),), txl.i32),
-        dk_semaphore: txl.Tensor((txl.int64(),), txl.i32),
-        dv_semaphore: txl.Tensor((txl.int64(),), txl.i32),
-        workspace: txl.Tensor((txl.int64(),), txl.f32),
-        softmax_scale: txl.f32,
+        cu_q: txl.Tensor((txl.int64(),), "int32"),
+        cu_k: txl.Tensor((txl.int64(),), "int32"),
+        partial_count: txl.Tensor((txl.int64(),), "int32"),
+        partial_index: txl.Tensor((txl.int64(),), "int32"),
+        full_count: txl.Tensor((txl.int64(),), "int32"),
+        full_index: txl.Tensor((txl.int64(),), "int32"),
+        cu_k_blocks: txl.Tensor((txl.int64(),), "int32"),
+        dq_write_order: txl.Tensor((txl.int64(),), "int32"),
+        dq_write_order_full: txl.Tensor((txl.int64(),), "int32"),
+        partial_offset: txl.Tensor((txl.int64(),), "int32"),
+        full_offset: txl.Tensor((txl.int64(),), "int32"),
+        packed_mask: txl.Tensor((txl.int64(),), "uint32"),
+        sequence_desc: txl.Tensor((txl.int64(),), "int32"),
+        work_desc: txl.Tensor((txl.int64(),), "int32"),
+        dq_semaphore: txl.Tensor((txl.int64(),), "int32"),
+        dk_semaphore: txl.Tensor((txl.int64(),), "int32"),
+        dv_semaphore: txl.Tensor((txl.int64(),), "int32"),
+        workspace: txl.Tensor((txl.int64(),), "float32"),
+        softmax_scale: "float32",
     ):
         # The source materializes ``block_idx_in_cluster`` with
         # ``cute.arch.make_warp_uniform``.  Keep the single broadcast here so
@@ -407,11 +407,11 @@ def get_kernel_2cta(*, backend_config=None, **config):
                 for sample, sample_tasks in enumerate(k_pairs_by_batch):
                     cluster_end = cluster_begin + sample_tasks * heads
                     with (
-                        txl.If(
+                        txl.if_(
                             (cluster_block >= txl.int32(cluster_begin))
                             & (cluster_block < txl.int32(cluster_end))
                         ),
-                        txl.Then(),
+                        txl.then_(),
                     ):
                         sample_cluster = cluster_block - txl.int32(cluster_begin)
                         txl.assign(batch_idx, txl.int32(sample))
@@ -423,8 +423,8 @@ def get_kernel_2cta(*, backend_config=None, **config):
                 txl.assign(batch_idx, txl.int32(0))
                 for sample in range(1, batch):
                     with (
-                        txl.If(logical_block >= _load_i32(cu_k_blocks, txl.int32(sample))),
-                        txl.Then(),
+                        txl.if_(logical_block >= _load_i32(cu_k_blocks, txl.int32(sample))),
+                        txl.then_(),
                     ):
                         txl.assign(batch_idx, txl.int32(sample))
                 txl.assign(task, logical_block - _load_i32(cu_k_blocks, batch_idx))
@@ -523,14 +523,14 @@ def get_kernel_2cta(*, backend_config=None, **config):
                     txl.Select(edge < txl.int32(2), task * txl.int32(2) + edge, partial_q_block),
                 )
             else:
-                with txl.If(edge < full_n):
-                    with txl.Then():
+                with txl.if_(edge < full_n):
+                    with txl.then_():
                         txl.assign(value, _load_i32(full_index, full_begin + edge))
-                    with txl.Else():
+                    with txl.else_():
                         txl.assign(value, _load_i32(partial_index, partial_begin + edge - full_n))
             return value
 
-        arena = txl.alloc_tensor((SHARED_BYTES,), txl.u8, scope="shared.dyn", align=1024)
+        arena = txl.alloc_tensor((SHARED_BYTES,), "uint8", scope="shared.dyn", align=1024)
         pool = txl.smem_pool(base=arena).pool
         q_pipe = _PipelinePair(txl.TMABar(pool, 1), txl.TCGen05Bar(pool, 1))
         do_pipe = _PipelinePair(txl.TMABar(pool, 1), txl.TCGen05Bar(pool, 1))
@@ -620,16 +620,16 @@ def get_kernel_2cta(*, backend_config=None, **config):
         with r_relay:
             relay_phase = txl.local_scalar("int32", init=txl.int32(0))
             edge = txl.local_scalar("int32", init=txl.int32(0))
-            with txl.While(edge < count):
+            with txl.while_(edge < count):
                 ds_full_cluster.wait(0, relay_phase)
-                with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+                with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                     ds_leader_cluster.arrive(0, remote=0)
                 txl.assign(relay_phase, relay_phase ^ txl.int32(1))
                 txl.assign(edge, edge + txl.int32(1))
 
         with r_load:
             elected = txl.local_scalar("uint32", init=txl.cuda.elect_sync())
-            with txl.If(elected != txl.uint32(0)), txl.Then():
+            with txl.if_(elected != txl.uint32(0)), txl.then_():
                 for tensor_map in (q_map, qt_map, k_map, kt_map, v_map, do_map, dot_map):
                     txl.ptx.prefetch.tensormap(txl.address_of(tensor_map))
                 if direct_dkv and not direct_raw_dkv:
@@ -661,7 +661,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                 lse192_prod = txl.PipelineState(1, phase=1)
                 sum192_prod = txl.PipelineState(1, phase=1)
                 edge192 = txl.local_scalar("int32", init=txl.int32(0))
-                with txl.While(edge192 < count):
+                with txl.while_(edge192 < count):
                     q_block = q_block_at(edge192)
                     q_safe = txl.Select(
                         q_block < q_block_count, q_block, q_block_count - txl.int32(1)
@@ -669,10 +669,10 @@ def get_kernel_2cta(*, backend_config=None, **config):
                     first = edge192 == txl.int32(0)
 
                     # The first edge brings in resident K together with Q.
-                    with txl.If(first), txl.Then():
+                    with txl.if_(first), txl.then_():
                         q_pipe.empty.wait(q192_prod.stage, q192_prod.phase)
-                        with txl.If(elected != txl.uint32(0)), txl.Then():
-                            with txl.If(rank == txl.int32(0)), txl.Then():
+                        with txl.if_(elected != txl.uint32(0)), txl.then_():
+                            with txl.if_(rank == txl.int32(0)), txl.then_():
                                 q_pipe.full.arrive(q192_prod.stage, txl.uint32(147456))
                             for feature_chunk in range(3):
                                 _issue_cluster_tma(
@@ -700,7 +700,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                         q192_prod.advance()
 
                     lse_pipe.empty.wait(lse192_prod.stage, lse192_prod.phase)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
                         lse_pipe.full.arrive(lse192_prod.stage, txl.uint32(512))
                         txl.ptx[BULK_G2S](
                             arena.ptr_to([off_slse]),
@@ -718,10 +718,10 @@ def get_kernel_2cta(*, backend_config=None, **config):
 
                     # Later edges bring in Q after LSE, matching the source
                     # overlap.  The byte count is just the three Q chunks.
-                    with txl.If(first == txl.bool(False)), txl.Then():
+                    with txl.if_(first == txl.bool(False)), txl.then_():
                         q_pipe.empty.wait(q192_prod.stage, q192_prod.phase)
-                        with txl.If(elected != txl.uint32(0)), txl.Then():
-                            with txl.If(rank == txl.int32(0)), txl.Then():
+                        with txl.if_(elected != txl.uint32(0)), txl.then_():
+                            with txl.if_(rank == txl.int32(0)), txl.then_():
                                 q_pipe.full.arrive(q192_prod.stage, txl.uint32(49152))
                             for feature_chunk in range(3):
                                 _issue_cluster_tma(
@@ -739,13 +739,13 @@ def get_kernel_2cta(*, backend_config=None, **config):
 
                     # dOt shares sdO.  Resident V joins the first dOt epoch.
                     do_pipe.empty.wait(do192_prod.stage, do192_prod.phase)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
                         do_bytes = txl.local_scalar("uint32", init=txl.uint32(32768))
-                        with txl.If(first), txl.Then():
+                        with txl.if_(first), txl.then_():
                             txl.assign(do_bytes, txl.uint32(98304))
-                        with txl.If(rank == txl.int32(0)), txl.Then():
+                        with txl.if_(rank == txl.int32(0)), txl.then_():
                             do_pipe.full.arrive(do192_prod.stage, do_bytes)
-                        with txl.If(first), txl.Then():
+                        with txl.if_(first), txl.then_():
                             for feature_chunk in range(2):
                                 _issue_cluster_tma(
                                     tma_g2s,
@@ -773,7 +773,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                     do192_prod.advance()
 
                     sum_pipe.empty.wait(sum192_prod.stage, sum192_prod.phase)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
                         sum_pipe.full.arrive(sum192_prod.stage, txl.uint32(512))
                         txl.ptx[BULK_G2S](
                             arena.ptr_to([off_ssum]),
@@ -786,10 +786,10 @@ def get_kernel_2cta(*, backend_config=None, **config):
                     # Qt overwrites Q after score consumption.  Kt is loaded
                     # beside it only once and remains resident for all dQ.
                     q_pipe.empty.wait(q192_prod.stage, q192_prod.phase)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
-                        with txl.If(rank == txl.int32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
+                        with txl.if_(rank == txl.int32(0)), txl.then_():
                             q_bytes = txl.local_scalar("uint32", init=txl.uint32(49152))
-                            with txl.If(first), txl.Then():
+                            with txl.if_(first), txl.then_():
                                 txl.assign(q_bytes, txl.uint32(147456))
                             q_pipe.full.arrive(q192_prod.stage, q_bytes)
                         for feature_chunk in range(3):
@@ -804,7 +804,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                                 map_batch,
                                 q_full_leader.ptr_to([q192_prod.stage]),
                             )
-                        with txl.If(first), txl.Then():
+                        with txl.if_(first), txl.then_():
                             for feature_chunk in range(3):
                                 _issue_cluster_tma(
                                     tma_g2s,
@@ -821,8 +821,8 @@ def get_kernel_2cta(*, backend_config=None, **config):
 
                     # dO overwrites dOt only after the dP consumer releases it.
                     do_pipe.empty.wait(do192_prod.stage, do192_prod.phase)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
-                        with txl.If(rank == txl.int32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
+                        with txl.if_(rank == txl.int32(0)), txl.then_():
                             do_pipe.full.arrive(do192_prod.stage, txl.uint32(32768))
                         _issue_cluster_tma(
                             tma_g2s,
@@ -839,15 +839,15 @@ def get_kernel_2cta(*, backend_config=None, **config):
                     txl.assign(edge192, edge192 + txl.int32(1))
 
             d128_count = count if not is_d192 else txl.int32(0)
-            with txl.While(edge < d128_count):
+            with txl.while_(edge < d128_count):
                 q_block = q_block_at(edge)
                 q_safe = txl.Select(q_block < q_block_count, q_block, q_block_count - txl.int32(1))
                 first = edge == txl.int32(0)
 
-                with txl.If(edge > txl.int32(0)), txl.Then():
+                with txl.if_(edge > txl.int32(0)), txl.then_():
                     qt_pipe.empty.wait(qt_prod.stage, qt_prod.phase)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
-                        with txl.If(rank == txl.int32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
+                        with txl.if_(rank == txl.int32(0)), txl.then_():
                             qt_pipe.full.arrive(qt_prod.stage, txl.uint32(32768))
                         _issue_cluster_tma(
                             tma_g2s,
@@ -863,13 +863,13 @@ def get_kernel_2cta(*, backend_config=None, **config):
                     qt_prod.advance()
 
                 q_pipe.empty.wait(q_prod.stage, q_prod.phase)
-                with txl.If(elected != txl.uint32(0)), txl.Then():
+                with txl.if_(elected != txl.uint32(0)), txl.then_():
                     q_bytes = txl.local_scalar("uint32", init=txl.uint32(32768))
-                    with txl.If(first), txl.Then():
+                    with txl.if_(first), txl.then_():
                         txl.assign(q_bytes, txl.uint32(98304))
-                    with txl.If(rank == txl.int32(0)), txl.Then():
+                    with txl.if_(rank == txl.int32(0)), txl.then_():
                         q_pipe.full.arrive(q_prod.stage, q_bytes)
-                    with txl.If(first), txl.Then():
+                    with txl.if_(first), txl.then_():
                         for feature_half in range(2):
                             _issue_cluster_tma(
                                 tma_g2s,
@@ -897,7 +897,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                 q_prod.advance()
 
                 lse_pipe.empty.wait(lse_prod.stage, lse_prod.phase)
-                with txl.If(elected != txl.uint32(0)), txl.Then():
+                with txl.if_(elected != txl.uint32(0)), txl.then_():
                     lse_pipe.full.arrive(lse_prod.stage, txl.uint32(512))
                     txl.ptx[BULK_G2S](
                         arena.ptr_to([off_slse]),
@@ -914,13 +914,13 @@ def get_kernel_2cta(*, backend_config=None, **config):
                 lse_prod.advance()
 
                 do_pipe.empty.wait(do_prod.stage, do_prod.phase)
-                with txl.If(elected != txl.uint32(0)), txl.Then():
+                with txl.if_(elected != txl.uint32(0)), txl.then_():
                     do_bytes = txl.local_scalar("uint32", init=txl.uint32(65536))
-                    with txl.If(first), txl.Then():
+                    with txl.if_(first), txl.then_():
                         txl.assign(do_bytes, txl.uint32(131072))
-                    with txl.If(rank == txl.int32(0)), txl.Then():
+                    with txl.if_(rank == txl.int32(0)), txl.then_():
                         do_pipe.full.arrive(do_prod.stage, do_bytes)
-                    with txl.If(first), txl.Then():
+                    with txl.if_(first), txl.then_():
                         for feature_half in range(2):
                             _issue_cluster_tma(
                                 tma_g2s,
@@ -959,7 +959,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                 do_prod.advance()
 
                 sum_pipe.empty.wait(sum_prod.stage, sum_prod.phase)
-                with txl.If(elected != txl.uint32(0)), txl.Then():
+                with txl.if_(elected != txl.uint32(0)), txl.then_():
                     sum_pipe.full.arrive(sum_prod.stage, txl.uint32(512))
                     txl.ptx[BULK_G2S](
                         arena.ptr_to([off_ssum]),
@@ -969,10 +969,10 @@ def get_kernel_2cta(*, backend_config=None, **config):
                     )
                 sum_prod.advance()
 
-                with txl.If(first), txl.Then():
+                with txl.if_(first), txl.then_():
                     kt_pipe.empty.wait(kt_prod.stage, kt_prod.phase)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
-                        with txl.If(rank == txl.int32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
+                        with txl.if_(rank == txl.int32(0)), txl.then_():
                             kt_pipe.full.arrive(kt_prod.stage, txl.uint32(65536))
                         _issue_cluster_tma(
                             tma_g2s,
@@ -990,10 +990,10 @@ def get_kernel_2cta(*, backend_config=None, **config):
                 txl.assign(edge, edge + txl.int32(1))
 
             if not is_d192:
-                with txl.If(work), txl.Then():
+                with txl.if_(work), txl.then_():
                     qt_pipe.empty.wait(qt_prod.stage, qt_prod.phase)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
-                        with txl.If(rank == txl.int32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
+                        with txl.if_(rank == txl.int32(0)), txl.then_():
                             qt_pipe.full.arrive(qt_prod.stage, txl.uint32(32768))
                         _issue_cluster_tma(
                             tma_g2s,
@@ -1017,7 +1017,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
             elected = txl.local_scalar("uint32", init=txl.cuda.elect_sync())
 
             if is_d192:
-                with txl.If((rank == txl.int32(0)) & work), txl.Then():
+                with txl.if_((rank == txl.int32(0)) & work), txl.then_():
                     d_k = _desc_at(txl.uint64(desc_krow_base), smem_base + txl.uint32(off_sk))
                     d_v = _desc_at(txl.uint64(desc_krow_base), smem_base + txl.uint32(off_sv))
                     d_q = _desc_at(txl.uint64(desc_row_base), smem_base + txl.uint32(off_sq))
@@ -1052,10 +1052,10 @@ def get_kernel_2cta(*, backend_config=None, **config):
                     dv_accumulate = txl.local_scalar("uint32", init=txl.uint32(0))
                     edge = txl.local_scalar("int32", init=txl.int32(0))
 
-                    with txl.While(edge < count):
+                    with txl.while_(edge < count):
                         q_pipe.full.wait(q_cons.stage, q_cons.phase)
                         dq_pipe.empty.wait(dq_prod.stage, dq_prod.phase ^ 1)
-                        with txl.If(elected != txl.uint32(0)), txl.Then():
+                        with txl.if_(elected != txl.uint32(0)), txl.then_():
                             _mma2_ss(ts, d_k, d_q, id_ss, krow_offsets, row_offsets, txl.uint32(0))
                             _commit2(s_pipe.full.ptr_to([s_prod.stage]), pair_mask)
                             _commit2(q_pipe.empty.ptr_to([q_cons.stage]), pair_mask)
@@ -1067,7 +1067,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                         # releases S only after its score loads, so dP must
                         # acquire that toggled empty phase before overwrite.
                         s_pipe.empty.wait(s_prod.stage, s_prod.phase ^ 1)
-                        with txl.If(elected != txl.uint32(0)), txl.Then():
+                        with txl.if_(elected != txl.uint32(0)), txl.then_():
                             _mma2_ss(
                                 tdp,
                                 d_v,
@@ -1084,14 +1084,14 @@ def get_kernel_2cta(*, backend_config=None, **config):
 
                         q_pipe.full.wait(q_cons.stage, q_cons.phase)
                         dp_pipe.empty.wait(dp_prod.stage, dp_prod.phase ^ 1)
-                        with txl.If(elected != txl.uint32(0)), txl.Then():
+                        with txl.if_(elected != txl.uint32(0)), txl.then_():
                             _mma2_ts(tdk, tds, d_qt, id_dk, dk_offsets, dk_accumulate)
                             _commit2(q_pipe.empty.ptr_to([q_cons.stage]), pair_mask)
                         txl.assign(dk_accumulate, txl.uint32(1))
                         q_cons.advance()
 
                         do_pipe.full.wait(do_cons.stage, do_cons.phase)
-                        with txl.If(elected != txl.uint32(0)), txl.Then():
+                        with txl.if_(elected != txl.uint32(0)), txl.then_():
                             _mma2_ts(tv, tp, d_do, id_ts, mn8_offsets, dv_accumulate)
                             _commit2(do_pipe.empty.ptr_to([do_cons.stage]), pair_mask)
                         txl.assign(dv_accumulate, txl.uint32(1))
@@ -1099,7 +1099,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
 
                         ds_pipe.full.wait(ds_cons.stage, ds_cons.phase)
                         ds_leader_cluster.wait(0, ds_cons.phase)
-                        with txl.If(elected != txl.uint32(0)), txl.Then():
+                        with txl.if_(elected != txl.uint32(0)), txl.then_():
                             _mma2_dq(tdq, d_ds, d_kt, id_dq, dq_a_offsets, dq_b_offsets)
                             _commit2(dq_pipe.full.ptr_to([dq_prod.stage]), pair_mask)
                             _commit2(ds_pipe.empty.ptr_to([ds_cons.stage]), pair_mask)
@@ -1108,14 +1108,14 @@ def get_kernel_2cta(*, backend_config=None, **config):
                         txl.assign(edge, edge + txl.int32(1))
 
                     dkdv_pipe.empty.wait(dkv_prod.stage, dkv_prod.phase ^ 1)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
                         _commit2(dkdv_pipe.full.ptr_to([dkv_prod.stage]), pair_mask)
                     dkv_prod.advance()
                     dkdv_pipe.empty.wait(dkv_prod.stage, dkv_prod.phase ^ 1)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
                         _commit2(dkdv_pipe.full.ptr_to([dkv_prod.stage]), pair_mask)
             else:
-                with txl.If((rank == txl.int32(0)) & work), txl.Then():
+                with txl.if_((rank == txl.int32(0)) & work), txl.then_():
                     d_k = _desc_at(txl.uint64(desc_krow_base), smem_base + txl.uint32(off_sk))
                     d_v = _desc_at(txl.uint64(desc_krow_base), smem_base + txl.uint32(off_sv))
                     d_q = _desc_at(txl.uint64(desc_row_base), smem_base + txl.uint32(off_sq))
@@ -1143,7 +1143,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
 
                     q_pipe.full.wait(q_cons.stage, q_cons.phase)
                     s_pipe.empty.wait(s_prod.stage, s_prod.phase ^ 1)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
                         _mma2_ss(ts, d_k, d_q, id_ss, krow_offsets, row_offsets, txl.uint32(0))
                         _commit2(s_pipe.full.ptr_to([s_prod.stage]), pair_mask)
                         _commit2(q_pipe.empty.ptr_to([q_cons.stage]), pair_mask)
@@ -1152,7 +1152,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
 
                     do_pipe.full.wait(do_cons.stage, do_cons.phase)
                     dp_pipe.empty.wait(dp_prod.stage, dp_prod.phase ^ 1)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
                         _mma2_ss(
                             tdp, d_v, d_dot, id_ss, dv_krow_offsets, do_row_offsets, txl.uint32(0)
                         )
@@ -1160,7 +1160,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                     dp_prod.advance()
 
                     s_pipe.empty.wait(s_prod.stage, s_prod.phase ^ 1)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
                         _mma2_ts(tv, ts, d_do, id_ts, mn8_offsets, txl.uint32(0))
                         _commit2(do_pipe.empty.ptr_to([do_cons.stage]), pair_mask)
                     do_cons.advance()
@@ -1168,10 +1168,10 @@ def get_kernel_2cta(*, backend_config=None, **config):
 
                     edge = txl.local_scalar("int32", init=txl.int32(1))
                     dk_accumulate = txl.local_scalar("uint32", init=txl.uint32(0))
-                    with txl.While(edge < count):
+                    with txl.while_(edge < count):
                         q_pipe.full.wait(q_cons.stage, q_cons.phase)
                         dq_pipe.empty.wait(dq_prod.stage, dq_prod.phase ^ 1)
-                        with txl.If(elected != txl.uint32(0)), txl.Then():
+                        with txl.if_(elected != txl.uint32(0)), txl.then_():
                             _mma2_ss(ts, d_k, d_q, id_ss, krow_offsets, row_offsets, txl.uint32(0))
                             _commit2(s_pipe.full.ptr_to([s_prod.stage]), pair_mask)
                             _commit2(q_pipe.empty.ptr_to([q_cons.stage]), pair_mask)
@@ -1181,14 +1181,14 @@ def get_kernel_2cta(*, backend_config=None, **config):
                         qt_pipe.full.wait(qt_cons.stage, qt_cons.phase)
                         dp_pipe.empty.wait(dp_prod.stage, dp_prod.phase ^ 1)
                         ds_pipe.full.wait(ds_cons.stage, ds_cons.phase)
-                        with txl.If(elected != txl.uint32(0)), txl.Then():
+                        with txl.if_(elected != txl.uint32(0)), txl.then_():
                             _mma2_ts(tdk, tds, d_qt, id_dk, mn8_offsets, dk_accumulate)
                             _commit2(qt_pipe.empty.ptr_to([qt_cons.stage]), pair_mask)
                         txl.assign(dk_accumulate, txl.uint32(1))
                         qt_cons.advance()
 
                         do_pipe.full.wait(do_cons.stage, do_cons.phase)
-                        with txl.If(elected != txl.uint32(0)), txl.Then():
+                        with txl.if_(elected != txl.uint32(0)), txl.then_():
                             _mma2_ss(
                                 tdp,
                                 d_v,
@@ -1202,7 +1202,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                         dp_prod.advance()
 
                         ds_leader_cluster.wait(0, ds_cons.phase)
-                        with txl.If(elected != txl.uint32(0)), txl.Then():
+                        with txl.if_(elected != txl.uint32(0)), txl.then_():
                             _mma2_dq(tdq, d_ds, d_kt, id_dq, dq_a_offsets, dq_b_offsets)
                             _commit2(dq_pipe.full.ptr_to([dq_prod.stage]), pair_mask)
                             _commit2(ds_pipe.empty.ptr_to([ds_cons.stage]), pair_mask)
@@ -1210,16 +1210,16 @@ def get_kernel_2cta(*, backend_config=None, **config):
                         dq_prod.advance()
 
                         s_pipe.empty.wait(s_prod.stage, s_prod.phase ^ 1)
-                        with txl.If(elected != txl.uint32(0)), txl.Then():
+                        with txl.if_(elected != txl.uint32(0)), txl.then_():
                             _mma2_ts(tv, ts, d_do, id_ts, mn8_offsets, txl.uint32(1))
                             _commit2(do_pipe.empty.ptr_to([do_cons.stage]), pair_mask)
                         do_cons.advance()
                         txl.assign(edge, edge + txl.int32(1))
 
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
                         _commit2(s_pipe.full.ptr_to([s_prod.stage]), pair_mask)
                     dkdv_pipe.empty.wait(dkv_prod.stage, dkv_prod.phase ^ 1)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
                         _commit2(dkdv_pipe.full.ptr_to([dkv_prod.stage]), pair_mask)
                     dkv_prod.advance()
 
@@ -1227,7 +1227,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                     qt_pipe.full.wait(qt_cons.stage, qt_cons.phase)
                     dp_pipe.empty.wait(dp_prod.stage, dp_prod.phase ^ 1)
                     ds_pipe.full.wait(ds_cons.stage, ds_cons.phase)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
                         _mma2_ts(tdk, tds, d_qt, id_dk, mn8_offsets, dk_accumulate)
                         _commit2(qt_pipe.empty.ptr_to([qt_cons.stage]), pair_mask)
                         _commit2(dkdv_pipe.full.ptr_to([dkv_prod.stage]), pair_mask)
@@ -1236,7 +1236,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
 
                     ds_leader_cluster.wait(0, ds_cons.phase)
                     dq_pipe.empty.wait(dq_prod.stage, dq_prod.phase ^ 1)
-                    with txl.If(elected != txl.uint32(0)), txl.Then():
+                    with txl.if_(elected != txl.uint32(0)), txl.then_():
                         _mma2_dq(tdq, d_ds, d_kt, id_dq, dq_a_offsets, dq_b_offsets)
                         _commit2(dq_pipe.full.ptr_to([dq_prod.stage]), pair_mask)
                         _commit2(ds_pipe.empty.ptr_to([ds_cons.stage]), pair_mask)
@@ -1269,7 +1269,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
 
             def compute_group(group_count, group_offset, is_partial):
                 group_edge = txl.local_scalar("int32", init=txl.int32(0))
-                with txl.While(group_edge < group_count):
+                with txl.while_(group_edge < group_count):
                     edge = group_edge + group_offset
                     lse_pipe.full.wait(lse_cons.stage, lse_cons.phase)
                     s_pipe.full.wait(s_cons.stage, s_cons.phase)
@@ -1286,14 +1286,14 @@ def get_kernel_2cta(*, backend_config=None, **config):
                     if is_d192:
                         # P aliases S in D192, so release the S accumulator as
                         # soon as the TMEM reads have completed, before R2T P.
-                        with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                        with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                             s_pipe.empty.arrive(s_cons.stage, remote=0, pred=True)
                         s_cons.advance()
                     else:
                         # D128 publishes dS one iteration late because S and the
                         # exchanged dS lifetime overlap in its TMEM schedule.
-                        with txl.If(edge > txl.int32(0)), txl.Then():
-                            with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                        with txl.if_(edge > txl.int32(0)), txl.then_():
+                            with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                                 ds_pipe.full.arrive(ds_prod.stage, remote=0)
                             ds_prod.advance()
 
@@ -1313,14 +1313,14 @@ def get_kernel_2cta(*, backend_config=None, **config):
                                 txl.shift_right(mask_words[j // 32], txl.uint32(j % 32)),
                                 txl.uint32(1),
                             )
-                            score_bits = txl.reinterpret(scores[j], ty=txl.u32)
+                            score_bits = txl.reinterpret(scores[j], ty="uint32")
                             drop = txl.local_scalar("uint32")
                             txl.ptx.setp.eq.u32(drop, keep, txl.uint32(0))
                             masked_bits = txl.local_scalar("uint32")
                             txl.ptx.selp.b32(
                                 masked_bits, txl.uint32(0xFF800000), score_bits, txl.ptx.pred(drop)
                             )
-                            txl.assign(scores[j], txl.reinterpret(masked_bits, ty=txl.f32))
+                            txl.assign(scores[j], txl.reinterpret(masked_bits, ty="float32"))
                     for rep in range(2):
                         for pair in range(16):
                             j = rep * 32 + pair * 2
@@ -1354,10 +1354,10 @@ def get_kernel_2cta(*, backend_config=None, **config):
                     txl.ptx["tcgen05.wait::st.sync.aligned"]()
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE[0]), txl.uint32(BAR_COMPUTE[1]))
-                    with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                    with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                         lse_pipe.empty.arrive(lse_cons.stage)
                     if not is_d192:
-                        with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                        with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                             s_pipe.empty.arrive(s_cons.stage, remote=0, pred=True)
                         s_cons.advance()
                     lse_cons.advance()
@@ -1415,8 +1415,8 @@ def get_kernel_2cta(*, backend_config=None, **config):
                         # warpgroups contribute their 32-column quarter to the
                         # selected 64-column stage.
                         direct_half = txl.int32(rep) == rank
-                        with txl.If(direct_half):
-                            with txl.Then():
+                        with txl.if_(direct_half):
+                            with txl.then_():
                                 for group in range(4):
                                     qcol = wg * txl.int32(32) + txl.int32(rep * 64 + group * 8)
                                     base = group * 4
@@ -1427,7 +1427,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                                         packed_ds[base + 2],
                                         packed_ds[base + 3],
                                     )
-                            with txl.Else():
+                            with txl.else_():
                                 if is_d192:
                                     for value_index in range(16):
                                         txl.assign(exchange[value_index], packed_ds[value_index])
@@ -1450,7 +1450,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                                             packed_ds[base + 3],
                                         )
                     txl.ptx["tcgen05.wait::st.sync.aligned"]()
-                    with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                    with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                         dp_pipe.empty.arrive(dp_cons.stage, remote=0, pred=True)
                     dp_cons.advance()
                     if is_d192:
@@ -1477,11 +1477,11 @@ def get_kernel_2cta(*, backend_config=None, **config):
                             )
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE[0]), txl.uint32(BAR_COMPUTE[1]))
-                    with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                    with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                         sum_pipe.empty.arrive(sum_cons.stage)
                     sum_cons.advance()
                     if is_d192:
-                        with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                        with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                             ds_pipe.full.arrive(ds_prod.stage, remote=0)
                         ds_prod.advance()
                         exchange_owner = ctid == txl.int32(0)
@@ -1491,7 +1491,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                             & (warp_in_wg == txl.int32(0))
                             & (txl.lane_id() == txl.int32(0))
                         )
-                    with txl.If(exchange_owner), txl.Then():
+                    with txl.if_(exchange_owner), txl.then_():
                         peer = txl.int32(1) - rank
                         remote_bar = txl.local_scalar("uint32")
                         remote_dst = txl.local_scalar("uint32")
@@ -1518,9 +1518,9 @@ def get_kernel_2cta(*, backend_config=None, **config):
             compute_group(full_n, txl.int32(0), False)
             compute_group(partial_n, full_n, True)
 
-            with txl.If(work), txl.Then():
+            with txl.if_(work), txl.then_():
                 if not is_d192:
-                    with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                    with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                         ds_pipe.full.arrive(ds_prod.stage, remote=0)
                 for is_dk in (False, True):
                     dkdv_pipe.full.wait(dkv_cons.stage, dkv_cons.phase)
@@ -1593,7 +1593,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                                 )
                             if direct_raw_dkv:
                                 seq = task * txl.int32(256) + rank * txl.int32(128) + crow
-                                with txl.If(seq < k_length), txl.Then():
+                                with txl.if_(seq < k_length), txl.then_():
                                     destination = (
                                         txl.cast(k_offset + seq, "int64") * txl.int64(kv_heads)
                                         + txl.cast(kv_head, "int64")
@@ -1633,11 +1633,11 @@ def get_kernel_2cta(*, backend_config=None, **config):
                                     txl.cast(txl.int32(1) + wg, "uint32"), txl.uint32(128)
                                 )
                                 with (
-                                    txl.If(
+                                    txl.if_(
                                         (warp_in_wg == txl.int32(0))
                                         & (txl.cuda.elect_sync() != txl.uint32(0))
                                     ),
-                                    txl.Then(),
+                                    txl.then_(),
                                 ):
                                     target_map = dk_map if is_dk else dv_map
                                     txl.ptx[TMA_S2G](
@@ -1669,11 +1669,11 @@ def get_kernel_2cta(*, backend_config=None, **config):
                             txl.ptx.fence.proxy.async_.shared__cta()
                             txl.ptx.bar.sync(txl.cast(txl.int32(1) + wg, "uint32"), txl.uint32(128))
                             with (
-                                txl.If(
+                                txl.if_(
                                     (warp_in_wg == txl.int32(0))
                                     & (txl.cuda.elect_sync() != txl.uint32(0))
                                 ),
-                                txl.Then(),
+                                txl.then_(),
                             ):
                                 output_base = dk_base if is_dk else dv_base
                                 dst_head = (
@@ -1701,7 +1701,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                                 )
 
                         if not direct_raw_dkv:
-                            with txl.If(warp_in_wg == txl.int32(0)), txl.Then():
+                            with txl.if_(warp_in_wg == txl.int32(0)), txl.then_():
                                 txl.ptx.cp.async_.bulk.commit_group()
                                 txl.ptx.cp.async_.bulk.wait_group.read(0)
                                 txl.ptx.bar.arrive(
@@ -1711,17 +1711,17 @@ def get_kernel_2cta(*, backend_config=None, **config):
                             txl.ptx.bar.sync(txl.cast(txl.int32(1) + wg, "uint32"), txl.uint32(160))
                     if deterministic_kv:
                         _release_inc_i32(kv_semaphore, kv_sem_index, crow == txl.int32(0))
-                    with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                    with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                         dkdv_pipe.empty.arrive(dkv_cons.stage, remote=0, pred=True)
                     dkv_cons.advance()
 
-            with txl.If((work == txl.bool(False)) & direct_dkv):
-                with txl.Then():
+            with txl.if_((work == txl.bool(False)) & direct_dkv):
+                with txl.then_():
                     seq = task * txl.int32(256) + rank * txl.int32(128) + crow
-                    with txl.If(seq < k_length), txl.Then():
+                    with txl.if_(seq < k_length), txl.then_():
                         token = k_offset + seq if varlen else batch_idx * txl.int32(seqlen_kv) + seq
-                        with txl.If(wg == txl.int32(0)):
-                            with txl.Then():
+                        with txl.if_(wg == txl.int32(0)):
+                            with txl.then_():
                                 destination = (
                                     txl.cast(token, "int64") * txl.int64(kv_heads)
                                     + txl.cast(kv_head, "int64")
@@ -1734,7 +1734,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                                         txl.uint32(0),
                                         txl.uint32(0),
                                     )
-                            with txl.Else():
+                            with txl.else_():
                                 destination = (
                                     txl.cast(token, "int64") * txl.int64(kv_heads)
                                     + txl.cast(kv_head, "int64")
@@ -1768,7 +1768,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
 
             def reduce_group(group_count, group_offset, is_partial):
                 group_edge = txl.local_scalar("int32", init=txl.int32(0))
-                with txl.While(group_edge < group_count):
+                with txl.while_(group_edge < group_count):
                     edge = group_edge + group_offset
                     dq_pipe.full.wait(dq_cons.stage, dq_cons.phase)
                     q_block = (
@@ -1804,7 +1804,7 @@ def get_kernel_2cta(*, backend_config=None, **config):
                         )
                     txl.ptx["tcgen05.wait::ld.sync.aligned"]()
                     txl.ptx.bar.warp.sync(txl.uint32(0xFFFFFFFF))
-                    with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                    with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                         dq_pipe.empty.arrive(dq_cons.stage, remote=0, pred=True)
                     dq_cons.advance()
 
@@ -1845,11 +1845,11 @@ def get_kernel_2cta(*, backend_config=None, **config):
                             )
                         txl.ptx.fence.proxy.async_.shared__cta()
                         if deterministic and stage == 0:
-                            with txl.If(q_live), txl.Then():
+                            with txl.if_(q_live), txl.then_():
                                 _wait_eq_i32(dq_semaphore, sem_index, lock, rtid == txl.int32(0))
                         txl.ptx.bar.sync(txl.uint32(BAR_REDUCE[0]), txl.uint32(BAR_REDUCE[1]))
-                        with txl.If((warp_in_reduce == txl.int32(0)) & q_live), txl.Then():
-                            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+                        with txl.if_((warp_in_reduce == txl.int32(0)) & q_live), txl.then_():
+                            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                                 dst = (
                                     txl.int64(dq_base)
                                     + dq_head_row * txl.int64(head_dim)
@@ -1884,28 +1884,28 @@ def get_kernel_2cta(*, backend_config=None, **config):
                     if is_d192:
                         # All four slices must be globally consumed before sdQacc
                         # can be reused as the next edge's 16 KiB exchange tile.
-                        with txl.If(warp_in_reduce == txl.int32(0)), txl.Then():
-                            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+                        with txl.if_(warp_in_reduce == txl.int32(0)), txl.then_():
+                            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                                 if deterministic:
                                     txl.ptx.cp.async_.bulk.wait_group(0)
                                 else:
                                     txl.ptx.cp.async_.bulk.wait_group.read(0)
                         txl.ptx.bar.sync(txl.uint32(BAR_REDUCE[0]), txl.uint32(BAR_REDUCE[1]))
-                        with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                        with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                             dq_empty_cluster.arrive(0)
                     if deterministic:
-                        with txl.If(warp_in_reduce == txl.int32(0)), txl.Then():
-                            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+                        with txl.if_(warp_in_reduce == txl.int32(0)), txl.then_():
+                            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                                 txl.ptx.cp.async_.bulk.wait_group.read(0)
                         txl.ptx.bar.sync(txl.uint32(BAR_REDUCE[0]), txl.uint32(BAR_REDUCE[1]))
-                        with txl.If(q_live), txl.Then():
+                        with txl.if_(q_live), txl.then_():
                             _release_inc_i32(dq_semaphore, sem_index, rtid == txl.int32(0))
                     txl.assign(group_edge, group_edge + txl.int32(1))
 
             reduce_group(full_n, txl.int32(0), False)
             reduce_group(partial_n, full_n, True)
-            with txl.If(work), txl.Then():
-                with txl.If(warp_in_reduce == txl.int32(0)), txl.Then():
+            with txl.if_(work), txl.then_():
+                with txl.if_(warp_in_reduce == txl.int32(0)), txl.then_():
                     txl.ptx.cp.async_.bulk.wait_group.read(0)
                 txl.ptx.bar.sync(txl.uint32(BAR_REDUCE[0]), txl.uint32(BAR_REDUCE[1]))
             txl.ptx.cp.async_.bulk.wait_group.read(0)

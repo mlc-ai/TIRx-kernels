@@ -45,7 +45,7 @@ the traced function only names an expression tree.
 q_begin: T.int32 = chunk_idx * target
 
 # after: native tracing spells the same register and evaluation boundary.
-q_begin = txl.local_scalar(txl.i32, init=chunk_idx * target, name="q_begin")
+q_begin = txl.local_scalar("int32", init=chunk_idx * target, name="q_begin")
 ```
 
 Preserve an untyped parser assignment too when it acted as an inferred-width
@@ -59,9 +59,9 @@ x_offset = row * hidden + lane
 store_offset = batch * stride + x_offset
 
 # after: preserve the parser's inferred integer boundaries.
-x_offset = txl.local_scalar(txl.i32, init=row * hidden + lane, name="x_offset")
+x_offset = txl.local_scalar("int32", init=row * hidden + lane, name="x_offset")
 store_offset = txl.local_scalar(
-    txl.i64, init=batch * stride + x_offset, name="store_offset"
+    "int64", init=batch * stride + x_offset, name="store_offset"
 )
 ```
 

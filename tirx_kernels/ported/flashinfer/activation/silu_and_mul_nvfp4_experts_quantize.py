@@ -201,14 +201,14 @@ def get_kernel(
     @txl.kernel()
     def silu_and_mul_nvfp4_experts_quantize(
         input_global: txl.Tensor((txl.int64(),), dtype),
-        sf_scale: txl.Tensor((txl.int64(),), txl.f32),
-        out_global: txl.Tensor((txl.int64(),), txl.u64),
-        sf_out: txl.Tensor((txl.int64(),), txl.u8),
-        mask: txl.Tensor((txl.int64(),), txl.i32),
-        num_rows: txl.i32,
-        num_cols: txl.i32,
-        num_experts: txl.i32,
-        use_silu_and_mul: txl.i32,  # source ABI is bool; i32 keeps the same branch shape
+        sf_scale: txl.Tensor((txl.int64(),), "float32"),
+        out_global: txl.Tensor((txl.int64(),), "uint64"),
+        sf_out: txl.Tensor((txl.int64(),), "uint8"),
+        mask: txl.Tensor((txl.int64(),), "int32"),
+        num_rows: "int32",
+        num_cols: "int32",
+        num_experts: "int32",
+        use_silu_and_mul: "int32",  # source ABI is bool; i32 keeps the same branch shape
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
@@ -229,19 +229,19 @@ def get_kernel(
         txl.assign(expert_idx, txl.int32(0))
         txl.assign(tid_in_expert, txl.int32(0))
         txl.assign(actual_stride, stride)
-        with txl.If(part_rem > 0):
-            with txl.Then():
+        with txl.if_(part_rem > 0):
+            with txl.then_():
                 bound = txl.local_scalar("int32", init=part_rem * (stride + 1))
-                with txl.If(tid32 < bound):
-                    with txl.Then():
+                with txl.if_(tid32 < bound):
+                    with txl.then_():
                         txl.assign(expert_idx, txl.truncdiv(tid32, stride + 1))
                         txl.assign(tid_in_expert, txl.truncmod(tid32, stride + 1))
                         txl.assign(actual_stride, stride + 1)
-                    with txl.Else():
+                    with txl.else_():
                         txl.assign(expert_idx, part_rem + txl.truncdiv(tid32 - bound, stride))
                         txl.assign(tid_in_expert, txl.truncmod(tid32 - bound, stride))
                         txl.assign(actual_stride, stride)
-            with txl.Else():
+            with txl.else_():
                 txl.assign(expert_idx, txl.truncdiv(tid32, stride))
                 txl.assign(tid_in_expert, txl.truncmod(tid32, stride))
                 txl.assign(actual_stride, stride)
@@ -253,7 +253,7 @@ def get_kernel(
         )
         use_mask = txl.reinterpret(txl.address_of(mask[0]), ty="uint64") != txl.uint64(0)
         actual_cols = txl.local_scalar("int32", init=cols_per_row)
-        with txl.If(use_silu_and_mul != 0), txl.Then():
+        with txl.if_(use_silu_and_mul != 0), txl.then_():
             txl.assign(actual_cols, cols_per_row * 2)
 
         xw = txl.alloc_local([8], "uint32")
@@ -275,7 +275,7 @@ def get_kernel(
             loop_bound = txl.local_scalar("int32")
             txl.assign(global_idx, tid_in_expert + expert_idx * m_rows * cols_per_row)
             txl.assign(loop_bound, (expert_idx + 1) * m_rows * cols_per_row)
-            with txl.While(global_idx < loop_bound):
+            with txl.while_(global_idx < loop_bound):
                 row_idx = txl.local_scalar("int32")
                 col_idx = txl.local_scalar("int32")
                 row_idx_in_expert = txl.local_scalar("int32")
@@ -283,11 +283,11 @@ def get_kernel(
                 txl.assign(col_idx, txl.truncmod(global_idx, cols_per_row))
                 txl.assign(row_idx_in_expert, row_idx - expert_idx * m_rows)
 
-                with txl.If(use_mask), txl.Then():
+                with txl.if_(use_mask), txl.then_():
                     mask_rows = txl.local_scalar("int32")
                     txl.ptx.ld.global_.s32(mask_rows, mask.ptr_to([expert_idx]))
-                    with txl.If(row_idx_in_expert >= mask_rows), txl.Then():
-                        txl.Break()
+                    with txl.if_(row_idx_in_expert >= mask_rows), txl.then_():
+                        txl.break_()
 
                 in_offset = txl.local_scalar(
                     "int64", init=txl.cast(row_idx, "int64") * actual_cols + col_idx
@@ -306,7 +306,7 @@ def get_kernel(
                     xw[7],
                     txl.address_of(input_global[in_offset * ELTS_PER_THREAD + 8]),
                 )
-                with txl.If(use_silu_and_mul != 0), txl.Then():
+                with txl.if_(use_silu_and_mul != 0), txl.then_():
                     txl.ptx.ld.global_.v4.b32(
                         yw[0],
                         yw[1],
@@ -347,10 +347,10 @@ def get_kernel(
                 # SFScale select (branch-lowered in the source).
                 sfscale_val = txl.local_scalar("float32", init=txl.float32(1.0))
                 with (
-                    txl.If(
+                    txl.if_(
                         txl.reinterpret(txl.address_of(sf_scale[0]), ty="uint64") != txl.uint64(0)
                     ),
-                    txl.Then(),
+                    txl.then_(),
                 ):
                     txl.ptx.ld.global_.f32(sfscale_val, sf_scale.ptr_to([expert_idx]))
 
@@ -389,17 +389,17 @@ def get_kernel(
                 txl.ptx.cvt.rn.f16x2.e4m3x2(f16p, e4m3_u16)
                 sf_value_r = _unpack_lo_f32(f16p, "float16")
                 output_scale = txl.local_scalar("float32", init=txl.float32(0.0))
-                with txl.If(vec_max != 0.0), txl.Then():
+                with txl.if_(vec_max != 0.0), txl.then_():
                     txl.ptx.rcp.approx.ftz.f32(r_tmp, sfscale_val)
                     txl.ptx.rcp.approx.ftz.f32(e_tmp, sf_value_r * r_tmp)
                     txl.assign(output_scale, e_tmp)
 
                 # SF byte store (STG.8, per thread).
                 with (
-                    txl.If(
+                    txl.if_(
                         txl.reinterpret(txl.address_of(sf_out[0]), ty="uint64") != txl.uint64(0)
                     ),
-                    txl.Then(),
+                    txl.then_(),
                 ):
                     txl.ptx.st.global_.b8(txl.address_of(sf_out[sf_byte]), sf_b8)
 
@@ -413,7 +413,7 @@ def get_kernel(
                 txl.assign(global_idx, global_idx + actual_stride)
 
         if block_x % 32:
-            with txl.If(tx < block_x), txl.Then():
+            with txl.if_(tx < block_x), txl.then_():
                 body()
         else:
             body()

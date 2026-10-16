@@ -446,7 +446,7 @@ def _ex2_emulation_2(values, base):
 
 
 def _apply_mask128(values, block_size):
-    with txl.If(block_size < 128), txl.Then():
+    with txl.if_(block_size < 128), txl.then_():
         with txl.unroll(4) as quarter:
             shift = txl.max((quarter + 1) * 32 - block_size, 0)
             mask = txl.local_scalar("uint32")
@@ -594,7 +594,7 @@ def _make_kernel(*, backend_config=None, **config):
     band_width = 32 if d == 96 else 64
     num_bands = d // band_width
     smem_swizzle = 2 if d == 96 else 3
-    elem_dtype = txl.bf16 if dtype == "bfloat16" else txl.f16
+    elem_dtype = "bfloat16" if dtype == "bfloat16" else "float16"
     elem_dtype_name = "bfloat16" if dtype == "bfloat16" else "float16"
     qk_idesc = 0x08200490 if dtype == "bfloat16" else 0x08200010
     pv_idesc = {
@@ -693,13 +693,13 @@ def _make_kernel(*, backend_config=None, **config):
         lane = txl.thread_id() & 31
         tid = txl.thread_id()
 
-        with txl.If(warp == 0), txl.Then():
+        with txl.if_(warp == 0), txl.then_():
             txl.ptx.prefetch.tensormap(txl.address_of(q_map))
             txl.ptx.prefetch.tensormap(txl.address_of(k_map))
             txl.ptx.prefetch.tensormap(txl.address_of(v_map))
             txl.ptx.prefetch.tensormap(txl.address_of(o_map))
 
-        arena = txl.alloc_tensor((smem_bytes,), txl.u8, scope="shared.dyn", align=1024)
+        arena = txl.alloc_tensor((smem_bytes,), "uint8", scope="shared.dyn", align=1024)
         smem = txl.smem_pool(base=arena)
         pool = smem.pool
         q_full = txl.TMABar(pool, 1)
@@ -802,7 +802,7 @@ def _make_kernel(*, backend_config=None, **config):
 
         def advance_ring(stage, phase):
             txl.assign(stage, stage + 1)
-            with txl.If(stage == kv_stages), txl.Then():
+            with txl.if_(stage == kv_stages), txl.then_():
                 txl.assign(stage, 0)
                 txl.assign(phase, phase ^ 1)
 
@@ -819,11 +819,11 @@ def _make_kernel(*, backend_config=None, **config):
 
         with r_idle:
             clc_producer_phase = txl.local_scalar("int32", init=1)
-            with txl.While(work_valid != 0):
+            with txl.while_(work_valid != 0):
                 _wait(clc_empty, 0, clc_producer_phase)
-                with txl.If(lane == 0), txl.Then():
+                with txl.if_(lane == 0), txl.then_():
                     clc_full.arrive(0, tx_count=16, remote=0)
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     txl.ptx[
                         "clusterlaunchcontrol.try_cancel.async.shared::cta"
                         ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
@@ -868,12 +868,12 @@ def _make_kernel(*, backend_config=None, **config):
                 if do_advance:
                     advance_ring(kv_stage, kv_phase)
 
-            with txl.While(work_valid != 0):
+            with txl.while_(work_valid != 0):
                 load_tile_metadata()
-                with txl.If(has_work), txl.Then():
+                with txl.if_(has_work), txl.then_():
                     load_kv(0, block_iter_count - 1, False)
                     _wait(q_empty, 0, q_producer_phase)
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                             q_full.ptr_to([0]), txl.uint32(128 * d * 2)
                         )
@@ -905,7 +905,7 @@ def _make_kernel(*, backend_config=None, **config):
                     txl.assign(q_producer_phase, q_producer_phase ^ 1)
                     load_kv(0, block_iter_count - 2)
                     i = txl.local_scalar("int32", init=0)
-                    with txl.While(i < block_iter_count - 2):
+                    with txl.while_(i < block_iter_count - 2):
                         load_kv(1, block_iter_count - 1 - i)
                         load_kv(0, block_iter_count - 3 - i)
                         txl.assign(i, i + 1)
@@ -918,7 +918,7 @@ def _make_kernel(*, backend_config=None, **config):
                 _wait(kv_empty, tail_stage, tail_phase)
                 advance_ring(tail_stage, tail_phase)
             _wait(q_empty, 0, q_producer_phase)
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                     q_full.ptr_to([0]), txl.uint32(128 * d * 2)
                 )
@@ -955,7 +955,7 @@ def _make_kernel(*, backend_config=None, **config):
                 )
                 k_desc.make_lo_uniform()
                 for k16 in range(d // 16):
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         txl.ptx[_MMA_F16](
                             txl.cast(tmem_base + score_stage * 128, "uint32"),
                             q_desc.add_16B_offset(descriptor_offset(k16)),
@@ -980,7 +980,7 @@ def _make_kernel(*, backend_config=None, **config):
                 for k16 in range(8):
                     if k16 == 6:
                         _wait(plast_full, score_stage, phase)
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         txl.ptx[_MMA_F16](
                             txl.cast(tmem_base + 256 + score_stage * d, "uint32"),
                             txl.cast(tmem_base + 64 + score_stage * 128 + k16 * 8, "uint32"),
@@ -993,24 +993,24 @@ def _make_kernel(*, backend_config=None, **config):
                             txl.cast(accumulate != 0 if k16 == 0 else True, "bool"),
                         )
 
-            with txl.While(work_valid != 0):
+            with txl.while_(work_valid != 0):
                 load_tile_metadata()
                 txl.assign(acc0, 0)
                 txl.assign(acc1, 0)
-                with txl.If(has_work), txl.Then():
+                with txl.if_(has_work), txl.then_():
                     _wait(q_full, 0, q_consumer_phase)
                     txl.assign(q_consumer_phase, q_consumer_phase ^ 1)
                     for score_stage in range(2):
                         _wait(kv_full, kv_stage, kv_phase)
                         issue_qk(score_stage, kv_stage)
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             txl.ptx[_TCGEN_COMMIT](spo_full.ptr_to([score_stage]))
                             txl.ptx[_TCGEN_COMMIT](kv_empty.ptr_to([kv_stage]))
                         advance_ring(kv_stage, kv_phase)
 
                     pair_count = (block_iter_count - 2) // 2
                     pair = txl.local_scalar("int32", init=0)
-                    with txl.While(pair < pair_count):
+                    with txl.while_(pair < pair_count):
                         for score_stage in range(2):
                             phase = txl.if_then_else(score_stage == 0, spo_phase0, spo_phase1)
                             _wait(kv_full, kv_stage, kv_phase)
@@ -1025,7 +1025,7 @@ def _make_kernel(*, backend_config=None, **config):
                                 phase,
                             )
                             issue_qk(score_stage, kv_stage)
-                            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                                 txl.ptx[_TCGEN_COMMIT](spo_full.ptr_to([score_stage]))
                             if score_stage == 0:
                                 txl.assign(spo_phase0, spo_phase0 ^ 1)
@@ -1033,12 +1033,12 @@ def _make_kernel(*, backend_config=None, **config):
                             else:
                                 txl.assign(spo_phase1, spo_phase1 ^ 1)
                                 txl.assign(acc1, 1)
-                            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                                 txl.ptx[_TCGEN_COMMIT](kv_empty.ptr_to([v_release_stage]))
                                 txl.ptx[_TCGEN_COMMIT](kv_empty.ptr_to([kv_stage]))
                             advance_ring(kv_stage, kv_phase)
                         txl.assign(pair, pair + 1)
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         txl.ptx[_TCGEN_COMMIT](q_empty.ptr_to([0]))
 
                     for score_stage in range(2):
@@ -1051,7 +1051,7 @@ def _make_kernel(*, backend_config=None, **config):
                             txl.if_then_else(score_stage == 0, acc0, acc1),
                             phase,
                         )
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             txl.ptx[_TCGEN_COMMIT](oacc_full.ptr_to([score_stage]))
                             txl.ptx[_TCGEN_COMMIT](kv_empty.ptr_to([kv_stage]))
                         advance_ring(kv_stage, kv_phase)
@@ -1067,7 +1067,7 @@ def _make_kernel(*, backend_config=None, **config):
 
         with r_epilogue:
             oepi_consumer_phase = txl.local_scalar("int32", init=0)
-            with txl.While(work_valid != 0):
+            with txl.while_(work_valid != 0):
                 load_tile_metadata()
                 _wait(oepi_full, 0, oepi_consumer_phase)
                 with txl.unroll(num_bands) as band:
@@ -1112,13 +1112,13 @@ def _make_kernel(*, backend_config=None, **config):
             stats_producer_phase = txl.local_scalar("int32", init=1)
             row_max = txl.local_scalar("float32", init=txl.float32(_NEG_INF))
             row_sum = txl.local_scalar("float32", init=txl.float32(0.0))
-            with txl.While(work_valid != 0):
+            with txl.while_(work_valid != 0):
                 load_tile_metadata()
                 txl.assign(row_max, txl.float32(_NEG_INF))
                 txl.assign(row_sum, txl.float32(0.0))
                 _wait(stats_empty, score_stage, stats_producer_phase)
                 txl.assign(stats_producer_phase, stats_producer_phase ^ 1)
-                with txl.If(has_work), txl.Then():
+                with txl.if_(has_work), txl.then_():
                     work_groups = block_iter_count // 2
 
                     def consume_score(logical, first):
@@ -1171,7 +1171,7 @@ def _make_kernel(*, backend_config=None, **config):
                             delta_scaled = txl.local_scalar("float32")
                             txl.ptx.mul.f32(delta_scaled, delta, softmax_scale_log2)
                             txl.assign(old_scale, _exp2(delta_scaled))
-                            with txl.If(delta_scaled >= txl.float32(-8.0)), txl.Then():
+                            with txl.if_(delta_scaled >= txl.float32(-8.0)), txl.then_():
                                 txl.assign(new_max, row_max)
                                 txl.assign(max_safe, row_max)
                                 txl.assign(old_scale, txl.float32(1.0))
@@ -1222,7 +1222,7 @@ def _make_kernel(*, backend_config=None, **config):
                                 spo_empty.arrive(score_stage)
                         txl.ptx.tcgen05.wait__st.sync.aligned()
                         txl.cuda.warp_sync()
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             plast_full.arrive(score_stage)
 
                         _wait(stats_empty, score_stage, stats_producer_phase)
@@ -1233,14 +1233,14 @@ def _make_kernel(*, backend_config=None, **config):
 
                     consume_score(block_iter_count - 1 - score_stage, True)
                     iteration = txl.local_scalar("int32", init=1)
-                    with txl.While(iteration < work_groups):
+                    with txl.while_(iteration < work_groups):
                         consume_score(block_iter_count - 1 - (iteration * 2 + score_stage), False)
                         txl.assign(iteration, iteration + 1)
 
                     _st_shared_f32(stats_smem, score_stage * 128 + tid128, row_sum)
                     _st_shared_f32(stats_smem, 256 + score_stage * 128 + tid128, row_max)
                     _stats_arrive(score_stage, local_warp)
-                with txl.If(has_work == txl.bool(False)), txl.Then():
+                with txl.if_(has_work == txl.bool(False)), txl.then_():
                     _stats_arrive(score_stage, local_warp)
                 advance_work()
             _wait(stats_empty, score_stage, stats_producer_phase)
@@ -1374,18 +1374,18 @@ def _make_kernel(*, backend_config=None, **config):
                         txl.uint32(0),
                     )
 
-            with txl.While(work_valid != 0):
+            with txl.while_(work_valid != 0):
                 load_tile_metadata()
                 total_sum = txl.local_scalar("float32", init=txl.float32(0.0))
                 safe_max = txl.local_scalar("float32", init=txl.float32(0.0))
-                with txl.If(has_work):
-                    with txl.Then():
+                with txl.if_(has_work):
+                    with txl.then_():
                         _stats_sync(0, corr_warp)
                         stats_empty.arrive(0)
                         _stats_sync(1, corr_warp)
                         pair_count = (block_iter_count - 2) // 2
                         pair = txl.local_scalar("int32", init=0)
-                        with txl.While(pair < pair_count):
+                        with txl.while_(pair < pair_count):
                             for score_stage in range(2):
                                 _stats_sync(score_stage, corr_warp)
                                 scale = _ld_shared_f32(stats_smem, score_stage * 128 + tid128)
@@ -1395,7 +1395,7 @@ def _make_kernel(*, backend_config=None, **config):
                                     txl.ptx.pred(scale < txl.float32(1.0)),
                                     txl.uint32(0xFFFFFFFF),
                                 )
-                                with txl.If(ballot != 0), txl.Then():
+                                with txl.if_(ballot != 0), txl.then_():
                                     rescale_o(score_stage, scale)
                                 spo_empty.arrive(score_stage)
                                 stats_empty.arrive(1 - score_stage)
@@ -1452,7 +1452,7 @@ def _make_kernel(*, backend_config=None, **config):
                         spo_empty.arrive(0)
                         spo_empty.arrive(1)
                         txl.assign(oacc_consumer_phase, oacc_consumer_phase ^ 1)
-                    with txl.Else():
+                    with txl.else_():
                         _stats_sync(0, corr_warp)
                         stats_empty.arrive(0)
                         _stats_sync(1, corr_warp)
@@ -1472,9 +1472,9 @@ def _make_kernel(*, backend_config=None, **config):
                     else:
                         token = packed_row
                         q_head = head
-                    with txl.If(token < seqlen_q), txl.Then():
+                    with txl.if_(token < seqlen_q), txl.then_():
                         lse_value = txl.local_scalar("float32", init=txl.float32(_NEG_INF))
-                        with txl.If(total_sum > txl.float32(0.0)), txl.Then():
+                        with txl.if_(total_sum > txl.float32(0.0)), txl.then_():
                             txl.assign(
                                 lse_value,
                                 (safe_max * softmax_scale_log2 + _log2(total_sum))
@@ -1539,12 +1539,12 @@ def _make_kernel(*, backend_config=None, **config):
         "k": txl.Tensor((batch * hkv * seqlen_kv * d,), elem_dtype),
         "v": txl.Tensor((batch * hkv * seqlen_kv * d,), elem_dtype),
         "out": txl.Tensor((batch * hq * seqlen_q * d,), elem_dtype),
-        "lse": txl.Tensor((batch * hq * seqlen_q,), txl.f32),
-        "block_index": txl.Tensor((batch * scheduled_heads * q_blocks * max_blocks,), txl.i32),
-        "block_sizes": txl.Tensor((physical_blocks,), txl.i32),
-        "block_nums": txl.Tensor((batch * scheduled_heads * q_blocks,), txl.i32),
-        "block_sparse_num": txl.i32,
-        "softmax_scale_log2": txl.f32,
+        "lse": txl.Tensor((batch * hq * seqlen_q,), "float32"),
+        "block_index": txl.Tensor((batch * scheduled_heads * q_blocks * max_blocks,), "int32"),
+        "block_sizes": txl.Tensor((physical_blocks,), "int32"),
+        "block_nums": txl.Tensor((batch * scheduled_heads * q_blocks,), "int32"),
+        "block_sparse_num": "int32",
+        "softmax_scale_log2": "float32",
     }
     return txl.kernel()(kernel)
 

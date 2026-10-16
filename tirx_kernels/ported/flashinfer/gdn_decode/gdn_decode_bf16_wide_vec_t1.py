@@ -250,23 +250,23 @@ def _make_gdn_decode_bf16_wide_vec_t1(
 ):
     @txl.kernel()
     def gdn_decode_bf16_wide_vec_t1(
-        state: txl.Tensor((txl.int64(),), txl.bf16),
-        intermediate: txl.Tensor((txl.int64(),), txl.bf16),
-        A_log: txl.Tensor((txl.int64(),), txl.f32),
-        a: txl.Tensor((txl.int64(),), txl.bf16),
-        dt_bias: txl.Tensor((txl.int64(),), txl.f32),
-        q: txl.Tensor((txl.int64(),), txl.bf16),
-        k: txl.Tensor((txl.int64(),), txl.bf16),
-        v: txl.Tensor((txl.int64(),), txl.bf16),
-        b_gate: txl.Tensor((txl.int64(),), txl.bf16),
-        output: txl.Tensor((txl.int64(),), txl.bf16),
-        read_indices: txl.Tensor((txl.int64(),), txl.i32),
-        write_indices: txl.Tensor((txl.int64(),), txl.i32),
-        state_slot_stride: txl.i64,
-        q_batch_stride: txl.i64,
-        k_batch_stride: txl.i64,
-        v_batch_stride: txl.i64,
-        batch: txl.i32,
+        state: txl.Tensor((txl.int64(),), "bfloat16"),
+        intermediate: txl.Tensor((txl.int64(),), "bfloat16"),
+        A_log: txl.Tensor((txl.int64(),), "float32"),
+        a: txl.Tensor((txl.int64(),), "bfloat16"),
+        dt_bias: txl.Tensor((txl.int64(),), "float32"),
+        q: txl.Tensor((txl.int64(),), "bfloat16"),
+        k: txl.Tensor((txl.int64(),), "bfloat16"),
+        v: txl.Tensor((txl.int64(),), "bfloat16"),
+        b_gate: txl.Tensor((txl.int64(),), "bfloat16"),
+        output: txl.Tensor((txl.int64(),), "bfloat16"),
+        read_indices: txl.Tensor((txl.int64(),), "int32"),
+        write_indices: txl.Tensor((txl.int64(),), "int32"),
+        state_slot_stride: "int64",
+        q_batch_stride: "int64",
+        k_batch_stride: "int64",
+        v_batch_stride: "int64",
+        batch: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -276,9 +276,9 @@ def _make_gdn_decode_bf16_wide_vec_t1(
         )
 
         smem = txl.smem_pool()
-        s_q = smem.alloc((K,), txl.f32, align=16)
-        s_k = smem.alloc((K,), txl.f32, align=16)
-        s_gb = smem.alloc((3,), txl.f32, align=16)
+        s_q = smem.alloc((K,), "float32", align=16)
+        s_k = smem.alloc((K,), "float32", align=16)
+        s_gb = smem.alloc((3,), "float32", align=16)
         smem.commit(SHARED_BYTES)
         linear_cta = txl.cta_id()
         tid = txl.thread_id()
@@ -327,7 +327,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
             )
         # Phase 0: with the T=1-only kq value dead, independent warps can publish
         # normalized Q, normalized K, and the scalar gates concurrently.
-        with txl.If(warp_raw[0] == 0), txl.Then():
+        with txl.if_(warp_raw[0] == 0), txl.then_():
             member_pre = _local_scalar("int32", lane_in_warp[0] % LANES_PER_GROUP)
             k_pre = _local_scalar("int32", member_pre[0] * ELEMS_PER_LANE)
             q_bits = txl.alloc_local((ELEMS_PER_LANE,), "uint16")
@@ -369,7 +369,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                     s_q.ptr_to([k_pre[0] + i]), txl.reinterpret(r_q[i], ty="uint32")
                 )
 
-        with txl.If(warp_raw[0] == 1), txl.Then():
+        with txl.if_(warp_raw[0] == 1), txl.then_():
             member_pre = _local_scalar("int32", lane_in_warp[0] % LANES_PER_GROUP)
             k_pre = _local_scalar("int32", member_pre[0] * ELEMS_PER_LANE)
             k_bits = txl.alloc_local((ELEMS_PER_LANE,), "uint16")
@@ -406,7 +406,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                     s_k.ptr_to([k_pre[0] + i]), txl.reinterpret(r_k[i], ty="uint32")
                 )
 
-        with txl.If(warp_raw[0] == 2), txl.Then():
+        with txl.if_(warp_raw[0] == 2), txl.then_():
             A_value = txl.local_scalar("float32")
             txl.ptx.ld.global_.b32(A_value, A_log.ptr_to([hv[0]]))
             dt_value = txl.local_scalar("float32")
@@ -454,7 +454,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
             txl.ptx["mul.f32"](_mul6, _sub2, softplus_x[0])
             gate_exponent = _local_scalar("float32", _mul6)
 
-            with txl.If(lane_in_warp[0] == 0), txl.Then():
+            with txl.if_(lane_in_warp[0] == 0), txl.then_():
                 _mul7 = txl.local_scalar("float32")
                 txl.ptx["mul.f32"](_mul7, gate_exponent[0], txl.float32(LOG2_E))
                 _exp2_3 = txl.local_scalar("float32")
@@ -462,8 +462,8 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                 g = _local_scalar("float32", _exp2_3)
                 txl.ptx.st.shared.b32(s_gb.ptr_to([0]), txl.reinterpret(g[0], ty="uint32"))
 
-        with txl.If(warp_raw[0] == 3), txl.Then():
-            with txl.If(lane_in_warp[0] == 0), txl.Then():
+        with txl.if_(warp_raw[0] == 3), txl.then_():
+            with txl.if_(lane_in_warp[0] == 0), txl.then_():
                 b_bits = txl.local_scalar("uint16")
                 txl.ptx.ld.global_.b16(b_bits, b_gate.ptr_to([n[0] * NUM_V_HEADS + hv[0]]))
                 b_value = txl.local_scalar("float32")
@@ -613,7 +613,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                 for row in range(ILP_ROWS):
                     txl.ptx["add.f32"](sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0]))
 
-            with txl.If(lane[0] == 0), txl.Then():
+            with txl.if_(lane[0] == 0), txl.then_():
                 output_base = _local_scalar(
                     "int64", txl.cast((n[0] * NUM_V_HEADS + hv[0]) * V + v_base[0], "int64")
                 )
