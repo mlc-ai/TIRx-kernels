@@ -59,28 +59,6 @@ from .smem import (
 from .specialize import specialize, tid_in_role, warp_id_in_role
 
 # ---------------------------------------------------------------------------
-# dtype and swizzle tokens
-# ---------------------------------------------------------------------------
-
-f16 = "float16"
-bf16 = "bfloat16"
-f32 = "float32"
-f8e4m3 = "float8_e4m3fn"
-i8 = "int8"
-i32 = "int32"
-i64 = "int64"
-u8 = "uint8"
-u16 = "uint16"
-u32 = "uint32"
-u64 = "uint64"
-
-SWNONE = SwizzleMode.SWIZZLE_NONE
-SW32B = SwizzleMode.SWIZZLE_32B_ATOM
-SW64B = SwizzleMode.SWIZZLE_64B_ATOM
-SW128B = SwizzleMode.SWIZZLE_128B_ATOM
-
-
-# ---------------------------------------------------------------------------
 # Explicit statement helpers
 # ---------------------------------------------------------------------------
 
@@ -294,15 +272,6 @@ class _CUDAProxy(_InstructionProxy):
 
 cuda = _CUDAProxy(_T.cuda)
 
-# Keep existing kernel spellings while using TVM's canonical operator names.
-tvm_warp_shuffle = _T.gpu_warp_shuffle
-tvm_warp_shuffle_up = _T.gpu_warp_shuffle_up
-tvm_warp_shuffle_down = _T.gpu_warp_shuffle_down
-tvm_warp_shuffle_xor = _T.gpu_warp_shuffle_xor
-tvm_warp_activemask = _T.gpu_warp_activemask
-tvm_storage_sync = _T.gpu_storage_sync
-
-
 # ---------------------------------------------------------------------------
 # tensors: ordinary tensors without a tile layout
 # ---------------------------------------------------------------------------
@@ -369,9 +338,6 @@ def alloc_local(shape, dtype="float32", *, align=-1, annotations=None):
     return alloc_tensor(shape, dtype, scope="local", align=align, annotations=annotations)
 
 
-local_scalar = _I.local_scalar
-
-
 def stack_alloca(kind, size=1):
     """Allocate host-stack storage and return its handle, bound exactly once.
 
@@ -407,7 +373,7 @@ def uniform(x, *, width=32, lane=0):
     here, not where the result is read::
 
         t = txl.alloc_local([1], <dtype of x>)
-        t[0] = txl.tvm_warp_shuffle(txl.uint32(0xFFFFFFFF), x, lane, width, 32)
+        t[0] = txl.gpu_warp_shuffle(txl.uint32(0xFFFFFFFF), x, lane, width, 32)
         return t[0]
 
     ``threadIdx.x >> 5`` is already the same in every lane of a warp, but ptxas
@@ -436,14 +402,6 @@ def uniform(x, *, width=32, lane=0):
 # ---------------------------------------------------------------------------
 # everything else is tirx
 # ---------------------------------------------------------------------------
-
-If = _I.if_
-Then = _I.then_
-Else = _I.else_
-While = _I.while_
-Break = _I.break_
-Return = _I.return_
-
 
 _FORBIDDEN_TIRX_NAMES = {
     "ComposeLayout",
@@ -530,10 +488,6 @@ from .scheduler import (
 )
 
 __all__ = [
-    "SW32B",
-    "SW64B",
-    "SW128B",
-    "SWNONE",
     "ClusterLaunchControlScheduler",
     "ClusterPersistentScheduler2D",
     "FlashAttentionLPTScheduler",
@@ -553,15 +507,10 @@ __all__ = [
     "TMABar",
     "alloc_local",
     "alloc_tensor",
-    "bf16",
     "cta_id",
     "cuda",
     "decl_tensor",
     "device_entry",
-    "f16",
-    "f32",
-    "i32",
-    "i64",
     "idioms",
     "kernel",
     "lane_id",
@@ -573,8 +522,6 @@ __all__ = [
     "stack_alloca",
     "thread_id",
     "tid_in_role",
-    "u8",
-    "u32",
     "uniform",
     "warp_id",
     "warp_id_in_role",

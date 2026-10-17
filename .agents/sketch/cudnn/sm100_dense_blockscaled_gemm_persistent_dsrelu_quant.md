@@ -209,7 +209,7 @@ SFB_OFFSET = align_up(SFA_OFFSET + AB_STAGES * SFA_STAGE_BYTES, 1024)
 AMAX_OFFSET = align_up(SFB_OFFSET + AB_STAGES * SFB_STAGE_BYTES, 1024)
 SHARED_BYTES = align_up(AMAX_OFFSET + 4 * 4, 1024)
 assert SHARED_BYTES <= 232448
-smem = txl.alloc_buffer((SHARED_BYTES,), txl.u8, scope="shared.dyn")
+smem = txl.alloc_buffer((SHARED_BYTES,), "uint8", scope="shared.dyn")
 
 # Anchor byte intervals, recovered from source storage order and PTX addresses:
 #   AB_FULL 0..39; AB_EMPTY 40..79

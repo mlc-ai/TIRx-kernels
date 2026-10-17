@@ -22,7 +22,7 @@ class PipelineState(_PipelineState):
     def advance(self):
         if self.depth > 1:
             txl.assign(self.stage, self.stage + txl.int32(1))
-            with txl.If(self.stage == self.depth), txl.Then():
+            with txl.if_(self.stage == self.depth), txl.then_():
                 txl.assign(self.stage, txl.int32(0))
                 txl.assign(self.phase, self.phase ^ txl.int32(1))
         else:
@@ -33,7 +33,7 @@ class MBarrier(_MBarrier):
     """The in-tree mbarrier wrapper with native instruction-emitting methods."""
 
     def _init(self, count):
-        with txl.If(self.leader), txl.Then():
+        with txl.if_(self.leader), txl.then_():
             with txl.unroll(0, self.depth) as i:
                 txl.ptx.mbarrier.init.shared.b64(self.buf.ptr_to([i]), txl.uint32(count))
 

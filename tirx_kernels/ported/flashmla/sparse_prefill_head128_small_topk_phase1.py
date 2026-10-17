@@ -326,14 +326,14 @@ def make_kernel(
 
     @txl.kernel()
     def sparse_flashmla_prefill_head128_small_topk_phase1_kernel(
-        q: txl.Tensor((s_q, B_H, D_QK), txl.bf16),
-        kv: txl.Tensor((s_kv * stride_kv_s_kv,), txl.bf16),
-        indices: txl.Tensor((s_q * stride_indices_s_q,), txl.i32),
-        attn_sink: txl.Tensor((B_H,), txl.f32),
-        topk_length: txl.Tensor((s_q,), txl.i32),
-        out: txl.Tensor((s_q, B_H, D_V), txl.bf16),
-        max_logits: txl.Tensor((s_q, B_H), txl.f32),
-        lse: txl.Tensor((s_q, B_H), txl.f32),
+        q: txl.Tensor((s_q, B_H, D_QK), "bfloat16"),
+        kv: txl.Tensor((s_kv * stride_kv_s_kv,), "bfloat16"),
+        indices: txl.Tensor((s_q * stride_indices_s_q,), "int32"),
+        attn_sink: txl.Tensor((B_H,), "float32"),
+        topk_length: txl.Tensor((s_q,), "int32"),
+        out: txl.Tensor((s_q, B_H, D_V), "bfloat16"),
+        max_logits: txl.Tensor((s_q, B_H), "float32"),
+        lse: txl.Tensor((s_q, B_H), "float32"),
     ):
         host = prepare_host(
             {
@@ -368,8 +368,8 @@ def make_kernel(
         cta_idx = block_idx % 2
 
         def prefetch(tensor_map):
-            with txl.If(warp_idx == 0), txl.Then():
-                with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+            with txl.if_(warp_idx == 0), txl.then_():
+                with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                     txl.ptx.prefetch.tensormap(txl.address_of(tensor_map))
 
         prefetch(q_tma_tensormap)
@@ -384,8 +384,8 @@ def make_kernel(
 
         smem = txl.smem_pool()
         pool = smem.pool
-        q_smem = smem.alloc((64, 512), "bfloat16", swizzle=txl.SW128B).buf
-        k_smem = smem.alloc((256, 256), "bfloat16", swizzle=txl.SW128B).buf
+        q_smem = smem.alloc((64, 512), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
+        k_smem = smem.alloc((256, 256), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
         s_smem_gemm = smem.alloc((64, 64), "bfloat16", align=1024)
         p_exchange = pool.alloc((4, 1024), "uint32")
         rowwise_max_buf = pool.alloc((128,), "float32")
@@ -441,7 +441,7 @@ def make_kernel(
                 txl.assign(self.block_idx, block_idx)
 
             def issue_cancel(self):
-                with txl.If(cta_idx == 0), txl.Then():
+                with txl.if_(cta_idx == 0), txl.then_():
                     txl.cuda.mbarrier_wait(
                         txl.address_of(clc_empty.buf[0]), txl.bitwise_xor(self.epoch.phase, 1)
                     )
@@ -469,18 +469,18 @@ def make_kernel(
                     txl.uint32(1),
                     pred=txl.bool(True),
                 )
-                with txl.If(next_job == txl.uint32(4294967295)):
-                    with txl.Then():
+                with txl.if_(next_job == txl.uint32(4294967295)):
+                    with txl.then_():
                         txl.assign(self.valid, 0)
-                    with txl.Else():
+                    with txl.else_():
                         txl.assign(self.block_idx, txl.Cast(next_job, "int32"))
                 self.epoch.advance()
 
         def initialize_protocol():
-            with txl.If(warp_idx == 1):
-                with txl.Then():
-                    with txl.If(txl.cuda.elect_sync()):
-                        with txl.Then():
+            with txl.if_(warp_idx == 1):
+                with txl.then_():
+                    with txl.if_(txl.cuda.elect_sync()):
+                        with txl.then_():
                             for init_bar, arrive_count in (
                                 (q_full, 1),
                                 (tq_ready, 1),
@@ -506,9 +506,9 @@ def make_kernel(
                                         txl.uint32(arrive_count),
                                     )
                             txl.ptx["fence.mbarrier_init.release.cluster"]()
-                with txl.Else():
-                    with txl.If(warp_idx == 2):
-                        with txl.Then():
+                with txl.else_():
+                    with txl.if_(warp_idx == 2):
+                        with txl.then_():
                             txl.ptx["tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32"](
                                 txl.cuda.cvta_generic_to_shared(txl.address_of(tmem_start_addr[0])),
                                 txl.uint32(512),
@@ -517,9 +517,9 @@ def make_kernel(
                             txl.ptx.ld.shared.u32(allocated_tmem_addr, tmem_start_addr.ptr_to([0]))
                             txl.cuda.trap_when_assert_failed(allocated_tmem_addr == txl.uint32(0))
                             txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::2.sync.aligned"]()
-                        with txl.Else():
-                            with txl.If(warp_idx == 3), txl.Then():
-                                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.else_():
+                            with txl.if_(warp_idx == 3), txl.then_():
+                                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                                     with txl.unroll(4) as init_stage:
                                         txl.ptx["mbarrier.init.shared.b64"](
                                             txl.cuda.cvta_generic_to_shared(
@@ -567,7 +567,7 @@ def make_kernel(
             )
             txl.cuda.mbarrier_wait(txl.address_of(q_released.buf[0]), output_epoch)
             if launch_dependents:
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     txl.ptx["griddepcontrol.launch_dependents"]()
 
             output_storage = txl.alloc_local((64,))
@@ -580,11 +580,11 @@ def make_kernel(
                     txl.cuda.get_tmem_addr(txl.uint32(0), 0, epi_k * 64),
                 )
                 txl.ptx["tcgen05.wait::ld.sync.aligned"]()
-                with txl.If(epi_k == 0), txl.Then():
+                with txl.if_(epi_k == 0), txl.then_():
                     txl.cuda.mbarrier_wait(txl.address_of(q_consumed.buf[0]), q_epoch)
                     txl.ptx["fence.proxy.async.shared::cta"]()
                     if signal_q_consumed:
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             tq_consumed_remote = txl.local_scalar("uint32")
                             txl.ptx["mapa.shared::cluster.u32"](
                                 tq_consumed_remote,
@@ -592,7 +592,7 @@ def make_kernel(
                                 txl.uint32(0),
                             )
                             txl.ptx["mbarrier.arrive.shared::cluster.b64"](tq_consumed_remote)
-                with txl.If(epi_k == 3), txl.Then():
+                with txl.if_(epi_k == 3), txl.then_():
                     output_empty = txl.local_scalar("uint32")
                     txl.ptx["mapa.shared::cluster.u32"](
                         output_empty,
@@ -653,8 +653,8 @@ def make_kernel(
 
             txl.ptx["fence.proxy.async.shared::cta"]()
             txl.ptx["bar.sync"](txl.uint32(0), txl.uint32(128))
-            with txl.If(warp_idx == 0), txl.Then():
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(warp_idx == 0), txl.then_():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     txl.ptx["cp.async.bulk.tensor.4d.global.shared::cta.tile.bulk_group"](
                         txl.reinterpret(txl.address_of(tensor_map), ty=txl.handle().ty),
                         0,
@@ -670,11 +670,11 @@ def make_kernel(
             jobs = CLCJobScheduler()
             last_valid = txl.local_scalar("int32", init=0)
             last_s_q_idx = txl.local_scalar("int32", init=0)
-            with txl.While(jobs.valid != 0):
+            with txl.while_(jobs.valid != 0):
                 wg0_s_q_idx = jobs.block_idx // 2
                 previous_epoch = txl.bitwise_xor(jobs.epoch.phase, 1)
-                with txl.If(warp_idx == 0), txl.Then():
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(warp_idx == 0), txl.then_():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         txl.ptx["cp.async.bulk.wait_group"](0)
                         buffer_17 = txl.local_scalar("uint64")
                         txl.ptx["mapa.u64"](buffer_17, txl.address_of(q_full.buf[0]), txl.uint32(0))
@@ -693,9 +693,9 @@ def make_kernel(
                             ),
                             txl.uint64(1364590687093260288),
                         )
-                        with txl.If(cta_idx == 0), txl.Then():
+                        with txl.if_(cta_idx == 0), txl.then_():
                             # Do not republish tQ-full until both CTAs consumed its prior phase.
-                            with txl.If(last_valid != 0), txl.Then():
+                            with txl.if_(last_valid != 0), txl.then_():
                                 txl.cuda.mbarrier_wait(
                                     txl.address_of(tq_consumed.buf[0]), previous_epoch
                                 )
@@ -749,8 +749,8 @@ def make_kernel(
                                 txl.cuda.cvta_generic_to_shared(txl.address_of(q_consumed.buf[0])),
                                 txl.Cast(3, "uint16"),
                             )
-                with txl.If(last_valid != 0):
-                    with txl.Then():
+                with txl.if_(last_valid != 0):
+                    with txl.then_():
                         store_output(
                             previous_epoch,
                             jobs.epoch.phase,
@@ -759,9 +759,9 @@ def make_kernel(
                             signal_q_consumed=True,
                             launch_dependents=False,
                         )
-                    with txl.Else():
+                    with txl.else_():
                         txl.cuda.mbarrier_wait(txl.address_of(q_consumed.buf[0]), jobs.epoch.phase)
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             buffer_13 = txl.local_scalar("uint32")
                             txl.ptx["mapa.shared::cluster.u32"](
                                 buffer_13,
@@ -772,10 +772,10 @@ def make_kernel(
                 txl.assign(last_valid, 1)
                 txl.assign(last_s_q_idx, wg0_s_q_idx)
                 jobs.advance()
-            with txl.If(last_valid != 0), txl.Then():
+            with txl.if_(last_valid != 0), txl.then_():
                 last_epoch = txl.bitwise_xor(jobs.epoch.phase, 1)
-                with txl.If(warp_idx == 0), txl.Then():
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(warp_idx == 0), txl.then_():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         txl.ptx["cp.async.bulk.wait_group"](0)
                 txl.ptx["bar.sync"](txl.uint32(0), txl.uint32(128))
                 store_output(
@@ -786,7 +786,7 @@ def make_kernel(
                     signal_q_consumed=False,
                     launch_dependents=True,
                 )
-            with txl.If(warp_idx == 0), txl.Then():
+            with txl.if_(warp_idx == 0), txl.then_():
                 txl.ptx["tcgen05.dealloc.cta_group::2.sync.aligned.b32"](
                     txl.uint32(0), txl.uint32(512)
                 )
@@ -795,13 +795,13 @@ def make_kernel(
         def kv_gather():
             kv_gather_token = iket_range("h128-small-kv-load")
             wg1_warp_idx = thread_idx // 32 - 4
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 jobs = CLCJobScheduler()
                 k_pipe = txl.PipelineState(4, phase=0)
-                with txl.While(jobs.valid != 0):
+                with txl.while_(jobs.valid != 0):
                     wg1_s_q_idx = jobs.block_idx // 2
                     wg1_topk_len = txl.local_scalar("int32", init=topk)
-                    with txl.If(have_topk_length), txl.Then():
+                    with txl.if_(have_topk_length), txl.then_():
                         txl.ptx.ld.global_.s32(wg1_topk_len, topk_length.ptr_to([wg1_s_q_idx]))
                     wg1_num_k_blocks = txl.max((wg1_topk_len + 64 - 1) // 64, 1)
                     wg1_g_indices_base = wg1_s_q_idx * stride_indices_s_q
@@ -868,16 +868,16 @@ def make_kernel(
             txl.cuda.iket.range_end(kv_gather_token[0])
 
         def producer_role(role: txl.constexpr):
-            with txl.If(role == 0):
-                with txl.Then():
+            with txl.if_(role == 0):
+                with txl.then_():
                     mma_token = iket_range("h128-small-qk-pv-issue")
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         jobs = CLCJobScheduler()
                         k_pipe = txl.PipelineState(4, phase=0)
-                        with txl.While(jobs.valid != 0):
+                        with txl.while_(jobs.valid != 0):
                             umma_s_q_idx = jobs.block_idx // 2
                             umma_topk_len = txl.local_scalar("int32", init=topk)
-                            with txl.If(have_topk_length), txl.Then():
+                            with txl.if_(have_topk_length), txl.then_():
                                 txl.ptx.ld.global_.s32(
                                     umma_topk_len, topk_length.ptr_to([umma_s_q_idx])
                                 )
@@ -886,7 +886,7 @@ def make_kernel(
                                 txl.address_of(q_consumed.buf[0]), jobs.epoch.phase
                             )
                             with txl.serial(umma_num_k_blocks + 1, unroll=False) as k:
-                                with txl.If(k < umma_num_k_blocks), txl.Then():
+                                with txl.if_(k < umma_num_k_blocks), txl.then_():
                                     txl.cuda.mbarrier_wait(
                                         txl.address_of(p_empty.buf[0]),
                                         txl.bitwise_xor(txl.bitwise_and(k_pipe.stage, 1), 1),
@@ -953,7 +953,7 @@ def make_kernel(
                                         ),
                                         txl.Cast(3, "uint16"),
                                     )
-                                    with txl.If(k == umma_num_k_blocks - 1), txl.Then():
+                                    with txl.if_(k == umma_num_k_blocks - 1), txl.then_():
                                         txl.ptx[
                                             "tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.b64"
                                         ](
@@ -961,7 +961,7 @@ def make_kernel(
                                                 txl.address_of(tq_ready.buf[0])
                                             )
                                         )
-                                with txl.If(k > 0), txl.Then():
+                                with txl.if_(k > 0), txl.then_():
                                     prev_k = k - 1
                                     prev_buf = (k_pipe.stage + 3) % 4
                                     prev_s_o_phase = txl.bitwise_and(prev_buf, 1)
@@ -969,7 +969,7 @@ def make_kernel(
                                         txl.address_of(so_full.buf[0]),
                                         txl.bitwise_xor(prev_s_o_phase, 0),
                                     )
-                                    with txl.If(prev_k == 0), txl.Then():
+                                    with txl.if_(prev_k == 0), txl.then_():
                                         txl.cuda.mbarrier_wait(
                                             txl.address_of(t_out_empty.buf[0]),
                                             txl.bitwise_xor(jobs.epoch.phase, 1),
@@ -1059,7 +1059,7 @@ def make_kernel(
                                         ),
                                         txl.Cast(3, "uint16"),
                                     )
-                                with txl.If(k != umma_num_k_blocks), txl.Then():
+                                with txl.if_(k != umma_num_k_blocks), txl.then_():
                                     k_pipe.advance()
                             txl.ptx["tcgen05.fence::before_thread_sync"]()
                             txl.ptx[
@@ -1070,18 +1070,18 @@ def make_kernel(
                             )
                             jobs.advance()
                     txl.cuda.iket.range_end(mma_token[0])
-                with txl.Else():
-                    with txl.If(role == 1):
-                        with txl.Then():
+                with txl.else_():
+                    with txl.if_(role == 1):
+                        with txl.then_():
                             valid_mask_token = iket_range("h128-small-valid-mask")
-                            with txl.If(lane_idx < 8), txl.Then():
+                            with txl.if_(lane_idx < 8), txl.then_():
                                 lane_indices = txl.alloc_local((8,), "int32")
                                 jobs = CLCJobScheduler()
                                 index_pipe = txl.PipelineState(4, phase=0)
-                                with txl.While(jobs.valid != 0):
+                                with txl.while_(jobs.valid != 0):
                                     valid_s_q_idx = jobs.block_idx // 2
                                     valid_topk_len = txl.local_scalar("int32", init=topk)
-                                    with txl.If(have_topk_length), txl.Then():
+                                    with txl.if_(have_topk_length), txl.then_():
                                         txl.ptx.ld.global_.s32(
                                             valid_topk_len, topk_length.ptr_to([valid_s_q_idx])
                                         )
@@ -1143,20 +1143,20 @@ def make_kernel(
                                         index_pipe.advance()
                                     jobs.advance()
                             txl.cuda.iket.range_end(valid_mask_token[0])
-                        with txl.Else():
-                            with txl.If(role >= 2), txl.Then():
+                        with txl.else_():
+                            with txl.if_(role >= 2), txl.then_():
                                 clc_token = txl.alloc_local((1,), "uint32")
                                 txl.assign(
                                     clc_token[0], txl.cuda.iket.sentinel_token("h128-small-clc")
                                 )
-                                with txl.If(role == 2), txl.Then():
+                                with txl.if_(role == 2), txl.then_():
                                     txl.assign(
                                         clc_token[0], txl.cuda.iket.range_start("h128-small-clc")
                                     )
-                                with txl.If(txl.cuda.elect_sync()), txl.Then():
-                                    with txl.If(role == 2), txl.Then():
+                                with txl.if_(txl.cuda.elect_sync()), txl.then_():
+                                    with txl.if_(role == 2), txl.then_():
                                         jobs = CLCJobScheduler()
-                                        with txl.While(jobs.valid != 0):
+                                        with txl.while_(jobs.valid != 0):
                                             jobs.issue_cancel()
                                             jobs.advance()
                                 txl.cuda.iket.range_end(clc_token[0])
@@ -1166,10 +1166,10 @@ def make_kernel(
             local_warp_idx = warp_idx - 12
             jobs = CLCJobScheduler()
             index_pipe = txl.PipelineState(4, phase=0)
-            with txl.While(jobs.valid != 0):
+            with txl.while_(jobs.valid != 0):
                 wg3_s_q_idx = jobs.block_idx // 2
                 wg3_topk_len = txl.local_scalar("int32", init=topk)
-                with txl.If(have_topk_length), txl.Then():
+                with txl.if_(have_topk_length), txl.then_():
                     txl.ptx.ld.global_.s32(wg3_topk_len, topk_length.ptr_to([wg3_s_q_idx]))
                 wg3_num_k_blocks = txl.max((wg3_topk_len + 64 - 1) // 64, 1)
                 mi = txl.local_scalar(
@@ -1193,8 +1193,8 @@ def make_kernel(
                         txl.address_of(umma_ready.buf[0]), txl.bitwise_and(index_pipe.stage, 1)
                     )
                     txl.ptx["tcgen05.fence::after_thread_sync"]()
-                    with txl.If(local_warp_idx < 2):
-                        with txl.Then():
+                    with txl.if_(local_warp_idx < 2):
+                        with txl.then_():
                             local_storage = p
                             txl.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
                                 *[local_storage[i] for i in range(32)], txl.uint32(384)
@@ -1204,7 +1204,7 @@ def make_kernel(
                                 *[local_storage_1[i] for i in range(32)],
                                 txl.cuda.get_tmem_addr(txl.uint32(384), 0, 32),
                             )
-                        with txl.Else():
+                        with txl.else_():
                             local_storage = p_peer
                             txl.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
                                 *[local_storage[i] for i in range(32)], txl.uint32(384)
@@ -1328,11 +1328,11 @@ def make_kernel(
                     )
                     new_max = txl.local_scalar("float32")
                     scale_for_old = txl.local_scalar("float32")
-                    with txl.If(should_scale_o == txl.uint32(0)):
-                        with txl.Then():
+                    with txl.if_(should_scale_o == txl.uint32(0)):
+                        with txl.then_():
                             txl.assign(scale_for_old, txl.float32(1.0))
                             txl.assign(new_max, mi)
-                        with txl.Else():
+                        with txl.else_():
                             txl.assign(new_max, txl.max(cur_pi_max, mi))
                             txl.ptx["ex2.approx.ftz.f32"](scale_for_old, mi - new_max)
                     txl.assign(mi, new_max)
@@ -1389,8 +1389,8 @@ def make_kernel(
                             r_words[r_w + 3],
                         )
                     with (
-                        txl.If(txl.bitwise_and(k > 0, should_scale_o != txl.uint32(0))),
-                        txl.Then(),
+                        txl.if_(txl.bitwise_and(k > 0, should_scale_o != txl.uint32(0))),
+                        txl.then_(),
                     ):
                         txl.ptx["tcgen05.fence::after_thread_sync"]()
                         o_rescale = txl.alloc_local((32,), "float32")
@@ -1428,7 +1428,7 @@ def make_kernel(
                         txl.uint32(1),
                     )
                     index_pipe.advance()
-                with txl.If(real_mi == txl.float32("-inf")), txl.Then():
+                with txl.if_(real_mi == txl.float32("-inf")), txl.then_():
                     txl.assign(li, txl.float32(0.0))
                     txl.assign(mi, txl.float32("-inf"))
                 txl.cuda.mbarrier_wait(
@@ -1441,10 +1441,10 @@ def make_kernel(
                 peer_li = txl.local_scalar("float32")
                 txl.ptx.ld.shared.f32(peer_li, rowwise_li_buf.ptr_to([idx_in_warpgroup]))
                 txl.assign(li, li + peer_li)
-                with txl.If(idx_in_warpgroup < 64), txl.Then():
+                with txl.if_(idx_in_warpgroup < 64), txl.then_():
                     head_idx = cta_idx * 64 + idx_in_warpgroup
                     attn_sink_value = txl.local_scalar("float32", init=txl.float32(-float("inf")))
-                    with txl.If(have_attn_sink), txl.Then():
+                    with txl.if_(have_attn_sink), txl.then_():
                         txl.ptx.ld.global_.f32(attn_sink_value, attn_sink.ptr_to([head_idx]))
                     attn_sink_log2 = attn_sink_value * txl.float32(1.4426950408889634)
                     sink_exp = txl.local_scalar("float32")

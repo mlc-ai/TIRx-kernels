@@ -26,7 +26,7 @@ with txl.serial(num_chunks) as local_chunk:
     have_state = local_chunk > 0
     load_v()
     load_w()
-    with txl.If(have_state), txl.Then():
+    with txl.if_(have_state), txl.then_():
         wait_state_ready()
         load_state_from_tmem()
         txl.ptx.tcgen05.wait__ld.sync.aligned()

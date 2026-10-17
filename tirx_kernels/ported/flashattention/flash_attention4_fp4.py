@@ -370,7 +370,7 @@ def make_kernel(
     ]
     if quant_pv:
         params.append(("tmap_sfv", txl.Ptr(txl.TensorMap)))
-    params.append(("softmax_scale_log2", txl.f32))
+    params.append(("softmax_scale_log2", "float32"))
     names = tuple(n for n, _ in params)
 
     def body(tmap_q, tmap_k, tmap_v, tmap_o, tmap_sfq, tmap_sfk, tmap_sfv, softmax_scale_log2):
@@ -400,21 +400,21 @@ def make_kernel(
         P_full_2.init(128)
         sfqk_load = txl.MBarrier(smem, 2)
         sfqk_load.init(128)
-        tmem_holding = smem.alloc((1,), txl.u32)
-        sScale = smem.alloc((Q_STAGE * BLK_M * 2,), txl.f32, align=BUFFER_ALIGN)
-        sO = smem.alloc((EPI_STAGE * o_stage_bytes,), txl.u8, align=BUFFER_ALIGN)
-        sQ = smem.alloc((Q_STAGE * q_stage_bytes,), txl.u8, align=BUFFER_ALIGN)
+        tmem_holding = smem.alloc((1,), "uint32")
+        sScale = smem.alloc((Q_STAGE * BLK_M * 2,), "float32", align=BUFFER_ALIGN)
+        sO = smem.alloc((EPI_STAGE * o_stage_bytes,), "uint8", align=BUFFER_ALIGN)
+        sQ = smem.alloc((Q_STAGE * q_stage_bytes,), "uint8", align=BUFFER_ALIGN)
         if kv_slot_bytes is not None:
-            sKV = smem.alloc((kv_stage * kv_slot_bytes,), txl.u8, align=BUFFER_ALIGN)
+            sKV = smem.alloc((kv_stage * kv_slot_bytes,), "uint8", align=BUFFER_ALIGN)
             sK = sV = sKV
         else:
-            sK = smem.alloc((kv_stage * k_stage_bytes,), txl.u8, align=BUFFER_ALIGN)
-            sV = smem.alloc((kv_stage * v_stage_bytes,), txl.u8, align=BUFFER_ALIGN)
-        sSFQ = smem.alloc((Q_STAGE * sfq_chunk_bytes,), txl.u8, align=BUFFER_ALIGN)
-        sSFK = smem.alloc((kv_stage * sfq_chunk_bytes,), txl.u8, align=BUFFER_ALIGN)
+            sK = smem.alloc((kv_stage * k_stage_bytes,), "uint8", align=BUFFER_ALIGN)
+            sV = smem.alloc((kv_stage * v_stage_bytes,), "uint8", align=BUFFER_ALIGN)
+        sSFQ = smem.alloc((Q_STAGE * sfq_chunk_bytes,), "uint8", align=BUFFER_ALIGN)
+        sSFK = smem.alloc((kv_stage * sfq_chunk_bytes,), "uint8", align=BUFFER_ALIGN)
         if quant_pv:
-            sSFP = smem.alloc((Q_STAGE * sfv_chunk_bytes,), txl.u8, align=BUFFER_ALIGN)
-            sSFV = smem.alloc((kv_stage * sfv_chunk_bytes,), txl.u8, align=BUFFER_ALIGN)
+            sSFP = smem.alloc((Q_STAGE * sfv_chunk_bytes,), "uint8", align=BUFFER_ALIGN)
+            sSFV = smem.alloc((kv_stage * sfv_chunk_bytes,), "uint8", align=BUFFER_ALIGN)
 
         def k_slot_off(slot):
             return slot * (kv_slot_bytes if kv_slot_bytes is not None else k_stage_bytes)
@@ -423,7 +423,7 @@ def make_kernel(
             return slot * (kv_slot_bytes if kv_slot_bytes is not None else v_stage_bytes)
 
         # ---- prologue (:1392-1514) -------------------------------------------------------------
-        with txl.If(warp == 0), txl.Then():
+        with txl.if_(warp == 0), txl.then_():
             for tm in (tmap_q, tmap_k, tmap_v, tmap_o, tmap_sfq, tmap_sfk) + (
                 (tmap_sfv,) if quant_pv else ()
             ):
@@ -587,7 +587,7 @@ def make_kernel(
                 kv = txl.PipelineState(kv_stage, phase=1)
                 sched = make_scheduler("sched_load")
                 sched.init(txl.cta_id())
-                with txl.While(sched.valid()):
+                with txl.while_(sched.valid()):
                     m_block = sched.m_block_idx
                     head = sched.head_idx
                     batch = sched.batch_idx
@@ -604,9 +604,9 @@ def make_kernel(
                     def load_q(stage):
                         block = m_block * 2 + stage
                         q_load.empty.wait(stage, q_phase)
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             q_load.full.arrive(stage, tx_count=spec.tma_bytes_q)
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             txl.ptx[TMA_G2S_4D](
                                 sQ.ptr_to([stage * q_stage_bytes]),
                                 txl.address_of(tmap_q),
@@ -617,7 +617,7 @@ def make_kernel(
                                 smem_u32(q_load.full.ptr_to([stage])),
                                 txl.uint64(0),
                             )
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             txl.ptx[TMA_G2S_5D](
                                 sSFQ.ptr_to([stage * sfq_chunk_bytes]),
                                 txl.address_of(tmap_sfq),
@@ -630,7 +630,7 @@ def make_kernel(
 
                     def prefetch_kv(n):
                         """L2 prefetch of K/V block n (no smem): covers cold-L2 latency the ring cannot."""
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             txl.ptx[TMA_PREFETCH_4D](
                                 txl.address_of(tmap_k),
                                 txl.int32(0),
@@ -668,9 +668,9 @@ def make_kernel(
                     def load_k(n):
                         slot = kv.stage
                         kv_load.empty.wait(slot, kv.phase)
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             kv_load.full.arrive(slot, tx_count=spec.tma_bytes_k)
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             txl.ptx[TMA_G2S_4D](
                                 sK.ptr_to([k_slot_off(slot)]),
                                 txl.address_of(tmap_k),
@@ -681,7 +681,7 @@ def make_kernel(
                                 smem_u32(kv_load.full.ptr_to([slot])),
                                 txl.uint64(0),
                             )
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             txl.ptx[TMA_G2S_5D](
                                 sSFK.ptr_to([slot * sfq_chunk_bytes]),
                                 txl.address_of(tmap_sfk),
@@ -696,11 +696,11 @@ def make_kernel(
                     def load_v(n):
                         slot = kv.stage
                         kv_load.empty.wait(slot, kv.phase)
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             kv_load.full.arrive(slot, tx_count=spec.tma_bytes_v)
                         if pv_format == "bf16":
                             for half in range(DV // 64):
-                                with txl.If(elected()), txl.Then():
+                                with txl.if_(elected()), txl.then_():
                                     txl.ptx[TMA_G2S_4D](
                                         sV.ptr_to([v_slot_off(slot) + half * v_half_bytes]),
                                         txl.address_of(tmap_v),
@@ -712,7 +712,7 @@ def make_kernel(
                                         txl.uint64(0),
                                     )
                         elif pv_format == "fp8":
-                            with txl.If(elected()), txl.Then():
+                            with txl.if_(elected()), txl.then_():
                                 txl.ptx[TMA_G2S_4D](
                                     sV.ptr_to([v_slot_off(slot)]),
                                     txl.address_of(tmap_v),
@@ -725,7 +725,7 @@ def make_kernel(
                                 )
                         else:  # K-major V: the key block is the innermost coordinate (bytes for FP4)
                             key_units = BLK_N // 2 if pv_format == "nvfp4" else BLK_N
-                            with txl.If(elected()), txl.Then():
+                            with txl.if_(elected()), txl.then_():
                                 txl.ptx[TMA_G2S_4D](
                                     sV.ptr_to([v_slot_off(slot)]),
                                     txl.address_of(tmap_v),
@@ -740,7 +740,7 @@ def make_kernel(
                                 sfv_coords = (txl.int32(0), txl.Cast(n * 2, "int32"), txl.int32(0))
                             else:
                                 sfv_coords = (txl.int32(0), txl.int32(0), txl.Cast(n, "int32"))
-                            with txl.If(elected()), txl.Then():
+                            with txl.if_(elected()), txl.then_():
                                 txl.ptx[TMA_G2S_5D](
                                     sSFV.ptr_to([slot * sfv_chunk_bytes]),
                                     txl.address_of(tmap_sfv),
@@ -754,7 +754,7 @@ def make_kernel(
 
                     if kv_prefetch:
                         for d in range(1, kv_prefetch + 1):
-                            with txl.If(n_max - d >= 0), txl.Then():
+                            with txl.if_(n_max - d >= 0), txl.then_():
                                 prefetch_kv(n_max - d)
                     load_q(0)
                     load_k(n_max - 1)
@@ -764,7 +764,7 @@ def make_kernel(
                     with txl.serial(n_max - 1, unroll=False) as i:
                         n = n_max - 2 - i
                         if kv_prefetch:
-                            with txl.If(n - kv_prefetch >= 0), txl.Then():
+                            with txl.if_(n - kv_prefetch >= 0), txl.then_():
                                 prefetch_kv(n - kv_prefetch)
                         load_k(n)
                         load_v(n)
@@ -800,7 +800,7 @@ def make_kernel(
 
                 def cp_sf_chunks(desc, stride_bytes, slot, chunks, col_base):
                     for c in range(chunks):
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             txl.ptx[TCGEN05_CP](
                                 txl.uint32(col_base + 4 * c),
                                 desc_at(desc, slot * (stride_bytes // 16) + 32 * c),
@@ -810,7 +810,7 @@ def make_kernel(
                     a_base = stage * (q_stage_bytes // 16)
                     b_base = slot * (k_slot_off(1) // 16)
                     for kt in range(QK_KT):
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             if qk_format == "nvfp4":
                                 txl.ptx[MMA_MXF4NVF4_4X](
                                     txl.uint32(TMEM_S[stage]),
@@ -887,7 +887,7 @@ def make_kernel(
                     for kt in range(PV_KT):
                         if kt == PV_SPLIT:
                             P_full_2.wait(stage, p_phase)
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             issue(kt)
 
                 def cp_sfqk(stage, slot):
@@ -908,7 +908,7 @@ def make_kernel(
                 acc = txl.local_scalar("int32", init=0)
                 sched = make_scheduler("sched_mma")
                 sched.init(txl.cta_id())
-                with txl.While(sched.valid()):
+                with txl.while_(sched.valid()):
                     m_block = sched.m_block_idx
                     n_blocks = txl.local_scalar("int32", init=n_block_max_of(m_block))
                     txl.assign(acc, 0)
@@ -921,11 +921,11 @@ def make_kernel(
                         sfqk_load.wait(stage, sfqk_phase)
                         cp_sfqk(stage, kv.stage)
                         gemm_qk(stage, kv.stage)
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             S_full.arrive(stage)
                     txl.assign(q_phase, q_phase ^ 1)
                     txl.assign(sfqk_phase, sfqk_phase ^ 1)
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         kv_load.empty.arrive(kv.stage)
                     kv.advance()
                     # steady loop (:2494-2637)
@@ -937,7 +937,7 @@ def make_kernel(
                             cp_sfpv(stage, v_slot)
                             gemm_pv(stage, v_slot, acc, p_phase)
                             if stage == 1:
-                                with txl.If(elected()), txl.Then():
+                                with txl.if_(elected()), txl.then_():
                                     kv_load.empty.arrive(v_slot)
                             if stage == 0:
                                 kv.advance()
@@ -946,15 +946,15 @@ def make_kernel(
                             sfqk_load.wait(stage, sfqk_phase)
                             cp_sfqk(stage, kv.stage)
                             gemm_qk(stage, kv.stage)
-                            with txl.If(elected()), txl.Then():
+                            with txl.if_(elected()), txl.then_():
                                 S_full.arrive(stage)
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             kv_load.empty.arrive(kv.stage)
                         kv.advance()
                         txl.assign(p_phase, p_phase ^ 1)
                         txl.assign(sfqk_phase, sfqk_phase ^ 1)
                         txl.assign(acc, 1)
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         for stage in range(Q_STAGE):
                             q_load.empty.arrive(stage)
                     # tail PV (:2645-2716)
@@ -963,10 +963,10 @@ def make_kernel(
                         P_full_O_rescaled.wait(stage, p_phase)
                         cp_sfpv(stage, kv.stage)
                         gemm_pv(stage, kv.stage, acc, p_phase)
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             O_full.arrive(stage)
                     txl.assign(p_phase, p_phase ^ 1)
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         kv_load.empty.arrive(kv.stage)
                     kv.advance()
                     sched.next_tile()
@@ -981,7 +981,7 @@ def make_kernel(
                 phase = txl.local_scalar("int32", init=0)
                 sched = make_scheduler("sched_epi")
                 sched.init(txl.cta_id())
-                with txl.While(sched.valid()):
+                with txl.while_(sched.valid()):
                     m_block = sched.m_block_idx
                     head = sched.head_idx
                     batch = sched.batch_idx
@@ -1013,7 +1013,7 @@ def make_kernel(
             corr_phase = txl.local_scalar("int32", init=1)
             row_max = txl.local_scalar("float32")
             row_sum = txl.local_scalar("float32")
-            with txl.If(stage == 1), txl.Then():
+            with txl.if_(stage == 1), txl.then_():
                 sfqk_load.arrive(0)
             s_col = stage * BLK_N  # S[stage] base column (128 * stage)
             p_col = s_col + spec.tmem_s_to_p_offset
@@ -1201,7 +1201,7 @@ def make_kernel(
                 txl.assign(si_phase, si_phase ^ 1)
                 txl.assign(corr_phase, corr_phase ^ 1)
 
-            with txl.While(sched.valid()):
+            with txl.while_(sched.valid()):
                 m_block = sched.m_block_idx
                 n_max = txl.local_scalar("int32", init=n_block_max_of(m_block))
                 txl.assign(row_max, txl.float32(NEG_INF))
@@ -1252,7 +1252,7 @@ def make_kernel(
             ce_phase = txl.local_scalar("int32", init=1)
             sched = make_scheduler("sched_corr")
             sched.init(txl.cta_id())
-            with txl.While(sched.valid()):
+            with txl.while_(sched.valid()):
                 m_block = sched.m_block_idx
                 n_blocks = txl.local_scalar("int32", init=n_block_max_of(m_block))
                 softmax_corr.full.wait(0, sc_phase)
@@ -1268,7 +1268,7 @@ def make_kernel(
                         txl.ptx.vote_sync.ballot.b32(
                             ballot, txl.ptx.pred(scale < txl.float32(1.0)), txl.uint32(0xFFFFFFFF)
                         )
-                        with txl.If(ballot != txl.uint32(0)), txl.Then():
+                        with txl.if_(ballot != txl.uint32(0)), txl.then_():
                             o = txl.alloc_local([16], "float32")
                             for t in range(DV // 16):
                                 addr = tmem(lane_base, TMEM_O[stage] + 16 * t)

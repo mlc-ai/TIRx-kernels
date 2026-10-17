@@ -492,8 +492,8 @@ def make_kernel(
         num_k_blocks = txl.max((topk_len + B_TOPK - 1) // B_TOPK, 1)
 
         def prefetch(tensor_map):
-            with txl.If(warp_idx == 0), txl.Then():
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(warp_idx == 0), txl.then_():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     txl.ptx.prefetch.tensormap(txl.address_of(tensor_map))
 
         prefetch(q_tensormap)
@@ -507,17 +507,17 @@ def make_kernel(
         smem = txl.smem_pool()
         pool = smem.pool
         u_base = pool.offset
-        q_full = smem.alloc((B_H // 2, d_qk), "bfloat16", swizzle=txl.SW128B).buf
+        q_full = smem.alloc((B_H // 2, d_qk), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
         q_cp_desc = txl.local_scalar("uint64")
         txl.cuda.tcgen05.encode_matrix_descriptor(
             txl.address_of(q_cp_desc), txl.reinterpret(txl.uint64(0), ty=txl.handle().ty), 0, 64, 3
         )
         pool.move_base_to(u_base + (B_H // 2) * d_sq * BF16_BYTES)
-        v_smem = smem.alloc((D_V // 2, B_TOPK), "bfloat16", swizzle=txl.SW128B).buf
-        k_smem = smem.alloc((B_TOPK // 2, d_qk), "bfloat16", swizzle=txl.SW128B).buf
+        v_smem = smem.alloc((D_V // 2, B_TOPK), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
+        k_smem = smem.alloc((B_TOPK // 2, d_qk), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
         u_end = pool.offset
         pool.move_base_to(u_base)
-        o_smem = smem.alloc((B_H // 2, D_V), "bfloat16", swizzle=txl.SW128B).buf
+        o_smem = smem.alloc((B_H // 2, D_V), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
         pool.move_base_to(u_end)
         s_smem_gemm = smem.alloc((B_H // 2, B_TOPK), "bfloat16", align=1024)
         is_k_valid = pool.alloc((NUM_BUFS, B_TOPK // 8), "int8")
@@ -547,8 +547,8 @@ def make_kernel(
         def initialize_and_load_q():
             # CUDA phase1.cuh:87-146.  Warp 0 owns barrier init, Q TMA launch,
             # and the cta_group::2 TMEM allocation.
-            with txl.If(warp_idx == 0), txl.Then():
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(warp_idx == 0), txl.then_():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     bar_prologue_q.init(1)
                     bar_prologue_utccp.init(1)
                     with txl.unroll(NUM_BUFS) as init_stage:
@@ -592,9 +592,9 @@ def make_kernel(
 
             txl.cuda.cluster_sync()
 
-            with txl.If(warp_idx == 0), txl.Then():
+            with txl.if_(warp_idx == 0), txl.then_():
                 prologue_token = iket_range("h128-q-load")
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     txl.ptx[_TMA_G2S_4D_CACHE](
                         q_full.ptr_to([0, 0]),
                         txl.address_of(q_tensormap),
@@ -793,11 +793,11 @@ def make_kernel(
 
                 new_max = txl.local_scalar("float32")
                 scale_for_old = txl.local_scalar("float32")
-                with txl.If(should_scale_o == txl.uint32(0)):
-                    with txl.Then():
+                with txl.if_(should_scale_o == txl.uint32(0)):
+                    with txl.then_():
                         txl.assign(scale_for_old, 1.0)
                         txl.assign(new_max, mi)
-                    with txl.Else():
+                    with txl.else_():
                         txl.assign(new_max, txl.max(cur_pi_max, mi))
                         txl.ptx.ex2.approx.ftz.f32(scale_for_old, mi - new_max)
                 txl.assign(mi, new_max)
@@ -820,7 +820,7 @@ def make_kernel(
                     txl.assign(li, li + s_x + s_y)
                     txl.ptx.mov.b32(s_pack[s_i], txl.cuda.float22bfloat162_rn(s_x, s_y))
 
-                with txl.If(k > 0), txl.Then():
+                with txl.if_(k > 0), txl.then_():
                     pv_stage = ring_stage(k - 1)
                     pv_phase = ring_phase(k - 1)
                     pv_wait_token = iket_range("h128-pv-wait")
@@ -845,7 +845,7 @@ def make_kernel(
                         s_words[s_word + 3],
                     )
 
-                with txl.If((k > 0) & (should_scale_o != txl.uint32(0))), txl.Then():
+                with txl.if_((k > 0) & (should_scale_o != txl.uint32(0))), txl.then_():
                     txl.ptx.tcgen05.fence__after_thread_sync()
                     o_rescale = txl.alloc_local((32,), "float32")
                     with txl.unroll((D_V // 2) // 32) as chunk_idx:
@@ -869,7 +869,7 @@ def make_kernel(
                 txl.cuda.iket.range_end(softmax_token[0])
 
             epilogue_token = iket_range("h128-output")
-            with txl.If(real_mi == txl.float32(-float("inf"))), txl.Then():
+            with txl.if_(real_mi == txl.float32(-float("inf"))), txl.then_():
                 txl.assign(li, 0.0)
                 txl.assign(mi, txl.float32(-float("inf")))
 
@@ -879,7 +879,7 @@ def make_kernel(
             txl.ptx.ld.shared.f32(peer_li, rowwise_li_buf.ptr_to([idx_in_warpgroup ^ 64]))
             txl.assign(li, li + peer_li)
 
-            with txl.If(idx_in_warpgroup < B_H // 2), txl.Then():
+            with txl.if_(idx_in_warpgroup < B_H // 2), txl.then_():
                 global_head = cta_idx * (B_H // 2) + idx_in_warpgroup
                 cur_lse = txl.local_scalar("float32")
                 cur_lse_log = txl.log(li)
@@ -929,13 +929,13 @@ def make_kernel(
             txl.ptx.vote_sync.any.pred(
                 have_valid_indices, txl.Not(li == txl.float32(0.0)), txl.uint32(0xFFFFFFFF)
             )
-            with txl.If(have_valid_indices == txl.uint32(0)), txl.Then():
+            with txl.if_(have_valid_indices == txl.uint32(0)), txl.then_():
                 with txl.unroll(B_EPI) as o_zero_i:
                     txl.ptx.mov.b32(o_epi[o_zero_i], txl.float32(0.0))
                 txl.assign(output_scale, 1.0)
             o_epi_bf16 = txl.alloc_local((B_EPI,), "bfloat16")
             with txl.unroll((D_V // 2) // B_EPI) as epi_k:
-                with txl.If(have_valid_indices != txl.uint32(0)), txl.Then():
+                with txl.if_(have_valid_indices != txl.uint32(0)), txl.then_():
                     _tmem_load(
                         o_epi,
                         txl.cuda.get_tmem_addr(txl.uint32(o_tmem_col), 0, epi_k * B_EPI),
@@ -983,8 +983,8 @@ def make_kernel(
 
                 txl.ptx.fence.proxy.async_.shared__cta()
                 txl.ptx.bar.sync(txl.uint32(BAR_WG0_SYNC), 128)
-                with txl.If(warp_idx == 0), txl.Then():
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(warp_idx == 0), txl.then_():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         o_part0_offset = epi_k * B_EPI * (B_H // 2) * BF16_BYTES
                         txl.ptx[_TMA_S2G_3D](
                             txl.address_of(out_part0_tensormap),
@@ -997,8 +997,8 @@ def make_kernel(
                                 ty=txl.Ptr("bfloat16", (o_smem.ptr_to([0, 0])).ty.scope),
                             ),
                         )
-                with txl.If(warp_idx == 1), txl.Then():
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(warp_idx == 1), txl.then_():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         o_part1_offset = (epi_k * B_EPI + D_V // 2) * (B_H // 2) * BF16_BYTES
                         txl.ptx[_TMA_S2G_3D](
                             txl.address_of(out_part1_tensormap),
@@ -1012,7 +1012,7 @@ def make_kernel(
                             ),
                         )
 
-            with txl.If(warp_idx == 0), txl.Then():
+            with txl.if_(warp_idx == 0), txl.then_():
                 txl.ptx.tcgen05.dealloc.cta_group__2.sync.aligned.b32(
                     txl.uint32(0), txl.uint32(512)
                 )
@@ -1022,7 +1022,7 @@ def make_kernel(
             # CUDA phase1.cuh:387-446.  K producer warpgroup.
             k_gather_token = iket_range("h128-k-load")
             wg1_warp_idx = warp_idx - 4
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 with txl.serial(0, num_k_blocks, unroll=False) as k:
                     indices_int4 = txl.alloc_local((WG1_ROWS_PER_WARP, 4), "int32")
                     max_indices = txl.local_scalar("int32", init=-1)
@@ -1059,8 +1059,8 @@ def make_kernel(
                     k_stage = ring_stage(k)
 
                     def gather_k_part(col_start, col_count, tx_dim, bar, tensormap):
-                        with txl.If(txl.Not(should_skip_tma)):
-                            with txl.Then():
+                        with txl.if_(txl.Not(should_skip_tma)):
+                            with txl.then_():
                                 with txl.unroll(WG1_ROWS_PER_WARP) as row_group:
                                     with txl.unroll(col_count) as col_atom:
                                         k_gather_offset = (
@@ -1086,7 +1086,7 @@ def make_kernel(
                                             ),
                                             _KV_TMA_CACHE_HINT,
                                         )
-                            with txl.Else():
+                            with txl.else_():
                                 _rem1 = txl.local_scalar("uint64")
                                 txl.ptx.mapa.shared__cluster.u64(
                                     _rem1, bar.ptr_to([k_stage]), txl.uint32(0)
@@ -1097,13 +1097,13 @@ def make_kernel(
                                     pred=txl.uint32(1),
                                 )
 
-                    with txl.If(k > 0), txl.Then():
+                    with txl.if_(k > 0), txl.then_():
                         prior_qk_part_stage = ring_stage(k - 1)
                         prior_qk_part_phase = ring_phase(k - 1)
                         bar_qk_part_done.wait(prior_qk_part_stage, prior_qk_part_phase)
                     gather_k_part(0, num_sq_tiles, d_sq, bar_k_part0_ready, kv_k_part0_tensormap)
 
-                    with txl.If(k > 0), txl.Then():
+                    with txl.if_(k > 0), txl.then_():
                         prior_qk_stage = ring_stage(k - 1)
                         prior_qk_phase = ring_phase(k - 1)
                         bar_qk_done.wait(prior_qk_stage, prior_qk_phase)
@@ -1120,11 +1120,11 @@ def make_kernel(
             # CUDA phase1.cuh:447-489.  V producer warpgroup.
             v_gather_token = iket_range("h128-v-load")
             wg2_warp_idx = warp_idx - 8
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 bar_prologue_utccp.wait(0, 0)
                 with txl.serial(0, num_k_blocks, unroll=False) as k:
                     v_stage = ring_stage(k)
-                    with txl.If(k > 0), txl.Then():
+                    with txl.if_(k > 0), txl.then_():
                         prior_pv_part_stage = ring_stage(k - 1)
                         prior_pv_part_phase = ring_phase(k - 1)
                         bar_sv_part_done.wait(prior_pv_part_stage, prior_pv_part_phase)
@@ -1179,7 +1179,7 @@ def make_kernel(
                     token_idxs_part0 = txl.alloc_local((WG2_ROWS_PER_PART, 4), "int32")
                     gather_v_part(0, 0, token_idxs_part0, bar_v_part0_ready, kv_v_part0_tensormap)
 
-                    with txl.If(k > 0), txl.Then():
+                    with txl.if_(k > 0), txl.then_():
                         prior_pv_stage = ring_stage(k - 1)
                         prior_pv_phase = ring_phase(k - 1)
                         bar_sv_done.wait(prior_pv_stage, prior_pv_phase)
@@ -1196,10 +1196,10 @@ def make_kernel(
         def run_wg3_role(do_mma: txl.constexpr):
             # CUDA phase1.cuh:490-606.  The constexpr selects one of the two
             # independently declared K roles without adding a runtime branch.
-            with txl.If(do_mma):
-                with txl.Then():
+            with txl.if_(do_mma):
+                with txl.then_():
                     mma_token = iket_range("h128-qk-pv-issue")
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         bar_prologue_q.arrive(0, tx_count=B_H * d_qk * BF16_BYTES)
                         bar_prologue_q.wait(0, 0)
                         txl.ptx.tcgen05.fence__after_thread_sync()
@@ -1222,7 +1222,7 @@ def make_kernel(
                         )
 
                         with txl.serial(0, num_k_blocks + 1, unroll=False) as k:
-                            with txl.If(k < num_k_blocks), txl.Then():
+                            with txl.if_(k < num_k_blocks), txl.then_():
                                 qk_stage = ring_stage(k)
                                 qk_phase = ring_phase(k)
 
@@ -1230,14 +1230,14 @@ def make_kernel(
                                     qk_stage, tx_count=B_TOPK * d_sq * BF16_BYTES
                                 )
                                 bar_k_part0_ready.wait(qk_stage, qk_phase)
-                                with txl.If(k > 0), txl.Then():
+                                with txl.if_(k > 0), txl.then_():
                                     prior_p_stage = ring_stage(k - 1)
                                     prior_p_phase = ring_phase(k - 1)
                                     bar_p_free.wait(prior_p_stage, prior_p_phase)
                                 txl.ptx.tcgen05.fence__after_thread_sync()
 
                                 txl.assign(mma_p_accumulate, txl.uint32(0))
-                                with txl.If(d_sq > 0), txl.Then():
+                                with txl.if_(d_sq > 0), txl.then_():
                                     if mma_smem_desc == "local_hoist":
                                         qk_part0_a_local = txl.SmemDescriptor()
                                         qk_part0_a_local.init(
@@ -1467,7 +1467,7 @@ def make_kernel(
                                 txl.assign(mma_p_accumulate, txl.uint32(1))
                                 bar_qk_done.arrive(qk_stage, cta_group=2, cta_mask=3)
 
-                            with txl.If(k > 0), txl.Then():
+                            with txl.if_(k > 0), txl.then_():
                                 pv_stage = ring_stage(k - 1)
                                 pv_phase = ring_phase(k - 1)
                                 bar_so_ready.wait(pv_stage, pv_phase)
@@ -1525,9 +1525,9 @@ def make_kernel(
                                 bar_sv_done.arrive(pv_stage, cta_group=2, cta_mask=3)
                     txl.cuda.iket.range_end(mma_token[0])
 
-                with txl.Else():
+                with txl.else_():
                     valid_mask_token = iket_range("h128-valid-mask")
-                    with txl.If(lane_idx < B_TOPK // 8), txl.Then():
+                    with txl.if_(lane_idx < B_TOPK // 8), txl.then_():
                         lane_indices = txl.alloc_local((8,), "int32")
                         with txl.serial(0, num_k_blocks, unroll=False) as k:
                             row_base = g_indices_base + k * B_TOPK + lane_idx * 8
@@ -1580,14 +1580,14 @@ def make_kernel(
                 run_wg3_role(False)
 
     sparse_flashmla_prefill_head128_phase1_kernel.__annotations__ = {
-        "q": txl.Tensor((s_q, h_q, d_qk), txl.bf16),
-        "kv": txl.Tensor((s_kv * stride_kv_s_kv,), txl.bf16),
-        "indices": txl.Tensor((s_q * stride_indices_s_q,), txl.i32),
-        "attn_sink": txl.Tensor((h_q,), txl.f32),
-        "topk_length": txl.Tensor((s_q,), txl.i32),
-        "out": txl.Tensor((s_q, h_q, D_V), txl.bf16),
-        "max_logits": txl.Tensor((s_q, h_q), txl.f32),
-        "lse": txl.Tensor((s_q, h_q), txl.f32),
+        "q": txl.Tensor((s_q, h_q, d_qk), "bfloat16"),
+        "kv": txl.Tensor((s_kv * stride_kv_s_kv,), "bfloat16"),
+        "indices": txl.Tensor((s_q * stride_indices_s_q,), "int32"),
+        "attn_sink": txl.Tensor((h_q,), "float32"),
+        "topk_length": txl.Tensor((s_q,), "int32"),
+        "out": txl.Tensor((s_q, h_q, D_V), "bfloat16"),
+        "max_logits": txl.Tensor((s_q, h_q), "float32"),
+        "lse": txl.Tensor((s_q, h_q), "float32"),
     }
     return txl.kernel()(sparse_flashmla_prefill_head128_phase1_kernel)
 

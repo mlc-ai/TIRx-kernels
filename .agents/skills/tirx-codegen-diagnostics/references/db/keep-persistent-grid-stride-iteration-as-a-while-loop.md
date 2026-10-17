@@ -15,7 +15,7 @@ increment it by the grid size.
 ```python
 work = txl.alloc_local([1], "int32")
 txl.assign(work[0], txl.cta_id())
-with txl.While(work[0] < total_work):
+with txl.while_(work[0] < total_work):
     ...
     txl.assign(work[0], work[0] + grid_x)
 ```

@@ -296,11 +296,11 @@ def _fp16_packed_max_to_ue8m0(packed_max):
     hi = txl.shift_right(packed_max, txl.uint32(16))
     max_half = txl.max(lo, hi)
     scale = txl.local_scalar("uint32")
-    with txl.If(txl.And(max_half >= txl.uint32(0x0400), max_half < txl.uint32(0x7C00))):
-        with txl.Then():
+    with txl.if_(txl.And(max_half >= txl.uint32(0x0400), max_half < txl.uint32(0x7C00))):
+        with txl.then_():
             rounded_exp = txl.shift_right(max_half + txl.uint32(0x01FF), txl.uint32(10))
             txl.assign(scale, rounded_exp + txl.uint32(110))
-        with txl.Else():
+        with txl.else_():
             txl.assign(scale, _fp16_block_max_to_ue8m0(pair_max_to_f32(packed_max, "float16")))
     return scale
 
@@ -311,11 +311,11 @@ def _bf16_packed_max_to_ue8m0(packed_max):
     hi = txl.shift_right(packed_max, txl.uint32(16))
     max_bf16 = txl.max(lo, hi)
     scale = txl.local_scalar("uint32")
-    with txl.If(txl.And(max_bf16 >= txl.uint32(0x0080), max_bf16 < txl.uint32(0x7F80))):
-        with txl.Then():
+    with txl.if_(txl.And(max_bf16 >= txl.uint32(0x0080), max_bf16 < txl.uint32(0x7F80))):
+        with txl.then_():
             rounded_exp = txl.shift_right(max_bf16 + txl.uint32(0x003F), txl.uint32(7))
             txl.assign(scale, rounded_exp - txl.uint32(2))
-        with txl.Else():
+        with txl.else_():
             block_max = pair_max_to_f32(packed_max, "bfloat16")
             txl.assign(
                 scale,
@@ -370,10 +370,10 @@ def _quantize_block_4t(words, *, dtype, fp16_mode=0):
         )
     if packed_mode:
         packed_u32 = txl.local_scalar("uint32")
-        with txl.If(scale_ue8m0_u32 >= txl.uint32(112)):
-            with txl.Then():
+        with txl.if_(scale_ue8m0_u32 >= txl.uint32(112)):
+            with txl.then_():
                 txl.assign(packed_u32, _cvt_e2m1x8_scaled_packed(words, scale_ue8m0_u32, dtype))
-            with txl.Else():
+            with txl.else_():
                 inv_scale = _ue8m0_to_inv_scale_bounded(scale_ue8m0_u32)
                 scaled = []
                 for i in range(4):
@@ -520,8 +520,8 @@ def get_kernel(
         @txl.kernel()
         def mxfp4_quantize_linear(
             in_global: txl.Tensor((txl.int64(),), dtype),
-            out_global: txl.Tensor((txl.int64(),), txl.u8),
-            sf_out: txl.Tensor((txl.int64(),), txl.u8),
+            out_global: txl.Tensor((txl.int64(),), "uint8"),
+            sf_out: txl.Tensor((txl.int64(),), "uint8"),
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
@@ -556,7 +556,7 @@ def get_kernel(
                         words1 = txl.alloc_local((4,), "uint32")
                         _load_block_4t(words0, in_global, txl.int32(0), sf_idx, thread_in_sf, k=k)
                         sf_idx1 = txl.local_scalar("int32", init=sf_idx + sf_stride)
-                        with txl.If(sf_idx1 < total_sf_blocks), txl.Then():
+                        with txl.if_(sf_idx1 < total_sf_blocks), txl.then_():
                             _load_block_4t(
                                 words1, in_global, txl.int32(0), sf_idx1, thread_in_sf, k=k
                             )
@@ -583,7 +583,7 @@ def get_kernel(
                         )
                     _st_scale_4t(txl.address_of(sf_out[sf_idx]), scale_ue8m0_u32, thread_in_sf)
                     if pipeline_two:
-                        with txl.If(sf_idx1 < total_sf_blocks), txl.Then():
+                        with txl.if_(sf_idx1 < total_sf_blocks), txl.then_():
                             scale_ue8m0_u32_1 = _finish_block_4t(
                                 words1,
                                 out_global,
@@ -614,13 +614,13 @@ def get_kernel(
                     process_one(sf_base + batch * sf_stride)
                 tail_idx = sf_base + (total_sf_blocks // sf_stride) * sf_stride
                 if total_sf_blocks % sf_stride:
-                    with txl.If(tail_idx < total_sf_blocks), txl.Then():
+                    with txl.if_(tail_idx < total_sf_blocks), txl.then_():
                         process_one(tail_idx)
             elif direct_one_batch:
                 process_one(bx * sf_blocks_per_tb + sf_in_block)
             else:
                 sf_idx = txl.local_scalar("int32", init=bx * sf_blocks_per_tb + sf_in_block)
-                with txl.While(sf_idx < total_sf_blocks):
+                with txl.while_(sf_idx < total_sf_blocks):
                     process_one(sf_idx)
                     txl.assign(sf_idx, sf_idx + sf_stride * (2 if pipeline_two else 1))
             if enable_pdl:
@@ -661,8 +661,8 @@ def get_kernel(
     @txl.kernel()
     def mxfp4_quantize_swizzled(
         in_global: txl.Tensor((txl.int64(),), dtype),
-        out_global: txl.Tensor((txl.int64(),), txl.u8),
-        sf_out: txl.Tensor((txl.int64(),), txl.u8),
+        out_global: txl.Tensor((txl.int64(),), "uint8"),
+        sf_out: txl.Tensor((txl.int64(),), "uint8"),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=grid_x, block=(block_x + 31) // 32 * 32),
@@ -680,25 +680,25 @@ def get_kernel(
             col_unit_idx = _materialize(txl.truncdiv(tx, txl.int32(threads_per_sf)))
             thread_in_sf = _materialize(txl.truncmod(tx, txl.int32(threads_per_sf)))
             row_idx = txl.local_scalar("int32", init=bx)
-            with txl.While(row_idx < padded_m):
-                with txl.If(row_idx >= m):
-                    with txl.Then():
+            with txl.while_(row_idx < padded_m):
+                with txl.if_(row_idx >= m):
+                    with txl.then_():
                         sc_pad = txl.local_scalar("int32", init=col_unit_idx)
-                        with txl.While(sc_pad < pad_cols):
-                            with txl.If(thread_in_sf == 0), txl.Then():
+                        with txl.while_(sc_pad < pad_cols):
+                            with txl.if_(thread_in_sf == 0), txl.then_():
                                 st_global_u8(
                                     txl.address_of(sf_out[sf_offset(row_idx, sc_pad)]), txl.uint8(0)
                                 )
                             txl.assign(sc_pad, sc_pad + col_units_per_block)
-                    with txl.Else():
+                    with txl.else_():
                         sc = txl.local_scalar("int32", init=col_unit_idx)
-                        with txl.While(sc < nsb):
+                        with txl.while_(sc < nsb):
                             if threads_per_sf == _4T_THREADS_PER_SF and needs_col_loop:
                                 words0 = txl.alloc_local((4,), "uint32")
                                 words1 = txl.alloc_local((4,), "uint32")
                                 _load_block_4t(words0, in_global, row_idx, sc, thread_in_sf, k=k)
                                 sc1 = txl.local_scalar("int32", init=sc + col_units_per_block)
-                                with txl.If(sc1 < nsb), txl.Then():
+                                with txl.if_(sc1 < nsb), txl.then_():
                                     _load_block_4t(
                                         words1, in_global, row_idx, sc1, thread_in_sf, k=k
                                     )
@@ -736,7 +736,7 @@ def get_kernel(
                                 thread_in_sf,
                             )
                             if threads_per_sf == _4T_THREADS_PER_SF and needs_col_loop:
-                                with txl.If(sc1 < nsb), txl.Then():
+                                with txl.if_(sc1 < nsb), txl.then_():
                                     scale_ue8m0_u32_1 = _finish_block_4t(
                                         words1,
                                         out_global,
@@ -756,8 +756,8 @@ def get_kernel(
                             else:
                                 txl.assign(sc, sc + col_units_per_block)
                         sc_tail = txl.local_scalar("int32", init=nsb + col_unit_idx)
-                        with txl.While(sc_tail < pad_cols):
-                            with txl.If(thread_in_sf == 0), txl.Then():
+                        with txl.while_(sc_tail < pad_cols):
+                            with txl.if_(thread_in_sf == 0), txl.then_():
                                 st_global_u8(
                                     txl.address_of(sf_out[sf_offset(row_idx, sc_tail)]),
                                     txl.uint8(0),
@@ -775,20 +775,20 @@ def get_kernel(
             row_idx2 = txl.local_scalar("int32")
             txl.assign(row_batch_idx, bx)
             txl.assign(row_idx2, row_batch_idx * rows_per_block + row_in_block)
-            with txl.While(row_batch_idx * rows_per_block < padded_m):
-                with txl.If(row_idx2 < padded_m), txl.Then():
-                    with txl.If(row_idx2 >= m):
-                        with txl.Then():
-                            with txl.If(thread_in_sf == 0), txl.Then():
+            with txl.while_(row_batch_idx * rows_per_block < padded_m):
+                with txl.if_(row_idx2 < padded_m), txl.then_():
+                    with txl.if_(row_idx2 >= m):
+                        with txl.then_():
+                            with txl.if_(thread_in_sf == 0), txl.then_():
                                 local_sf = txl.local_scalar("int32", init=sf_idx_in_row)
-                                with txl.While(local_sf < pad_cols):
+                                with txl.while_(local_sf < pad_cols):
                                     st_global_u8(
                                         txl.address_of(sf_out[sf_offset(row_idx2, local_sf)]),
                                         txl.uint8(0),
                                     )
                                     txl.assign(local_sf, local_sf + nsb)
-                        with txl.Else():
-                            with txl.If(sf_idx_in_row < nsb), txl.Then():
+                        with txl.else_():
+                            with txl.if_(sf_idx_in_row < nsb), txl.then_():
                                 if threads_per_sf == _4T_THREADS_PER_SF:
                                     scale_ue8m0_u32 = _process_block_4t(
                                         in_global,
@@ -817,9 +817,9 @@ def get_kernel(
                                     thread_in_sf,
                                 )
                             if pad_cols != nsb:
-                                with txl.If(thread_in_sf == 0), txl.Then():
+                                with txl.if_(thread_in_sf == 0), txl.then_():
                                     pad_col = txl.local_scalar("int32", init=nsb + sf_idx_in_row)
-                                    with txl.While(pad_col < pad_cols):
+                                    with txl.while_(pad_col < pad_cols):
                                         st_global_u8(
                                             txl.address_of(sf_out[sf_offset(row_idx2, pad_col)]),
                                             txl.uint8(0),
@@ -873,7 +873,7 @@ def get_kernel(
                 process_row(row_base + batch * row_stride)
             tail_row = row_base + (m // row_stride) * row_stride
             if m % row_stride:
-                with txl.If(tail_row < m), txl.Then():
+                with txl.if_(tail_row < m), txl.then_():
                     process_row(tail_row)
 
         def small_body_static():
@@ -882,7 +882,7 @@ def get_kernel(
             sf_idx_in_row = _materialize(txl.truncdiv(local_tidx, txl.int32(threads_per_sf)))
             thread_in_sf = _materialize(txl.truncmod(local_tidx, txl.int32(threads_per_sf)))
             row_idx = txl.local_scalar("int32", init=bx * rows_per_block + row_in_block)
-            with txl.While(row_idx < m):
+            with txl.while_(row_idx < m):
                 scale = _process_block_4t(
                     in_global,
                     out_global,
@@ -905,12 +905,12 @@ def get_kernel(
             thread_in_sf = _materialize(txl.truncmod(local_tidx, txl.int32(threads_per_sf)))
             row_stride = grid_x * rows_per_block
             row_idx = txl.local_scalar("int32", init=bx * rows_per_block + row_in_block)
-            with txl.While(row_idx < m):
+            with txl.while_(row_idx < m):
                 words0 = txl.alloc_local((4,), "uint32")
                 words1 = txl.alloc_local((4,), "uint32")
                 _load_block_4t(words0, in_global, row_idx, sf_idx_in_row, thread_in_sf, k=k)
                 row_idx1 = txl.local_scalar("int32", init=row_idx + row_stride)
-                with txl.If(row_idx1 < m), txl.Then():
+                with txl.if_(row_idx1 < m), txl.then_():
                     _load_block_4t(words1, in_global, row_idx1, sf_idx_in_row, thread_in_sf, k=k)
                 scale0 = _finish_block_4t(
                     words0,
@@ -925,7 +925,7 @@ def get_kernel(
                 _st_scale_4t(
                     txl.address_of(sf_out[sf_offset(row_idx, sf_idx_in_row)]), scale0, thread_in_sf
                 )
-                with txl.If(row_idx1 < m), txl.Then():
+                with txl.if_(row_idx1 < m), txl.then_():
                     scale1 = _finish_block_4t(
                         words1,
                         out_global,
@@ -944,7 +944,7 @@ def get_kernel(
                 txl.assign(row_idx, row_idx + 2 * row_stride)
 
         if block_x % 32:
-            with txl.If(tx < block_x), txl.Then():
+            with txl.if_(tx < block_x), txl.then_():
                 body() if needs_col_loop else (
                     small_body_direct()
                     if direct_one_batch

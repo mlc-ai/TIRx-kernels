@@ -247,9 +247,9 @@ def get_kernel(
         @txl.kernel()
         def mxfp8_quantize_linear(
             in_global: txl.Tensor((txl.int64(),), dtype),
-            out_global: txl.Tensor((txl.int64(),), txl.u8),
-            sf_out: txl.Tensor((txl.int64(),), txl.u8),
-            total_sf: txl.i32,
+            out_global: txl.Tensor((txl.int64(),), "uint8"),
+            sf_out: txl.Tensor((txl.int64(),), "uint8"),
+            total_sf: "int32",
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=grid_x, block=block_x // 32 * 32),
@@ -270,7 +270,7 @@ def get_kernel(
 
             # Grid-stride loop over flat SF blocks (mxfp8_quantize.py:248-326).
             sf_idx = txl.local_scalar("int32", init=bx * sfbpt + warp_idx * sfbpw + sf_idx_in_warp)
-            with txl.While(sf_idx < total_sf):
+            with txl.while_(sf_idx < total_sf):
                 row_idx = txl.truncdiv(sf_idx, txl.int32(nsb))
                 col_idx = txl.truncmod(sf_idx, txl.int32(nsb))
                 scale_ue8m0_u32 = _quantize_block(
@@ -283,7 +283,7 @@ def get_kernel(
                     use_2t=use_2t,
                     k=k,
                 )
-                with txl.If(thread_in_sf == 0), txl.Then():
+                with txl.if_(thread_in_sf == 0), txl.then_():
                     st_global_u8(txl.address_of(sf_out[sf_idx]), txl.cast(scale_ue8m0_u32, "uint8"))
                 txl.assign(sf_idx, sf_idx + grid_x * sfbpt)
 
@@ -301,10 +301,10 @@ def get_kernel(
     @txl.kernel()
     def mxfp8_quantize_swizzled(
         in_global: txl.Tensor((txl.int64(),), dtype),
-        out_global: txl.Tensor((txl.int64(),), txl.u8),
-        sf_out: txl.Tensor((txl.int64(),), txl.u8),
-        m_rows: txl.i32,
-        padded_rows: txl.i32,
+        out_global: txl.Tensor((txl.int64(),), "uint8"),
+        sf_out: txl.Tensor((txl.int64(),), "uint8"),
+        m_rows: "int32",
+        padded_rows: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=grid_x, block=block_x // 32 * 32),
@@ -325,21 +325,21 @@ def get_kernel(
             thread_in_unit = txl.truncmod(tx, txl.int32(tps))
 
             row_idx = txl.local_scalar("int32", init=bx)
-            with txl.While(row_idx < padded_rows):
-                with txl.If(row_idx >= m_rows):
-                    with txl.Then():
+            with txl.while_(row_idx < padded_rows):
+                with txl.if_(row_idx >= m_rows):
+                    with txl.then_():
                         # Padding row: zero out scale factors only (:481-489).
                         sc_pad = txl.local_scalar("int32", init=col_unit_idx)
-                        with txl.While(sc_pad < pad_cols):
-                            with txl.If(thread_in_unit == 0), txl.Then():
+                        with txl.while_(sc_pad < pad_cols):
+                            with txl.if_(thread_in_unit == 0), txl.then_():
                                 st_global_u8(
                                     txl.address_of(sf_out[sf_offset(row_idx, sc_pad)]), txl.uint8(0)
                                 )
                             txl.assign(sc_pad, sc_pad + col_units_per_block)
-                    with txl.Else():
+                    with txl.else_():
                         # Data row: quantize each SF block in the column loop.
                         sc = txl.local_scalar("int32", init=col_unit_idx)
-                        with txl.While(sc < nsb):
+                        with txl.while_(sc < nsb):
                             scale_ue8m0_u32 = _quantize_block(
                                 in_global,
                                 out_global,
@@ -350,7 +350,7 @@ def get_kernel(
                                 use_2t=use_2t,
                                 k=k,
                             )
-                            with txl.If(thread_in_unit == 0), txl.Then():
+                            with txl.if_(thread_in_unit == 0), txl.then_():
                                 st_global_u8(
                                     txl.address_of(sf_out[sf_offset(row_idx, sc)]),
                                     txl.cast(scale_ue8m0_u32, "uint8"),
@@ -358,8 +358,8 @@ def get_kernel(
                             txl.assign(sc, sc + col_units_per_block)
                         # Padding SF columns of a data row (:580-587).
                         sc_tail = txl.local_scalar("int32", init=nsb + col_unit_idx)
-                        with txl.While(sc_tail < pad_cols):
-                            with txl.If(thread_in_unit == 0), txl.Then():
+                        with txl.while_(sc_tail < pad_cols):
+                            with txl.if_(thread_in_unit == 0), txl.then_():
                                 st_global_u8(
                                     txl.address_of(sf_out[sf_offset(row_idx, sc_tail)]),
                                     txl.uint8(0),
@@ -377,22 +377,22 @@ def get_kernel(
             row_idx2 = txl.local_scalar("int32")
             txl.assign(row_batch_idx, bx)
             txl.assign(row_idx2, row_batch_idx * rows_per_block + row_in_block)
-            with txl.While(row_batch_idx * rows_per_block < padded_rows):
-                with txl.If(row_idx2 < padded_rows), txl.Then():
-                    with txl.If(row_idx2 >= m_rows):
-                        with txl.Then():
+            with txl.while_(row_batch_idx * rows_per_block < padded_rows):
+                with txl.if_(row_idx2 < padded_rows), txl.then_():
+                    with txl.if_(row_idx2 >= m_rows):
+                        with txl.then_():
                             # Padding row: zero ALL padded SF columns; the stride is
                             # num_sf_blocks_per_row (:609-620).
-                            with txl.If(thread_in_unit == 0), txl.Then():
+                            with txl.if_(thread_in_unit == 0), txl.then_():
                                 pad_col = txl.local_scalar("int32", init=sf_col_idx)
-                                with txl.While(pad_col < pad_cols):
+                                with txl.while_(pad_col < pad_cols):
                                     st_global_u8(
                                         txl.address_of(sf_out[sf_offset(row_idx2, pad_col)]),
                                         txl.uint8(0),
                                     )
                                     txl.assign(pad_col, pad_col + nsb)
-                        with txl.Else():
-                            with txl.If(sf_col_idx < nsb), txl.Then():
+                        with txl.else_():
+                            with txl.if_(sf_col_idx < nsb), txl.then_():
                                 scale_ue8m0_u32 = _quantize_block(
                                     in_global,
                                     out_global,
@@ -403,16 +403,16 @@ def get_kernel(
                                     use_2t=use_2t,
                                     k=k,
                                 )
-                                with txl.If(thread_in_unit == 0), txl.Then():
+                                with txl.if_(thread_in_unit == 0), txl.then_():
                                     st_global_u8(
                                         txl.address_of(sf_out[sf_offset(row_idx2, sf_col_idx)]),
                                         txl.cast(scale_ue8m0_u32, "uint8"),
                                     )
                             # Padding SF columns of a data row (:711-723).
                             if pad_cols != nsb:
-                                with txl.If(thread_in_unit == 0), txl.Then():
+                                with txl.if_(thread_in_unit == 0), txl.then_():
                                     pad_col2 = txl.local_scalar("int32", init=nsb + sf_col_idx)
-                                    with txl.While(pad_col2 < pad_cols):
+                                    with txl.while_(pad_col2 < pad_cols):
                                         st_global_u8(
                                             txl.address_of(sf_out[sf_offset(row_idx2, pad_col2)]),
                                             txl.uint8(0),

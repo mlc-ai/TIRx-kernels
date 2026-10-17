@@ -132,12 +132,12 @@ def _shared_load_f32x4_ptr(ptr, values):
 
 
 def _shared_load_f32x4_ptr_offset(ptr, byte_offset: txl.int32, values, native_offset: bool = True):
-    with txl.If(txl.Not(native_offset)):
-        with txl.Then():
+    with txl.if_(txl.Not(native_offset)):
+        with txl.then_():
             _shared_load_f32x4_ptr(
                 txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope)), values
             )
-        with txl.Else():
+        with txl.else_():
             words = txl.alloc_local((4,), "uint32", align=16)
             txl.ptx.ld.shared.v4.b32(
                 words[0], words[1], words[2], words[3], txl.ptx.addr(ptr, byte_offset)
@@ -158,12 +158,12 @@ def _shared_load_f32x4_b64_ptr(ptr, values):
 def _shared_load_f32x4_b64_ptr_offset(
     ptr, byte_offset: txl.int32, values, native_offset: bool = True
 ):
-    with txl.If(txl.Not(native_offset)):
-        with txl.Then():
+    with txl.if_(txl.Not(native_offset)):
+        with txl.then_():
             _shared_load_f32x4_b64_ptr(
                 txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope)), values
             )
-        with txl.Else():
+        with txl.else_():
             pairs = txl.alloc_local((2,), "uint64", align=16)
             txl.ptx.ld.shared.v2.b64(pairs[0], pairs[1], txl.ptx.addr(ptr, byte_offset))
             txl.ptx.mov.b32(values[0], txl.cuda.float2_x(pairs[0]))
@@ -182,14 +182,14 @@ def _global_load_f32x4_ptr(ptr, values, value_offset: txl.int32):
 def _global_load_f32x4_ptr_offset(
     ptr, byte_offset: txl.int32, values, value_offset: txl.int32, native_offset: bool = True
 ):
-    with txl.If(txl.Not(native_offset)):
-        with txl.Then():
+    with txl.if_(txl.Not(native_offset)):
+        with txl.then_():
             _global_load_f32x4_ptr(
                 txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope)),
                 values,
                 value_offset,
             )
-        with txl.Else():
+        with txl.else_():
             words = txl.alloc_local((4,), "uint32", align=16)
             txl.ptx.ld.global_.v4.b32(
                 words[0], words[1], words[2], words[3], txl.ptx.addr(ptr, byte_offset)
@@ -210,14 +210,14 @@ def _global_load_f32x4_b64_ptr(ptr, values, value_offset: txl.int32):
 def _global_load_f32x4_b64_ptr_offset(
     ptr, byte_offset: txl.int32, values, value_offset: txl.int32, native_offset: bool = True
 ):
-    with txl.If(txl.Not(native_offset)):
-        with txl.Then():
+    with txl.if_(txl.Not(native_offset)):
+        with txl.then_():
             _global_load_f32x4_b64_ptr(
                 txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope)),
                 values,
                 value_offset,
             )
-        with txl.Else():
+        with txl.else_():
             pairs = txl.alloc_local((2,), "uint64", align=16)
             txl.ptx.ld.global_.v2.b64(pairs[0], pairs[1], txl.ptx.addr(ptr, byte_offset))
             txl.ptx.mov.b32(values[value_offset], txl.cuda.float2_x(pairs[0]))
@@ -229,8 +229,8 @@ def _global_load_f32x4_b64_ptr_offset(
 def _global_store_f32x4_ptr_offset(
     ptr, byte_offset: txl.int32, values, value_offset: txl.int32, native_offset: bool = True
 ):
-    with txl.If(txl.Not(native_offset)):
-        with txl.Then():
+    with txl.if_(txl.Not(native_offset)):
+        with txl.then_():
             txl.ptx.st.global_.v4.b32(
                 txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope)),
                 txl.reinterpret(values[value_offset], ty="uint32"),
@@ -238,7 +238,7 @@ def _global_store_f32x4_ptr_offset(
                 txl.reinterpret(values[value_offset + 2], ty="uint32"),
                 txl.reinterpret(values[value_offset + 3], ty="uint32"),
             )
-        with txl.Else():
+        with txl.else_():
             txl.ptx.st.global_.v4.b32(
                 txl.ptx.addr(ptr, byte_offset),
                 txl.reinterpret(values[value_offset], ty="uint32"),
@@ -259,14 +259,14 @@ def _global_store_f32x4_b64_ptr(ptr, values, value_offset: txl.int32):
 def _global_store_f32x4_b64_ptr_offset(
     ptr, byte_offset: txl.int32, values, value_offset: txl.int32, native_offset: bool = True
 ):
-    with txl.If(txl.Not(native_offset)):
-        with txl.Then():
+    with txl.if_(txl.Not(native_offset)):
+        with txl.then_():
             _global_store_f32x4_b64_ptr(
                 txl.ptr_byte_offset(ptr, byte_offset, ty=txl.Ptr("float32", (ptr).ty.scope)),
                 values,
                 value_offset,
             )
-        with txl.Else():
+        with txl.else_():
             txl.ptx.st.global_.v2.b64(
                 txl.ptx.addr(ptr, byte_offset),
                 txl.cuda.make_float2(values[value_offset], values[value_offset + 1]),
@@ -556,25 +556,25 @@ def _make_gdn_decode_fp32_mtp_warp(
 ):
     @txl.kernel()
     def gdn_decode_fp32_mtp_warp(
-        state: txl.Tensor((txl.int64(),), txl.f32),
-        intermediate: txl.Tensor((txl.int64(),), txl.f32),
-        A_log: txl.Tensor((txl.int64(),), txl.f32),
-        a: txl.Tensor((txl.int64(),), txl.bf16),
-        dt_bias: txl.Tensor((txl.int64(),), txl.f32),
-        q: txl.Tensor((txl.int64(),), txl.bf16),
-        k: txl.Tensor((txl.int64(),), txl.bf16),
-        v: txl.Tensor((txl.int64(),), txl.bf16),
-        b_gate: txl.Tensor((txl.int64(),), txl.bf16),
-        output: txl.Tensor((txl.int64(),), txl.bf16),
-        read_indices: txl.Tensor((txl.int64(),), txl.i32),
-        write_indices: txl.Tensor((txl.int64(),), txl.i32),
-        ssm_state_indices: txl.Tensor((txl.int64(),), txl.i32),
-        state_slot_stride: txl.i64,
-        state_head_stride: txl.i64,
-        q_batch_stride: txl.i64,
-        k_batch_stride: txl.i64,
-        v_batch_stride: txl.i64,
-        batch: txl.i32,
+        state: txl.Tensor((txl.int64(),), "float32"),
+        intermediate: txl.Tensor((txl.int64(),), "float32"),
+        A_log: txl.Tensor((txl.int64(),), "float32"),
+        a: txl.Tensor((txl.int64(),), "bfloat16"),
+        dt_bias: txl.Tensor((txl.int64(),), "float32"),
+        q: txl.Tensor((txl.int64(),), "bfloat16"),
+        k: txl.Tensor((txl.int64(),), "bfloat16"),
+        v: txl.Tensor((txl.int64(),), "bfloat16"),
+        b_gate: txl.Tensor((txl.int64(),), "bfloat16"),
+        output: txl.Tensor((txl.int64(),), "bfloat16"),
+        read_indices: txl.Tensor((txl.int64(),), "int32"),
+        write_indices: txl.Tensor((txl.int64(),), "int32"),
+        ssm_state_indices: txl.Tensor((txl.int64(),), "int32"),
+        state_slot_stride: "int64",
+        state_head_stride: "int64",
+        q_batch_stride: "int64",
+        k_batch_stride: "int64",
+        v_batch_stride: "int64",
+        batch: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -584,12 +584,12 @@ def _make_gdn_decode_fp32_mtp_warp(
         )
 
         smem = txl.smem_pool()
-        s_q = smem.alloc((S_K_BYTE_OFFSET // 4,), txl.f32, align=16)
-        s_k = smem.alloc(((S_G_BYTE_OFFSET - S_K_BYTE_OFFSET) // 4,), txl.f32, align=16)
-        s_g = smem.alloc(((S_BETA_BYTE_OFFSET - S_G_BYTE_OFFSET) // 4,), txl.f32, align=16)
-        s_beta = smem.alloc(((S_V_BYTE_OFFSET - S_BETA_BYTE_OFFSET) // 4,), txl.f32, align=16)
-        s_v = smem.alloc(((S_OUTPUT_BYTE_OFFSET - S_V_BYTE_OFFSET) // 4,), txl.f32, align=16)
-        s_output = smem.alloc((SEQ_LEN * TILE_V,), txl.bf16, align=16)
+        s_q = smem.alloc((S_K_BYTE_OFFSET // 4,), "float32", align=16)
+        s_k = smem.alloc(((S_G_BYTE_OFFSET - S_K_BYTE_OFFSET) // 4,), "float32", align=16)
+        s_g = smem.alloc(((S_BETA_BYTE_OFFSET - S_G_BYTE_OFFSET) // 4,), "float32", align=16)
+        s_beta = smem.alloc(((S_V_BYTE_OFFSET - S_BETA_BYTE_OFFSET) // 4,), "float32", align=16)
+        s_v = smem.alloc(((S_OUTPUT_BYTE_OFFSET - S_V_BYTE_OFFSET) // 4,), "float32", align=16)
+        s_output = smem.alloc((SEQ_LEN * TILE_V,), "bfloat16", align=16)
         smem.commit(SHARED_BYTES)
         linear_cta = txl.cta_id()
         tid = txl.thread_id()
@@ -642,7 +642,7 @@ def _make_gdn_decode_fp32_mtp_warp(
         r_k_bits = txl.alloc_local((VEC_SIZE,), "uint16")
         gate_scratch = txl.alloc_local((5,), "float32")
         gate_pair_value = txl.alloc_local((1,), "uint64")
-        with txl.If(read_slot_raw >= 0), txl.Then():
+        with txl.if_(read_slot_raw >= 0), txl.then_():
             write_slot_raw = _local_scalar("int32", read_slot_raw)
             if not SAME_POOL:
                 txl.ptx.ld.global_.s32(write_slot_raw[0], write_indices.ptr_to([n]))
@@ -761,7 +761,7 @@ def _make_gdn_decode_fp32_mtp_warp(
                         USE_NATIVE_OFFSETS,
                     )
                     if USE_SMEM_V:
-                        with txl.If(tid < TILE_V), txl.Then():
+                        with txl.if_(tid < TILE_V), txl.then_():
                             v_input_base = txl.cast(
                                 n, "int64"
                             ) * effective_v_batch_stride + txl.cast(
@@ -786,7 +786,7 @@ def _make_gdn_decode_fp32_mtp_warp(
                         )
                 if USE_SMEM_V:
                     for t in range(SEQ_LEN):
-                        with txl.If(tid < TILE_V), txl.Then():
+                        with txl.if_(tid < TILE_V), txl.then_():
                             v_input_base = txl.cast(
                                 n, "int64"
                             ) * effective_v_batch_stride + txl.cast(
@@ -818,7 +818,7 @@ def _make_gdn_decode_fp32_mtp_warp(
                                 read_ptr, row * K * 4, r_h, row * VEC_SIZE, USE_NATIVE_OFFSETS
                             )
                 else:
-                    with txl.If(warp == 0), txl.Then():
+                    with txl.if_(warp == 0), txl.then_():
                         read_ptr = state.ptr_to([read_offset[0]])
                         for row in range(ILP_ROWS):
                             _global_load_f32x4_b64_ptr_offset(
@@ -1052,7 +1052,7 @@ def _make_gdn_decode_fp32_mtp_warp(
                                     output_sums[row],
                                     _shfl_bfly_f32(output_sums[row], delta[0]),
                                 )
-                    with txl.If(lane == 0), txl.Then():
+                    with txl.if_(lane == 0), txl.then_():
                         output_base = txl.cast(
                             ((n * SEQ_LEN + t) * NUM_V_HEADS + hv) * V + v_base, "int64"
                         )
@@ -1136,7 +1136,7 @@ def _make_gdn_decode_fp32_mtp_warp(
                                 scatter_ptr, row * K * 4, r_h, row * VEC_SIZE, USE_NATIVE_OFFSETS
                             )
                 if not DISABLE_STATE_UPDATE and (not PER_TOKEN_POOL_SCATTER):
-                    with txl.If(write_slot_raw[0] >= 0), txl.Then():
+                    with txl.if_(write_slot_raw[0] >= 0), txl.then_():
                         write_offset = _local_scalar(
                             "int64",
                             write_state_base[0] + txl.cast(v_base * K + k_start[0], "int64"),
@@ -1156,7 +1156,7 @@ def _make_gdn_decode_fp32_mtp_warp(
                 output_tile_base = txl.cast(
                     (n * SEQ_LEN * NUM_V_HEADS + hv) * V + v_tile * TILE_V, "int64"
                 )
-                with txl.If(tid < TILE_V), txl.Then():
+                with txl.if_(tid < TILE_V), txl.then_():
                     output_tile_ptr = output.ptr_to([output_tile_base + tid])
                     shared_output_ptr = s_output.ptr_to([tid])
                     for t in range(SEQ_LEN):

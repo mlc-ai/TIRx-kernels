@@ -261,7 +261,7 @@ def advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx):
     ``wait_ge`` ends with one (:133) and the phase bump is followed by another
     (:182) -- so every thread leaves with the new phase visible.
     """
-    with txl.If(tx == 0), txl.Then():
+    with txl.if_(tx == 0), txl.then_():
         red_release_gpu_add_s32(state, arrival_word, txl.int32(1))
         target = (phase + txl.int32(1)) * txl.int32(ctas_per_group)
         spin = txl.local_scalar("int32")
@@ -348,15 +348,15 @@ def get_kernel(
     @txl.kernel()
     def radix_topk_multi_cta(
         inp: txl.Tensor((num_rows * length,), dtype),
-        out_idx: txl.Tensor((num_rows * k,), txl.i32),
+        out_idx: txl.Tensor((num_rows * k,), "int32"),
         out_val: txl.Tensor((num_rows * k,), dtype),
-        aux: txl.Tensor((aux_elems,), txl.i32),
-        lengths_g: txl.Tensor((num_rows,), txl.i32),
-        row_starts_g: txl.Tensor((num_rows,), txl.i32),
-        pt_starts_g: txl.Tensor((num_rows,), txl.i32),
-        row_to_batch_g: txl.Tensor((num_rows,), txl.i32),
-        state: txl.Tensor((WORKSPACE_WORDS,), txl.u32),
-        aux_stride: txl.i64,
+        aux: txl.Tensor((aux_elems,), "int32"),
+        lengths_g: txl.Tensor((num_rows,), "int32"),
+        row_starts_g: txl.Tensor((num_rows,), "int32"),
+        pt_starts_g: txl.Tensor((num_rows,), "int32"),
+        row_to_batch_g: txl.Tensor((num_rows,), "int32"),
+        state: txl.Tensor((WORKSPACE_WORDS,), "uint32"),
+        aux_stride: "int64",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=grid, block=BLOCK_THREADS // 32 * 32),
@@ -394,7 +394,7 @@ def get_kernel(
             # and the trivial branch's next-buffer index into constants.  A
             # mutable while-loop counter blocks that folding.
             row_idx = group_id + it * txl.int32(num_groups)
-            with txl.If(row_idx < num_rows), txl.Then():
+            with txl.if_(row_idx < num_rows), txl.then_():
                 # --- per-row header (:1221-1240) --------------------------
                 row_start = txl.int32(0)
                 page_start = txl.int32(0)
@@ -426,11 +426,11 @@ def get_kernel(
                     txl.assign(take_main, txl.int32(0))
                     t_start = cta_in_group * txl.int32(chunk)
                     t_actual = txl.local_scalar("int32", init=txl.int32(0))
-                    with txl.If(t_start < row_len), txl.Then():
+                    with txl.if_(t_start < row_len), txl.then_():
                         txl.assign(t_actual, txl.min(txl.int32(chunk), row_len - t_start))
                     with txl.serial(tx, t_actual, step=BLOCK_THREADS) as i0:
                         g0 = t_start + i0
-                        with txl.If(g0 < k), txl.Then():
+                        with txl.if_(g0 < k), txl.then_():
                             slot0 = row_out + txl.cast(g0, "int64")
                             st_global_u32(out_idx, slot0, txl.reinterpret(g0, ty="uint32"))
                             bits0 = ld_global_bits(
@@ -450,13 +450,13 @@ def get_kernel(
                         batch_idx = txl.reinterpret(
                             ld_global_u32(row_to_batch_g, row_idx), ty="int32"
                         )
-                    with txl.If(row_len <= k), txl.Then():
+                    with txl.if_(row_len <= k), txl.then_():
                         # NOT split: every CTA writes the whole [0, k) range (:1272-1276).
                         txl.assign(take_main, txl.int32(0))
                         src0 = txl.cast(batch_idx, "int64") * aux_stride
                         with txl.serial(tx, k, step=BLOCK_THREADS) as i1:
                             page_id = txl.local_scalar("int32", init=txl.int32(-1))
-                            with txl.If(i1 < row_len), txl.Then():
+                            with txl.if_(i1 < row_len), txl.then_():
                                 txl.assign(
                                     page_id,
                                     txl.reinterpret(
@@ -475,11 +475,11 @@ def get_kernel(
                     offset = txl.reinterpret(
                         ld_global_u32(aux, txl.cast(row_idx, "int64")), ty="int32"
                     )
-                    with txl.If(row_len <= k), txl.Then():
+                    with txl.if_(row_len <= k), txl.then_():
                         txl.assign(take_main, txl.int32(0))
                         with txl.serial(tx, k, step=BLOCK_THREADS) as i2:
                             val2 = txl.local_scalar("int32", init=txl.int32(-1))
-                            with txl.If(i2 < row_len), txl.Then():
+                            with txl.if_(i2 < row_len), txl.then_():
                                 txl.assign(val2, i2 + offset)
                             st_global_u32(
                                 out_idx,
@@ -490,11 +490,11 @@ def get_kernel(
                     # Common tail of the trivial branches (:1257-1266, :1277-1286,
                     # :1295-1304): CTA 0 clears the buffer the next iteration opens
                     # on, so a skipped row cannot leave it dirty.
-                    with txl.If(take_main == txl.int32(0)), txl.Then():
+                    with txl.if_(take_main == txl.int32(0)), txl.then_():
                         next_first = txl.truncmod(
                             (it + txl.int32(1)) * txl.int32(rounds), txl.int32(3)
                         )
-                        with txl.If(cta_in_group == 0), txl.Then():
+                        with txl.if_(cta_in_group == 0), txl.then_():
                             with txl.serial(tx, RADIX, step=BLOCK_THREADS) as bz:
                                 st_global_u32(
                                     state,
@@ -506,12 +506,12 @@ def get_kernel(
                 # compile-time true; a runtime flag wrapped the whole body in a branch.
                 static_main = basic and not basic_trivial
                 with (
-                    nullcontext() if static_main else txl.If(take_main == 1),
-                    nullcontext() if static_main else txl.Then(),
+                    nullcontext() if static_main else txl.if_(take_main == 1),
+                    nullcontext() if static_main else txl.then_(),
                 ):
                     chunk_start = cta_in_group * txl.int32(chunk)
                     actual = txl.local_scalar("int32", init=txl.int32(0))
-                    with txl.If(chunk_start < row_len), txl.Then():
+                    with txl.if_(chunk_start < row_len), txl.then_():
                         txl.assign(actual, txl.min(txl.int32(chunk), row_len - chunk_start))
                     chunk_in = row_in + txl.cast(chunk_start, "int64")
 
@@ -542,13 +542,13 @@ def get_kernel(
                     bar_sync()
 
                     # scalar caches (:670-677); no shared output counter here
-                    with txl.If(tx == 0), txl.Then():
+                    with txl.if_(tx == 0), txl.then_():
                         st_shared_pair_u32(s_scalars, 0, txl.uint32(0), txl.uint32(k))
                     bar_sync()
 
                     # === initial group rendezvous (:679-687) ===============
                     advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx)
-                    with txl.If(txl.And(cta_in_group == 0, tx == 0)), txl.Then():
+                    with txl.if_(txl.And(cta_in_group == 0, tx == 0)), txl.then_():
                         st_release_gpu_s32(state, output_word, txl.int32(0))
 
                     # === Stage 2: NUM_ROUNDS rounds, reduced group-wide ====
@@ -562,7 +562,7 @@ def get_kernel(
                         ) * txl.int32(RADIX)
                         shift = txl.int32(obits) - (rnd + 1) * 8
                         mask = txl.local_scalar("uint32", init=txl.uint32(0))
-                        with txl.If(rnd != 0), txl.Then():
+                        with txl.if_(rnd != 0), txl.then_():
                             txl.assign(
                                 mask,
                                 txl.shift_left(
@@ -582,7 +582,7 @@ def get_kernel(
                         bar_sync()
                         with txl.serial(tx, actual, step=BLOCK_THREADS, unroll=2) as ih:
                             key = txl.cast(ld_key(s_ordered, ih), "uint32")
-                            with txl.If(txl.bitwise_and(key, mask) == prefix), txl.Then():
+                            with txl.if_(txl.bitwise_and(key, mask) == prefix), txl.then_():
                                 bucket = txl.bitwise_and(
                                     txl.shift_right(key, txl.cast(shift, "uint32")),
                                     txl.uint32(0xFF),
@@ -595,9 +595,9 @@ def get_kernel(
                         # fold this CTA's histogram into the group's buffer (:727-736)
                         with txl.serial(tx, RADIX, step=BLOCK_THREADS) as ba:
                             hval = ld_shared_u32(s_hist, ba)
-                            with txl.If(hval > txl.uint32(0)), txl.Then():
+                            with txl.if_(hval > txl.uint32(0)), txl.then_():
                                 atom_global_add_u32(state, cur_hist + ba, hval)
-                        with txl.If(cta_in_group == 0), txl.Then():
+                        with txl.if_(cta_in_group == 0), txl.then_():
                             with txl.serial(tx, RADIX, step=BLOCK_THREADS) as bc:
                                 st_global_u32(state, next_hist + bc, txl.uint32(0))
                         # The fold writes group-visible histogram state, so every
@@ -612,33 +612,33 @@ def get_kernel(
                         with txl.unroll(8) as step:
                             stride = txl.shift_left(txl.int32(1), step)
                             acc = txl.local_scalar("uint32", init=txl.uint32(0))
-                            with txl.If(tx < RADIX), txl.Then():
+                            with txl.if_(tx < RADIX), txl.then_():
                                 txl.assign(acc, ld_shared_u32(s_suffix, tx))
-                                with txl.If(tx + stride < RADIX), txl.Then():
+                                with txl.if_(tx + stride < RADIX), txl.then_():
                                     txl.assign(acc, acc + ld_shared_u32(s_suffix, tx + stride))
                             bar_sync()
-                            with txl.If(tx < RADIX), txl.Then():
+                            with txl.if_(tx < RADIX), txl.then_():
                                 st_shared_u32(s_suffix, tx, acc)
                             bar_sync()
 
                         # threshold bucket (:753-767)
-                        with txl.If(tx == 0), txl.Then():
+                        with txl.if_(tx == 0), txl.then_():
                             st_shared_pair_u32(s_scalars, 2, txl.uint32(0), remaining_k)
                         bar_sync()
-                        with txl.If(tx < RADIX), txl.Then():
+                        with txl.if_(tx < RADIX), txl.then_():
                             count_ge = ld_shared_u32(s_suffix, tx)
                             count_gt = txl.local_scalar("uint32", init=txl.uint32(0))
-                            with txl.If(tx + 1 < RADIX), txl.Then():
+                            with txl.if_(tx + 1 < RADIX), txl.then_():
                                 txl.assign(count_gt, ld_shared_u32(s_suffix, tx + 1))
                             with (
-                                txl.If(txl.And(count_ge >= remaining_k, count_gt < remaining_k)),
-                                txl.Then(),
+                                txl.if_(txl.And(count_ge >= remaining_k, count_gt < remaining_k)),
+                                txl.then_(),
                             ):
                                 st_shared_pair_u32(
                                     s_scalars, 2, txl.cast(tx, "uint32"), remaining_k - count_gt
                                 )
                         bar_sync()
-                        with txl.If(tx == 0), txl.Then():
+                        with txl.if_(tx == 0), txl.then_():
                             found = ld_shared_pair_u32(s_scalars, 2)
                             st_shared_pair_u32(
                                 s_scalars,
@@ -659,7 +659,7 @@ def get_kernel(
                         )
 
                     # === Stage 3: CTA-local gt (and eq) counts (:777-830) ==
-                    with txl.If(tx == 0), txl.Then():
+                    with txl.if_(tx == 0), txl.then_():
                         if deterministic:
                             st_shared_pair_u32(s_suffix, 0, txl.uint32(0), txl.uint32(0))
                         else:
@@ -683,10 +683,10 @@ def get_kernel(
                         if deterministic:
                             txl.assign(my_eq, my_eq + shfl_down_u32(my_eq, delta))
                     lane = txl.bitwise_and(tx, txl.int32(31))
-                    with txl.If(txl.And(lane == 0, my_gt > txl.uint32(0))), txl.Then():
+                    with txl.if_(txl.And(lane == 0, my_gt > txl.uint32(0))), txl.then_():
                         atom_shared_add_u32(s_suffix, 0, my_gt)
                     if deterministic:
-                        with txl.If(txl.And(lane == 0, my_eq > txl.uint32(0))), txl.Then():
+                        with txl.if_(txl.And(lane == 0, my_eq > txl.uint32(0))), txl.then_():
                             atom_shared_add_u32(s_suffix, 1, my_eq)
                     bar_sync()
                     gt_count = ld_shared_u32(s_suffix, 0)
@@ -706,16 +706,16 @@ def get_kernel(
 
                     if not deterministic:
                         # === Stage 4a: non-deterministic collect (:906-963) =
-                        with txl.If(tx == 0), txl.Then():
+                        with txl.if_(tx == 0), txl.then_():
                             st_shared_u32(s_hist, 0, txl.uint32(0))
-                            with txl.If(gt_count > txl.uint32(0)), txl.Then():
+                            with txl.if_(gt_count > txl.uint32(0)), txl.then_():
                                 st_shared_u32(
                                     s_hist, 1, atom_global_add_u32(state, output_word, gt_count)
                                 )
                         bar_sync()
                         with txl.serial(tx, actual, step=BLOCK_THREADS, unroll=2) as i:
                             key3 = txl.cast(ld_key(s_ordered, i), "uint32")
-                            with txl.If(key3 > pivot), txl.Then():
+                            with txl.if_(key3 > pivot), txl.then_():
                                 local_pos = atom_shared_add_u32(s_hist, 0, txl.uint32(1))
                                 pos = txl.cast(ld_shared_u32(s_hist, 1) + local_pos, "int32")
                                 emit_selected(
@@ -737,11 +737,11 @@ def get_kernel(
                         advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx)
                         with txl.serial(tx, actual, step=BLOCK_THREADS, unroll=2) as i:
                             key4 = txl.cast(ld_key(s_ordered, i), "uint32")
-                            with txl.If(key4 == pivot), txl.Then():
+                            with txl.if_(key4 == pivot), txl.then_():
                                 pos2 = txl.cast(
                                     atom_global_add_u32(state, output_word, txl.uint32(1)), "int32"
                                 )
-                                with txl.If(pos2 < k), txl.Then():
+                                with txl.if_(pos2 < k), txl.then_():
                                     emit_selected(
                                         out_idx,
                                         out_val,
@@ -758,7 +758,7 @@ def get_kernel(
                     else:
                         # === Stage 4b: deterministic collect (:1048-1138) ==
                         eq_count = ld_shared_u32(s_suffix, 1)
-                        with txl.If(tx == 0), txl.Then():
+                        with txl.if_(tx == 0), txl.then_():
                             st_shared_u32(s_hist, 1, txl.uint32(0))
                             st_shared_u32(s_hist, 4, txl.uint32(0))
                             st_global_u32(state, det_base + cta_in_group, gt_count)
@@ -766,25 +766,25 @@ def get_kernel(
                                 state, det_base + txl.int32(RADIX) + cta_in_group, eq_count
                             )
                         advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx)
-                        with txl.If(tx == 0), txl.Then():
+                        with txl.if_(tx == 0), txl.then_():
                             gt_prefix = txl.local_scalar("uint32", init=txl.uint32(0))
                             row_total_gt = txl.local_scalar("uint32", init=txl.uint32(0))
                             eq_prefix = txl.local_scalar("uint32", init=txl.uint32(0))
                             with txl.serial(0, ctas_per_group) as c:
                                 c_gt = ld_global_u32(state, det_base + c)
                                 c_eq = ld_global_u32(state, det_base + txl.int32(RADIX) + c)
-                                with txl.If(c < cta_in_group), txl.Then():
+                                with txl.if_(c < cta_in_group), txl.then_():
                                     txl.assign(gt_prefix, gt_prefix + c_gt)
                                     txl.assign(eq_prefix, eq_prefix + c_eq)
                                 txl.assign(row_total_gt, row_total_gt + c_gt)
                             eq_needed = txl.local_scalar("uint32", init=txl.uint32(0))
-                            with txl.If(txl.uint32(k) > row_total_gt), txl.Then():
+                            with txl.if_(txl.uint32(k) > row_total_gt), txl.then_():
                                 txl.assign(eq_needed, txl.uint32(k) - row_total_gt)
                             st_shared_quad_u32(
                                 s_hist, 0, gt_prefix, eq_prefix, row_total_gt, eq_needed
                             )
                             st_shared_u32(s_hist, 4, txl.uint32(0))
-                            with txl.If(eq_needed > eq_prefix), txl.Then():
+                            with txl.if_(eq_needed > eq_prefix), txl.then_():
                                 st_shared_u32(s_hist, 4, txl.min(eq_count, eq_needed - eq_prefix))
                         bar_sync()
                         # Snapshot the two fields the collect needs so the
@@ -795,11 +795,11 @@ def get_kernel(
                         eq_base = txl.local_scalar("uint32", init=plan_v[2] + plan_v[1])
                         eq_limit = ld_shared_u32(s_hist, 4)
                         gt_limit = txl.local_scalar("uint32", init=txl.uint32(0))
-                        with txl.If(txl.uint32(k) > gt_base), txl.Then():
+                        with txl.if_(txl.uint32(k) > gt_base), txl.then_():
                             txl.assign(gt_limit, txl.uint32(k) - gt_base)
 
-                        with txl.If(eq_limit == txl.uint32(0)):
-                            with txl.Then():
+                        with txl.if_(eq_limit == txl.uint32(0)):
+                            with txl.then_():
                                 sel = txl.local_scalar("uint32", init=txl.uint32(0))
                                 with txl.serial(tx, actual, step=BLOCK_THREADS) as id1:
                                     key5 = txl.cast(ld_key(s_ordered, id1), "uint32")
@@ -811,7 +811,7 @@ def get_kernel(
                                 rake_off = _raking_offset(tx)
                                 st_shared_u32(s_scan, rake_off, sel)
                                 bar_sync()
-                                with txl.If(tx < RAKING_THREADS), txl.Then():
+                                with txl.if_(tx < RAKING_THREADS), txl.then_():
                                     rake_base = tx * RAKING_STRIDE
                                     cache = txl.alloc_local([RAKING_SEGMENT], "uint32")
                                     total = txl.local_scalar("uint32", init=txl.uint32(0))
@@ -827,18 +827,18 @@ def get_kernel(
                                 bar_sync()
                                 pre = ld_shared_u32(s_scan, rake_off)
                                 with (
-                                    txl.If(txl.And(sel > txl.uint32(0), pre < gt_limit)),
-                                    txl.Then(),
+                                    txl.if_(txl.And(sel > txl.uint32(0), pre < gt_limit)),
+                                    txl.then_(),
                                 ):
                                     emit_pos = txl.local_scalar("uint32", init=pre)
                                     emit_end = txl.local_scalar("uint32", init=pre + sel)
-                                    with txl.If(emit_end > gt_limit), txl.Then():
+                                    with txl.if_(emit_end > gt_limit), txl.then_():
                                         txl.assign(emit_end, gt_limit)
                                     done = txl.local_scalar("int32", init=txl.int32(0))
                                     with txl.serial(tx, actual, step=BLOCK_THREADS) as id3:
-                                        with txl.If(done == 0), txl.Then():
+                                        with txl.if_(done == 0), txl.then_():
                                             key6 = txl.cast(ld_key(s_ordered, id3), "uint32")
-                                            with txl.If(key6 > pivot), txl.Then():
+                                            with txl.if_(key6 > pivot), txl.then_():
                                                 emit_selected(
                                                     out_idx,
                                                     out_val,
@@ -853,10 +853,10 @@ def get_kernel(
                                                     dtype,
                                                 )
                                                 txl.assign(emit_pos, emit_pos + txl.uint32(1))
-                                                with txl.If(emit_pos == emit_end), txl.Then():
+                                                with txl.if_(emit_pos == emit_end), txl.then_():
                                                     txl.assign(done, 1)
                                 bar_sync()
-                            with txl.Else():
+                            with txl.else_():
                                 sel_gt = txl.local_scalar("uint32", init=txl.uint32(0))
                                 sel_eq = txl.local_scalar("uint32", init=txl.uint32(0))
                                 with txl.serial(tx, actual, step=BLOCK_THREADS) as id4:
@@ -875,7 +875,7 @@ def get_kernel(
                                 rake_off2 = _raking_offset(tx) * 2
                                 st_shared_pair_u32(s_scan, rake_off2, sel_gt, sel_eq)
                                 bar_sync()
-                                with txl.If(tx < RAKING_THREADS), txl.Then():
+                                with txl.if_(tx < RAKING_THREADS), txl.then_():
                                     rake_base2 = tx * RAKING_STRIDE * 2
                                     cache_gt = txl.alloc_local([RAKING_SEGMENT], "uint32")
                                     cache_eq = txl.alloc_local([RAKING_SEGMENT], "uint32")
@@ -910,8 +910,8 @@ def get_kernel(
                                     # `>` and `==` are mutually exclusive, so the
                                     # source's if / else-if pair (:1130-1136) is two
                                     # conjunctions rather than four nested branches.
-                                    with txl.If(txl.And(key8 > pivot, cur_gt < gt_limit)):
-                                        with txl.Then():
+                                    with txl.if_(txl.And(key8 > pivot, cur_gt < gt_limit)):
+                                        with txl.then_():
                                             emit_selected(
                                                 out_idx,
                                                 out_val,
@@ -926,10 +926,10 @@ def get_kernel(
                                                 dtype,
                                             )
                                             txl.assign(cur_gt, cur_gt + txl.uint32(1))
-                                        with txl.Else():
+                                        with txl.else_():
                                             with (
-                                                txl.If(txl.And(key8 == pivot, cur_eq < eq_limit)),
-                                                txl.Then(),
+                                                txl.if_(txl.And(key8 == pivot, cur_eq < eq_limit)),
+                                                txl.then_(),
                                             ):
                                                 emit_selected(
                                                     out_idx,
@@ -975,7 +975,7 @@ def get_kernel(
 
         # === exit: the last CTA of the group resets the state (:203-238) ===
         bar_sync()
-        with txl.If(tx == 0), txl.Then():
+        with txl.if_(tx == 0), txl.then_():
             old = atom_add_release_gpu_s32(state, arrival_word, txl.int32(1))
             st_shared_u32(
                 s_last,
@@ -987,7 +987,7 @@ def get_kernel(
                 ),
             )
         bar_sync()
-        with txl.If(ld_shared_u32(s_last, 0) != txl.uint32(0)), txl.Then():
+        with txl.if_(ld_shared_u32(s_last, 0) != txl.uint32(0)), txl.then_():
             with txl.serial(0, 3) as bufi:
                 with txl.serial(tx, RADIX, step=BLOCK_THREADS) as br:
                     st_global_u32(state, st_base + bufi * txl.int32(RADIX) + br, txl.uint32(0))
@@ -995,7 +995,7 @@ def get_kernel(
                 with txl.serial(tx, DET_SCRATCH_WORDS, step=BLOCK_THREADS) as dw:
                     st_global_u32(state, det_base + dw, txl.uint32(0))
             bar_sync()
-            with txl.If(tx == 0), txl.Then():
+            with txl.if_(tx == 0), txl.then_():
                 st_release_declared_s32(state, arrival_word, txl.int32(0))
 
     return radix_topk_multi_cta.func

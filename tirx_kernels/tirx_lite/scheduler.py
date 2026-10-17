@@ -29,7 +29,7 @@ from .pipeline import Pipeline, PipelineState
 def query_cancel_first_ctaid_x(first_ctaid_x, handle, *, use_ld_acquire=True):
     """Decode one CLC cancellation response into ``first_ctaid_x``."""
     response = txl.local_scalar("uint128", name="clc_response")
-    canceled = txl.local_scalar(txl.u32, name="clc_canceled")
+    canceled = txl.local_scalar("uint32", name="clc_canceled")
     suffix = ".acquire.cta" if use_ld_acquire else ""
 
     txl.ptx[f"ld{suffix}.shared.b128"](response, handle)
@@ -89,14 +89,14 @@ class ClusterPersistentScheduler2D(_ClusterPersistentScheduler2D):
         full_groups = self._FULL_GROUPS
         group_size = self._l2_group_size
         group_span = self._l2_group_size * self._N_TILE_COLS
-        with txl.If((full_groups > 0) & (tile_linear < full_groups * group_span)):
-            with txl.Then():
+        with txl.if_((full_groups > 0) & (tile_linear < full_groups * group_span)):
+            with txl.then_():
                 group_id = tile_linear // group_span
                 within_group = tile_linear % group_span
                 tile_row = group_id * group_size + within_group % group_size
                 tile_col = within_group // group_size
                 set_tile_coords(tile_row, tile_col)
-            with txl.Else():
+            with txl.else_():
                 set_tile_coords(0, 0)
 
     def _gm_emit_tail_only(self, tile_linear, set_tile_coords):
@@ -104,13 +104,13 @@ class ClusterPersistentScheduler2D(_ClusterPersistentScheduler2D):
         tail_rows = self._TAIL_ROWS
         group_size = self._l2_group_size
         group_span = self._l2_group_size * self._N_TILE_COLS
-        with txl.If(tail_rows > 0):
-            with txl.Then():
+        with txl.if_(tail_rows > 0):
+            with txl.then_():
                 rem = tile_linear - full_groups * group_span
                 tile_row = full_groups * group_size + rem % tail_rows
                 tile_col = rem // tail_rows
                 set_tile_coords(tile_row, tile_col)
-            with txl.Else():
+            with txl.else_():
                 set_tile_coords(0, 0)
 
     def _gm_emit_full_and_tail(self, tile_linear, set_tile_coords):
@@ -118,21 +118,21 @@ class ClusterPersistentScheduler2D(_ClusterPersistentScheduler2D):
         tail_rows = self._TAIL_ROWS
         group_size = self._l2_group_size
         group_span = self._l2_group_size * self._N_TILE_COLS
-        with txl.If((full_groups > 0) & (tile_linear < full_groups * group_span)):
-            with txl.Then():
+        with txl.if_((full_groups > 0) & (tile_linear < full_groups * group_span)):
+            with txl.then_():
                 group_id = tile_linear // group_span
                 within_group = tile_linear % group_span
                 tile_row = group_id * group_size + within_group % group_size
                 tile_col = within_group // group_size
                 set_tile_coords(tile_row, tile_col)
-            with txl.Else():
-                with txl.If(tail_rows > 0):
-                    with txl.Then():
+            with txl.else_():
+                with txl.if_(tail_rows > 0):
+                    with txl.then_():
                         rem = tile_linear - full_groups * group_span
                         tile_row = full_groups * group_size + rem % tail_rows
                         tile_col = rem // tail_rows
                         set_tile_coords(tile_row, tile_col)
-                    with txl.Else():
+                    with txl.else_():
                         set_tile_coords(0, 0)
 
     def init(self, cluster_id):
@@ -211,8 +211,8 @@ class _CLCWorker(ClusterPersistentScheduler2D):
         )
         self._clc = clc
         self._sa = PipelineState(1, 0)
-        self._done = txl.local_scalar(txl.i32, name=f"{prefix}_done")
-        self._nxt = txl.local_scalar(txl.u32, name=f"{prefix}_next")
+        self._done = txl.local_scalar("int32", name=f"{prefix}_done")
+        self._nxt = txl.local_scalar("uint32", name=f"{prefix}_next")
 
     def reset(self):
         txl.assign(self._done, txl.int32(0))
@@ -235,15 +235,15 @@ class _CLCWorker(ClusterPersistentScheduler2D):
         self._sa.advance()
         query_cancel_first_ctaid_x(self._nxt, txl.address_of(self._clc.clc_handle[0]))
         txl.cuda.warpgroup_sync(wg_id + 1)
-        with txl.If((warp_id == 0) & (lane_id == 0)), txl.Then():
+        with txl.if_((warp_id == 0) & (lane_id == 0)), txl.then_():
             self._clc.sched_fin.empty.arrive(0, remote=0, pred=True)
 
     def advance_coords(self):
-        with txl.If(self._nxt != txl.uint32(0xFFFFFFFF)), txl.Then():
+        with txl.if_(self._nxt != txl.uint32(0xFFFFFFFF)), txl.then_():
             self.update_current_m_n_idx(self._nxt // self._clc._cta_group)
 
     def mark_done_if_drained(self):
-        with txl.If(self._nxt == txl.uint32(0xFFFFFFFF)), txl.Then():
+        with txl.if_(self._nxt == txl.uint32(0xFFFFFFFF)), txl.then_():
             txl.assign(self._done, txl.int32(1))
 
 
@@ -257,20 +257,20 @@ class ClusterLaunchControlScheduler(_ClusterLaunchControlScheduler):
         self._cta_group = cta_group
         self.sched_arr = Pipeline(pool, 1, full="tma", empty="mbar", init_empty=1)
         self.sched_fin = Pipeline(pool, 1, full="mbar", empty="mbar", init_empty=finish_arrivals)
-        self.clc_handle = pool.alloc((4,), txl.u32, align=16)
-        self._s_done = txl.local_scalar(txl.i32, name="clc_scheduler_done")
-        self._s_nxt = txl.local_scalar(txl.u32, name="clc_scheduler_next")
+        self.clc_handle = pool.alloc((4,), "uint32", align=16)
+        self._s_done = txl.local_scalar("int32", name="clc_scheduler_done")
+        self._s_nxt = txl.local_scalar("uint32", name="clc_scheduler_next")
 
     def worker(self, prefix):
         return _CLCWorker(self, prefix)
 
     def run_scheduler(self, cbx):
-        with txl.If(txl.cuda.elect_sync()), txl.Then():
+        with txl.if_(txl.cuda.elect_sync()), txl.then_():
             sa = PipelineState(1, 0)
             sf = PipelineState(1, 1)
             txl.assign(self._s_done, txl.int32(0))
-            with txl.While(self._s_done == txl.int32(0)):
-                with txl.If(cbx == 0), txl.Then():
+            with txl.while_(self._s_done == txl.int32(0)):
+                with txl.if_(cbx == 0), txl.then_():
                     self.sched_fin.empty.wait(0, sf.phase)
                     sf.advance()
                     txl.ptx[
@@ -285,7 +285,7 @@ class ClusterLaunchControlScheduler(_ClusterLaunchControlScheduler):
                 sa.advance()
                 query_cancel_first_ctaid_x(self._s_nxt, txl.address_of(self.clc_handle[0]))
                 self.sched_fin.empty.arrive(0, remote=0, pred=True)
-                with txl.If(self._s_nxt == txl.uint32(0xFFFFFFFF)), txl.Then():
+                with txl.if_(self._s_nxt == txl.uint32(0xFFFFFFFF)), txl.then_():
                     txl.assign(self._s_done, txl.int32(1))
 
 

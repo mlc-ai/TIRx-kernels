@@ -213,15 +213,15 @@ def _try_wait_acquire(dst, barrier, phase) -> None:
 
 def _wait_plain(barrier, phase) -> None:
     ready = txl.local_scalar("uint32", init=txl.uint32(0))
-    with txl.While(ready == txl.uint32(0)):
+    with txl.while_(ready == txl.uint32(0)):
         txl.ptx.mbarrier.try_wait.parity.shared.b64(
             ready, barrier, txl.cast(phase, "uint32"), txl.uint32(_TRY_WAIT_TICKS)
         )
 
 
 def _wait_plain_if_needed(barrier, phase, speculative_ready) -> None:
-    with txl.If(speculative_ready == txl.uint32(0)):
-        with txl.Then():
+    with txl.if_(speculative_ready == txl.uint32(0)):
+        with txl.then_():
             _wait_plain(barrier, phase)
 
 
@@ -394,7 +394,7 @@ def _make_bmm_kernel(
         mma_role = roles.role("mma", warps=[4])
         tma_role = roles.role("tma", warps=[5])
 
-        smem = txl.alloc_tensor((shared_bytes,), txl.u8, scope="shared.dyn", align=1024)
+        smem = txl.alloc_tensor((shared_bytes,), "uint8", scope="shared.dyn", align=1024)
         protocol_pool = txl.smem_pool(base=smem)
         ab_pipe = txl.Pipeline(
             protocol_pool,
@@ -414,8 +414,8 @@ def _make_bmm_kernel(
         )
         if protocol_pool.bytes != tmem_dealloc_offset:
             raise AssertionError("protocol storage offsets changed")
-        tmem_dealloc = protocol_pool.alloc((1,), txl.u64, align=8)
-        tmem_slot = protocol_pool.alloc((1,), txl.u32, align=4)
+        tmem_dealloc = protocol_pool.alloc((1,), "uint64", align=8)
+        tmem_slot = protocol_pool.alloc((1,), "uint32", align=4)
         if protocol_pool.bytes != tmem_ptr_offset + 4:
             raise AssertionError("protocol storage header changed")
 
@@ -424,35 +424,35 @@ def _make_bmm_kernel(
             txl.ptx.prefetch.tensormap(txl.address_of(b_map))
             txl.ptx.prefetch.tensormap(txl.address_of(c_map))
 
-        with txl.If(warp == 0):
-            with txl.Then():
-                with txl.If(_elected()):
-                    with txl.Then():
+        with txl.if_(warp == 0):
+            with txl.then_():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         with txl.unroll(0, ab_stages) as stage:
                             txl.ptx.mbarrier.init.shared.b64(
                                 ab_pipe.full.ptr_to([stage]), txl.uint32(1)
                             )
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         with txl.unroll(0, ab_stages) as stage:
                             txl.ptx.mbarrier.init.shared.b64(
                                 ab_pipe.empty.ptr_to([stage]), txl.uint32(ab_empty_arrivals)
                             )
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         with txl.unroll(0, acc_stages) as stage:
                             txl.ptx.mbarrier.init.shared.b64(
                                 acc_pipe.full.ptr_to([stage]), txl.uint32(1)
                             )
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         with txl.unroll(0, acc_stages) as stage:
                             txl.ptx.mbarrier.init.shared.b64(
                                 acc_pipe.empty.ptr_to([stage]), txl.uint32(acc_empty_arrivals)
                             )
         with tma_role:
-            with txl.If(_elected()):
-                with txl.Then():
+            with txl.if_(_elected()):
+                with txl.then_():
                     txl.ptx.mbarrier.init.shared.b64(tmem_dealloc.ptr_to([0]), txl.uint32(32))
         txl.ptx.fence.mbarrier_init.release.cluster()
         txl.ptx.fence.mbarrier_init.release.cluster()
@@ -539,30 +539,30 @@ def _make_bmm_kernel(
             work = txl.local_scalar("int32", init=cluster_work_id)
             count = txl.local_scalar("int32")
             speculative = txl.local_scalar("uint32")
-            with txl.While(work < cluster_work):
+            with txl.while_(work < cluster_work):
                 tile_m_idx, tile_n_idx, batch_idx = scheduler_coords(work)
                 txl.assign(count, 0)
                 txl.assign(speculative, txl.uint32(1))
-                with txl.If(count < k_tiles):
-                    with txl.Then():
+                with txl.if_(count < k_tiles):
+                    with txl.then_():
                         _try_wait_acquire(
                             speculative, ab_pipe.empty.ptr_to([tma_state.stage]), tma_state.phase
                         )
-                with txl.While(count < k_tiles):
+                with txl.while_(count < k_tiles):
                     _wait_plain_if_needed(
                         ab_pipe.empty.ptr_to([tma_state.stage]), tma_state.phase, speculative
                     )
-                    with txl.If(leader_cta):
-                        with txl.Then():
-                            with txl.If(_elected()):
-                                with txl.Then():
+                    with txl.if_(leader_cta):
+                        with txl.then_():
+                            with txl.if_(_elected()):
+                                with txl.then_():
                                     txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                                         ab_pipe.full.ptr_to([tma_state.stage]),
                                         txl.uint32(num_tma_load_bytes),
                                     )
 
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             a_coord_m = tile_m_idx * cta_m + cluster_y * a_cluster_piece
                             a_coord_k = count * k_tile
                             a_smem_offset = (
@@ -599,8 +599,8 @@ def _make_bmm_kernel(
                                     txl.uint64(tma_cache_hint),
                                 )
 
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             b_coord_n = tile_n_idx * n_tile + cta_v * b_rows
                             b_coord_k = count * k_tile + cluster_m_group * b_cluster_piece
                             b_smem_offset = (
@@ -639,8 +639,8 @@ def _make_bmm_kernel(
                     _advance(tma_state)
                     txl.assign(count, count + 1)
                     txl.assign(speculative, txl.uint32(1))
-                    with txl.If(count < k_tiles):
-                        with txl.Then():
+                    with txl.if_(count < k_tiles):
+                        with txl.then_():
                             _try_wait_acquire(
                                 speculative,
                                 ab_pipe.empty.ptr_to([tma_state.stage]),
@@ -662,29 +662,29 @@ def _make_bmm_kernel(
             count = txl.local_scalar("int32")
             speculative = txl.local_scalar("uint32")
             accumulate = txl.local_scalar("uint32")
-            with txl.While(work < cluster_work):
+            with txl.while_(work < cluster_work):
                 txl.assign(count, 0)
                 txl.assign(speculative, txl.uint32(1))
-                with txl.If((count < k_tiles) & leader_cta):
-                    with txl.Then():
+                with txl.if_((count < k_tiles) & leader_cta):
+                    with txl.then_():
                         _try_wait_acquire(
                             speculative, ab_pipe.full.ptr_to([mma_state.stage]), mma_state.phase
                         )
-                with txl.If(leader_cta):
-                    with txl.Then():
+                with txl.if_(leader_cta):
+                    with txl.then_():
                         _wait_plain(acc_pipe.empty.ptr_to([acc_state.stage]), acc_state.phase)
                 txl.assign(accumulate, txl.uint32(0))
-                with txl.While(count < k_tiles):
-                    with txl.If(leader_cta):
-                        with txl.Then():
+                with txl.while_(count < k_tiles):
+                    with txl.if_(leader_cta):
+                        with txl.then_():
                             _wait_plain_if_needed(
                                 ab_pipe.full.ptr_to([mma_state.stage]), mma_state.phase, speculative
                             )
                             for kphase in range(k_phases):
                                 a_kphase = kphase * (instruction_k // 16)
                                 b_kphase = kphase * (b_chunk * instruction_k // 16)
-                                with txl.If(_elected()):
-                                    with txl.Then():
+                                with txl.if_(_elected()):
+                                    with txl.then_():
                                         txl.ptx[
                                             "tcgen05.mma.cta_group::2.kind::f8f6f4"
                                             ".collector::a::discard"
@@ -707,8 +707,8 @@ def _make_bmm_kernel(
                                             txl.ptx.pred(txl.cast(accumulate, "bool")),
                                         )
                                 txl.assign(accumulate, txl.uint32(1))
-                            with txl.If(_elected()):
-                                with txl.Then():
+                            with txl.if_(_elected()):
+                                with txl.then_():
                                     txl.ptx[
                                         "tcgen05.commit.cta_group::2.mbarrier::arrive::one"
                                         ".shared::cluster.multicast::cluster.b64"
@@ -719,15 +719,15 @@ def _make_bmm_kernel(
                     _advance(mma_state)
                     txl.assign(count, count + 1)
                     txl.assign(speculative, txl.uint32(1))
-                    with txl.If((count < k_tiles) & leader_cta):
-                        with txl.Then():
+                    with txl.if_((count < k_tiles) & leader_cta):
+                        with txl.then_():
                             _try_wait_acquire(
                                 speculative, ab_pipe.full.ptr_to([mma_state.stage]), mma_state.phase
                             )
-                with txl.If(leader_cta):
-                    with txl.Then():
-                        with txl.If(_elected()):
-                            with txl.Then():
+                with txl.if_(leader_cta):
+                    with txl.then_():
+                        with txl.if_(_elected()):
+                            with txl.then_():
                                 txl.ptx[
                                     "tcgen05.commit.cta_group::2.mbarrier::arrive::one"
                                     ".shared::cluster.multicast::cluster.b64"
@@ -737,14 +737,14 @@ def _make_bmm_kernel(
                                 )
                 _advance(acc_state)
                 advance_work(work)
-            with txl.If(leader_cta):
-                with txl.Then():
+            with txl.if_(leader_cta):
+                with txl.then_():
                     _advance(acc_state)
                     _wait_plain(acc_pipe.empty.ptr_to([acc_state.stage]), acc_state.phase)
 
         with epilogue_role:
-            with txl.If(warp == 0):
-                with txl.Then():
+            with txl.if_(warp == 0):
+                with txl.then_():
                     txl.ptx["tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32"](
                         tmem_slot.ptr_to([0]), txl.uint32(tmem_columns)
                     )
@@ -805,11 +805,11 @@ def _make_bmm_kernel(
                 )
                 return txl.cast(swizzled - smem_base, "int32")
 
-            with txl.While(work < cluster_work):
+            with txl.while_(work < cluster_work):
                 tile_m_idx, tile_n_idx, batch_idx = scheduler_coords(work)
                 _wait_plain(acc_pipe.full.ptr_to([acc_state.stage]), acc_state.phase)
                 subtile = txl.local_scalar("int32", init=0)
-                with txl.While(subtile < epilogue_subtiles):
+                with txl.while_(subtile < epilogue_subtiles):
                     tmem_address = txl.local_scalar(
                         "uint32",
                         init=(tmem_base + (warp << 21) + acc_state.stage * n_tile + subtile * 32),
@@ -832,8 +832,8 @@ def _make_bmm_kernel(
                         )
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx.bar.sync(txl.uint32(1), txl.uint32(128))
-                    with txl.If(txl.And(warp == 0, lane == 0)):
-                        with txl.Then():
+                    with txl.if_(txl.And(warp == 0, lane == 0)):
+                        with txl.then_():
                             txl.ptx[
                                 "cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"
                                 ".L2::cache_hint"
@@ -850,8 +850,8 @@ def _make_bmm_kernel(
                     txl.ptx.bar.sync(txl.uint32(1), txl.uint32(128))
                     txl.assign(subtile, subtile + 1)
                 txl.ptx.bar.sync(txl.uint32(1), txl.uint32(128))
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         txl.ptx.mbarrier.arrive.shared__cluster.b64(
                             acc_empty_leader.ptr_to([acc_state.stage]), txl.uint32(1)
                         )
@@ -860,8 +860,8 @@ def _make_bmm_kernel(
                 advance_work(work)
 
             txl.ptx.cp.async_.bulk.wait_group.read(0)
-            with txl.If(warp == 0):
-                with txl.Then():
+            with txl.if_(warp == 0):
+                with txl.then_():
                     txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::2.sync.aligned"]()
                     remote_dealloc = txl.local_scalar("uint32")
                     txl.ptx.mapa.shared__cluster.u32(
@@ -876,10 +876,10 @@ def _make_bmm_kernel(
                     )
 
     kernel.__annotations__ = {
-        "a": txl.Tensor((B * M * K_dim,), txl.u8),
-        "b": txl.Tensor((B * K_dim * N,), txl.u8),
-        "c": txl.Tensor((B * M * N * c_bits // 8,), txl.u8),
-        "output_scale": txl.Tensor((1,), txl.f32),
+        "a": txl.Tensor((B * M * K_dim,), "uint8"),
+        "b": txl.Tensor((B * K_dim * N,), "uint8"),
+        "c": txl.Tensor((B * M * N * c_bits // 8,), "uint8"),
+        "output_scale": txl.Tensor((1,), "float32"),
     }
     return txl.kernel()(kernel)
 

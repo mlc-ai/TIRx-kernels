@@ -178,15 +178,15 @@ def _try_wait_acquire(dst, barrier, phase):
 
 def _wait_plain(barrier, phase):
     ready = txl.local_scalar("uint32", init=txl.uint32(0))
-    with txl.While(ready == txl.uint32(0)):
+    with txl.while_(ready == txl.uint32(0)):
         txl.ptx.mbarrier.try_wait.parity.shared.b64(
             ready, barrier, txl.cast(phase, "uint32"), txl.uint32(_TRY_WAIT_TICKS)
         )
 
 
 def _wait_plain_if_needed(barrier, phase, speculative_ready):
-    with txl.If(speculative_ready == txl.uint32(0)):
-        with txl.Then():
+    with txl.if_(speculative_ready == txl.uint32(0)):
+        with txl.then_():
             _wait_plain(barrier, phase)
 
 
@@ -512,7 +512,7 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
         mma_role = roles.role("mma", warps=[4])
         tma_role = roles.role("tma", warps=[5])
 
-        smem = txl.alloc_tensor((shared_bytes,), txl.u8, scope="shared.dyn", align=1024)
+        smem = txl.alloc_tensor((shared_bytes,), "uint8", scope="shared.dyn", align=1024)
         protocol_pool = txl.smem_pool(base=smem)
         ab_pipe = txl.Pipeline(
             protocol_pool,
@@ -532,8 +532,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
         )
         if protocol_pool.bytes != tmem_dealloc_offset:
             raise AssertionError("protocol storage offsets changed")
-        tmem_dealloc = protocol_pool.alloc((1,), txl.u64, align=8)
-        tmem_slot = protocol_pool.alloc((1,), txl.u32, align=4)
+        tmem_dealloc = protocol_pool.alloc((1,), "uint64", align=8)
+        tmem_slot = protocol_pool.alloc((1,), "uint32", align=4)
         if protocol_pool.bytes != tmem_ptr_offset + 4:
             raise AssertionError("protocol storage header changed")
 
@@ -544,37 +544,37 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
             txl.ptx.prefetch.tensormap(txl.address_of(sfb_map))
             txl.ptx.prefetch.tensormap(txl.address_of(c_map))
 
-        with txl.If(warp == 0):
-            with txl.Then():
-                with txl.If(_elected()):
-                    with txl.Then():
+        with txl.if_(warp == 0):
+            with txl.then_():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         with txl.unroll(0, ab_stages) as stage:
                             txl.ptx.mbarrier.init.shared.b64(
                                 ab_pipe.full.ptr_to([stage]), txl.uint32(1)
                             )
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         with txl.unroll(0, ab_stages) as stage:
                             txl.ptx.mbarrier.init.shared.b64(
                                 ab_pipe.empty.ptr_to([stage]), txl.uint32(ab_empty_arrivals)
                             )
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         with txl.unroll(0, acc_stages) as stage:
                             txl.ptx.mbarrier.init.shared.b64(
                                 acc_pipe.full.ptr_to([stage]), txl.uint32(1)
                             )
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         with txl.unroll(0, acc_stages) as stage:
                             txl.ptx.mbarrier.init.shared.b64(
                                 acc_pipe.empty.ptr_to([stage]), txl.uint32(acc_empty_arrivals)
                             )
         if cta_group == 2:
-            with txl.If(warp == 0):
-                with txl.Then():
-                    with txl.If(_elected()):
-                        with txl.Then():
+            with txl.if_(warp == 0):
+                with txl.then_():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             txl.ptx.mbarrier.init.shared.b64(
                                 tmem_dealloc.ptr_to([0]), txl.uint32(32)
                             )
@@ -722,34 +722,34 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
             work = txl.local_scalar("int32", init=cluster_work_id)
             count = txl.local_scalar("int32")
             speculative = txl.local_scalar("uint32")
-            with txl.While(work < cluster_work):
+            with txl.while_(work < cluster_work):
                 tile_m_idx, tile_n_idx = scheduler_coords(work)
                 if prefetch_distance > 0:
                     prefetch_k = txl.local_scalar("int32", init=0)
-                    with txl.While((prefetch_k < prefetch_distance) & (prefetch_k < k_tiles)):
+                    with txl.while_((prefetch_k < prefetch_distance) & (prefetch_k < k_tiles)):
                         prefetch_inputs(tile_m_idx, tile_n_idx, prefetch_k)
                         txl.assign(prefetch_k, prefetch_k + 1)
                 txl.assign(count, 0)
                 txl.assign(speculative, txl.uint32(1))
-                with txl.If(count < k_tiles):
-                    with txl.Then():
+                with txl.if_(count < k_tiles):
+                    with txl.then_():
                         _try_wait_acquire(
                             speculative, ab_pipe.empty.ptr_to([tma_state.stage]), tma_state.phase
                         )
-                with txl.While(count < k_tiles):
+                with txl.while_(count < k_tiles):
                     _wait_plain_if_needed(
                         ab_pipe.empty.ptr_to([tma_state.stage]), tma_state.phase, speculative
                     )
-                    with txl.If(leader_cta):
-                        with txl.Then():
-                            with txl.If(_elected()):
-                                with txl.Then():
+                    with txl.if_(leader_cta):
+                        with txl.then_():
+                            with txl.if_(_elected()):
+                                with txl.then_():
                                     txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                                         ab_pipe.full.ptr_to([tma_state.stage]),
                                         txl.uint32(num_tma_load_bytes),
                                     )
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             a_coord_m = tile_m_idx * cta_m + cluster_y * a_cluster_piece
                             a_coord_k = count * k_tile
                             a_smem_offset = (
@@ -811,8 +811,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                     txl.cast(a_mcast_mask, "uint16"),
                                     txl.uint64(tma_cache_hint),
                                 )
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             b_coord_n = (
                                 tile_n_idx * n_tile
                                 + cta_v * b_rows
@@ -879,8 +879,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                     txl.uint64(tma_cache_hint),
                                 )
 
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             sfa_linear = cluster_y * sfa_piece_values
                             sfa_coord_0 = sfa_linear % 256
                             sfa_coord_1 = count * sf_k_box + sfa_linear // 256
@@ -946,8 +946,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                     txl.uint64(tma_cache_hint),
                                 )
 
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             sfb_linear = cluster_x * sfb_piece_values
                             sfb_coord_0 = sfb_linear % 256
                             sfb_quotient = sfb_linear // 256
@@ -1002,14 +1002,14 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                     txl.uint64(tma_cache_hint),
                                 )
                     if prefetch_distance > 0:
-                        with txl.If(count < k_tiles - prefetch_distance):
-                            with txl.Then():
+                        with txl.if_(count < k_tiles - prefetch_distance):
+                            with txl.then_():
                                 prefetch_inputs(tile_m_idx, tile_n_idx, count + prefetch_distance)
                     _advance(tma_state)
                     txl.assign(count, count + 1)
                     txl.assign(speculative, txl.uint32(1))
-                    with txl.If(count < k_tiles):
-                        with txl.Then():
+                    with txl.if_(count < k_tiles):
+                        with txl.then_():
                             _try_wait_acquire(
                                 speculative,
                                 ab_pipe.empty.ptr_to([tma_state.stage]),
@@ -1051,22 +1051,22 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                     txl.bitwise_and(txl.shift_right(sfb_addr, txl.uint32(26)), txl.uint32(0x30)),
                 )
 
-            with txl.While(work < cluster_work):
+            with txl.while_(work < cluster_work):
                 tile_m_idx, tile_n_idx = scheduler_coords(work)
                 txl.assign(count, 0)
                 txl.assign(speculative, txl.uint32(1))
-                with txl.If((count < k_tiles) & leader_cta):
-                    with txl.Then():
+                with txl.if_((count < k_tiles) & leader_cta):
+                    with txl.then_():
                         _try_wait_acquire(
                             speculative, ab_pipe.full.ptr_to([mma_state.stage]), mma_state.phase
                         )
-                with txl.If(leader_cta):
-                    with txl.Then():
+                with txl.if_(leader_cta):
+                    with txl.then_():
                         _wait_plain(acc_pipe.empty.ptr_to([acc_state.stage]), acc_state.phase)
                 txl.assign(accumulate, txl.uint32(0))
-                with txl.While(count < k_tiles):
-                    with txl.If(leader_cta):
-                        with txl.Then():
+                with txl.while_(count < k_tiles):
+                    with txl.if_(leader_cta):
+                        with txl.then_():
                             _wait_plain_if_needed(
                                 ab_pipe.full.ptr_to([mma_state.stage]), mma_state.phase, speculative
                             )
@@ -1084,8 +1084,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                 sfb_kblock_chunks = sfb_chunks // 2
                                 for kblock in range(2):
                                     for chunk in range(sfa_segment_chunks):
-                                        with txl.If(_elected()):
-                                            with txl.Then():
+                                        with txl.if_(_elected()):
+                                            with txl.then_():
                                                 txl.ptx[
                                                     f"tcgen05.cp.cta_group::{cta_group}.32x128b.warpx4"
                                                 ](
@@ -1105,8 +1105,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                                     ),
                                                 )
                                     for chunk in range(sfb_kblock_chunks):
-                                        with txl.If(_elected()):
-                                            with txl.Then():
+                                        with txl.if_(_elected()):
+                                            with txl.then_():
                                                 txl.ptx[
                                                     f"tcgen05.cp.cta_group::{cta_group}.32x128b.warpx4"
                                                 ](
@@ -1126,8 +1126,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                                     ),
                                                 )
                                     for chunk in range(sfa_segment_chunks):
-                                        with txl.If(_elected()):
-                                            with txl.Then():
+                                        with txl.if_(_elected()):
+                                            with txl.then_():
                                                 txl.ptx[
                                                     f"tcgen05.cp.cta_group::{cta_group}.32x128b.warpx4"
                                                 ](
@@ -1163,8 +1163,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                     sfa_reuse = txl.cast(sfa_keep + 16 // sf_layout_scale, "uint32")
                                     keep_desc = runtime_descriptor(sfa_keep, sfb_addr)
                                     reuse_desc = runtime_descriptor(sfa_reuse, sfb_addr)
-                                    with txl.If(_elected()):
-                                        with txl.Then():
+                                    with txl.if_(_elected()):
+                                        with txl.then_():
                                             txl.ptx[
                                                 f"tcgen05.mma.cta_group::{cta_group}.kind::mxf4nvf4"
                                                 f".block_scale.block{sf_vec_size}"
@@ -1191,8 +1191,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                                 sfb_addr,
                                                 txl.ptx.pred(txl.cast(accumulate, "bool")),
                                             )
-                                    with txl.If(_elected()):
-                                        with txl.Then():
+                                    with txl.if_(_elected()):
+                                        with txl.then_():
                                             txl.ptx[
                                                 f"tcgen05.mma.cta_group::{cta_group}.kind::mxf4nvf4"
                                                 f".block_scale.block{sf_vec_size}"
@@ -1229,8 +1229,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                     f".block_scale.block{sf_vec_size}.collector::a::discard"
                                 )
                                 for sf_chunk in range(sfa_chunks):
-                                    with txl.If(_elected()):
-                                        with txl.Then():
+                                    with txl.if_(_elected()):
+                                        with txl.then_():
                                             txl.ptx[
                                                 f"tcgen05.cp.cta_group::{cta_group}.32x128b.warpx4"
                                             ](
@@ -1249,8 +1249,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                     sfb_shared_chunk = (
                                         sf_chunk % sfb_n_box
                                     ) * sf_k_box + sf_chunk // sfb_n_box
-                                    with txl.If(_elected()):
-                                        with txl.Then():
+                                    with txl.if_(_elected()):
+                                        with txl.then_():
                                             txl.ptx[
                                                 f"tcgen05.cp.cta_group::{cta_group}.32x128b.warpx4"
                                             ](
@@ -1280,8 +1280,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                         "uint32",
                                     )
                                     mma_desc = runtime_descriptor(sfa_addr, sfb_addr)
-                                    with txl.If(_elected()):
-                                        with txl.Then():
+                                    with txl.if_(_elected()):
+                                        with txl.then_():
                                             txl.ptx[mma_name](
                                                 txl.cast(
                                                     tmem_base + acc_state.stage * n_tile, "uint32"
@@ -1304,8 +1304,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                                 txl.ptx.pred(txl.cast(accumulate, "bool")),
                                             )
                                     txl.assign(accumulate, txl.uint32(1))
-                            with txl.If(_elected()):
-                                with txl.Then():
+                            with txl.if_(_elected()):
+                                with txl.then_():
                                     if cluster_size == 1:
                                         txl.ptx[
                                             f"tcgen05.commit.cta_group::{cta_group}.mbarrier::"
@@ -1322,15 +1322,15 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                     _advance(mma_state)
                     txl.assign(count, count + 1)
                     txl.assign(speculative, txl.uint32(1))
-                    with txl.If((count < k_tiles) & leader_cta):
-                        with txl.Then():
+                    with txl.if_((count < k_tiles) & leader_cta):
+                        with txl.then_():
                             _try_wait_acquire(
                                 speculative, ab_pipe.full.ptr_to([mma_state.stage]), mma_state.phase
                             )
-                with txl.If(leader_cta):
-                    with txl.Then():
-                        with txl.If(_elected()):
-                            with txl.Then():
+                with txl.if_(leader_cta):
+                    with txl.then_():
+                        with txl.if_(_elected()):
+                            with txl.then_():
                                 if cluster_size == 1:
                                     txl.ptx[
                                         f"tcgen05.commit.cta_group::{cta_group}.mbarrier::"
@@ -1346,15 +1346,15 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                                     )
                 _advance(acc_state)
                 advance_work(work)
-            with txl.If(leader_cta):
-                with txl.Then():
+            with txl.if_(leader_cta):
+                with txl.then_():
                     for _ in range(acc_stages - 1):
                         _advance(acc_state)
                     _wait_plain(acc_pipe.empty.ptr_to([acc_state.stage]), acc_state.phase)
 
         with epilogue_role:
-            with txl.If(warp == 0):
-                with txl.Then():
+            with txl.if_(warp == 0):
+                with txl.then_():
                     txl.ptx[
                         f"tcgen05.alloc.exclusive.cta_group::{cta_group}.sync.aligned."
                         "shared::cta.b32"
@@ -1404,11 +1404,11 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                 )
                 return txl.cast(swizzled - smem_base, "int32")
 
-            with txl.While(work < cluster_work):
+            with txl.while_(work < cluster_work):
                 tile_m_idx, tile_n_idx = scheduler_coords(work)
                 _wait_plain(acc_pipe.full.ptr_to([acc_state.stage]), acc_state.phase)
                 subtile = txl.local_scalar("int32", init=0)
-                with txl.While(subtile < epilogue_subtiles):
+                with txl.while_(subtile < epilogue_subtiles):
                     m_subtile = subtile % (cta_m // 128)
                     n_subtile = subtile // (cta_m // 128)
                     tmem_address = txl.local_scalar(
@@ -1506,8 +1506,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                         )
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx.bar.sync(txl.uint32(1), txl.uint32(128))
-                    with txl.If(txl.And(warp == 0, lane == 0)):
-                        with txl.Then():
+                    with txl.if_(txl.And(warp == 0, lane == 0)):
+                        with txl.then_():
                             if swap:
                                 for row_copy in range(2):
                                     txl.ptx[
@@ -1546,8 +1546,8 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                     txl.assign(executed_subtiles, executed_subtiles + 1)
                     txl.assign(subtile, subtile + 1)
                 txl.ptx.bar.sync(txl.uint32(1), txl.uint32(128))
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         if cta_group == 2:
                             txl.ptx.mbarrier.arrive.shared__cluster.b64(
                                 acc_empty_leader.ptr_to([acc_state.stage]), txl.uint32(1)
@@ -1560,13 +1560,13 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                 advance_work(work)
 
             txl.ptx.cp.async_.bulk.wait_group.read(0)
-            with txl.If(warp == 0):
-                with txl.Then():
+            with txl.if_(warp == 0):
+                with txl.then_():
                     txl.ptx[
                         f"tcgen05.relinquish_alloc_permit.cta_group::{cta_group}.sync.aligned"
                     ]()
-            with txl.If(warp == 0):
-                with txl.Then():
+            with txl.if_(warp == 0):
+                with txl.then_():
                     if cta_group == 2:
                         remote_dealloc = txl.local_scalar("uint32")
                         txl.ptx.mapa.shared__cluster.u32(
@@ -1581,16 +1581,16 @@ def _make_kernel(M, N, K_dim, sf_mode, out_dtype, alpha, tactic, *, backend_conf
                     )
 
     kernel.__annotations__ = {
-        "a": txl.Tensor((kernel_m * K_dim // 2,), txl.u8),
-        "b": txl.Tensor((kernel_n * K_dim // 2,), txl.u8),
+        "a": txl.Tensor((kernel_m * K_dim // 2,), "uint8"),
+        "b": txl.Tensor((kernel_n * K_dim // 2,), "uint8"),
         "sfa": txl.Tensor(
-            (_ceil_div(kernel_m, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,), txl.u8
+            (_ceil_div(kernel_m, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,), "uint8"
         ),
         "sfb": txl.Tensor(
-            (_ceil_div(kernel_n, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,), txl.u8
+            (_ceil_div(kernel_n, 128) * _ceil_div(K_dim, 4 * sf_vec_size) * 512,), "uint8"
         ),
-        "c": txl.Tensor((kernel_m * kernel_n * 2,), txl.u8),
-        "alpha_ptr": txl.Tensor((1,), txl.f32),
+        "c": txl.Tensor((kernel_m * kernel_n * 2,), "uint8"),
+        "alpha_ptr": txl.Tensor((1,), "float32"),
     }
     return txl.kernel()(kernel)
 

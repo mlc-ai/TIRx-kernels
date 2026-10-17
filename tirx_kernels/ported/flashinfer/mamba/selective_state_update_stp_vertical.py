@@ -66,10 +66,10 @@ def _mbarrier_arrive_wait(barrier):
     token = txl.local_scalar("uint64")
     done = txl.local_scalar("uint32")
     txl.ptx.mbarrier.arrive.shared__cta.b64(token, barrier, txl.uint32(1))
-    with txl.While(True):
+    with txl.while_(True):
         txl.ptx.mbarrier.try_wait.shared__cta.b64(done, barrier, token)
-        with txl.If(done != txl.uint32(0)), txl.Then():
-            txl.Break()
+        with txl.if_(done != txl.uint32(0)), txl.then_():
+            txl.break_()
 
 
 def _tma_g2s(dst, tensor_state, d, head, batch, barrier):
@@ -359,34 +359,34 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
     def selective_state_update_stp_vertical(
         tensor_state: txl.Ptr(txl.TensorMap),
         state: txl.Tensor((txl.int64(),), spec["STATE_DTYPE"]),
-        state_scale: txl.Tensor((txl.int64(),), txl.f32),
-        x: txl.Tensor((txl.int64(),), txl.bf16),
+        state_scale: txl.Tensor((txl.int64(),), "float32"),
+        x: txl.Tensor((txl.int64(),), "bfloat16"),
         dt: txl.Tensor((txl.int64(),), spec["WEIGHT_DTYPE"]),
-        matrix_a: txl.Tensor((txl.int64(),), txl.f32),
-        matrix_b: txl.Tensor((txl.int64(),), txl.bf16),
-        matrix_c: txl.Tensor((txl.int64(),), txl.bf16),
+        matrix_a: txl.Tensor((txl.int64(),), "float32"),
+        matrix_b: txl.Tensor((txl.int64(),), "bfloat16"),
+        matrix_c: txl.Tensor((txl.int64(),), "bfloat16"),
         d_weight: txl.Tensor((txl.int64(),), spec["WEIGHT_DTYPE"]),
-        z: txl.Tensor((txl.int64(),), txl.bf16),
+        z: txl.Tensor((txl.int64(),), "bfloat16"),
         dt_bias: txl.Tensor((txl.int64(),), spec["WEIGHT_DTYPE"]),
         state_indices: txl.Tensor((txl.int64(),), spec["INDEX_DTYPE"]),
         dst_indices: txl.Tensor((txl.int64(),), spec["INDEX_DTYPE"]),
-        rand_seed: txl.Tensor((txl.int64(),), txl.i64),
-        output: txl.Tensor((txl.int64(),), txl.bf16),
-        state_stride_batch: txl.i64,
-        state_scale_stride_batch: txl.i64,
-        x_stride_batch: txl.i64,
-        dt_stride_batch: txl.i64,
-        b_stride_batch: txl.i64,
-        c_stride_batch: txl.i64,
-        z_stride_batch: txl.i64,
-        out_stride_batch: txl.i64,
-        state_indices_stride_batch: txl.i64,
-        dst_indices_stride_batch: txl.i64,
-        nheads_runtime: txl.i32,
-        ngroups_runtime: txl.i32,
-        dt_softplus: txl.i32,
-        update_state: txl.i32,
-        pad_slot_id: txl.i32,
+        rand_seed: txl.Tensor((txl.int64(),), "int64"),
+        output: txl.Tensor((txl.int64(),), "bfloat16"),
+        state_stride_batch: "int64",
+        state_scale_stride_batch: "int64",
+        x_stride_batch: "int64",
+        dt_stride_batch: "int64",
+        b_stride_batch: "int64",
+        c_stride_batch: "int64",
+        z_stride_batch: "int64",
+        out_stride_batch: "int64",
+        state_indices_stride_batch: "int64",
+        dst_indices_stride_batch: "int64",
+        nheads_runtime: "int32",
+        ngroups_runtime: "int32",
+        dt_softplus: "int32",
+        update_state: "int32",
+        pad_slot_id: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(spec["BATCH"], spec["NHEADS"]), block=5 * 32),
@@ -396,12 +396,12 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
         batch_i, head = txl.cta_id()
         smem = txl.smem_pool()
         s_state = smem.alloc((3 * spec["STATE_STAGE_VALUES"],), spec["STATE_DTYPE"], align=128)
-        s_x = smem.alloc((spec["DIM"],), txl.bf16, align=16)
-        s_z = smem.alloc((spec["DIM"],), txl.bf16, align=16)
-        s_b = smem.alloc((spec["DSTATE"],), txl.bf16, align=16)
-        s_c = smem.alloc((spec["DSTATE"],), txl.bf16, align=16)
-        s_out = smem.alloc((spec["DIM"],), txl.f32, align=4)
-        s_scale = smem.alloc((spec["DIM"],), txl.f32, align=128) if spec["SCALE_STATE"] else s_out
+        s_x = smem.alloc((spec["DIM"],), "bfloat16", align=16)
+        s_z = smem.alloc((spec["DIM"],), "bfloat16", align=16)
+        s_b = smem.alloc((spec["DSTATE"],), "bfloat16", align=16)
+        s_c = smem.alloc((spec["DSTATE"],), "bfloat16", align=16)
+        s_out = smem.alloc((spec["DIM"],), "float32", align=4)
+        s_scale = smem.alloc((spec["DIM"],), "float32", align=128) if spec["SCALE_STATE"] else s_out
         empty = txl.MBarrier(smem, 3)
         full = txl.MBarrier(smem, 3)
         consumers_ready = txl.MBarrier(smem, 1)
@@ -568,7 +568,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
         ):
             d_begin = txl.local_scalar("int32", init=0)
             state_pipe = txl.PipelineState(3, phase=0)
-            with txl.While(d_begin < DIM):
+            with txl.while_(d_begin < DIM):
                 _mbarrier_arrive_wait(full_barriers_buf.ptr_to([state_pipe.stage]))
                 with txl.unroll(4) as row_iter:
                     dd: txl.int32 = warp + row_iter * 4
@@ -593,7 +593,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
 
                     with txl.serial(STATE_ITERATIONS) as state_iter:
                         state_i: txl.int32 = (state_iter * 32 + lane) * STATE_VALUES_PER_BANK
-                        with txl.If(state_i < DSTATE), txl.Then():
+                        with txl.if_(state_i < DSTATE), txl.then_():
                             state_index: txl.int32 = (
                                 state_pipe.stage * STATE_STAGE_VALUES + dd * DSTATE + state_i
                             )
@@ -730,7 +730,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         txl.ptx["add.ftz.f32"](
                             out_value, out_value, _simple._shfl_down_f32(out_value, delta)
                         )
-                    with txl.If(lane == 0), txl.Then():
+                    with txl.if_(lane == 0), txl.then_():
                         txl.ptx.st.shared.b32(
                             s_out.ptr_to([row_d]), txl.reinterpret(out_value, ty="uint32")
                         )
@@ -749,7 +749,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                             new_state_max, _simple._shfl_idx_f32(new_state_max, txl.int32(0))
                         )
                         encode_scale = txl.local_scalar("float32", init=1.0)
-                        with txl.If(new_state_max != txl.float32(0.0)), txl.Then():
+                        with txl.if_(new_state_max != txl.float32(0.0)), txl.then_():
                             txl.ptx["div.approx.ftz.f32"](
                                 encode_scale, txl.float32(32767.0), new_state_max
                             )
@@ -758,7 +758,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         new_decode_scale: txl.float32 = rcp_0
                         with txl.serial(STATE_ITERATIONS) as state_iter:
                             state_i: txl.int32 = (state_iter * 32 + lane) * STATE_VALUES_PER_BANK
-                            with txl.If(state_i < DSTATE), txl.Then():
+                            with txl.if_(state_i < DSTATE), txl.then_():
                                 quantized = txl.alloc_local((STATE_VALUES_PER_BANK,), "int32")
                                 with txl.unroll(STATE_VALUES_PER_BANK) as e:
                                     mul_5 = txl.local_scalar("float32")
@@ -787,7 +787,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                     state_pipe.stage * STATE_STAGE_VALUES + dd * DSTATE + state_i
                                 )
                                 txl.ptx.st.shared.b32(s_state.ptr_to([state_index]), packed_i16)
-                        with txl.If(lane == 0), txl.Then():
+                        with txl.if_(lane == 0), txl.then_():
                             txl.ptx.st.shared.b32(
                                 s_scale.ptr_to([row_d]),
                                 txl.reinterpret(new_decode_scale, ty="uint32"),
@@ -861,11 +861,11 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
             if ROLE == "producer":
                 read_state: txl.bool = state_batch != txl.cast(pad_slot_id, "int64")
                 write_state: txl.bool = txl.And(read_state, update_state != 0)
-                with txl.If(lane == 0), txl.Then():
-                    with txl.If(read_state):
-                        with txl.Then():
-                            with txl.If(write_state):
-                                with txl.Then():
+                with txl.if_(lane == 0), txl.then_():
+                    with txl.if_(read_state):
+                        with txl.then_():
+                            with txl.if_(write_state):
+                                with txl.then_():
                                     producer_pipeline(
                                         group,
                                         state_batch,
@@ -873,7 +873,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                         READ_STATE=True,
                                         WRITE_STATE=True,
                                     )
-                                with txl.Else():
+                                with txl.else_():
                                     producer_pipeline(
                                         group,
                                         state_batch,
@@ -881,7 +881,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                         READ_STATE=True,
                                         WRITE_STATE=False,
                                     )
-                        with txl.Else():
+                        with txl.else_():
                             producer_pipeline(
                                 group,
                                 state_batch,
@@ -911,8 +911,8 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                 if HAS_DT_BIAS:
                     bias_value: txl.float32 = _load_weight_nc(dt_bias, head, WEIGHT_DTYPE)
                     txl.ptx["add.ftz.f32"](dt_value, dt_value, bias_value)
-                with txl.If(dt_softplus != 0), txl.Then():
-                    with txl.If(dt_value <= txl.float32(20.0)), txl.Then():
+                with txl.if_(dt_softplus != 0), txl.then_():
+                    with txl.if_(dt_value <= txl.float32(20.0)), txl.then_():
                         mul_6 = txl.local_scalar("float32")
                         txl.ptx["mul.ftz.f32"](mul_6, dt_value, txl.float32(_LOG2_E))
                         exp_arg: txl.float32 = mul_6
@@ -939,8 +939,8 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                     lane == 0, txl.float32(1.0), txl.float32(0.0)
                 )
 
-                with txl.If(state_batch != txl.cast(pad_slot_id, "int64")):
-                    with txl.Then():
+                with txl.if_(state_batch != txl.cast(pad_slot_id, "int64")):
+                    with txl.then_():
                         consumer_pipeline(
                             lane,
                             warp,
@@ -952,7 +952,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                             state_ptr_offset,
                             USE_STATE_CACHE=True,
                         )
-                    with txl.Else():
+                    with txl.else_():
                         consumer_pipeline(
                             lane,
                             warp,
@@ -967,7 +967,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
 
                 _mbarrier_arrive_wait(consumers_ready_buf.ptr_to([0]))
                 row_d: txl.int32 = warp * 32 + lane
-                with txl.If(row_d < DIM), txl.Then():
+                with txl.if_(row_d < DIM), txl.then_():
                     out_value = txl.local_scalar("float32")
                     sload_5 = txl.local_scalar("uint32")
                     txl.ptx.ld.shared.b32(sload_5, s_out.ptr_to([row_d]))
@@ -1007,15 +1007,15 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         output_bits,
                     )
                 with (
-                    txl.If(
+                    txl.if_(
                         txl.And(
                             txl.And(SCALE_STATE, update_state != 0),
                             state_batch != txl.cast(pad_slot_id, "int64"),
                         )
                     ),
-                    txl.Then(),
+                    txl.then_(),
                 ):
-                    with txl.If(row_d < DIM), txl.Then():
+                    with txl.if_(row_d < DIM), txl.then_():
                         sload_7 = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(sload_7, s_scale.ptr_to([row_d]))
                         scale_bits: txl.uint32 = sload_7

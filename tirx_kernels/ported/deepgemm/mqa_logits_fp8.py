@@ -55,7 +55,7 @@ def _build_tirx_tensor_maps(data: dict[str, Any]):
     config = data["config"]
     kv_fp8, kv_scales = data["kv_in"]
     q = data["q_in"].view(torch.uint8).reshape(config.seq_len * config.num_heads, config.head_dim)
-    swizzle = {32: txl.SW32B, 64: txl.SW64B, 128: txl.SW128B}[config.head_dim].value
+    swizzle = {32: txl.SwizzleMode.SWIZZLE_32B_ATOM, 64: txl.SwizzleMode.SWIZZLE_64B_ATOM, 128: txl.SwizzleMode.SWIZZLE_128B_ATOM}[config.head_dim].value
     maps = (
         _encode_tensor_map(
             "float32", 1, kv_scales, (config.seq_len_kv,), (), (config.block_kv,), 0
@@ -372,7 +372,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
     smem_weight_size_per_stage = block_q * num_heads * 4
     smem_kv_size_per_stage = block_kv * head_dim
     smem_kv_scale_size_per_stage = block_kv * 4
-    _SWZ = {32: txl.SW32B, 64: txl.SW64B, 128: txl.SW128B}[head_dim]
+    _SWZ = {32: txl.SwizzleMode.SWIZZLE_32B_ATOM, 64: txl.SwizzleMode.SWIZZLE_64B_ATOM, 128: txl.SwizzleMode.SWIZZLE_128B_ATOM}[head_dim]
     swizzle_alignment = 8 * head_dim
 
     num_accum_tmem_cols = block_q * num_heads * num_tmem_stages
@@ -399,13 +399,13 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
 
     @txl.kernel()
     def sm100_fp8_mqa_logits(
-        seq_len: txl.u32,
-        seq_len_kv: txl.u32,
-        max_seqlen_k: txl.u32,
-        num_q_blocks: txl.u32,
-        logits_stride: txl.u32,
-        cu_seq_len_k_start: txl.Tensor((txl.int64(),), txl.i32),
-        cu_seq_len_k_end: txl.Tensor((txl.int64(),), txl.i32),
+        seq_len: "uint32",
+        seq_len_kv: "uint32",
+        max_seqlen_k: "uint32",
+        num_q_blocks: "uint32",
+        logits_stride: "uint32",
+        cu_seq_len_k_start: txl.Tensor((txl.int64(),), "int32"),
+        cu_seq_len_k_end: txl.Tensor((txl.int64(),), "int32"),
         logits_flat: txl.Tensor((txl.int64(),), logits_tir_dtype),
         kv_scales_map: txl.Ptr(txl.TensorMap),
         kv_map: txl.Ptr(txl.TensorMap),
@@ -429,22 +429,22 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
         # One elected lane of warp 0 prefetches every descriptor before any
         # pipeline traffic (the former dispatcher's placement).
         for m in (q_map, weights_map, kv_map, kv_scales_map):
-            with txl.If(warp_idx == 0), txl.Then():
-                with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+            with txl.if_(warp_idx == 0), txl.then_():
+                with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                     txl.ptx.prefetch.tensormap(txl.address_of(m))
 
         smem = txl.smem_pool()
         smem_q = smem.alloc(
             (num_q_stages, block_q * num_heads, head_dim),
-            txl.u8,
+            "uint8",
             swizzle=_SWZ,
             align=swizzle_alignment,
         )
-        smem_weights = smem.alloc((num_q_stages, block_q, num_heads), txl.f32, align=16)
+        smem_weights = smem.alloc((num_q_stages, block_q, num_heads), "float32", align=16)
         smem_kv = smem.alloc(
-            (num_kv_stages, block_kv, head_dim), txl.u8, swizzle=_SWZ, align=swizzle_alignment
+            (num_kv_stages, block_kv, head_dim), "uint8", swizzle=_SWZ, align=swizzle_alignment
         )
-        smem_kv_scales = smem.alloc((num_kv_stages, block_kv), txl.f32, align=16)
+        smem_kv_scales = smem.alloc((num_kv_stages, block_kv), "float32", align=16)
         q_pipe = txl.Pipeline(
             smem,
             num_q_stages,
@@ -459,7 +459,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
         tmem_pipe = txl.Pipeline(
             smem, num_tmem_stages, full="tcgen05", empty="mbar", init_full=1, init_empty=128
         )
-        tmem_ptr_in_smem = smem.alloc((1,), txl.u32, align=4)
+        tmem_ptr_in_smem = smem.alloc((1,), "uint32", align=4)
         # TMEM D is addressed by its fixed column base.  The allocator is
         # asserted to return base zero below, so no TIR tmem buffer is needed.
         tmem_col = 0
@@ -547,7 +547,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
         # Keep the collective under the entry-owned warp-uniform id.  The
         # generic pool guard declares a second warp scope, which is not a safe
         # lowering boundary for this persistent kernel.
-        with txl.If(warp_idx == spec_warp_start + 2), txl.Then():
+        with txl.if_(warp_idx == spec_warp_start + 2), txl.then_():
             txl.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
                 txl.address_of(tmem_ptr_in_smem[0]), txl.uint32(num_tmem_cols)
             )
@@ -567,10 +567,10 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
             # elect_sync wraps the WHOLE loop, as the original does: the ring
             # cursors stay elect-lane locals on the uniform datapath. G3's
             # loop-level rule means this placement is preserved exactly.
-            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                 q_state = txl.RingState(num_q_stages)
                 q_idx = txl.local_scalar("uint32", init=sm_idx_u32)
-                with txl.While(q_idx < num_q_blocks):
+                with txl.while_(q_idx < num_q_blocks):
                     q_pipe.empty.wait(q_state.stage, q_state.phase ^ txl.uint32(1))
                     txl.ptx[TMA_G2S_2D](
                         smem_q[q_state.stage].ptr_to(0, 0),
@@ -597,16 +597,16 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
 
         # ---------------- warp 9: KV + KV scales ------------------------
         with kv_tma:
-            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                 kv_state = txl.RingState(num_kv_stages)
                 q_idx = txl.local_scalar("uint32")
                 kv_idx = txl.local_scalar("uint32")
                 txl.assign(q_idx, sm_idx_u32)
-                with txl.While(q_idx < num_q_blocks):
+                with txl.while_(q_idx < num_q_blocks):
                     load_schedule(q_idx)
                     kv_start = schedule_result[0]
                     txl.assign(kv_idx, txl.uint32(0))
-                    with txl.While(kv_idx < schedule_result[1]):
+                    with txl.while_(kv_idx < schedule_result[1]):
                         kv_pipe.empty.wait(kv_state.stage, kv_state.phase ^ txl.uint32(1))
                         kv_row0 = kv_start + kv_idx * txl.uint32(block_kv)
                         txl.ptx[TMA_G2S_2D](
@@ -652,18 +652,18 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
             )
             desc_a = txl.local_scalar("uint64")
             desc_b = txl.local_scalar("uint64")
-            with txl.If(txl.cuda.elect_sync() != txl.uint32(0)), txl.Then():
+            with txl.if_(txl.cuda.elect_sync() != txl.uint32(0)), txl.then_():
                 q_state = txl.RingState(num_q_stages)
                 kv_state = txl.RingState(num_kv_stages)
                 tmem_state = txl.RingState(num_tmem_stages)
                 q_idx = txl.local_scalar("uint32")
                 kv_idx = txl.local_scalar("uint32")
                 txl.assign(q_idx, sm_idx_u32)
-                with txl.While(q_idx < num_q_blocks):
+                with txl.while_(q_idx < num_q_blocks):
                     load_schedule(q_idx)
                     q_pipe.full.wait(q_state.stage, q_state.phase)
                     txl.assign(kv_idx, txl.uint32(0))
-                    with txl.While(kv_idx < schedule_result[1]):
+                    with txl.while_(kv_idx < schedule_result[1]):
                         kv_pipe.full.wait(kv_state.stage, kv_state.phase)
                         for math_wg_i in range(num_math_warpgroups):
                             tmem_pipe.empty.wait(tmem_state.stage, tmem_state.phase ^ txl.uint32(1))
@@ -722,10 +722,10 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
             kv_idx = txl.local_scalar("uint32")
             kv_offset = txl.local_scalar("uint32")
             txl.assign(q_idx, sm_idx_u32)
-            with txl.While(q_idx < num_q_blocks):
+            with txl.while_(q_idx < num_q_blocks):
                 load_schedule(q_idx)
                 q_pipe.full.wait(q_state.stage, q_state.phase)
-                with txl.If(schedule_result[1] > txl.uint32(0)), txl.Then():
+                with txl.if_(schedule_result[1] > txl.uint32(0)), txl.then_():
                     for weight_i in range(block_q):
                         for weight_j in range(num_heads // 4):
                             wc = weight_j * 4
@@ -746,7 +746,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.assign(kv_offset, schedule_result[0] + math_thread_idx)
                     txl.assign(kv_idx, txl.uint32(0))
-                    with txl.While(kv_idx < schedule_result[1]):
+                    with txl.while_(kv_idx < schedule_result[1]):
                         kv_pipe.full.wait(kv_state.stage, kv_state.phase)
                         scale_kv = txl.local_scalar("float32")
                         txl.ptx.ld.shared.f32(
@@ -800,7 +800,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                 txl.assign(q_idx, q_idx + txl.uint32(config.num_sms))
                 q_state.advance()
             txl.ptx.bar.sync(8, txl.uint32(num_math_threads))
-            with txl.If(warp_idx == 0), txl.Then():
+            with txl.if_(warp_idx == 0), txl.then_():
                 txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
                     txl.uint32(tmem_col), txl.uint32(num_tmem_cols)
                 )

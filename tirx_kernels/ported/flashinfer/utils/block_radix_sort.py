@@ -251,7 +251,7 @@ def _scan_warp_inclusive(out, incl, tx, value):
 
 def _scan_publish_warp_aggregate(scan, incl, tx):
     """Last lane of each warp shares its warp aggregate (``:169-172``)."""
-    with txl.If(tx % WARP_THREADS == WARP_THREADS - 1), txl.Then():
+    with txl.if_(tx % WARP_THREADS == WARP_THREADS - 1), txl.then_():
         st_shared_u32(scan, tx // WARP_THREADS, incl[0])
     bar_sync()
 
@@ -264,14 +264,14 @@ def _scan_seed_aggregate(scan, agg, wpre):
 
 def _scan_fold_warp(scan, agg, wpre, tx, w):
     """One step of ``ApplyWarpAggregates`` (``:129-134``)."""
-    with txl.If(tx // WARP_THREADS == w), txl.Then():
+    with txl.if_(tx // WARP_THREADS == w), txl.then_():
         txl.assign(wpre[0], agg[0])
     txl.assign(agg[0], agg[0] + ld_shared_u32(scan, w))
 
 
 def _scan_fold_warp_value(agg, wpre, tx, w, value):
     """``ApplyWarpAggregates`` over an aggregate already held in a register."""
-    with txl.If(tx // WARP_THREADS == w), txl.Then():
+    with txl.if_(tx // WARP_THREADS == w), txl.then_():
         txl.assign(wpre[0], agg[0])
     txl.assign(agg[0], agg[0] + value)
 
@@ -286,7 +286,7 @@ def _scan_seed_and_fold_pair(scan, agg, wpre, tx):
     pair = ld_shared_pair_u32(scan, 0)
     txl.assign(agg[0], pair[0])
     txl.assign(wpre[0], txl.uint32(0))
-    with txl.If(tx // WARP_THREADS == 1), txl.Then():
+    with txl.if_(tx // WARP_THREADS == 1), txl.then_():
         txl.assign(wpre[0], agg[0])
     txl.assign(agg[0], agg[0] + pair[1])
 
@@ -296,13 +296,13 @@ def _scan_seed_and_fold_quad(scan, agg, wpre, tx):
     quad = ld_shared_quad_u32(scan, 0)
     txl.assign(agg[0], quad[0])
     txl.assign(wpre[0], txl.uint32(0))
-    with txl.If(tx // WARP_THREADS == 1), txl.Then():
+    with txl.if_(tx // WARP_THREADS == 1), txl.then_():
         txl.assign(wpre[0], agg[0])
     txl.assign(agg[0], agg[0] + quad[1])
-    with txl.If(tx // WARP_THREADS == 2), txl.Then():
+    with txl.if_(tx // WARP_THREADS == 2), txl.then_():
         txl.assign(wpre[0], agg[0])
     txl.assign(agg[0], agg[0] + quad[2])
-    with txl.If(tx // WARP_THREADS == 3), txl.Then():
+    with txl.if_(tx // WARP_THREADS == 3), txl.then_():
         txl.assign(wpre[0], agg[0])
     txl.assign(agg[0], agg[0] + quad[3])
 
@@ -336,18 +336,18 @@ def _scan_apply_prefix(scan, out, agg, wpre, tx, n_warps):
     warp_id = txl.local_scalar("int32", init=tx // WARP_THREADS)
     lane = txl.local_scalar("int32", init=tx % WARP_THREADS)
     # Apply the warp prefix; lane0 of a non-zero warp takes it outright (:308-317).
-    with txl.If(warp_id != 0), txl.Then():
+    with txl.if_(warp_id != 0), txl.then_():
         txl.assign(out[0], wpre[0] + out[0])
-        with txl.If(lane == 0), txl.Then():
+        with txl.if_(lane == 0), txl.then_():
             txl.assign(out[0], wpre[0])
     # Warp 0 evaluates the prefix callback and shares it (:387-398).
-    with txl.If(warp_id == 0), txl.Then():
-        with txl.If(lane == 0), txl.Then():
+    with txl.if_(warp_id == 0), txl.then_():
+        with txl.if_(lane == 0), txl.then_():
             st_shared_u32(scan, n_warps, txl.shift_left(agg[0], txl.uint32(16)))
             txl.assign(out[0], txl.shift_left(agg[0], txl.uint32(16)))
     bar_sync()
     bp = txl.local_scalar("uint32", init=ld_shared_u32(scan, n_warps))
-    with txl.If(tx > 0), txl.Then():
+    with txl.if_(tx > 0), txl.then_():
         txl.assign(out[0], bp + out[0])
 
 
@@ -586,7 +586,7 @@ def emit_block_radix_sort_rolled(
     the ``9P - 1`` barrier count directly.
     """
     begin = txl.local_scalar("int32", init=0)
-    with txl.While(begin < num_passes * RADIX_BITS):
+    with txl.while_(begin < num_passes * RADIX_BITS):
         emit_rank_keys(
             counters32,
             counters16,
@@ -610,5 +610,5 @@ def emit_block_radix_sort_rolled(
         txl.assign(begin, begin + RADIX_BITS)
         # The source breaks out before this barrier on the final pass
         # (block_radix_sort.cuh:415-421), giving 9P - 1 rather than 9P.
-        with txl.If(begin < num_passes * RADIX_BITS), txl.Then():
+        with txl.if_(begin < num_passes * RADIX_BITS), txl.then_():
             bar_sync()

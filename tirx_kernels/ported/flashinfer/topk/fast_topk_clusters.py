@@ -297,10 +297,10 @@ def get_kernel(
     def _threshold(hist, scal, tid, warp, lane, rank, bank, k_rem, sum_across):
         """`get_threshold_bin` (:116-154). Leaves the bin in `scal[THR]` and
         walks the caller's `k_rem` register down."""
-        txl.tvm_storage_sync("shared")
+        txl.gpu_storage_sync("shared")
 
         v = txl.local_scalar("int32", init=txl.int32(0))
-        with txl.If(tid < RADIX), txl.Then():
+        with txl.if_(tid < RADIX), txl.then_():
             txl.assign(v, txl.cast(R.ld_shared_u32(hist, bank * RADIX + tid), "int32"))
             # Five-step warp suffix scan (:21-31), unrolled. `.down` accumulates
             # toward lane 0, so the warp's total over its 32 bins lands THERE.
@@ -308,19 +308,19 @@ def get_kernel(
             # collective stays convergent across the whole warp.
             for delta, keep in ((1, 31), (2, 30), (4, 28), (8, 24), (16, 16)):
                 peer = R.shfl_down_u32(txl.reinterpret(v, ty="uint32"), delta)
-                with txl.If(lane < keep), txl.Then():
+                with txl.if_(lane < keep), txl.then_():
                     txl.assign(v, v + txl.cast(peer, "int32"))
-            with txl.If(lane == 0), txl.Then():
+            with txl.if_(lane == 0), txl.then_():
                 R.st_shared_u32(scal, CUM0 + warp, txl.reinterpret(v, ty="uint32"))
-        txl.tvm_storage_sync("shared")
+        txl.gpu_storage_sync("shared")
 
-        with txl.If(warp == 0), txl.Then():
+        with txl.if_(warp == 0), txl.then_():
             w = txl.local_scalar("int32", init=txl.int32(0))
-            with txl.If(lane < 8), txl.Then():
+            with txl.if_(lane < 8), txl.then_():
                 txl.assign(w, txl.cast(R.ld_shared_u32(scal, CUM0 + lane), "int32"))
             for delta, keep in ((1, 7), (2, 6), (4, 4)):
                 peer = R.shfl_down_u32(txl.reinterpret(w, ty="uint32"), delta)
-                with txl.If(lane < keep), txl.Then():
+                with txl.if_(lane < keep), txl.then_():
                     txl.assign(w, w + txl.cast(peer, "int32"))
             # `__syncwarp` sits BETWEEN the scan and the write-back into the same
             # buffer (:48). After the store it would protect nothing.
@@ -328,20 +328,20 @@ def get_kernel(
             # The guard is load-bearing: cum_reduce_buf is 8 ints with
             # k_remaining_counter 32 B later, so an unguarded 32-lane store puts
             # 128 B where 32 are allocated (:49-51).
-            with txl.If(lane < 8), txl.Then():
+            with txl.if_(lane < 8), txl.then_():
                 R.st_shared_u32(scal, CUM0 + lane, txl.reinterpret(w, ty="uint32"))
-        txl.tvm_storage_sync("shared")
-        with txl.If(warp < 7), txl.Then():
+        txl.gpu_storage_sync("shared")
+        with txl.if_(warp < 7), txl.then_():
             txl.assign(v, v + txl.cast(R.ld_shared_u32(scal, CUM0 + warp + 1), "int32"))
 
         # --- cluster-wide sum of the same bin (:120-138) --------------------
         if nc > 1 and sum_across:
-            with txl.If(tid < RADIX), txl.Then():
+            with txl.if_(tid < RADIX), txl.then_():
                 # This IS the DSMEM publication: peers read the PING-PONG bank.
                 R.st_shared_u32(hist, bank * RADIX + tid, txl.reinterpret(v, ty="uint32"))
             txl.ptx.barrier.cluster.arrive()
             txl.ptx.barrier.cluster.wait()
-            with txl.If(tid < RADIX), txl.Then():
+            with txl.if_(tid < RADIX), txl.then_():
                 with txl.unroll(nc - 1) as c:
                     peer = txl.alloc_local([1], "uint32")
                     txl.ptx.mapa.shared__cluster.u32(
@@ -354,20 +354,20 @@ def get_kernel(
                     txl.assign(v, v + txl.cast(got, "int32"))
                 R.st_shared_u32(hist, 2 * RADIX + tid, txl.reinterpret(v, ty="uint32"))
         else:
-            with txl.If(tid < RADIX), txl.Then():
+            with txl.if_(tid < RADIX), txl.then_():
                 R.st_shared_u32(hist, 2 * RADIX + tid, txl.reinterpret(v, ty="uint32"))
-        txl.tvm_storage_sync("shared")
+        txl.gpu_storage_sync("shared")
 
         # --- pick the crossing bin (:142-152) --------------------------------
         nxt = txl.local_scalar("int32", init=txl.int32(0))
-        with txl.If(tid < RADIX - 1), txl.Then():
+        with txl.if_(tid < RADIX - 1), txl.then_():
             txl.assign(nxt, txl.cast(R.ld_shared_u32(hist, 2 * RADIX + tid + 1), "int32"))
-        with txl.If(tid < RADIX), txl.Then():
-            with txl.If(txl.And(v > k_rem, nxt <= k_rem)), txl.Then():
+        with txl.if_(tid < RADIX), txl.then_():
+            with txl.if_(txl.And(v > k_rem, nxt <= k_rem)), txl.then_():
                 R.st_shared_u32(scal, THR, txl.reinterpret(tid, ty="uint32"))
-        txl.tvm_storage_sync("shared")
+        txl.gpu_storage_sync("shared")
         bin_ = txl.local_scalar("int32", init=txl.cast(R.ld_shared_u32(scal, THR), "int32"))
-        with txl.If(bin_ < RADIX - 1), txl.Then():
+        with txl.if_(bin_ < RADIX - 1), txl.then_():
             txl.assign(
                 k_rem, k_rem - txl.cast(R.ld_shared_u32(hist, 2 * RADIX + bin_ + 1), "int32")
             )
@@ -404,8 +404,8 @@ def get_kernel(
                 txl.cast(txl.shift_right(bits, txl.uint16(shift)), "int32"), 0xFF
             )
         d = txl.local_scalar("int32", init=digit)
-        with txl.If(d > bin_):
-            with txl.Then():
+        with txl.if_(d > bin_):
+            with txl.then_():
                 # HAZARD: unguarded. The source's `if (topk_offset < TopK)` is
                 # commented out at :195-197; the writeback's `offs < TopK` is what
                 # bounds the global store. Reproduce, do not repair.
@@ -413,8 +413,8 @@ def get_kernel(
                 R.st_shared_u32(
                     topk_inds, txl.cast(slot, "int32"), txl.reinterpret(index, ty="uint32")
                 )
-            with txl.Else():
-                with txl.If(d == bin_), txl.Then():
+            with txl.else_():
+                with txl.if_(d == bin_), txl.then_():
                     if not last:
                         # Read five times below: the capacity test, both cache
                         # stores, and the ring offset.  Every boundary-bin
@@ -426,8 +426,8 @@ def get_kernel(
                             ),
                         )
                         keep = txl.local_scalar("int32", init=txl.int32(1))
-                        with txl.If(slot < num_cached):
-                            with txl.Then():
+                        with txl.if_(slot < num_cached):
+                            with txl.then_():
                                 R.st_shared_u32(
                                     cidx,
                                     phase * num_cached + slot,
@@ -436,9 +436,9 @@ def get_kernel(
                                 R.st_shared_u32(
                                     cbits, phase * num_cached + slot, txl.cast(bits, "uint32")
                                 )
-                            with txl.Else():
-                                with txl.If(slot - num_cached < ovf_stride):
-                                    with txl.Then():
+                            with txl.else_():
+                                with txl.if_(slot - num_cached < ovf_stride):
+                                    with txl.then_():
                                         off = (
                                             ring_base
                                             + phase * ovf_stride * 2
@@ -448,10 +448,10 @@ def get_kernel(
                                         R.st_global_u32(
                                             ovf, off + 1, txl.reinterpret(index, ty="uint32")
                                         )
-                                    with txl.Else():
+                                    with txl.else_():
                                         # ring full: dropped (:210-214)
                                         txl.assign(keep, txl.int32(0))
-                        with txl.If(keep == 1), txl.Then():
+                        with txl.if_(keep == 1), txl.then_():
                             if is32:
                                 nb = txl.bitwise_and(
                                     txl.cast(txl.shift_right(bits, txl.uint32(shift - 8)), "int32"),
@@ -475,7 +475,7 @@ def get_kernel(
                         # works with no `clusterCtaIdx.x` tag bound, so at one
                         # CTA per cluster rank 0 is this CTA and the mapping is
                         # the identity.
-                        with txl.If(txl.And(k_rem > 0, exceeded == 0)), txl.Then():
+                        with txl.if_(txl.And(k_rem > 0, exceeded == 0)), txl.then_():
                             peer = txl.local_scalar("uint32")
                             txl.ptx.mapa.shared__cluster.u32(
                                 peer,
@@ -484,15 +484,15 @@ def get_kernel(
                             )
                             got = txl.local_scalar("uint32")
                             txl.ptx.atom.shared__cluster.add.u32(got, peer, txl.uint32(1))
-                            with txl.If(txl.cast(got, "int32") < k_rem):
-                                with txl.Then():
+                            with txl.if_(txl.cast(got, "int32") < k_rem):
+                                with txl.then_():
                                     slot = R.atom_shared_add_u32(scal, FINAL, txl.uint32(1))
                                     R.st_shared_u32(
                                         topk_inds,
                                         txl.cast(slot, "int32"),
                                         txl.reinterpret(index, ty="uint32"),
                                     )
-                                with txl.Else():
+                                with txl.else_():
                                     txl.assign(exceeded, txl.int32(1))
 
     def _round(
@@ -523,9 +523,9 @@ def get_kernel(
         txl.assign(exceeded, txl.int32(0))  # :268 -- per round, per thread
         if nc > 1:
             txl.ptx.barrier.cluster.wait()
-        with txl.If(tid < RADIX), txl.Then():
+        with txl.if_(tid < RADIX), txl.then_():
             R.st_shared_u32(hist, (phase ^ 1) * RADIX + tid, txl.uint32(0))
-        with txl.If(tid == 0), txl.Then():
+        with txl.if_(tid == 0), txl.then_():
             R.st_shared_u32(scal, NCACHED + phase, txl.uint32(0))
         _threshold(hist, scal, tid, warp, lane, rank, phase, k_rem, True)
         bin_t = txl.local_scalar("int32", init=txl.cast(R.ld_shared_u32(scal, THR), "int32"))
@@ -635,8 +635,8 @@ def get_kernel(
             txl.assign(rag_off, _ld_i32(aux, row))
 
         # ---- trivial branch (:417-429 / :467-476 / :511-520) ---------------
-        with txl.If(row_len <= k):
-            with txl.Then():
+        with txl.if_(row_len <= k):
+            with txl.then_():
                 if pt and triv_trips * BLOCK_THREADS * nc == k:
                     # Stage the page-table loads into DISTINCT registers before
                     # any store. `unroll=N` on a real loop reuses one destination
@@ -651,10 +651,10 @@ def get_kernel(
                     tbase = tid + (cta % nc) * BLOCK_THREADS
                     for u in range(triv_trips):
                         iu = tbase + u * BLOCK_THREADS * nc
-                        with txl.If(iu < row_len):
-                            with txl.Then():
+                        with txl.if_(iu < row_len):
+                            with txl.then_():
                                 txl.assign(stage[u], _ld_i32(aux, pt_base + iu))
-                            with txl.Else():
+                            with txl.else_():
                                 txl.assign(stage[u], txl.int32(-1))
                     for u in range(triv_trips):
                         iu = tbase + u * BLOCK_THREADS * nc
@@ -666,8 +666,8 @@ def get_kernel(
                         step=BLOCK_THREADS * nc,
                         unroll=triv_unroll,
                     ) as i:
-                        with txl.If(i < row_len):
-                            with txl.Then():
+                        with txl.if_(i < row_len):
+                            with txl.then_():
                                 if plain:
                                     _st_idx(out_idx, ind_base + i, i, i64)
                                     st_global_bits(
@@ -680,28 +680,28 @@ def get_kernel(
                                     _st_idx(out_idx, ind_base + i, _ld_i32(aux, pt_base + i), i64)
                                 else:
                                     _st_idx(out_idx, ind_base + i, i + rag_off, i64)
-                            with txl.Else():
+                            with txl.else_():
                                 # output_values is left UNTOUCHED over the pad
                                 # region (:425-427) -- the port must not zero it.
                                 _st_idx(out_idx, ind_base + i, -1, i64)
-            with txl.Else():
+            with txl.else_():
                 # Per-CTA constant, but every spilling element reads it from
                 # inside the classification loops.
                 ring_base = txl.local_scalar("int32", init=cta * ovf_stride * 4)
                 exceeded = txl.local_scalar("int32", init=txl.int32(0))
 
                 # ---- zero banks 0/1 and three scalars (:158-170) ------------
-                with txl.If(tid < RADIX), txl.Then():
+                with txl.if_(tid < RADIX), txl.then_():
                     R.st_shared_u32(hist, tid, txl.uint32(0))
                     R.st_shared_u32(hist, RADIX + tid, txl.uint32(0))
-                with txl.If(tid == 0), txl.Then():
+                with txl.if_(tid == 0), txl.then_():
                     R.st_shared_u32(scal, FINAL, txl.uint32(0))
                     R.st_shared_u32(scal, KREM, txl.uint32(0))
                     R.st_shared_u32(scal, NCACHED, txl.uint32(0))
                     # threshold_bin is deliberately NOT initialized (:166-170): a
                     # round whose crossing test selects no lane reads the
                     # previous round's value. Reproduce, do not repair.
-                txl.tvm_storage_sync("shared")
+                txl.gpu_storage_sync("shared")
 
                 # ---- first histogram pass: SCALAR strided (:174-179) --------
                 with txl.serial(
@@ -816,7 +816,7 @@ def get_kernel(
                     )
 
                 # ---- epilogue: claim the output range (:374-404) ------------
-                txl.tvm_storage_sync("shared")
+                txl.gpu_storage_sync("shared")
                 n_out = txl.local_scalar("int32", init=txl.int32(k))
                 out_start = txl.local_scalar("int32", init=txl.int32(0))
                 if nc > 1:
@@ -826,8 +826,8 @@ def get_kernel(
                     )
                     txl.ptx.barrier.cluster.arrive()
                     txl.ptx.barrier.cluster.wait()
-                    with txl.If(rank > 0), txl.Then():
-                        with txl.If(tid == 0), txl.Then():
+                    with txl.if_(rank > 0), txl.then_():
+                        with txl.if_(tid == 0), txl.then_():
                             peer = txl.local_scalar("uint32")
                             txl.ptx.mapa.shared__cluster.u32(
                                 peer,
@@ -839,7 +839,7 @@ def get_kernel(
                                 old, peer, txl.reinterpret(my_num, ty="uint32")
                             )
                             R.st_shared_u32(scal, FINAL, old)  # broadcast (:392)
-                        txl.tvm_storage_sync("shared")
+                        txl.gpu_storage_sync("shared")
                         txl.assign(out_start, txl.cast(R.ld_shared_u32(scal, FINAL), "int32"))
                     txl.ptx.barrier.cluster.arrive()
                     txl.ptx.barrier.cluster.wait()
@@ -848,7 +848,7 @@ def get_kernel(
                 # ---- writeback (:438-447 / :486-492 / :530-536) -------------
                 with txl.serial(tid, n_out, step=BLOCK_THREADS, unroll=wb_unroll) as i4:
                     offs = i4 + out_start
-                    with txl.If(offs < k), txl.Then():
+                    with txl.if_(offs < k), txl.then_():
                         ind = txl.cast(R.ld_shared_u32(topk_inds, i4), "int32")
                         if plain:
                             _st_idx(out_idx, ind_base + offs, ind, i64)
@@ -872,7 +872,7 @@ def get_kernel(
             logits: txl.Tensor((batch * seq_len,), val_t),
             indices: txl.Tensor((batch * k,), idx_t),
             values: txl.Tensor((batch * k,), val_t),
-            overflow: txl.Tensor((batch * 4 * ovf_stride * nc,), txl.i32),
+            overflow: txl.Tensor((batch * 4 * ovf_stride * nc,), "int32"),
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(
@@ -889,9 +889,9 @@ def get_kernel(
         def fast_topk_clusters_kernel(
             logits: txl.Tensor((batch * seq_len,), val_t),
             indices: txl.Tensor((batch * k,), idx_t),
-            seq_lens: txl.Tensor((batch,), txl.i32),
-            aux: txl.Tensor((batch * seq_len if pt else batch,), txl.i32),
-            overflow: txl.Tensor((batch * 4 * ovf_stride * nc,), txl.i32),
+            seq_lens: txl.Tensor((batch,), "int32"),
+            aux: txl.Tensor((batch * seq_len if pt else batch,), "int32"),
+            overflow: txl.Tensor((batch * 4 * ovf_stride * nc,), "int32"),
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(

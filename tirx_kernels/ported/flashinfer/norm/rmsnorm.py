@@ -136,7 +136,7 @@ def _butterfly_sum_f32(acc, lane_xors: tuple[int, ...]) -> None:
     each round reading the value the previous round produced.  Every lane of
     the warp reaches every round, so this must be called at a convergent point.
     """
-    peer = txl.local_scalar(txl.u32)
+    peer = txl.local_scalar("uint32")
     for lane_xor in lane_xors:
         txl.ptx.shfl_sync.bfly.b32(
             peer,
@@ -165,7 +165,7 @@ def _load_global_bits(
     elif vec == 2:
         load.v2.b16(values[value_offset], values[value_offset + 1], buffer.ptr_to([index]))
     else:
-        words = txl.alloc_local([vec // 2], txl.u32)
+        words = txl.alloc_local([vec // 2], "uint32")
         if vec == 4:
             load.v2.b32(words[0], words[1], buffer.ptr_to([index]))
         else:
@@ -192,14 +192,14 @@ def _load_shared_bits(values, value_offset: int, shared_raw, byte_offset, vec: i
             values[value_offset], values[value_offset + 1], shared_raw.ptr_to([byte_offset])
         )
     elif vec == 4:
-        halves = txl.alloc_local([4], txl.u16)
+        halves = txl.alloc_local([4], "uint16")
         txl.ptx.ld.shared.v4.b16(
             halves[0], halves[1], halves[2], halves[3], shared_raw.ptr_to([byte_offset])
         )
         for value in range(4):
             txl.assign(values[value_offset + value], halves[value])
     else:
-        words = txl.alloc_local([4], txl.u32)
+        words = txl.alloc_local([4], "uint32")
         txl.ptx.ld.shared.v4.b32(
             words[0], words[1], words[2], words[3], shared_raw.ptr_to([byte_offset])
         )
@@ -583,7 +583,7 @@ def get_kernel(
         # a *sum* is distributed over its terms by the simplifier, so each term
         # would widen on its own (one IMAD.WIDE apiece). Landing the finished
         # int32 value in a local first gives the cast a single Var to sit on.
-        row_i32 = txl.local_scalar(txl.i32, init=block_x * rows + row_in_cta)
+        row_i32 = txl.local_scalar("int32", init=block_x * rows + row_in_cta)
         row_i64 = txl.cast(row_i32, "int64")
         row_valid = txl.bool(True) if thor_full_rows else row_i64 < runtime_M
         warp = tid // 32
@@ -591,30 +591,30 @@ def get_kernel(
         row_warp = warp // warps_per_row
         warp_in_row = warp % warps_per_row
 
-        shared_raw = txl.smem_pool().alloc([smem_bytes], txl.u8)
+        shared_raw = txl.smem_pool().alloc([smem_bytes], "uint8")
 
         if cluster_n > 1:
-            with txl.If(tid == 0), txl.Then():
+            with txl.if_(tid == 0), txl.then_():
                 txl.ptx.mbarrier.init.shared.b64(shared_raw.ptr_to([mbar_offset]), txl.uint32(1))
             txl.ptx.fence.mbarrier_init.release.cluster()
             txl.ptx.barrier.cluster.arrive.relaxed()
             txl.ptx.barrier.cluster.wait()
 
-        x_bits = txl.alloc_local([pair_values], txl.u16)
-        w_bits = txl.alloc_local([pair_values], txl.u16)
-        x_f32 = txl.alloc_local([pair_values], txl.f32)
-        w_f32 = txl.alloc_local([pair_values], txl.f32)
+        x_bits = txl.alloc_local([pair_values], "uint16")
+        w_bits = txl.alloc_local([pair_values], "uint16")
+        x_f32 = txl.alloc_local([pair_values], "float32")
+        w_f32 = txl.alloc_local([pair_values], "float32")
         if thor_parallel_reduction:
-            partial_sums = txl.alloc_local([thor_reduction_partials], txl.f32)
+            partial_sums = txl.alloc_local([thor_reduction_partials], "float32")
         else:
-            x_sq = txl.alloc_local([pair_values], txl.f32)
+            x_sq = txl.alloc_local([pair_values], "float32")
         # The odd upper half of the last pair is a don't-care lane the source
         # leaves uninitialized; reading it keeps the packed shape intact.
-        undefined_f32 = txl.local_scalar(txl.f32)
-        packed = txl.local_scalar(txl.u64)
+        undefined_f32 = txl.local_scalar("float32")
+        packed = txl.local_scalar("uint64")
 
         if compact:
-            element = txl.local_scalar(txl.i32)
+            element = txl.local_scalar("int32")
 
             def compact_index(value):
                 """One compact element offset, widened to the int64 axis exactly once."""
@@ -638,7 +638,7 @@ def get_kernel(
                 if thor_full_rows and thor_full_cols:
                     _load_global_bits(x_bits, vb * vec, x, x_offset, vec, l1_evict_first=True)
                 else:
-                    with txl.If(txl.And(row_valid, col_valid)), txl.Then():
+                    with txl.if_(txl.And(row_valid, col_valid)), txl.then_():
                         _load_global_bits(x_bits, vb * vec, x, x_offset, vec, l1_evict_first=True)
             elif use_async:
                 if thor_full_rows:
@@ -654,7 +654,7 @@ def get_kernel(
                         source_bytes,
                     )
                 else:
-                    with txl.If(row_valid), txl.Then():
+                    with txl.if_(row_valid), txl.then_():
                         # Ignore-src: an out-of-range column copies nothing and the
                         # staged bytes read back as zero.
                         txl.ptx[_CP_ASYNC](
@@ -667,7 +667,7 @@ def get_kernel(
                 if thor_full_rows and thor_full_cols:
                     _load_global_bits(x_bits, vb * vec, x, x_offset, vec)
                 else:
-                    with txl.If(txl.And(row_valid, col_valid)), txl.Then():
+                    with txl.if_(txl.And(row_valid, col_valid)), txl.then_():
                         _load_global_bits(x_bits, vb * vec, x, x_offset, vec)
 
         if use_async and not thor_direct_x:
@@ -679,7 +679,7 @@ def get_kernel(
             if thor_full_cols:
                 _load_global_bits(w_bits, vb * vec, weight, absolute_col, vec)
             else:
-                with txl.If(absolute_col < H), txl.Then():
+                with txl.if_(absolute_col < H), txl.then_():
                     _load_global_bits(w_bits, vb * vec, weight, absolute_col, vec)
 
         if use_async and not thor_direct_x:
@@ -707,7 +707,7 @@ def get_kernel(
                     txl.ptx.fma.rn.f32(
                         partial_sums[partial], x_f32[value], x_f32[value], partial_sums[partial]
                     )
-            local_sum = txl.local_scalar(txl.f32, init=partial_sums[0])
+            local_sum = txl.local_scalar("float32", init=partial_sums[0])
             for partial in range(1, thor_reduction_partials):
                 txl.ptx.add.f32(local_sum, local_sum, partial_sums[partial])
         else:
@@ -719,7 +719,7 @@ def get_kernel(
                 )
                 txl.ptx.mov.b64(x_sq[pair * 2], x_sq[pair * 2 + 1], packed)
 
-            local_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
+            local_sum = txl.local_scalar("float32", init=txl.float32(0.0))
             for value in range(total_values):
                 txl.ptx.add.f32(local_sum, local_sum, x_sq[value])
 
@@ -727,35 +727,35 @@ def get_kernel(
         warp_sum = local_sum
 
         if warps_per_row > 1 and cluster_n == 1:
-            with txl.If(lane == 0), txl.Then():
+            with txl.if_(lane == 0), txl.then_():
                 txl.ptx.st.shared.b32(
                     shared_raw.ptr_to([reduce_base + (row_warp + warp_in_row * rows) * 4]),
                     txl.reinterpret(warp_sum, ty="uint32"),
                 )
             txl.ptx.bar.sync(txl.uint32(0))
-            final_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
+            final_sum = txl.local_scalar("float32", init=txl.float32(0.0))
             if thor_leader_warp_finalize:
-                with txl.If(warp_in_row == 0), txl.Then():
-                    with txl.If(lane < warps_per_row), txl.Then():
-                        reduce_word = txl.local_scalar(txl.u32)
+                with txl.if_(warp_in_row == 0), txl.then_():
+                    with txl.if_(lane < warps_per_row), txl.then_():
+                        reduce_word = txl.local_scalar("uint32")
                         txl.ptx.ld.shared.b32(
                             reduce_word,
                             shared_raw.ptr_to([reduce_base + (row_warp + lane * rows) * 4]),
                         )
                         txl.assign(final_sum, txl.reinterpret(reduce_word, ty="float32"))
                     _butterfly_sum_f32(final_sum, full_lane_xors)
-                    with txl.If(lane == 0), txl.Then():
+                    with txl.if_(lane == 0), txl.then_():
                         txl.ptx.st.shared.b32(
                             shared_raw.ptr_to([reduce_base + row_warp * 4]),
                             txl.reinterpret(final_sum, ty="uint32"),
                         )
                 txl.ptx.bar.sync(txl.uint32(0))
-                final_word = txl.local_scalar(txl.u32)
+                final_word = txl.local_scalar("uint32")
                 txl.ptx.ld.shared.b32(final_word, shared_raw.ptr_to([reduce_base + row_warp * 4]))
                 sum_sq = txl.reinterpret(final_word, ty="float32")
             else:
-                with txl.If(lane < warps_per_row), txl.Then():
-                    reduce_word = txl.local_scalar(txl.u32)
+                with txl.if_(lane < warps_per_row), txl.then_():
+                    reduce_word = txl.local_scalar("uint32")
                     txl.ptx.ld.shared.b32(
                         reduce_word, shared_raw.ptr_to([reduce_base + (row_warp + lane * rows) * 4])
                     )
@@ -763,14 +763,14 @@ def get_kernel(
                 _butterfly_sum_f32(final_sum, full_lane_xors)
                 sum_sq = final_sum
         elif cluster_n > 1:
-            with txl.If(warp == 0), txl.Then():
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(warp == 0), txl.then_():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                         shared_raw.ptr_to([mbar_offset]), txl.uint32(expected_bytes)
                     )
-            with txl.If(lane < cluster_n), txl.Then():
+            with txl.if_(lane < cluster_n), txl.then_():
                 reduce_index = row_warp + warp_in_row * rows + cta_rank * rows * warps_per_row
-                peer_reduce = txl.local_scalar(txl.u32)
+                peer_reduce = txl.local_scalar("uint32")
                 txl.ptx.mapa.shared__cluster.u32(
                     peer_reduce,
                     txl.cuda.cvta_generic_to_shared(
@@ -778,7 +778,7 @@ def get_kernel(
                     ),
                     txl.cast(lane, "uint32"),
                 )
-                peer_mbar = txl.local_scalar(txl.u32)
+                peer_mbar = txl.local_scalar("uint32")
                 txl.ptx.mapa.shared__cluster.u32(
                     peer_mbar,
                     txl.cuda.cvta_generic_to_shared(shared_raw.ptr_to([mbar_offset])),
@@ -790,16 +790,16 @@ def get_kernel(
 
             txl.cuda.mbarrier_wait(shared_raw.ptr_to([mbar_offset]), txl.int32(0))
 
-            final_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
+            final_sum = txl.local_scalar("float32", init=txl.float32(0.0))
             for iteration in range(_ceil_div(total_partials_per_row, 32)):
                 partial = lane + iteration * 32
-                with txl.If(partial < total_partials_per_row), txl.Then():
+                with txl.if_(partial < total_partials_per_row), txl.then_():
                     reduce_index = (
                         row_warp
                         + (partial % warps_per_row) * rows
                         + (partial // warps_per_row) * rows * warps_per_row
                     )
-                    reduce_word = txl.local_scalar(txl.u32)
+                    reduce_word = txl.local_scalar("uint32")
                     txl.ptx.ld.shared.b32(
                         reduce_word, shared_raw.ptr_to([reduce_base + reduce_index * 4])
                     )
@@ -811,13 +811,13 @@ def get_kernel(
         else:
             sum_sq = warp_sum
 
-        shifted = txl.local_scalar(txl.f32)
+        shifted = txl.local_scalar("float32")
         if H & (H - 1) == 0:
             txl.ptx.fma.rn.f32(shifted, sum_sq, txl.float32(1.0 / H), runtime_eps)
         else:
             txl.ptx.div.rn.f32(shifted, sum_sq, txl.float32(H))
             txl.ptx.add.f32(shifted, shifted, runtime_eps)
-        rstd = txl.local_scalar(txl.f32)
+        rstd = txl.local_scalar("float32")
         txl.ptx.rsqrt.approx.ftz.f32(rstd, shifted)
 
         # A cluster-1 full Thor tile only reads the staged input after this
@@ -891,8 +891,8 @@ def get_kernel(
                 )
                 txl.ptx.mov.b64(x_f32[pair * 2], x_f32[pair * 2 + 1], packed)
 
-        y_bits = txl.alloc_local([pair_values], txl.u16)
-        y_words = txl.alloc_local([packed_pairs], txl.u32)
+        y_bits = txl.alloc_local([pair_values], "uint16")
+        y_words = txl.alloc_local([packed_pairs], "uint32")
         if packed_narrow:
             for pair in range(packed_pairs):
                 txl.ptx[cvt_pair_from_f32](y_words[pair], x_f32[pair * 2 + 1], x_f32[pair * 2])
@@ -933,8 +933,8 @@ def get_kernel(
             x: txl.Tensor((txl.int64(),), dtype),
             weight: txl.Tensor((H,), dtype),
             y: txl.Tensor((txl.int64(),), dtype),
-            runtime_M: txl.i64,
-            runtime_eps: txl.f32,
+            runtime_M: "int64",
+            runtime_eps: "float32",
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(
@@ -972,10 +972,10 @@ def get_kernel(
             x: txl.Tensor((txl.int64(),), dtype),
             weight: txl.Tensor((H,), dtype),
             y: txl.Tensor((txl.int64(),), dtype),
-            runtime_M: txl.i64,
-            runtime_eps: txl.f32,
-            x_row_stride: txl.i64,
-            y_row_stride: txl.i64,
+            runtime_M: "int64",
+            runtime_eps: "float32",
+            x_row_stride: "int64",
+            y_row_stride: "int64",
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(

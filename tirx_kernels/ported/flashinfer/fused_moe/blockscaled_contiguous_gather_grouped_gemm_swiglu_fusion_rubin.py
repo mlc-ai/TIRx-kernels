@@ -213,7 +213,7 @@ def _try_wait(dst, barrier, phase):
 
 def _wait(barrier, phase):
     ready = txl.local_scalar("uint32", init=txl.uint32(0))
-    with txl.While(ready == txl.uint32(0)):
+    with txl.while_(ready == txl.uint32(0)):
         txl.ptx.mbarrier.try_wait.parity.shared.b64(
             ready, barrier, txl.cast(phase, "uint32"), txl.uint32(_TRY_WAIT_TICKS)
         )
@@ -405,9 +405,9 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
         gather_sfa_role = roles.role("gather_sfa", warps=[12, 13, 14, 15], regs=80)
         transform_role = roles.role("transform_sfa", warps=[16, 17, 18, 19], regs=48)
 
-        smem = txl.alloc_tensor((_SMEM_BYTES,), txl.u8, scope="shared.dyn", align=1024)
+        smem = txl.alloc_tensor((_SMEM_BYTES,), "uint8", scope="shared.dyn", align=1024)
         pool = txl.smem_pool(base=smem)
-        info = pool.alloc((10,), txl.i32, align=4)
+        info = pool.alloc((10,), "int32", align=4)
         a_pipe = txl.Pipeline(pool, 8, full="mbar", empty="tcgen05", leader=txl.bool(False))
         b_pipe = txl.Pipeline(pool, 8, full="tma", empty="tcgen05", leader=txl.bool(False))
         sfa_pipe = txl.Pipeline(pool, 8, full="mbar", empty="mbar", leader=txl.bool(False))
@@ -416,8 +416,8 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
         tile_pipe = txl.Pipeline(pool, 2, full="mbar", empty="mbar", leader=txl.bool(False))
         if pool.bytes != _TMEM_DEALLOC_OFFSET:
             raise AssertionError(f"protocol layout changed: {pool.bytes}")
-        _tmem_dealloc = pool.alloc((1,), txl.u64, align=8)
-        tmem_slot = pool.alloc((1,), txl.u32, align=4)
+        _tmem_dealloc = pool.alloc((1,), "uint64", align=8)
+        tmem_slot = pool.alloc((1,), "uint32", align=4)
         del _tmem_dealloc
         if pool.bytes != _TMEM_PTR_OFFSET + 4:
             raise AssertionError(f"protocol header changed: {pool.bytes}")
@@ -428,21 +428,21 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
             txl.ptx.prefetch.tensormap(txl.address_of(c_map))
 
         def init_pipe(pipe, stages, full_arrivals, empty_arrivals):
-            with txl.If(_elected()):
-                with txl.Then():
+            with txl.if_(_elected()):
+                with txl.then_():
                     with txl.unroll(0, stages) as stage:
                         txl.ptx.mbarrier.init.shared.b64(
                             pipe.full.ptr_to([stage]), txl.uint32(full_arrivals)
                         )
-            with txl.If(_elected()):
-                with txl.Then():
+            with txl.if_(_elected()):
+                with txl.then_():
                     with txl.unroll(0, stages) as stage:
                         txl.ptx.mbarrier.init.shared.b64(
                             pipe.empty.ptr_to([stage]), txl.uint32(empty_arrivals)
                         )
 
-        with txl.If(warp == 0):
-            with txl.Then():
+        with txl.if_(warp == 0):
+            with txl.then_():
                 init_pipe(sfa_pipe, 8, 128, 128)
                 init_pipe(sfa_t_pipe, 4, 128, 1)
                 init_pipe(a_pipe, 8, 128, 1)
@@ -489,7 +489,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
             work = txl.local_scalar("int32", init=work_id)
             active_tiles = txl.local_scalar("int32")
             txl.ptx.ld.global_.s32(active_tiles, num_non_exiting_tiles.ptr_to([0]))
-            with txl.While(work < active_tiles * n_tiles):
+            with txl.while_(work < active_tiles * n_tiles):
                 tile_m = work // n_tiles
                 tile_n = work % n_tiles
                 _wait(tile_pipe.empty.ptr_to([state.stage]), state.phase)
@@ -497,8 +497,8 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
                 limit = txl.local_scalar("int32")
                 txl.ptx.ld.global_.s32(expert, tile_idx_to_expert_idx.ptr_to([tile_m]))
                 txl.ptx.ld.global_.s32(limit, tile_idx_to_mn_limit.ptr_to([tile_m]))
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         base = state.stage * 5
                         txl.ptx.st.shared.b32(info.ptr_to([base]), tile_m)
                         txl.ptx.st.shared.b32(info.ptr_to([base + 1]), tile_n)
@@ -513,8 +513,8 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
                 _advance(state)
                 txl.assign(work, work + num_clusters)
             _wait(tile_pipe.empty.ptr_to([state.stage]), state.phase)
-            with txl.If(_elected()):
-                with txl.Then():
+            with txl.if_(_elected()):
+                with txl.then_():
                     base = state.stage * 5
                     txl.ptx.st.shared.b32(info.ptr_to([base]), txl.int32(0))
                     txl.ptx.st.shared.b32(info.ptr_to([base + 1]), txl.int32(0))
@@ -563,7 +563,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
             valid = txl.local_scalar("int32")
             mn_limit = txl.local_scalar("int32")
             wait_and_read_info(tile_state, tile_m, tile_n, expert, valid, mn_limit)
-            with txl.While(valid != 0):
+            with txl.while_(valid != 0):
                 for item in range(8):
                     row = thread // 8 + item * 16
                     global_row = tile_m * 128 + row
@@ -589,7 +589,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
                     else:
                         txl.assign(token_rows[item], token_row)
                 count = txl.local_scalar("int32", init=0)
-                with txl.While(count < k_tiles):
+                with txl.while_(count < k_tiles):
                     _wait(a_pipe.empty.ptr_to([producer.stage]), producer.phase)
                     # The prior MMA reads A through the async proxy; cp.async
                     # reuses it through the generic proxy after this handoff.
@@ -649,7 +649,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
             valid = txl.local_scalar("int32")
             mn_limit = txl.local_scalar("int32")
             wait_and_read_info(tile_state, tile_m, tile_n, expert, valid, mn_limit)
-            with txl.While(valid != 0):
+            with txl.while_(valid != 0):
                 global_row = tile_m * 128 + thread
                 token = txl.local_scalar("int32")
                 txl.ptx.ld.global_.s32(token, token_id_mapping.ptr_to([global_row]))
@@ -660,7 +660,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
                     "uint32", init=txl.cast(global_row < mn_limit, "uint32")
                 )
                 count = txl.local_scalar("int32", init=0)
-                with txl.While(count < k_tiles):
+                with txl.while_(count < k_tiles):
                     _wait(sfa_pipe.empty.ptr_to([producer.stage]), producer.phase)
                     source = (
                         txl.cast(source_row, "int64") * (K_dim // 16)
@@ -694,9 +694,9 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
             valid = txl.local_scalar("int32")
             mn_limit = txl.local_scalar("int32")
             wait_and_read_info(tile_state, tile_m, tile_n, expert, valid, mn_limit)
-            with txl.While(valid != 0):
+            with txl.while_(valid != 0):
                 count = txl.local_scalar("int32", init=0)
-                with txl.While(count < k_tiles):
+                with txl.while_(count < k_tiles):
                     _wait(sfa_pipe.full.ptr_to([consumer.stage]), consumer.phase)
                     for row_group in range(4):
                         address = _SFA_OFFSET + consumer.stage * 2048 + (row_group * 32 + lane) * 16
@@ -740,16 +740,16 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
             expert = txl.local_scalar("int32")
             valid = txl.local_scalar("int32")
             wait_and_read_info(tile_state, tile_m, tile_n, expert, valid)
-            with txl.While(valid != 0):
+            with txl.while_(valid != 0):
                 count = txl.local_scalar("int32", init=0)
-                with txl.While(count < k_tiles):
+                with txl.while_(count < k_tiles):
                     speculative = txl.local_scalar("uint32")
                     _try_wait(speculative, b_pipe.empty.ptr_to([producer.stage]), producer.phase)
-                    with txl.If(speculative == txl.uint32(0)):
-                        with txl.Then():
+                    with txl.if_(speculative == txl.uint32(0)):
+                        with txl.then_():
                             _wait(b_pipe.empty.ptr_to([producer.stage]), producer.phase)
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                                 b_pipe.full.ptr_to([producer.stage]), txl.uint32(18_432)
                             )
@@ -814,19 +814,19 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
             expert = txl.local_scalar("int32")
             valid = txl.local_scalar("int32")
             wait_and_read_info(tile_state, tile_m, tile_n, expert, valid)
-            with txl.While(valid != 0):
+            with txl.while_(valid != 0):
                 _wait(acc_pipe.empty.ptr_to([acc_producer.stage]), acc_producer.phase)
                 count = txl.local_scalar("int32", init=0)
                 accumulate = txl.local_scalar("uint32", init=txl.uint32(0))
-                with txl.While(count < k_tiles):
+                with txl.while_(count < k_tiles):
                     _wait(a_pipe.full.ptr_to([a_consumer.stage]), a_consumer.phase)
                     # cp.async (not bulk) writes through the generic proxy.
                     txl.ptx.fence.proxy.async_.shared__cta()
                     _wait(b_pipe.full.ptr_to([b_consumer.stage]), b_consumer.phase)
                     _wait(sfa_t_pipe.full.ptr_to([sfa_t_consumer.stage]), sfa_t_consumer.phase)
                     for chunk in range(4):
-                        with txl.If(_elected()):
-                            with txl.Then():
+                        with txl.if_(_elected()):
+                            with txl.then_():
                                 txl.ptx["tcgen05.cp.cta_group::1.32x128b.warpx4"](
                                     txl.cast(tmem_base + 320 + chunk * 4, "uint32"),
                                     sfb_descriptor
@@ -838,8 +838,8 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
                         )
                         sfb_addr = txl.cast(tmem_base + 320 + kblock * 8, "uint32")
                         mma_desc = runtime_descriptor(sfa_addr, sfb_addr)
-                        with txl.If(_elected()):
-                            with txl.Then():
+                        with txl.if_(_elected()):
+                            with txl.then_():
                                 txl.ptx[
                                     "tcgen05.mma.cta_group::1.kind::mxf4nvf4"
                                     ".block_scale.block16.collector::a::discard"
@@ -862,20 +862,20 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
                                     ),
                                 )
                     txl.assign(accumulate, txl.uint32(1))
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             txl.ptx[
                                 "tcgen05.commit.cta_group::1.mbarrier::arrive::one"
                                 ".shared::cluster.b64"
                             ](a_pipe.empty.ptr_to([a_consumer.stage]))
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             txl.ptx[
                                 "tcgen05.commit.cta_group::1.mbarrier::arrive::one"
                                 ".shared::cluster.b64"
                             ](b_pipe.empty.ptr_to([b_consumer.stage]))
-                    with txl.If(_elected()):
-                        with txl.Then():
+                    with txl.if_(_elected()):
+                        with txl.then_():
                             txl.ptx[
                                 "tcgen05.commit.cta_group::1.mbarrier::arrive::one"
                                 ".shared::cluster.b64"
@@ -884,8 +884,8 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
                     _advance(b_consumer)
                     _advance(sfa_t_consumer)
                     txl.assign(count, count + 1)
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         txl.ptx[
                             "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64"
                         ](acc_pipe.full.ptr_to([acc_producer.stage]))
@@ -894,8 +894,8 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
             drain_empty(acc_pipe, acc_producer, 2)
 
         with epilogue_role:
-            with txl.If(warp == 0):
-                with txl.Then():
+            with txl.if_(warp == 0):
+                with txl.then_():
                     txl.ptx["tcgen05.alloc.exclusive.cta_group::1.sync.aligned.shared::cta.b32"](
                         tmem_slot.ptr_to([0]), txl.uint32(_TMEM_COLUMNS)
                     )
@@ -936,7 +936,7 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
                 txl.ptx.mov.b64(dst0, dst1, both)
 
             wait_and_read_info(tile_state, tile_m, tile_n, expert, valid)
-            with txl.While(valid != 0):
+            with txl.while_(valid != 0):
                 _wait(acc_pipe.full.ptr_to([acc_consumer.stage]), acc_consumer.phase)
                 alpha_value = txl.local_scalar("float32")
                 txl.ptx.ld.global_.b32(alpha_value, alpha.ptr_to([expert]))
@@ -1117,10 +1117,10 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
                     )
                 txl.ptx.fence.proxy.async_.shared__cta()
                 txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
-                with txl.If(warp == 0):
-                    with txl.Then():
-                        with txl.If(_elected()):
-                            with txl.Then():
+                with txl.if_(warp == 0):
+                    with txl.then_():
+                        with txl.if_(_elected()):
+                            with txl.then_():
                                 txl.ptx[
                                     "cp.async.bulk.tensor.3d.global.shared::cta.tile"
                                     ".bulk_group.L2::cache_hint"
@@ -1135,20 +1135,20 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
                                 txl.ptx.cp.async_.bulk.commit_group()
                                 txl.ptx.cp.async_.bulk.wait_group.read(8)
                 txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
-                with txl.If(_elected()):
-                    with txl.Then():
+                with txl.if_(_elected()):
+                    with txl.then_():
                         txl.ptx.mbarrier.arrive.shared.b64(
                             acc_pipe.empty.ptr_to([acc_consumer.stage]), txl.uint32(1)
                         )
                 _advance(acc_consumer)
                 txl.assign(executed, executed + 1)
                 wait_and_read_info(tile_state, tile_m, tile_n, expert, valid)
-            with txl.If(warp == 0):
-                with txl.Then():
+            with txl.if_(warp == 0):
+                with txl.then_():
                     txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"]()
             txl.ptx.bar.sync(txl.uint32(2), txl.uint32(128))
-            with txl.If(warp == 0):
-                with txl.Then():
+            with txl.if_(warp == 0):
+                with txl.then_():
                     txl.ptx["tcgen05.dealloc.exclusive.cta_group::1.sync.aligned.b32"](
                         tmem_base, txl.uint32(_TMEM_COLUMNS)
                     )
@@ -1158,18 +1158,18 @@ def _make_kernel(num_experts, seq_len, N, K_dim, routing, num_sms, use_pdl, *, b
             txl.ptx.griddepcontrol.launch_dependents()
 
     kernel.__annotations__ = {
-        "a": txl.Tensor((seq_len * K_dim // 2,), txl.u8),
-        "b": txl.Tensor((num_experts * N * K_dim // 2,), txl.u8),
-        "sfa": txl.Tensor((seq_len * K_dim // 16,), txl.u8),
-        "sfb": txl.Tensor((num_experts * N * K_dim // 16,), txl.u8),
-        "c": txl.Tensor((permuted_m * N // 4,), txl.u8),
-        "sfc": txl.Tensor((permuted_m * N // 32,), txl.u8),
-        "alpha": txl.Tensor((num_experts,), txl.f32),
-        "tile_idx_to_expert_idx": txl.Tensor((permuted_tiles,), txl.i32),
-        "tile_idx_to_mn_limit": txl.Tensor((permuted_tiles,), txl.i32),
-        "token_id_mapping": txl.Tensor((permuted_m,), txl.i32),
-        "num_non_exiting_tiles": txl.Tensor((1,), txl.i32),
-        "global_scale": txl.Tensor((1,), txl.f32),
+        "a": txl.Tensor((seq_len * K_dim // 2,), "uint8"),
+        "b": txl.Tensor((num_experts * N * K_dim // 2,), "uint8"),
+        "sfa": txl.Tensor((seq_len * K_dim // 16,), "uint8"),
+        "sfb": txl.Tensor((num_experts * N * K_dim // 16,), "uint8"),
+        "c": txl.Tensor((permuted_m * N // 4,), "uint8"),
+        "sfc": txl.Tensor((permuted_m * N // 32,), "uint8"),
+        "alpha": txl.Tensor((num_experts,), "float32"),
+        "tile_idx_to_expert_idx": txl.Tensor((permuted_tiles,), "int32"),
+        "tile_idx_to_mn_limit": txl.Tensor((permuted_tiles,), "int32"),
+        "token_id_mapping": txl.Tensor((permuted_m,), "int32"),
+        "num_non_exiting_tiles": txl.Tensor((1,), "int32"),
+        "global_scale": txl.Tensor((1,), "float32"),
     }
     return txl.kernel()(kernel)
 

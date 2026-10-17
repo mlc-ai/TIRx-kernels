@@ -640,7 +640,7 @@ def _load_scale_bf16x2(scale, offset, out):
     mant = txl.alloc_local((1,), "uint32")
     acc = txl.alloc_local((1,), "uint32")
     packed = txl.local_scalar(
-        txl.u32, init=txl.reinterpret(packed_i[0], ty="uint32"), name="packed"
+        "uint32", init=txl.reinterpret(packed_i[0], ty="uint32"), name="packed"
     )
     txl.ptx.prmt.b32(q[0], packed, packed, txl.uint32(0x1302))
     txl.ptx.and_.b32(acc[0], q[0], txl.uint32(0x80008000))
@@ -787,7 +787,7 @@ def _dequant_kv_fp4(
     export counts as one extra ``mul.rn.bf16x2`` (17 against 16). Under FP8 Q it
     is absent here and lands on the S accumulator instead.
     """
-    with txl.If(count_raw > 0), txl.Then():
+    with txl.if_(count_raw > 0), txl.then_():
         bar_tma.wait(0, 0)
         if mma_dtype == "float8_e4m3":
             # Pair form: two scale columns, 32 values, one 16-byte load.
@@ -811,13 +811,13 @@ def _dequant_kv_fp4(
             staged = txl.alloc_local((DEQUANT_FP8_STAGED,), "uint32")
             for pre in range(DEQUANT_FP8_BATCH):
                 task_pre = txl.local_scalar(
-                    txl.i32, init=pre * DEQUANT_THREADS + group_tidx, name="task_pre"
+                    "int32", init=pre * DEQUANT_THREADS + group_tidx, name="task_pre"
                 )
                 row_pre = txl.local_scalar(
-                    txl.i32, init=udiv_i32(task_pre, pairs_per_row), name="row_pre"
+                    "int32", init=udiv_i32(task_pre, pairs_per_row), name="row_pre"
                 )
                 pair_pre = txl.local_scalar(
-                    txl.i32, init=task_pre - row_pre * pairs_per_row, name="pair_pre"
+                    "int32", init=task_pre - row_pre * pairs_per_row, name="pair_pre"
                 )
                 txl.ptx.ld.shared.v4.b32(
                     staged[pre * 4],
@@ -828,11 +828,11 @@ def _dequant_kv_fp4(
                 )
             for it in range(DEQUANT_FP8_BATCH):
                 task = txl.local_scalar(
-                    txl.i32, init=it * DEQUANT_THREADS + group_tidx, name="task"
+                    "int32", init=it * DEQUANT_THREADS + group_tidx, name="task"
                 )
-                row = txl.local_scalar(txl.i32, init=udiv_i32(task, pairs_per_row), name="row")
+                row = txl.local_scalar("int32", init=udiv_i32(task, pairs_per_row), name="row")
                 pair_col = txl.local_scalar(
-                    txl.i32, init=task - row * pairs_per_row, name="pair_col"
+                    "int32", init=task - row * pairs_per_row, name="pair_col"
                 )
                 if paged:
                     # Re-read EVERY ITERATION: the backend does not hoist this
@@ -840,17 +840,17 @@ def _dequant_kv_fp4(
                     # inside the `.pragma "nounroll"` body), and lifting it
                     # changes the hottest loop's instruction count.
                     page_idx_d = txl.local_scalar(
-                        txl.i32, init=ld_shared_i32(s_paged_kv_idx, 0), name="page_idx_d"
+                        "int32", init=ld_shared_i32(s_paged_kv_idx, 0), name="page_idx_d"
                     )
                     scale_row = txl.local_scalar(
-                        txl.i32,
+                        "int32",
                         init=_paged_kv_scale_row(row, head_kv_idx, page_idx_d, num_heads_kv),
                         name="scale_row",
                     )
                 else:
-                    token = txl.local_scalar(txl.i32, init=token_base + row, name="token")
+                    token = txl.local_scalar("int32", init=token_base + row, name="token")
                     scale_row = txl.local_scalar(
-                        txl.i32,
+                        "int32",
                         init=_flat_kv_scale_row(token, head_kv_idx, num_heads_kv),
                         name="scale_row",
                     )
@@ -885,27 +885,27 @@ def _dequant_kv_fp4(
             # ROLLED (`unroll=1`, :1444), for the same reason as the pair arm.
             with txl.serial(0, total_tasks // DEQUANT_THREADS, unroll=False) as it:
                 task = txl.local_scalar(
-                    txl.i32, init=it * DEQUANT_THREADS + group_tidx, name="task"
+                    "int32", init=it * DEQUANT_THREADS + group_tidx, name="task"
                 )
-                row = txl.local_scalar(txl.i32, init=udiv_i32(task, SCALE_COLS), name="row")
+                row = txl.local_scalar("int32", init=udiv_i32(task, SCALE_COLS), name="row")
                 scale_col = txl.local_scalar(
-                    txl.i32, init=task - row * SCALE_COLS, name="scale_col"
+                    "int32", init=task - row * SCALE_COLS, name="scale_col"
                 )
                 if paged:
                     # Same per-iteration re-read as the pair arm (.loc 1 1450 K
                     # / :1625 V, inside $L__BB0_89 / $L__BB0_120).
                     page_idx_s = txl.local_scalar(
-                        txl.i32, init=ld_shared_i32(s_paged_kv_idx, 0), name="page_idx_s"
+                        "int32", init=ld_shared_i32(s_paged_kv_idx, 0), name="page_idx_s"
                     )
                     scale_row = txl.local_scalar(
-                        txl.i32,
+                        "int32",
                         init=_paged_kv_scale_row(row, head_kv_idx, page_idx_s, num_heads_kv),
                         name="scale_row",
                     )
                 else:
-                    token = txl.local_scalar(txl.i32, init=token_base + row, name="token")
+                    token = txl.local_scalar("int32", init=token_base + row, name="token")
                     scale_row = txl.local_scalar(
-                        txl.i32,
+                        "int32",
                         init=_flat_kv_scale_row(token, head_kv_idx, num_heads_kv),
                         name="scale_row",
                     )
@@ -940,7 +940,7 @@ def _dequant_kv_fp4(
                     )
         txl.ptx.fence.proxy.async_.shared__cta()
         bar_sync_named(bar_id, DEQUANT_THREADS)
-        with txl.If(group_tidx == 0), txl.Then():
+        with txl.if_(group_tidx == 0), txl.then_():
             bar_ready.arrive(0)
 
 
@@ -959,7 +959,7 @@ def _issue_qk(s_slot, q_slot, q_desc, k_desc, kind, operand_dtype, s_col, stage_
         sub = ki // per_subtile
         within = ki % per_subtile
         off = sub * _SUBTILE_16B + within * _MMA_K_16B
-        with txl.If(txl.cuda.elect_sync()), txl.Then():
+        with txl.if_(txl.cuda.elect_sync()), txl.then_():
             txl.ptx[_MMA_CHAIN[kind]](
                 txl.cast(s_col + s_slot * stage_stride, "uint32"),
                 q_desc.add_16B_offset(q_slot * _stage_16b(operand_dtype) + off),
@@ -997,9 +997,9 @@ def _issue_pv(
     steps = N_BLOCK // mma_k
     split_step = SPLIT_P_ARRIVE // mma_k
     with txl.unroll(steps) as ki:
-        with txl.If(ki == split_step), txl.Then():
+        with txl.if_(ki == split_step), txl.then_():
             bar_last.wait(pv_slot, phase)
-        with txl.If(txl.cuda.elect_sync()), txl.Then():
+        with txl.if_(txl.cuda.elect_sync()), txl.then_():
             txl.ptx[_MMA_CHAIN[kind]](
                 txl.cast(o_col + pv_slot * o_stage_stride, "uint32"),
                 txl.cast(p_col + pv_slot * p_stage_stride + ki * _PV_A_COL_STEP[kind], "uint32"),
@@ -1021,7 +1021,7 @@ def _tcgen05_commit(bar, stage):
     ordered behind the MMA -- including the softmax-produced P pipes, whose
     consumer release the export also shows as a commit (:2129-2130).
     """
-    with txl.If(txl.cuda.elect_sync()), txl.Then():
+    with txl.if_(txl.cuda.elect_sync()), txl.then_():
         bar.arrive(stage)
 
 
@@ -1195,14 +1195,14 @@ def _resolve_gather4_rows(
         for j in range(4):
             qi = qi_base + tok_base + j
             txl.assign(rows[j], q_oob_m_idx)
-            with txl.If(qi < count_raw), txl.Then():
+            with txl.if_(qi < count_raw), txl.then_():
                 q_idx = txl.bitwise_and(ld_shared_i32(meta, meta_slot + tok_base + j), Q_IDX_MASK)
                 txl.assign(rows[j], (q_batch_off + q_idx) * num_heads_kv + head_kv_idx)
     elif qheadperkv == 2:
         for t in range(2):
             qi = qi_base + tok_base + t
             base = txl.local_scalar("int32", init=q_oob_m_idx * qheadperkv)
-            with txl.If(qi < count_raw), txl.Then():
+            with txl.if_(qi < count_raw), txl.then_():
                 q_idx = txl.bitwise_and(ld_shared_i32(meta, meta_slot + tok_base + t), Q_IDX_MASK)
                 txl.assign(base, ((q_batch_off + q_idx) * num_heads_kv + head_kv_idx) * qheadperkv)
             txl.assign(rows[t * 2], base)
@@ -1210,7 +1210,7 @@ def _resolve_gather4_rows(
     else:
         qi = qi_base + tok_base
         base = txl.local_scalar("int32", init=q_oob_m_idx * qheadperkv)
-        with txl.If(qi < count_raw), txl.Then():
+        with txl.if_(qi < count_raw), txl.then_():
             q_idx = txl.bitwise_and(ld_shared_i32(meta, meta_slot + tok_base), Q_IDX_MASK)
             txl.assign(base, ((q_batch_off + q_idx) * num_heads_kv + head_kv_idx) * qheadperkv)
         for j in range(4):
@@ -1471,10 +1471,10 @@ def _make_kernel(*, backend_config=None, **config):
         # Work-item decode and the CTA-level early-out (:660-688).
         # The grid is sized by the work list's CAPACITY, so the tail CTAs retire.
         work_count_val = txl.local_scalar(
-            txl.i32, init=ld_global_i32(work_count, 0), name="work_count_val"
+            "int32", init=ld_global_i32(work_count, 0), name="work_count_val"
         )
         cta_valid_work = txl.local_scalar(
-            txl.i32, init=txl.cast(block < work_count_val, "int32"), name="cta_valid_work"
+            "int32", init=txl.cast(block < work_count_val, "int32"), name="cta_valid_work"
         )
         head_kv_idx = txl.alloc_local((1,), "int32")
         row_linear = txl.alloc_local((1,), "int32")
@@ -1488,7 +1488,7 @@ def _make_kernel(*, backend_config=None, **config):
         txl.assign(work_q_count[0], 0)
         txl.assign(batch_idx[0], 0)
         txl.assign(kv_block_idx[0], 0)
-        with txl.If(cta_valid_work != 0), txl.Then():
+        with txl.if_(cta_valid_work != 0), txl.then_():
             txl.assign(head_kv_idx[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 0))
             txl.assign(row_linear[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 1))
             txl.assign(work_q_begin[0], ld_global_i32(scheduler_metadata, block * WORK_FIELDS + 2))
@@ -1504,13 +1504,13 @@ def _make_kernel(*, backend_config=None, **config):
         # -----------------------------------------------------------------------
         smem = txl.smem_pool()
         pool = smem.pool
-        s_k = smem.alloc((N_BLOCK, HEAD_DIM), qk_ty, swizzle=txl.SW128B).buf
+        s_k = smem.alloc((N_BLOCK, HEAD_DIM), qk_ty, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
         # Same shape as sK: the TMA box's fastest dim is head_dim, so the tile
         # lands (kv rows, head_dim cols) with head_dim contiguous. For the PV
         # B operand that means N = head_dim is the contiguous axis, which is what
         # "MN-major" names (:386-387).
-        s_v = smem.alloc((N_BLOCK, HEAD_DIM), pv_ty, swizzle=txl.SW128B).buf
-        s_q = smem.alloc((Q_STAGE * M_BLOCK, HEAD_DIM), q_ty, swizzle=txl.SW128B).buf
+        s_v = smem.alloc((N_BLOCK, HEAD_DIM), pv_ty, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
+        s_q = smem.alloc((Q_STAGE * M_BLOCK, HEAD_DIM), q_ty, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
         # The packed FP4 staging tiles, UNCONDITIONAL here -- every specialization of
         # this kernel dequantizes (:511-512), where the sibling gates its equivalents
         # on an fp8-staging predicate. Plain buffers, matching their unswizzled
@@ -1579,13 +1579,13 @@ def _make_kernel(*, backend_config=None, **config):
         # -----------------------------------------------------------------------
         # Prologue: descriptor prefetch, thread-0 metadata publish, barrier init.
         # -----------------------------------------------------------------------
-        with txl.If(warp_idx == 0), txl.Then():
+        with txl.if_(warp_idx == 0), txl.then_():
             # ONLY the Q descriptor (:690-696). K and V are never prefetched -- the
             # export carries exactly one `prefetch.tensormap`. The two Q programs
             # also differ in election: the CUTE-atom (TMA-Q) arm issues it
             # unelected, the raw-descriptor gather4 arm elects one lane.
             if USE_GATHER4(qheadperkv):
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     txl.ptx.prefetch.tensormap(txl.address_of(q_map))
             else:
                 txl.ptx.prefetch.tensormap(txl.address_of(q_map))
@@ -1594,7 +1594,7 @@ def _make_kernel(*, backend_config=None, **config):
         # (:751-806). `mbarrier.init` is idempotent across the warp's 32 lanes, so
         # the reference does not elect, and the export shows the 24 inits inside a
         # plain `@%p bra` on the warp index with no `elect.sync`.
-        with txl.If(warp_idx == 0), txl.Then():
+        with txl.if_(warp_idx == 0), txl.then_():
             with txl.unroll(Q_STAGE) as stage:
                 txl.ptx.mbarrier.init.shared.b64(bar_q_full.ptr_to([stage]), txl.uint32(1))
                 txl.ptx.mbarrier.init.shared.b64(bar_q_empty.ptr_to([stage]), txl.uint32(1))
@@ -1629,23 +1629,23 @@ def _make_kernel(*, backend_config=None, **config):
         txl.ptx.fence.mbarrier_init.release.cluster()
         txl.cuda.cta_sync()
 
-        with txl.If(tidx == 0), txl.Then():
+        with txl.if_(tidx == 0), txl.then_():
             base_row_start = txl.local_scalar(
-                txl.i32,
+                "int32",
                 init=ld_global_i32(k2q_row_ptr, head_kv_idx[0] * (total_rows + 1) + row_linear[0]),
                 name="base_row_start",
             )
             row_start = txl.local_scalar(
-                txl.i32, init=base_row_start + work_q_begin[0], name="row_start"
+                "int32", init=base_row_start + work_q_begin[0], name="row_start"
             )
-            count_raw = txl.local_scalar(txl.i32, init=work_q_count[0], name="count_raw")
+            count_raw = txl.local_scalar("int32", init=work_q_count[0], name="count_raw")
             # Upstream reads this as `mPageTable.shape[1]` (:211). The table is
             # rectangular because `page_size == blk_kv`, so `num_batches *
             # pages_per_seq == num_pages == total_k / page_size`, and the quotient
             # of two ABI scalars recovers it without a new argument.
             if paged:
                 pages_per_seq = txl.local_scalar(
-                    txl.i32,
+                    "int32",
                     init=udiv_i32(udiv_i32(total_k, N_BLOCK), num_batches),
                     name="pages_per_seq",
                 )
@@ -1655,26 +1655,26 @@ def _make_kernel(*, backend_config=None, **config):
             # capacity for a shorter supplied length.
             if seqused:
                 seqlen_k = txl.local_scalar(
-                    txl.i32, init=ld_global_i32(seqused_k, batch_idx[0]), name="seqlen_k"
+                    "int32", init=ld_global_i32(seqused_k, batch_idx[0]), name="seqlen_k"
                 )
             elif paged:
-                seqlen_k = txl.local_scalar(txl.i32, init=pages_per_seq * N_BLOCK, name="seqlen_k")
+                seqlen_k = txl.local_scalar("int32", init=pages_per_seq * N_BLOCK, name="seqlen_k")
             else:
                 seqlen_k = txl.local_scalar(
-                    txl.i32,
+                    "int32",
                     init=ld_global_i32(cu_seqlens_k, batch_idx[0] + 1)
                     - ld_global_i32(cu_seqlens_k, batch_idx[0]),
                     name="seqlen_k",
                 )
             kv_valid_cols = txl.local_scalar(
-                txl.i32,
+                "int32",
                 init=txl.min(txl.max(seqlen_k - kv_block_idx[0] * N_BLOCK, 0), N_BLOCK),
                 name="kv_valid_cols",
             )
             q_batch_offset = txl.local_scalar(
-                txl.i32, init=ld_global_i32(cu_seqlens_q, batch_idx[0]), name="q_batch_offset"
+                "int32", init=ld_global_i32(cu_seqlens_q, batch_idx[0]), name="q_batch_offset"
             )
-            k_batch_offset = txl.local_scalar(txl.i32, init=txl.int32(0), name="k_batch_offset")
+            k_batch_offset = txl.local_scalar("int32", init=txl.int32(0), name="k_batch_offset")
             if not paged:
                 txl.assign(k_batch_offset, ld_global_i32(cu_seqlens_k, batch_idx[0]))
             # `seqlen_q` and therefore `causal_q_offset` are needed BEFORE the
@@ -1688,13 +1688,13 @@ def _make_kernel(*, backend_config=None, **config):
             txl.assign(causal_q_offset_l[0], 0)
             if causal:
                 seqlen_q = txl.local_scalar(
-                    txl.i32,
+                    "int32",
                     init=ld_global_i32(cu_seqlens_q, batch_idx[0] + 1) - q_batch_offset,
                     name="seqlen_q",
                 )
                 txl.assign(causal_q_offset_l[0], seqlen_k - seqlen_q)
             causal_q_offset = txl.local_scalar(
-                txl.i32, init=causal_q_offset_l[0], name="causal_q_offset"
+                "int32", init=causal_q_offset_l[0], name="causal_q_offset"
             )
             txl.ptx.st.shared.v4.b32(
                 s_row_meta.ptr_to([0]),
@@ -1720,9 +1720,9 @@ def _make_kernel(*, backend_config=None, **config):
             # would drive the diagonal mask over rows that have no diagonal.
             diag_q_count = txl.alloc_local((1,), "int32")
             txl.assign(diag_q_count[0], 0)
-            with txl.If(txl.And(txl.And(causal, count_raw > 0), kv_valid_cols > 0)), txl.Then():
+            with txl.if_(txl.And(txl.And(causal, count_raw > 0), kv_valid_cols > 0)), txl.then_():
                 q_threshold = txl.local_scalar(
-                    txl.i32,
+                    "int32",
                     init=(kv_block_idx[0] * N_BLOCK + kv_valid_cols) - causal_q_offset,
                     name="q_threshold",
                 )
@@ -1736,19 +1736,19 @@ def _make_kernel(*, backend_config=None, **config):
                 # count the search runs to convergence, and the export keeps it
                 # rolled with exactly one probe load in the body.
                 with txl.serial(0, 32, unroll=False) as _:
-                    with txl.If(lo[0] < hi[0]), txl.Then():
-                        mid = txl.local_scalar(txl.i32, init=udiv_i32(lo[0] + hi[0], 2), name="mid")
+                    with txl.if_(lo[0] < hi[0]), txl.then_():
+                        mid = txl.local_scalar("int32", init=udiv_i32(lo[0] + hi[0], 2), name="mid")
                         probe = txl.local_scalar(
-                            txl.i32,
+                            "int32",
                             init=ld_global_i32(
                                 k2q_q_indices, head_kv_idx[0] * nnz + row_start + mid
                             ),
                             name="probe",
                         )
-                        with txl.If(probe < q_threshold):
-                            with txl.Then():
+                        with txl.if_(probe < q_threshold):
+                            with txl.then_():
                                 txl.assign(lo[0], mid + 1)
-                            with txl.Else():
+                            with txl.else_():
                                 txl.assign(hi[0], mid)
                 txl.assign(diag_q_count[0], lo[0])
             st_shared_i32(s_diag_q_count, 0, diag_q_count[0])
@@ -1772,10 +1772,10 @@ def _make_kernel(*, backend_config=None, **config):
         # same fence and CTA barrier below, so visibility is unchanged and paging
         # still adds no barrier of its own.
         if paged:
-            with txl.If(txl.And(warp_idx == 1, cta_valid_work != 0)), txl.Then():
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.And(warp_idx == 1, cta_valid_work != 0)), txl.then_():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     pages_per_seq_w1 = txl.local_scalar(
-                        txl.i32,
+                        "int32",
                         init=udiv_i32(udiv_i32(total_k, N_BLOCK), num_batches),
                         name="pages_per_seq_w1",
                     )
@@ -1797,7 +1797,7 @@ def _make_kernel(*, backend_config=None, **config):
         # Role dispatch. A flat sequence of independent `if` blocks, each ANDed
         # with `cta_valid_work` -- not an if/elif chain (:943-1191).
         # -----------------------------------------------------------------------
-        with txl.If(warp_idx == TOTAL_WARPS - 1), txl.Then():
+        with txl.if_(warp_idx == TOTAL_WARPS - 1), txl.then_():
             # Warp 15 is idle and is NOT gated on cta_valid_work (:991-992).
             txl.ptx.setmaxnreg.dec.sync.aligned.u32(txl.uint32(NUM_REGS_OTHER))
 
@@ -1805,57 +1805,57 @@ def _make_kernel(*, backend_config=None, **config):
         # ROLE: Q-load warpgroup, warps 8..11 (:1014-1047).
         # -----------------------------------------------------------------------
         with (
-            txl.If(txl.And(tidx >= Q_LOAD_WARP_BASE * WARP_SIZE, tidx < MMA_WARP_ID * WARP_SIZE)),
-            txl.Then(),
+            txl.if_(txl.And(tidx >= Q_LOAD_WARP_BASE * WARP_SIZE, tidx < MMA_WARP_ID * WARP_SIZE)),
+            txl.then_(),
         ):
-            with txl.If(cta_valid_work != 0), txl.Then():
+            with txl.if_(cta_valid_work != 0), txl.then_():
                 txl.ptx.setmaxnreg.dec.sync.aligned.u32(txl.uint32(num_regs_store))
                 q_row_start = txl.local_scalar(
-                    txl.i32, init=ld_shared_i32(s_row_meta, 2), name="q_row_start"
+                    "int32", init=ld_shared_i32(s_row_meta, 2), name="q_row_start"
                 )
                 q_count_raw = txl.local_scalar(
-                    txl.i32, init=ld_shared_i32(s_row_meta, 3), name="q_count_raw"
+                    "int32", init=ld_shared_i32(s_row_meta, 3), name="q_count_raw"
                 )
                 q_batch_off = txl.local_scalar(
-                    txl.i32, init=ld_shared_i32(s_row_meta, 5), name="q_batch_off"
+                    "int32", init=ld_shared_i32(s_row_meta, 5), name="q_batch_off"
                 )
                 # Deliberately NOT gated on KV validity: a sparse entry past the
                 # sequence still runs the all-masked path so its partial is neutral
                 # (:1007-1009).
-                with txl.If(q_count_raw > 0), txl.Then():
+                with txl.if_(q_count_raw > 0), txl.then_():
                     num_q_groups_load = txl.local_scalar(
-                        txl.i32,
+                        "int32",
                         init=uceil_div_i32(q_count_raw, q_tokens_per_group),
                         name="num_q_groups_load",
                     )
                     warp_in_wg = txl.local_scalar(
-                        txl.i32, init=warp_idx - Q_LOAD_WARP_BASE, name="warp_in_wg"
+                        "int32", init=warp_idx - Q_LOAD_WARP_BASE, name="warp_in_wg"
                     )
                     # `q_oob_m_idx = mQ_2d.shape[0] // qheadperkv` (:1855) -- one
                     # past the last Q *tile*, so an absent token gathers out of
                     # bounds and takes the descriptor's OOB fill. `total_q` alone
                     # would be an in-range row whenever num_heads_kv > 1.
                     q_oob_m_idx = txl.local_scalar(
-                        txl.i32, init=total_q * num_heads_kv, name="q_oob_m_idx"
+                        "int32", init=total_q * num_heads_kv, name="q_oob_m_idx"
                     )
 
                     if not USE_GATHER4(qheadperkv):
                         with txl.serial(0, num_q_groups_load, unroll=False) as qi_group:
-                            slot = txl.local_scalar(txl.i32, init=qi_group % Q_STAGE, name="slot")
+                            slot = txl.local_scalar("int32", init=qi_group % Q_STAGE, name="slot")
                             phase = txl.local_scalar(
-                                txl.i32, init=udiv_i32(qi_group, Q_STAGE) & 1, name="phase"
+                                "int32", init=udiv_i32(qi_group, Q_STAGE) & 1, name="phase"
                             )
-                            with txl.If(warp_in_wg == 0), txl.Then():
+                            with txl.if_(warp_in_wg == 0), txl.then_():
                                 bar_q_empty.wait(slot, phase ^ 1)
-                                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                                     _mbar_expect_tx(bar_q_full, slot, M_BLOCK * HEAD_DIM * q_bytes)
                             bar_sync_named(BAR_LOAD_WG, SOFTMAX_THREADS)
 
                             load_meta_slot = txl.local_scalar(
-                                txl.i32, init=slot * q_tokens_per_group, name="load_meta_slot"
+                                "int32", init=slot * q_tokens_per_group, name="load_meta_slot"
                             )
                             qidx_meta_slot = txl.local_scalar(
-                                txl.i32,
+                                "int32",
                                 init=(qi_group & (QIDX_META_STAGES - 1)) * q_tokens_per_group,
                                 name="qidx_meta_slot",
                             )
@@ -1863,18 +1863,18 @@ def _make_kernel(*, backend_config=None, **config):
                             # qheadperkv >= 8 a group is at most 16 tokens
                             # (:1883-1898).
                             with (
-                                txl.If(txl.And(warp_in_wg == 0, lane_idx < q_tokens_per_group)),
-                                txl.Then(),
+                                txl.if_(txl.And(warp_in_wg == 0, lane_idx < q_tokens_per_group)),
+                                txl.then_(),
                             ):
                                 qi = txl.local_scalar(
-                                    txl.i32,
+                                    "int32",
                                     init=qi_group * q_tokens_per_group + lane_idx,
                                     name="qi",
                                 )
-                                with txl.If(qi < q_count_raw):
-                                    with txl.Then():
+                                with txl.if_(qi < q_count_raw):
+                                    with txl.then_():
                                         word = txl.local_scalar(
-                                            txl.i32,
+                                            "int32",
                                             init=ld_global_i32(
                                                 k2q_qsplit_indices,
                                                 head_kv_idx[0] * nnz + q_row_start + qi,
@@ -1889,7 +1889,7 @@ def _make_kernel(*, backend_config=None, **config):
                                             * num_heads_kv
                                             + head_kv_idx[0],
                                         )
-                                    with txl.Else():
+                                    with txl.else_():
                                         st_shared_i32(s_qidx_meta, qidx_meta_slot + lane_idx, 0)
                                         st_shared_i32(
                                             s_q_load_m_idx, load_meta_slot + lane_idx, q_oob_m_idx
@@ -1897,22 +1897,22 @@ def _make_kernel(*, backend_config=None, **config):
                             bar_sync_named(BAR_LOAD_WG, SOFTMAX_THREADS)
 
                             # Publish metadata only after every writer joins.
-                            with txl.If((warp_in_wg == 0) & (lane_idx == 0)), txl.Then():
+                            with txl.if_((warp_in_wg == 0) & (lane_idx == 0)), txl.then_():
                                 bar_q_full.arrive(slot)
 
                             with txl.unroll(TOKENS_PER_WARP(qheadperkv)) as qi_slot:
                                 tok = txl.local_scalar(
-                                    txl.i32,
+                                    "int32",
                                     init=warp_in_wg * TOKENS_PER_WARP(qheadperkv) + qi_slot,
                                     name="tok",
                                 )
-                                with txl.If(tok < q_tokens_per_group), txl.Then():
+                                with txl.if_(tok < q_tokens_per_group), txl.then_():
                                     m_tile = txl.local_scalar(
-                                        txl.i32,
+                                        "int32",
                                         init=ld_shared_i32(s_q_load_m_idx, load_meta_slot + tok),
                                         name="m_tile",
                                     )
-                                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                                         with txl.unroll(Q_SUBTILES(q_bytes)) as ks:
                                             txl.ptx[_TMA_G2S_2D_CACHE](
                                                 txl.ptr_byte_offset(
@@ -1931,14 +1931,14 @@ def _make_kernel(*, backend_config=None, **config):
                                                 _TMA_NO_POLICY,
                                             )
 
-                        with txl.If(warp_in_wg == 0), txl.Then():
+                        with txl.if_(warp_in_wg == 0), txl.then_():
                             # One acquire past the end leaves the ring's empty half
                             # in the state the next work item expects (:1930-1935).
                             bar_q_empty.wait(
                                 num_q_groups_load % Q_STAGE,
                                 (udiv_i32(num_q_groups_load, Q_STAGE) & 1) ^ 1,
                             )
-                            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                                 txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                                     bar_q_full.ptr_to([num_q_groups_load % Q_STAGE]),
                                     txl.uint32(M_BLOCK * HEAD_DIM * q_bytes),
@@ -1953,13 +1953,13 @@ def _make_kernel(*, backend_config=None, **config):
                             NUM_Q_LOAD_WARPS * WARP_SIZE
                         )
                         with txl.serial(0, num_q_groups_load, unroll=False) as qi_group:
-                            slot = txl.local_scalar(txl.i32, init=qi_group % Q_STAGE, name="slot")
+                            slot = txl.local_scalar("int32", init=qi_group % Q_STAGE, name="slot")
                             phase = txl.local_scalar(
-                                txl.i32, init=udiv_i32(qi_group, Q_STAGE) & 1, name="phase"
+                                "int32", init=udiv_i32(qi_group, Q_STAGE) & 1, name="phase"
                             )
-                            with txl.If(warp_in_wg == 0), txl.Then():
+                            with txl.if_(warp_in_wg == 0), txl.then_():
                                 bar_q_empty.wait(slot, phase ^ 1)
-                                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                                     _mbar_expect_tx(bar_q_full, slot, M_BLOCK * HEAD_DIM * q_bytes)
                             # Issue the qsplit reads BEFORE the barrier and store
                             # them after it. The barrier only orders the shared
@@ -1974,19 +1974,19 @@ def _make_kernel(*, backend_config=None, **config):
                             qsplit_word = txl.alloc_local((meta_iters,), "int32")
                             with txl.unroll(meta_iters) as meta_iter:
                                 tok_pre = txl.local_scalar(
-                                    txl.i32,
+                                    "int32",
                                     init=(meta_iter * NUM_Q_LOAD_WARPS + warp_in_wg) * WARP_SIZE
                                     + lane_idx,
                                     name="tok_pre",
                                 )
                                 txl.assign(qsplit_word[meta_iter], 0)
-                                with txl.If(tok_pre < q_tokens_per_group), txl.Then():
+                                with txl.if_(tok_pre < q_tokens_per_group), txl.then_():
                                     qi_pre = txl.local_scalar(
-                                        txl.i32,
+                                        "int32",
                                         init=qi_group * q_tokens_per_group + tok_pre,
                                         name="qi_pre",
                                     )
-                                    with txl.If(qi_pre < q_count_raw), txl.Then():
+                                    with txl.if_(qi_pre < q_count_raw), txl.then_():
                                         txl.assign(
                                             qsplit_word[meta_iter],
                                             ld_global_i32(
@@ -1997,7 +1997,7 @@ def _make_kernel(*, backend_config=None, **config):
                             bar_sync_named(BAR_LOAD_WG, SOFTMAX_THREADS)
 
                             qidx_meta_slot = txl.local_scalar(
-                                txl.i32,
+                                "int32",
                                 init=txl.bitwise_and(qi_group, QIDX_META_STAGES - 1)
                                 * q_tokens_per_group,
                                 name="qidx_meta_slot",
@@ -2007,28 +2007,28 @@ def _make_kernel(*, backend_config=None, **config):
                             # (:1671-1690).
                             with txl.unroll(meta_iters) as meta_iter:
                                 tok_g4 = txl.local_scalar(
-                                    txl.i32,
+                                    "int32",
                                     init=(meta_iter * NUM_Q_LOAD_WARPS + warp_in_wg) * WARP_SIZE
                                     + lane_idx,
                                     name="tok_g4",
                                 )
-                                with txl.If(tok_g4 < q_tokens_per_group), txl.Then():
+                                with txl.if_(tok_g4 < q_tokens_per_group), txl.then_():
                                     st_shared_i32(
                                         s_qidx_meta, qidx_meta_slot + tok_g4, qsplit_word[meta_iter]
                                     )
                             bar_sync_named(BAR_LOAD_WG, SOFTMAX_THREADS)
-                            with txl.If((warp_in_wg == 0) & (lane_idx == 0)), txl.Then():
+                            with txl.if_((warp_in_wg == 0) & (lane_idx == 0)), txl.then_():
                                 bar_q_full.arrive(slot)
 
-                            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                                 with txl.unroll(gathers_per_warp) as gather_slot:
                                     gather_idx = txl.local_scalar(
-                                        txl.i32,
+                                        "int32",
                                         init=gather_slot * NUM_Q_LOAD_WARPS + warp_in_wg,
                                         name="gather_idx",
                                     )
                                     tok_base = txl.local_scalar(
-                                        txl.i32,
+                                        "int32",
                                         init=gather_idx * tokens_per_gather4,
                                         name="tok_base",
                                     )
@@ -2047,7 +2047,7 @@ def _make_kernel(*, backend_config=None, **config):
                                         qheadperkv=qheadperkv,
                                     )
                                     with txl.unroll(Q_SUBTILES(q_bytes)) as ks:
-                                        with txl.If(ks + 1 < Q_SUBTILES(q_bytes)), txl.Then():
+                                        with txl.if_(ks + 1 < Q_SUBTILES(q_bytes)), txl.then_():
                                             txl.ptx[_TMA_GATHER4_PREFETCH](
                                                 txl.address_of(q_map),
                                                 txl.int32((ks + 1) * q_load_tile),
@@ -2078,12 +2078,12 @@ def _make_kernel(*, backend_config=None, **config):
                                         )
                             bar_sync_named(BAR_LOAD_WG, SOFTMAX_THREADS)
 
-                        with txl.If(warp_in_wg == 0), txl.Then():
+                        with txl.if_(warp_in_wg == 0), txl.then_():
                             bar_q_empty.wait(
                                 num_q_groups_load % Q_STAGE,
                                 (udiv_i32(num_q_groups_load, Q_STAGE) & 1) ^ 1,
                             )
-                            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                                 txl.ptx.mbarrier.arrive.expect_tx.shared.b64(
                                     bar_q_full.ptr_to([num_q_groups_load % Q_STAGE]),
                                     txl.uint32(M_BLOCK * HEAD_DIM * q_bytes),
@@ -2094,31 +2094,31 @@ def _make_kernel(*, backend_config=None, **config):
         # (:1064-1086, :1676-1777).
         # -----------------------------------------------------------------------
         with (
-            txl.If(
+            txl.if_(
                 txl.And(
                     warp_idx >= KV_LOAD_WARP_BASE, warp_idx < KV_LOAD_WARP_BASE + NUM_KV_LOAD_WARPS
                 )
             ),
-            txl.Then(),
+            txl.then_(),
         ):
-            with txl.If(cta_valid_work != 0), txl.Then():
+            with txl.if_(cta_valid_work != 0), txl.then_():
                 txl.ptx.setmaxnreg.dec.sync.aligned.u32(txl.uint32(NUM_REGS_OTHER))
                 kv_block_load = txl.local_scalar(
-                    txl.i32, init=ld_shared_i32(s_row_meta, 1), name="kv_block_load"
+                    "int32", init=ld_shared_i32(s_row_meta, 1), name="kv_block_load"
                 )
                 k_batch_off = txl.local_scalar(
-                    txl.i32, init=ld_shared_i32(s_row_meta, 6), name="k_batch_off"
+                    "int32", init=ld_shared_i32(s_row_meta, 6), name="k_batch_off"
                 )
                 kv_has_work = txl.local_scalar(
-                    txl.i32,
+                    "int32",
                     init=txl.cast(ld_shared_i32(s_row_meta, 3) > 0, "int32"),
                     name="kv_has_work",
                 )
-                with txl.If(kv_has_work != 0), txl.Then():
+                with txl.if_(kv_has_work != 0), txl.then_():
                     kv_row_start = txl.local_scalar(
-                        txl.i32, init=k_batch_off + kv_block_load * N_BLOCK, name="kv_row_start"
+                        "int32", init=k_batch_off + kv_block_load * N_BLOCK, name="kv_row_start"
                     )
-                    with txl.If(warp_idx == KV_LOAD_WARP_BASE), txl.Then():
+                    with txl.if_(warp_idx == KV_LOAD_WARP_BASE), txl.then_():
                         # ONE issue per tile, not two: the packed row is 64 bytes,
                         # inside a single 128-byte box. The copy and the arrive sit
                         # in two separate `elect.sync` regions, as the export shows
@@ -2129,7 +2129,7 @@ def _make_kernel(*, backend_config=None, **config):
                         page_idx_k = txl.alloc_local((1,), "int32")
                         if paged:
                             txl.assign(page_idx_k[0], ld_shared_i32(s_paged_kv_idx, 0))
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             if paged:
                                 txl.ptx[_TMA_G2S_4D_CACHE](
                                     s_k_fp4.ptr_to([0, 0]),
@@ -2151,18 +2151,18 @@ def _make_kernel(*, backend_config=None, **config):
                                     txl.cuda.cvta_generic_to_shared(bar_k_tma.ptr_to([0])),
                                     _TMA_NO_POLICY,
                                 )
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             txl.ptx.mbarrier.arrive.release.cta.shared__cta.b64(
                                 bar_k_tma.ptr_to([0]), txl.uint32(1)
                             )
-                    with txl.If(warp_idx == KV_LOAD_WARP_BASE + 1), txl.Then():
+                    with txl.if_(warp_idx == KV_LOAD_WARP_BASE + 1), txl.then_():
                         # Read warp-wide in this warp's own arm, before the
                         # copy's elect.sync -- the export shows all 32 lanes
                         # executing it (:1709 for K, :1744 for V).
                         page_idx_v = txl.alloc_local((1,), "int32")
                         if paged:
                             txl.assign(page_idx_v[0], ld_shared_i32(s_paged_kv_idx, 0))
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             if paged:
                                 txl.ptx[_TMA_G2S_4D_CACHE](
                                     s_v_fp4.ptr_to([0, 0]),
@@ -2184,7 +2184,7 @@ def _make_kernel(*, backend_config=None, **config):
                                     txl.cuda.cvta_generic_to_shared(bar_v_tma.ptr_to([0])),
                                     _TMA_NO_POLICY,
                                 )
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             txl.ptx.mbarrier.arrive.release.cta.shared__cta.b64(
                                 bar_v_tma.ptr_to([0]), txl.uint32(1)
                             )
@@ -2196,8 +2196,8 @@ def _make_kernel(*, backend_config=None, **config):
         # ROLE: the single MMA-issue warp, warp 12; also the TMEM allocator warp
         # (:1035-1057, :2189-2436).
         # -----------------------------------------------------------------------
-        with txl.If(warp_idx == MMA_WARP_ID), txl.Then():
-            with txl.If(cta_valid_work != 0), txl.Then():
+        with txl.if_(warp_idx == MMA_WARP_ID), txl.then_():
+            with txl.if_(cta_valid_work != 0), txl.then_():
                 txl.ptx.setmaxnreg.dec.sync.aligned.u32(txl.uint32(NUM_REGS_OTHER))
                 txl.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
                     txl.address_of(tmem_start_addr[0]), txl.uint32(TMEM_TOTAL)
@@ -2208,11 +2208,11 @@ def _make_kernel(*, backend_config=None, **config):
                 bar_sync_named(BAR_TMEM_ALLOC, WARP_SIZE * (WARPS_PER_GROUP * 2 + 1))
 
                 mma_count_raw = txl.local_scalar(
-                    txl.i32, init=ld_shared_i32(s_row_meta, 3), name="mma_count_raw"
+                    "int32", init=ld_shared_i32(s_row_meta, 3), name="mma_count_raw"
                 )
-                with txl.If(mma_count_raw > 0), txl.Then():
+                with txl.if_(mma_count_raw > 0), txl.then_():
                     num_q_groups_mma = txl.local_scalar(
-                        txl.i32,
+                        "int32",
                         init=uceil_div_i32(mma_count_raw, q_tokens_per_group),
                         name="num_q_groups_mma",
                     )
@@ -2246,7 +2246,7 @@ def _make_kernel(*, backend_config=None, **config):
                     _tcgen05_commit(bar_s_full, 0)
                     _tcgen05_commit(bar_q_empty, 0)
 
-                    with txl.If(num_q_groups_mma > 1), txl.Then():
+                    with txl.if_(num_q_groups_mma > 1), txl.then_():
                         bar_q_full.wait(1, 0)
                         bar_s_empty.wait(1, 1)
                         _issue_qk(
@@ -2267,12 +2267,12 @@ def _make_kernel(*, backend_config=None, **config):
                     bar_v.wait(0, 0)
 
                     with txl.serial(2, num_q_groups_mma, unroll=False) as qi:
-                        pv_qi = txl.local_scalar(txl.i32, init=qi - 2, name="pv_qi")
+                        pv_qi = txl.local_scalar("int32", init=qi - 2, name="pv_qi")
                         pv_slot = txl.local_scalar(
-                            txl.i32, init=txl.bitwise_and(pv_qi, 1), name="pv_slot"
+                            "int32", init=txl.bitwise_and(pv_qi, 1), name="pv_slot"
                         )
                         pv_phase = txl.local_scalar(
-                            txl.i32, init=udiv_i32(pv_qi, 2) & 1, name="pv_phase"
+                            "int32", init=udiv_i32(pv_qi, 2) & 1, name="pv_phase"
                         )
                         bar_p_full.wait(pv_slot, pv_phase)
                         bar_o_empty.wait(pv_slot, pv_phase ^ 1)
@@ -2292,15 +2292,15 @@ def _make_kernel(*, backend_config=None, **config):
                         _tcgen05_commit(bar_p_last_empty, pv_slot)
                         _tcgen05_commit(bar_p_empty, pv_slot)
 
-                        q_slot = txl.local_scalar(txl.i32, init=qi % Q_STAGE, name="q_slot")
+                        q_slot = txl.local_scalar("int32", init=qi % Q_STAGE, name="q_slot")
                         q_phase = txl.local_scalar(
-                            txl.i32, init=udiv_i32(qi, Q_STAGE) & 1, name="q_phase"
+                            "int32", init=udiv_i32(qi, Q_STAGE) & 1, name="q_phase"
                         )
                         s_slot = txl.local_scalar(
-                            txl.i32, init=txl.bitwise_and(qi, 1), name="s_slot"
+                            "int32", init=txl.bitwise_and(qi, 1), name="s_slot"
                         )
                         s_phase = txl.local_scalar(
-                            txl.i32, init=udiv_i32(qi, 2) & 1, name="s_phase"
+                            "int32", init=udiv_i32(qi, 2) & 1, name="s_phase"
                         )
                         bar_q_full.wait(q_slot, q_phase)
                         bar_s_empty.wait(s_slot, s_phase ^ 1)
@@ -2308,8 +2308,8 @@ def _make_kernel(*, backend_config=None, **config):
                         # whole 8-instruction chain in the emitted code; the Q-slot
                         # choice collapses into an address select (export: two
                         # chains behind `@%p bra`, one PV chain).
-                        with txl.If(s_slot == 0):
-                            with txl.Then():
+                        with txl.if_(s_slot == 0):
+                            with txl.then_():
                                 _issue_qk(
                                     0,
                                     q_slot,
@@ -2320,7 +2320,7 @@ def _make_kernel(*, backend_config=None, **config):
                                     tmem_s_col,
                                     tmem_stage_stride,
                                 )
-                            with txl.Else():
+                            with txl.else_():
                                 _issue_qk(
                                     1,
                                     q_slot,
@@ -2336,16 +2336,16 @@ def _make_kernel(*, backend_config=None, **config):
 
                     # Drain the last one or two PV tiles (:2152-2183).
                     drain_begin = txl.local_scalar(
-                        txl.i32,
+                        "int32",
                         init=txl.if_then_else(num_q_groups_mma == 1, 0, num_q_groups_mma - 2),
                         name="drain_begin",
                     )
                     with txl.serial(drain_begin, num_q_groups_mma, unroll=False) as pv_qi2:
                         pv_slot2 = txl.local_scalar(
-                            txl.i32, init=txl.bitwise_and(pv_qi2, 1), name="pv_slot2"
+                            "int32", init=txl.bitwise_and(pv_qi2, 1), name="pv_slot2"
                         )
                         pv_phase2 = txl.local_scalar(
-                            txl.i32, init=udiv_i32(pv_qi2, 2) & 1, name="pv_phase2"
+                            "int32", init=udiv_i32(pv_qi2, 2) & 1, name="pv_phase2"
                         )
                         bar_p_full.wait(pv_slot2, pv_phase2)
                         bar_o_empty.wait(pv_slot2, pv_phase2 ^ 1)
@@ -2399,15 +2399,15 @@ def _make_kernel(*, backend_config=None, **config):
             fake-column order, the combine kernel reads it back that way, and the
             permutation undoes the one the fragment already carries.
             """
-            slot = txl.local_scalar(txl.i32, init=txl.bitwise_and(qi_group, 1), name="slot")
-            phase = txl.local_scalar(txl.i32, init=udiv_i32(qi_group, 2) & 1, name="phase")
+            slot = txl.local_scalar("int32", init=txl.bitwise_and(qi_group, 1), name="slot")
+            phase = txl.local_scalar("int32", init=udiv_i32(qi_group, 2) & 1, name="phase")
             bar_o_full.wait(slot, phase)
 
             # Decode the packed qsplit once per group into the 2-deep caches; every
             # per-store read below comes out of these, never out of s_qidx_meta.
-            with txl.If(group_tidx < q_tokens_per_group), txl.Then():
+            with txl.if_(group_tidx < q_tokens_per_group), txl.then_():
                 word = txl.local_scalar(
-                    txl.i32,
+                    "int32",
                     init=ld_shared_i32(s_qidx_meta, qidx_meta_slot + group_tidx),
                     name="word",
                 )
@@ -2433,14 +2433,14 @@ def _make_kernel(*, backend_config=None, **config):
             # sectors for 512 bytes, the minimum. Under `32x32b` the thread IS the
             # row, so every lane of a store lands on a different row 512 bytes
             # away: the same bytes at twice the sectors.
-            warp_in_wg = txl.local_scalar(txl.i32, init=group_tidx // WARP_SIZE, name="warp_in_wg")
+            warp_in_wg = txl.local_scalar("int32", init=group_tidx // WARP_SIZE, name="warp_in_wg")
             lane_in_warp = txl.local_scalar(
-                txl.i32, init=group_tidx - warp_in_wg * WARP_SIZE, name="lane_in_warp"
+                "int32", init=group_tidx - warp_in_wg * WARP_SIZE, name="lane_in_warp"
             )
             row_of_lane = txl.local_scalar(
-                txl.i32, init=warp_in_wg * 32 + lane_in_warp // 4, name="row_of_lane"
+                "int32", init=warp_in_wg * 32 + lane_in_warp // 4, name="row_of_lane"
             )
-            col_of_lane = txl.local_scalar(txl.i32, init=(lane_in_warp % 4) * 2, name="col_of_lane")
+            col_of_lane = txl.local_scalar("int32", init=(lane_in_warp % 4) * 2, name="col_of_lane")
 
             # One reciprocal per (lane_base, parity) for the whole epilogue -- four
             # per thread -- instead of one per 128-bit store.
@@ -2448,15 +2448,15 @@ def _make_kernel(*, backend_config=None, **config):
             for lb in range(2):
                 for par in range(2):
                     rs_row = txl.local_scalar(
-                        txl.i32, init=row_of_lane + lb * 16 + 8 * par, name="rs_row"
+                        "int32", init=row_of_lane + lb * 16 + 8 * par, name="rs_row"
                     )
                     rs_sum = txl.local_scalar(
-                        txl.f32,
+                        "float32",
                         init=ld_shared_f32(s_scale, slot * M_BLOCK * 2 + rs_row),
                         name="rs_sum",
                     )
                     rs_safe = txl.local_scalar(
-                        txl.f32,
+                        "float32",
                         init=txl.if_then_else(
                             txl.Or(rs_sum == txl.float32(0.0), rs_sum != rs_sum),
                             txl.float32(1.0),
@@ -2490,26 +2490,26 @@ def _make_kernel(*, backend_config=None, **config):
                     # `tok` is the token within the group, `row_in_tok` the head
                     # inside that token.
                     row = txl.local_scalar(
-                        txl.i32, init=row_of_lane + lane_base + 8 * parity, name="row"
+                        "int32", init=row_of_lane + lane_base + 8 * parity, name="row"
                     )
-                    tok = txl.local_scalar(txl.i32, init=udiv_i32(row, qheadperkv), name="tok")
+                    tok = txl.local_scalar("int32", init=udiv_i32(row, qheadperkv), name="tok")
                     row_in_tok = txl.local_scalar(
-                        txl.i32, init=row - tok * qheadperkv, name="row_in_tok"
+                        "int32", init=row - tok * qheadperkv, name="row_in_tok"
                     )
                     qi = txl.local_scalar(
-                        txl.i32, init=qi_group * q_tokens_per_group + tok, name="qi"
+                        "int32", init=qi_group * q_tokens_per_group + tok, name="qi"
                     )
-                    with txl.If(qi < count_raw), txl.Then():
+                    with txl.if_(qi < count_raw), txl.then_():
                         # Re-read per store, as the reference does: nothing here is
                         # hoisted out of the column loop, the reciprocal included
                         # (:2785-2800, measured one of each per 128-bit store).
                         q_idx_e = txl.local_scalar(
-                            txl.i32,
+                            "int32",
                             init=ld_shared_i32(s_q_idx, slot * q_tokens_per_group + tok),
                             name="q_idx_e",
                         )
                         split_e = txl.local_scalar(
-                            txl.i32,
+                            "int32",
                             init=ld_shared_i32(s_split_idx, slot * q_tokens_per_group + tok),
                             name="split_e",
                         )
@@ -2527,10 +2527,10 @@ def _make_kernel(*, backend_config=None, **config):
                         row_scale = txl.alloc_local((1,), "float32")
                         txl.assign(row_scale[0], row_scale_cache[(lane_base // 16) * 2 + parity])
                         q_abs_e = txl.local_scalar(
-                            txl.i32, init=q_batch_off + q_idx_e, name="q_abs_e"
+                            "int32", init=q_batch_off + q_idx_e, name="q_abs_e"
                         )
                         flat_row = txl.local_scalar(
-                            txl.i64,
+                            "int64",
                             init=(
                                 txl.cast(split_e, "int64")
                                 * txl.cast(total_q, "int64")
@@ -2544,7 +2544,7 @@ def _make_kernel(*, backend_config=None, **config):
                         # `col_base + (lane%4)*2 + 8*kb`; the fake-column map turns
                         # that into the contiguous output address.
                         store_col = txl.local_scalar(
-                            txl.i32,
+                            "int32",
                             init=_fake_col(partial_dtype, col_base + col_of_lane + 8 * kb),
                             name="store_col",
                         )
@@ -2603,7 +2603,7 @@ def _make_kernel(*, backend_config=None, **config):
                 o_regs_a = txl.alloc_local((32,), "float32")
                 o_regs_b = txl.alloc_local((32,), "float32")
                 with txl.serial(0, 2, unroll=False) as col_pass:
-                    col_base_rt = txl.local_scalar(txl.i32, init=col_pass * 64, name="col_base_rt")
+                    col_base_rt = txl.local_scalar("int32", init=col_pass * 64, name="col_base_rt")
                     load_o_pass(o_regs_a, 0, col_base_rt)
                     load_o_pass(o_regs_b, 16, col_base_rt)
                     store_o_pass(o_regs_a, 0, col_base_rt)
@@ -2611,25 +2611,25 @@ def _make_kernel(*, backend_config=None, **config):
                 txl.ptx.tcgen05.wait__ld.sync.aligned()
 
             # LSE: one row per thread (:2987-3016).
-            tok_l = txl.local_scalar(txl.i32, init=udiv_i32(group_tidx, qheadperkv), name="tok_l")
+            tok_l = txl.local_scalar("int32", init=udiv_i32(group_tidx, qheadperkv), name="tok_l")
             h_local = txl.local_scalar(
-                txl.i32, init=group_tidx - tok_l * qheadperkv, name="h_local"
+                "int32", init=group_tidx - tok_l * qheadperkv, name="h_local"
             )
-            with txl.If(qi_group * q_tokens_per_group + tok_l < count_raw), txl.Then():
+            with txl.if_(qi_group * q_tokens_per_group + tok_l < count_raw), txl.then_():
                 row_sum_l = txl.local_scalar(
-                    txl.f32,
+                    "float32",
                     init=ld_shared_f32(s_scale, slot * M_BLOCK * 2 + group_tidx),
                     name="row_sum_l",
                 )
                 row_max_l = txl.local_scalar(
-                    txl.f32,
+                    "float32",
                     init=ld_shared_f32(s_scale, slot * M_BLOCK * 2 + M_BLOCK + group_tidx),
                     name="row_max_l",
                 )
                 lg = txl.alloc_local((1,), "float32")
                 txl.ptx.lg2.approx.ftz.f32(lg[0], row_sum_l)
                 lse_val = txl.local_scalar(
-                    txl.f32,
+                    "float32",
                     init=txl.if_then_else(
                         txl.Or(row_sum_l == txl.float32(0.0), row_sum_l != row_sum_l),
                         -txl.infinity("float32"),
@@ -2638,20 +2638,20 @@ def _make_kernel(*, backend_config=None, **config):
                     name="lse_val",
                 )
                 q_idx_l = txl.local_scalar(
-                    txl.i32,
+                    "int32",
                     init=ld_shared_i32(s_q_idx, slot * q_tokens_per_group + tok_l),
                     name="q_idx_l",
                 )
                 split_l = txl.local_scalar(
-                    txl.i32,
+                    "int32",
                     init=ld_shared_i32(s_split_idx, slot * q_tokens_per_group + tok_l),
                     name="split_l",
                 )
                 h_abs = txl.local_scalar(
-                    txl.i32, init=head_kv_idx[0] * qheadperkv + h_local, name="h_abs"
+                    "int32", init=head_kv_idx[0] * qheadperkv + h_local, name="h_abs"
                 )
                 lse_flat = txl.local_scalar(
-                    txl.i64,
+                    "int64",
                     init=(
                         txl.cast(split_l, "int64")
                         * txl.cast(total_q, "int64")
@@ -2664,14 +2664,14 @@ def _make_kernel(*, backend_config=None, **config):
                 txl.ptx.st.global_.f32(lse_partial.ptr_to([lse_flat]), lse_val)
                 if temperature:
                     temp_sum = txl.local_scalar(
-                        txl.f32,
+                        "float32",
                         init=ld_shared_f32(s_scale_temp, slot * M_BLOCK + group_tidx),
                         name="temp_sum",
                     )
                     lgt = txl.alloc_local((1,), "float32")
                     txl.ptx.lg2.approx.ftz.f32(lgt[0], temp_sum)
                     lse_t = txl.local_scalar(
-                        txl.f32,
+                        "float32",
                         init=txl.if_then_else(
                             txl.Or(temp_sum == txl.float32(0.0), temp_sum != temp_sum),
                             NEG_INF,
@@ -2687,28 +2687,28 @@ def _make_kernel(*, backend_config=None, **config):
 
         def softmax_warpgroup(stage):
             group_tidx = txl.local_scalar(
-                txl.i32, init=tidx - stage * SOFTMAX_THREADS, name="group_tidx"
+                "int32", init=tidx - stage * SOFTMAX_THREADS, name="group_tidx"
             )
             kv_block_sm = txl.local_scalar(
-                txl.i32, init=ld_shared_i32(s_row_meta, 1), name="kv_block_sm"
+                "int32", init=ld_shared_i32(s_row_meta, 1), name="kv_block_sm"
             )
             count_raw_sm = txl.local_scalar(
-                txl.i32, init=ld_shared_i32(s_row_meta, 3), name="count_raw_sm"
+                "int32", init=ld_shared_i32(s_row_meta, 3), name="count_raw_sm"
             )
             kv_valid_cols = txl.local_scalar(
-                txl.i32, init=ld_shared_i32(s_row_meta, 4), name="kv_valid_cols"
+                "int32", init=ld_shared_i32(s_row_meta, 4), name="kv_valid_cols"
             )
             q_batch_off_sm = txl.local_scalar(
-                txl.i32, init=ld_shared_i32(s_row_meta, 5), name="q_batch_off_sm"
+                "int32", init=ld_shared_i32(s_row_meta, 5), name="q_batch_off_sm"
             )
             # Read unconditionally, as the source does (:1119-1127): both cells only
             # ever feed the diagonal mask, so a non-causal build leaves two dead
             # scalar loads behind rather than gating them away.
             causal_q_off = txl.local_scalar(
-                txl.i32, init=ld_shared_i32(s_row_meta, 7), name="causal_q_off"
+                "int32", init=ld_shared_i32(s_row_meta, 7), name="causal_q_off"
             )
             diag_q_count_sm = txl.local_scalar(
-                txl.i32, init=ld_shared_i32(s_diag_q_count, 0), name="diag_q_count_sm"
+                "int32", init=ld_shared_i32(s_diag_q_count, 0), name="diag_q_count_sm"
             )
 
             # NVFP4 dequantization (:1779-1865). Unconditional and not in the load
@@ -2716,10 +2716,10 @@ def _make_kernel(*, backend_config=None, **config):
             # softmax warpgroup converts it into the tile the MMA reads, before
             # entering its own loop. WG0 takes K, WG1 takes V.
             k_batch_off_sm = txl.local_scalar(
-                txl.i32, init=ld_shared_i32(s_row_meta, 6), name="k_batch_off_sm"
+                "int32", init=ld_shared_i32(s_row_meta, 6), name="k_batch_off_sm"
             )
             token_base_sm = txl.local_scalar(
-                txl.i32, init=k_batch_off_sm + kv_block_sm * N_BLOCK, name="token_base_sm"
+                "int32", init=k_batch_off_sm + kv_block_sm * N_BLOCK, name="token_base_sm"
             )
             if stage == 0:
                 _dequant_kv_fp4(
@@ -2765,9 +2765,9 @@ def _make_kernel(*, backend_config=None, **config):
 
             bar_sync_named(BAR_TMEM_ALLOC, WARP_SIZE * (WARPS_PER_GROUP * 2 + 1))
 
-            with txl.If(count_raw_sm > 0), txl.Then():
+            with txl.if_(count_raw_sm > 0), txl.then_():
                 num_q_groups_sm = txl.local_scalar(
-                    txl.i32,
+                    "int32",
                     init=uceil_div_i32(count_raw_sm, q_tokens_per_group),
                     name="num_q_groups_sm",
                 )
@@ -2775,29 +2775,29 @@ def _make_kernel(*, backend_config=None, **config):
                 # diagonal column limit, which a non-causal build never computes.
                 if causal:
                     kv_block_col_start = txl.local_scalar(
-                        txl.i32, init=kv_block_sm * N_BLOCK, name="kv_block_col_start"
+                        "int32", init=kv_block_sm * N_BLOCK, name="kv_block_col_start"
                     )
                 else:
                     kv_block_col_start = txl.local_scalar(
-                        txl.i32, init=txl.int32(0), name="kv_block_col_start"
+                        "int32", init=txl.int32(0), name="kv_block_col_start"
                     )
                 # WG0 takes the even Q groups, WG1 the odd ones (:2465-2468).
                 num_stage_groups = txl.local_scalar(
-                    txl.i32,
+                    "int32",
                     init=udiv_i32(num_q_groups_sm + (1 - stage), 2),
                     name="num_stage_groups",
                 )
 
                 with txl.serial(0, num_stage_groups, unroll=False) as qi_iter:
-                    qi_group = txl.local_scalar(txl.i32, init=qi_iter * 2 + stage, name="qi_group")
+                    qi_group = txl.local_scalar("int32", init=qi_iter * 2 + stage, name="qi_group")
                     phase = txl.local_scalar(
-                        txl.i32, init=txl.bitwise_and(qi_iter, 1), name="phase"
+                        "int32", init=txl.bitwise_and(qi_iter, 1), name="phase"
                     )
                     producer_phase = txl.local_scalar(
-                        txl.i32, init=phase ^ 1, name="producer_phase"
+                        "int32", init=phase ^ 1, name="producer_phase"
                     )
                     qidx_meta_slot = txl.local_scalar(
-                        txl.i32,
+                        "int32",
                         init=txl.bitwise_and(qi_group, QIDX_META_STAGES - 1) * q_tokens_per_group,
                         name="qidx_meta_slot",
                     )
@@ -2851,21 +2851,21 @@ def _make_kernel(*, backend_config=None, **config):
                         # here and takes the column-limit-only arm (:2544-2548), so
                         # none of this is emitted.
                         qi_group_start = txl.local_scalar(
-                            txl.i32, init=qi_group * q_tokens_per_group, name="qi_group_start"
+                            "int32", init=qi_group * q_tokens_per_group, name="qi_group_start"
                         )
                         masked_tok_count = txl.local_scalar(
-                            txl.i32,
+                            "int32",
                             init=txl.max(
                                 0, txl.min(q_tokens_per_group, diag_q_count_sm - qi_group_start)
                             ),
                             name="masked_tok_count",
                         )
-                        with txl.If(masked_tok_count > 0), txl.Then():
+                        with txl.if_(masked_tok_count > 0), txl.then_():
                             tok_of_row = txl.local_scalar(
-                                txl.i32, init=udiv_i32(group_tidx, qheadperkv), name="tok_of_row"
+                                "int32", init=udiv_i32(group_tidx, qheadperkv), name="tok_of_row"
                             )
                             q_idx_mask = txl.local_scalar(
-                                txl.i32,
+                                "int32",
                                 init=txl.bitwise_and(
                                     ld_shared_i32(s_qidx_meta, qidx_meta_slot + tok_of_row),
                                     Q_IDX_MASK,
@@ -2873,15 +2873,15 @@ def _make_kernel(*, backend_config=None, **config):
                                 name="q_idx_mask",
                             )
                             causal_col_limit = txl.local_scalar(
-                                txl.i32,
+                                "int32",
                                 init=q_idx_mask + causal_q_off - kv_block_col_start + 1,
                                 name="causal_col_limit",
                             )
                             txl.assign(col_limit[0], txl.min(kv_valid_cols, causal_col_limit))
-                    with txl.If(col_limit[0] < N_BLOCK), txl.Then():
+                    with txl.if_(col_limit[0] < N_BLOCK), txl.then_():
                         with txl.unroll(N_BLOCK // MASK_R2P_CHUNK) as chunk:
                             shift = txl.local_scalar(
-                                txl.i32,
+                                "int32",
                                 init=txl.max((chunk + 1) * MASK_R2P_CHUNK - col_limit[0], 0),
                                 name="shift",
                             )
@@ -2895,7 +2895,7 @@ def _make_kernel(*, backend_config=None, **config):
                             txl.ptx.shr.u32(
                                 bits_reg[0], txl.uint32(0xFFFFFFFF), txl.cast(shift, "uint32")
                             )
-                            bits = txl.local_scalar(txl.u32, init=bits_reg[0], name="bits")
+                            bits = txl.local_scalar("uint32", init=bits_reg[0], name="bits")
                             # `txl.unroll`, not `range`: a `range` here lowers to a
                             # runtime 32-trip loop, and this body runs once per
                             # element, per softmax step, per Q group, in both
@@ -2910,14 +2910,14 @@ def _make_kernel(*, backend_config=None, **config):
                             # per-element select.
                             with txl.unroll(MASK_R2P_CHUNK) as i:
                                 with (
-                                    txl.If(
+                                    txl.if_(
                                         txl.bitwise_and(
                                             bits,
                                             txl.shift_left(txl.uint32(1), txl.cast(i, "uint32")),
                                         )
                                         == txl.uint32(0)
                                     ),
-                                    txl.Then(),
+                                    txl.then_(),
                                 ):
                                     txl.assign(s_regs[chunk * MASK_R2P_CHUNK + i], NEG_INF)
 
@@ -2940,10 +2940,10 @@ def _make_kernel(*, backend_config=None, **config):
                     # (:514), and redoing it in f32 here differs by one ULP, which
                     # propagates straight into every LSE.
                     scale_log2 = txl.local_scalar(
-                        txl.f32, init=softmax_scale_log2, name="scale_log2"
+                        "float32", init=softmax_scale_log2, name="scale_log2"
                     )
                     neg_max_scaled = txl.local_scalar(
-                        txl.f32, init=-(row_max[0] * scale_log2), name="neg_max_scaled"
+                        "float32", init=-(row_max[0] * scale_log2), name="neg_max_scaled"
                     )
                     with txl.unroll(N_BLOCK // 2) as ii:
                         i = ii * 2
@@ -2989,15 +2989,15 @@ def _make_kernel(*, backend_config=None, **config):
                                     (k % ex2_emu_freq) < (ex2_emu_freq - EX2_EMU_RES),
                                     txl.Or(j >= EX2_FRG_CNT - 1, j < EX2_EMU_START_FRG),
                                 )
-                                with txl.If(use_mufu):
-                                    with txl.Then():
+                                with txl.if_(use_mufu):
+                                    with txl.then_():
                                         txl.ptx.ex2.approx.ftz.f32(
                                             s_regs[j * 32 + k], s_regs[j * 32 + k]
                                         )
                                         txl.ptx.ex2.approx.ftz.f32(
                                             s_regs[j * 32 + k + 1], s_regs[j * 32 + k + 1]
                                         )
-                                    with txl.Else():
+                                    with txl.else_():
                                         _ex2_emulation_2(s_regs, j * 32 + k, j * 32 + k + 1)
                         _pack_p_words(p_words, s_regs, j, pv_dtype)
 
@@ -3014,7 +3014,7 @@ def _make_kernel(*, backend_config=None, **config):
                             ),
                             *[p_words[k * rep + i] for i in range(rep)],
                         )
-                        with txl.If(k + 1 == split_idx), txl.Then():
+                        with txl.if_(k + 1 == split_idx), txl.then_():
                             txl.ptx.tcgen05.wait__st.sync.aligned()
                             bar_p_full.arrive(stage)
                     txl.ptx.tcgen05.wait__st.sync.aligned()
@@ -3047,79 +3047,79 @@ def _make_kernel(*, backend_config=None, **config):
 
             bar_arrive_named(BAR_TMEM_ALLOC, WARP_SIZE * (WARPS_PER_GROUP * 2 + 1))
 
-        with txl.If(warp_idx < SOFTMAX1_WARP_BASE), txl.Then():
-            with txl.If(cta_valid_work != 0), txl.Then():
+        with txl.if_(warp_idx < SOFTMAX1_WARP_BASE), txl.then_():
+            with txl.if_(cta_valid_work != 0), txl.then_():
                 txl.ptx.setmaxnreg.inc.sync.aligned.u32(txl.uint32(num_regs_softmax))
                 softmax_warpgroup(0)
 
         with (
-            txl.If(txl.And(warp_idx >= SOFTMAX1_WARP_BASE, warp_idx < Q_LOAD_WARP_BASE)),
-            txl.Then(),
+            txl.if_(txl.And(warp_idx >= SOFTMAX1_WARP_BASE, warp_idx < Q_LOAD_WARP_BASE)),
+            txl.then_(),
         ):
-            with txl.If(cta_valid_work != 0), txl.Then():
+            with txl.if_(cta_valid_work != 0), txl.then_():
                 txl.ptx.setmaxnreg.inc.sync.aligned.u32(txl.uint32(num_regs_softmax))
                 softmax_warpgroup(1)
 
-    _shape_head_q = txl.Var("head_q", txl.i32)
-    _shape_nnz = txl.Var("nnz", txl.i32)
-    _shape_num_batches = txl.Var("num_batches", txl.i32)
-    _shape_num_heads_kv = txl.Var("num_heads_kv", txl.i32)
-    _shape_scale_numel = txl.Var("scale_numel", txl.i32)
-    _shape_topk = txl.Var("topk", txl.i32)
-    _shape_total_k = txl.Var("total_k", txl.i32)
-    _shape_total_q = txl.Var("total_q", txl.i32)
-    _shape_total_rows = txl.Var("total_rows", txl.i32)
-    _shape_work_capacity = txl.Var("work_capacity", txl.i32)
+    _shape_head_q = txl.Var("head_q", "int32")
+    _shape_nnz = txl.Var("nnz", "int32")
+    _shape_num_batches = txl.Var("num_batches", "int32")
+    _shape_num_heads_kv = txl.Var("num_heads_kv", "int32")
+    _shape_scale_numel = txl.Var("scale_numel", "int32")
+    _shape_topk = txl.Var("topk", "int32")
+    _shape_total_k = txl.Var("total_k", "int32")
+    _shape_total_q = txl.Var("total_q", "int32")
+    _shape_total_rows = txl.Var("total_rows", "int32")
+    _shape_work_capacity = txl.Var("work_capacity", "int32")
 
     parameters = [
         # K/V keep their three logical axes because the host-side TensorMap
         # encoding consumes that tensor ABI.  Paged storage is reshaped to the
         # same contiguous rank-3 view by tirx_args; no match_buffer is needed.
-        ("k", txl.Tensor((_shape_total_k, _shape_num_heads_kv, PACKED_HEAD_DIM), txl.u8)),
-        ("v", txl.Tensor((_shape_total_k, _shape_num_heads_kv, PACKED_HEAD_DIM), txl.u8)),
-        ("k_scale", txl.Tensor((_shape_scale_numel,), txl.u8)),
-        ("v_scale", txl.Tensor((_shape_scale_numel,), txl.u8)),
+        ("k", txl.Tensor((_shape_total_k, _shape_num_heads_kv, PACKED_HEAD_DIM), "uint8")),
+        ("v", txl.Tensor((_shape_total_k, _shape_num_heads_kv, PACKED_HEAD_DIM), "uint8")),
+        ("k_scale", txl.Tensor((_shape_scale_numel,), "uint8")),
+        ("v_scale", txl.Tensor((_shape_scale_numel,), "uint8")),
     ]
     if k_global:
-        parameters.append(("k_global_scale", txl.Tensor((1,), txl.f32)))
+        parameters.append(("k_global_scale", txl.Tensor((1,), "float32")))
     parameters.extend(
         [
-            ("k2q_q_indices", txl.Tensor((_shape_num_heads_kv * _shape_nnz,), txl.i32)),
-            ("k2q_qsplit_indices", txl.Tensor((_shape_num_heads_kv * _shape_nnz,), txl.i32)),
-            ("k2q_row_ptr", txl.Tensor((_shape_num_heads_kv * (_shape_total_rows + 1),), txl.i32)),
-            ("scheduler_metadata", txl.Tensor((_shape_work_capacity * WORK_FIELDS,), txl.i32)),
-            ("work_count", txl.Tensor((1,), txl.i32)),
+            ("k2q_q_indices", txl.Tensor((_shape_num_heads_kv * _shape_nnz,), "int32")),
+            ("k2q_qsplit_indices", txl.Tensor((_shape_num_heads_kv * _shape_nnz,), "int32")),
+            ("k2q_row_ptr", txl.Tensor((_shape_num_heads_kv * (_shape_total_rows + 1),), "int32")),
+            ("scheduler_metadata", txl.Tensor((_shape_work_capacity * WORK_FIELDS,), "int32")),
+            ("work_count", txl.Tensor((1,), "int32")),
             (
                 "o_partial",
                 txl.Tensor((_shape_topk * _shape_total_q * _shape_head_q * HEAD_DIM,), partial_ty),
             ),
-            ("lse_partial", txl.Tensor((_shape_topk * _shape_total_q * _shape_head_q,), txl.f32)),
+            ("lse_partial", txl.Tensor((_shape_topk * _shape_total_q * _shape_head_q,), "float32")),
         ]
     )
     if temperature:
         parameters.append(
             (
                 "lse_temperature_partial",
-                txl.Tensor((_shape_topk * _shape_total_q * _shape_head_q,), txl.f32),
+                txl.Tensor((_shape_topk * _shape_total_q * _shape_head_q,), "float32"),
             )
         )
     # Q is flattened only across token/head; HEAD_DIM remains the descriptor's
     # contiguous axis, so the launch argument is a rank-2 tensor.
     parameters.append(("q_flat", txl.Tensor((_shape_total_q * _shape_head_q, HEAD_DIM), q_ty)))
     if paged:
-        parameters.append(("page_table", txl.Tensor((_shape_total_k // N_BLOCK,), txl.i32)))
+        parameters.append(("page_table", txl.Tensor((_shape_total_k // N_BLOCK,), "int32")))
     if seqused:
-        parameters.append(("seqused_k", txl.Tensor((_shape_num_batches,), txl.i32)))
+        parameters.append(("seqused_k", txl.Tensor((_shape_num_batches,), "int32")))
     parameters.extend(
         [
-            ("cu_seqlens_q", txl.Tensor((_shape_num_batches + 1,), txl.i32)),
-            ("cu_seqlens_k", txl.Tensor((_shape_num_batches + 1,), txl.i32)),
-            ("softmax_scale_log2", txl.f32),
-            ("lse_temperature_scale_log2", txl.f32),
-            ("lse_temperature_inv_scale", txl.f32),
-            ("num_kv_blocks", txl.i32),
+            ("cu_seqlens_q", txl.Tensor((_shape_num_batches + 1,), "int32")),
+            ("cu_seqlens_k", txl.Tensor((_shape_num_batches + 1,), "int32")),
+            ("softmax_scale_log2", "float32"),
+            ("lse_temperature_scale_log2", "float32"),
+            ("lse_temperature_inv_scale", "float32"),
+            ("num_kv_blocks", "int32"),
             ("num_heads_kv", _shape_num_heads_kv),
-            ("seq_len_q", txl.i32),
+            ("seq_len_q", "int32"),
             ("work_capacity", _shape_work_capacity),
             ("total_k", _shape_total_k),
             ("total_q", _shape_total_q),

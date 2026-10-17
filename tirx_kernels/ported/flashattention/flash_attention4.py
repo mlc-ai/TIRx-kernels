@@ -235,25 +235,25 @@ def make_kernel(
         # (audited in the notes: Q@0, K/V@65536, O, sScale, tmem mailbox, then
         # every barrier ring at the original's offset).
         smem = txl.smem_pool()
-        # swizzle=txl.SW128B is the same composed layout the original's
+        # swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM is the same composed layout the original's
         # pool.alloc_tcgen05_mma_AB(..., "float16") picks ("auto" -> 128B atom):
         # both call mma_shared_layout(dtype, SWIZZLE_128B_ATOM, shape) with
         # align=1024.
         q_smem = smem.alloc(
             (SMEM_PIPE_DEPTH_Q, BLK_M * cta_group, HEAD_DIM // cta_group),
-            txl.f16,
-            swizzle=txl.SW128B,
+            "float16",
+            swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM,
         )
         # K and V share one ring: the loader alternates load_k / load_v into
         # successive stages. In the 2-CTA schedule K and V are [128, 64] per
         # CTA, with V consumed through the transposed descriptor view.
         # The backing allocation remains 96KB in both schedules.
         kv_base = SMEM_PIPE_DEPTH_Q * BLK_M * HEAD_DIM * F16_BYTES
-        k_smem = smem.alloc((KV_DEPTH, BLK_N, HEAD_DIM // cta_group), txl.f16, swizzle=txl.SW128B)
+        k_smem = smem.alloc((KV_DEPTH, BLK_N, HEAD_DIM // cta_group), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
         smem.pool.move_base_to(kv_base)
-        v_smem = smem.alloc((KV_DEPTH, BLK_N, HEAD_DIM // cta_group), txl.f16, swizzle=txl.SW128B)
+        v_smem = smem.alloc((KV_DEPTH, BLK_N, HEAD_DIM // cta_group), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
         smem.pool.move_base_to(kv_base + KV_DEPTH * KV_ROWS * HEAD_DIM * F16_BYTES)
-        o_smem = smem.alloc((TMEM_DEPTH, BLK_M, HEAD_DIM), txl.f16, swizzle=txl.SW128B)
+        o_smem = smem.alloc((TMEM_DEPTH, BLK_M, HEAD_DIM), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
 
         # 16-byte units between two ring stages of a swizzled tile: a stage is a
         # constant translation of the same rows x cols tile.
@@ -363,7 +363,7 @@ def make_kernel(
                     view.ptr_to(0, 0),
                     ldo=512,
                     sdo=64,
-                    swizzle=txl.SW128B.value,
+                    swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM.value,
                 )
                 desc_lo = txl.alloc_local((1,), "uint32")
                 desc_hi = txl.alloc_local((1,), "uint32")
@@ -411,8 +411,8 @@ def make_kernel(
             v_desc_tail_lo = v_desc
             v_desc_tail_hi = v_desc
 
-        sScale = smem.alloc((SSCALE_TOTAL_SIZE,), txl.f32, align=1024)
-        tmem_addr = smem.alloc((1,), txl.u32)
+        sScale = smem.alloc((SSCALE_TOTAL_SIZE,), "float32", align=1024)
+        tmem_addr = smem.alloc((1,), "uint32")
 
         # ---- per-thread pipeline state — orig:L663-669 ----------------------
         # KV advances per ring slot. The other protocols unroll their two
@@ -499,7 +499,7 @@ def make_kernel(
             token = txl.alloc_local([1], "uint32")
             if leader_only:
                 txl.assign(token[0], txl.cuda.iket.sentinel_token(name))
-                with txl.If(warp_id == 0), txl.Then():
+                with txl.if_(warp_id == 0), txl.then_():
                     txl.assign(token[0], txl.cuda.iket.range_start(name))
             else:
                 txl.assign(token[0], txl.cuda.iket.range_start(name))
@@ -676,21 +676,21 @@ def make_kernel(
         # guards are on the raw warp id, not roles: the original runs them
         # once, outside the task loop, while the role blocks (and their
         # setmaxnreg) are inside it.
-        with txl.If(warp_cta == 12), txl.Then():
+        with txl.if_(warp_cta == 12), txl.then_():
             txl.ptx[tmem_alloc](txl.address_of(tmem_addr[0]), txl.uint32(N_COLS_TMEM))
             txl.cuda.warp_sync()
-        with txl.If(tvm_tirx.tirx.all(wg_id == 3, warp_id == 0)), txl.Then():
+        with txl.if_(tvm_tirx.tirx.all(wg_id == 3, warp_id == 0)), txl.then_():
             allocated = txl.local_scalar("uint32")
             txl.ptx.ld.shared.u32(allocated, tmem_addr.ptr_to([0]))
             txl.cuda.trap_when_assert_failed(allocated == txl.uint32(0))
-        with txl.If(wg_id == 2), txl.Then():
+        with txl.if_(wg_id == 2), txl.then_():
             for i_q in range(2):
                 p_o_rescale_remote.arrive(i_q)
 
         # =====================================================================
         # Roles stay inside the task loop, preserving per-task setmaxnreg.
         # =====================================================================
-        with txl.While(scheduler.valid()):
+        with txl.while_(scheduler.valid()):
             m_block_idx = scheduler.m_block_idx
             batch_idx = scheduler.batch_idx
             kv_head_idx = scheduler.head_idx
@@ -713,7 +713,7 @@ def make_kernel(
                     def load_q(i_q, tensor_map):
                         q_load.empty.wait(i_q, q_epoch.phase)
                         tma_q_token = iket_range("issue-tma-q")
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             for k_part in range(cta_group):
                                 if GQA_RATIO == 1:
                                     txl.ptx[tma_g2s_3d](
@@ -745,7 +745,7 @@ def make_kernel(
                                         ),
                                     )
                             if USE_2CTA:
-                                with txl.If(cta_rank == 0), txl.Then():
+                                with txl.if_(cta_rank == 0), txl.then_():
                                     q_load_full_remote.arrive(
                                         i_q, tx_count=cta_group * BLK_M * HEAD_DIM * F16_BYTES
                                     )
@@ -761,7 +761,7 @@ def make_kernel(
                         only the tensormap differs."""
                         kv_load.empty.wait(kv_pipe.stage, kv_pipe.phase)
                         tma_kv_token = iket_range(event)
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             for k_part in range(1 if is_v else cta_group):
                                 txl.ptx[tma_g2s_3d](
                                     (v_smem if is_v else k_smem)[kv_pipe.stage].ptr_to(
@@ -791,7 +791,7 @@ def make_kernel(
                                     ),
                                 )
                             if USE_2CTA:
-                                with txl.If(cta_rank == 0), txl.Then():
+                                with txl.if_(cta_rank == 0), txl.then_():
                                     kv_load_full_remote.arrive(
                                         kv_pipe.stage,
                                         tx_count=cta_group * KV_ROWS * HEAD_DIM * F16_BYTES,
@@ -826,7 +826,7 @@ def make_kernel(
                         if i_q != 0:
                             corr_epi.full.wait(i_q, tmem_epoch.phase)
                         m_start_global = q_tile_start(i_q)
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             if GQA_RATIO == 1:
                                 txl.ptx[TMA_S2G_3D](
                                     txl.address_of(O_tensor_map),
@@ -867,7 +867,7 @@ def make_kernel(
                         tile it is (ki%4)*2 + (ki//4)*1024, which is the frozen
                         kernel's hand-written constant to the bit."""
                         for ki in range(HEAD_DIM // MMA_K):
-                            with txl.If(elected()), txl.Then():
+                            with txl.if_(elected()), txl.then_():
                                 txl.ptx[mma_f16](
                                     txl.Cast(q_stage * MMA_N, "uint32"),
                                     desc_at(qd, q_stage * Q_STAGE16 + qoff(ki)),
@@ -876,7 +876,7 @@ def make_kernel(
                                     *mma_keep_lanes,
                                     ki != 0,
                                 )
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             commit(s_ready, q_stage)
 
                     def gemm_pv_part1(i_q, kv_stage, should_accumulate, vd):
@@ -884,7 +884,7 @@ def make_kernel(
                         MN-major (ID_PV sets trans_b), so the k walk steps whole
                         rows: 16 rows = 128 16B units."""
                         for ki in range(K_SPLIT // MMA_K):
-                            with txl.If(elected()), txl.Then():
+                            with txl.if_(elected()), txl.then_():
                                 txl.ptx[mma_f16](
                                     txl.Cast((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N, "uint32"),
                                     txl.Cast(
@@ -902,7 +902,7 @@ def make_kernel(
                         """orig:L948-968."""
                         p_ready_2.wait(i_q, tmem_epoch.phase)
                         for ki in range((BLK_N - K_SPLIT) // MMA_K):
-                            with txl.If(elected()), txl.Then():
+                            with txl.if_(elected()), txl.then_():
                                 txl.ptx[mma_f16](
                                     txl.Cast((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N, "uint32"),
                                     txl.Cast(
@@ -928,7 +928,7 @@ def make_kernel(
                             kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
                         gemm_qk(i_q, kv_pipe.stage, q_desc, k_desc)
                         if i_q == 1:
-                            with txl.If(elected()), txl.Then():
+                            with txl.if_(elected()), txl.then_():
                                 kv_load.empty.arrive(
                                     kv_pipe.stage,
                                     cta_group=cta_group,
@@ -960,7 +960,7 @@ def make_kernel(
                             p_o_rescale.wait(i_q, tmem_epoch.phase)
                             gemm_pv(i_q, stage_v, acc, v_desc, v_desc_steady_hi)
                             if i_q == 1:
-                                with txl.If(elected()), txl.Then():
+                                with txl.if_(elected()), txl.then_():
                                     kv_load.empty.arrive(
                                         stage_v,
                                         cta_group=cta_group,
@@ -971,15 +971,15 @@ def make_kernel(
                             gemm_qk(i_q, kv_pipe.stage, q_desc_steady, k_desc_steady)
                             # Early Q release — orig:L1018-1030.
                             if EARLY_Q_RELEASE:
-                                with txl.If(i_kv == mma_trip_count - 2), txl.Then():
-                                    with txl.If(elected()), txl.Then():
+                                with txl.if_(i_kv == mma_trip_count - 2), txl.then_():
+                                    with txl.if_(elected()), txl.then_():
                                         q_load.empty.arrive(
                                             i_q,
                                             cta_group=cta_group,
                                             cta_mask=3 if USE_2CTA else None,
                                         )
                             if i_q == 1:
-                                with txl.If(elected()), txl.Then():
+                                with txl.if_(elected()), txl.then_():
                                     kv_load.empty.arrive(
                                         kv_pipe.stage,
                                         cta_group=cta_group,
@@ -995,19 +995,19 @@ def make_kernel(
                         p_o_rescale.wait(i_q, tmem_epoch.phase)
                         gemm_pv(i_q, kv_pipe.stage, acc, v_desc_tail_lo, v_desc_tail_hi)
                         if i_q == 1:
-                            with txl.If(elected()), txl.Then():
+                            with txl.if_(elected()), txl.then_():
                                 kv_load.empty.arrive(
                                     kv_pipe.stage,
                                     cta_group=cta_group,
                                     cta_mask=3 if USE_2CTA else None,
                                 )
-                        with txl.If(elected()), txl.Then():
+                        with txl.if_(elected()), txl.then_():
                             commit(o_ready, i_q)
                     kv_pipe.advance()
                     tmem_epoch.advance()
                     if not EARLY_Q_RELEASE:
                         for i_q in range(SMEM_PIPE_DEPTH_Q):
-                            with txl.If(elected()), txl.Then():
+                            with txl.if_(elected()), txl.then_():
                                 q_load.empty.arrive(
                                     i_q, cta_group=cta_group, cta_mask=3 if USE_2CTA else None
                                 )
@@ -1022,7 +1022,7 @@ def make_kernel(
             with r_softmax:
                 row_max = txl.local_scalar("float32")
                 row_sum = txl.alloc_local([1], "float32")
-                with txl.If(warp_id == 0), txl.Then():
+                with txl.if_(warp_id == 0), txl.then_():
                     txl.cuda.iket.mark("softmax-baseline")
 
                 def mask_r2p(s_chunk, col_limit, ncol):
@@ -1075,7 +1075,7 @@ def make_kernel(
                     # read (tcgen05.st operands), so allocate that directly.
                     p_chunk = txl.alloc_local([BLK_N // 2], "uint32")
                     s_ready.wait(wg_id, score_epoch.phase)
-                    with txl.If(warp_id == 0), txl.Then():
+                    with txl.if_(warp_id == 0), txl.then_():
                         txl.cuda.iket.mark("softmax-phase-0")
                     softmax_max_token = iket_range("softmax-max", leader_only=True)
                     tile_max = txl.alloc_local([1], "float32")
@@ -1112,20 +1112,20 @@ def make_kernel(
                         txl.assign(acc_scale, txl.float32(1.0))
                     else:
                         txl.assign(acc_scale_, (row_max_old - row_max_safe) * scale_log2)
-                        with txl.If(acc_scale_ >= -rescale_threshold):
-                            with txl.Then():
+                        with txl.if_(acc_scale_ >= -rescale_threshold):
+                            with txl.then_():
                                 txl.assign(row_max_new, row_max_old)
                                 txl.assign(row_max_safe, row_max_old)
                                 txl.assign(acc_scale, txl.float32(1.0))
-                            with txl.Else():
+                            with txl.else_():
                                 txl.ptx.ex2.approx.ftz.f32(acc_scale, acc_scale_)
                     txl.assign(row_max, row_max_new)
                     row_max_scaled = row_max_safe * scale_log2
-                    with txl.If(warp_id == 0), txl.Then():
+                    with txl.if_(warp_id == 0), txl.then_():
                         txl.cuda.iket.mark("softmax-phase-1")
                     txl.cuda.iket.range_end(softmax_max_token[0])
                     if not is_first:
-                        with txl.If(tid_in_wg < BLK_M), txl.Then():
+                        with txl.if_(tid_in_wg < BLK_M), txl.then_():
                             sScale_idx = ACC_SCALE_BASE + tid_in_wg + wg_id * BLK_M
                             txl.ptx.st.shared.f32(sScale.ptr_to([sScale_idx]), acc_scale)
                     # Stats-ready handshake to the correction wg over a HW named
@@ -1175,15 +1175,15 @@ def make_kernel(
                             (P_SPLIT_Q + i) * BLK_N // 4 // 2,
                             tmem((wg_id * 2 * MMA_N + MMA_N + (P_SPLIT_Q + i) * BLK_N // 4) // 2),
                         )
-                    with txl.If(warp_id == 0), txl.Then():
+                    with txl.if_(warp_id == 0), txl.then_():
                         txl.cuda.iket.mark("softmax-phase-2")
                     txl.ptx.tcgen05.wait__st.sync.aligned()
                     p_ready_2_remote.arrive(wg_id)
-                    with txl.If(warp_id == 0), txl.Then():
+                    with txl.if_(warp_id == 0), txl.then_():
                         txl.cuda.iket.mark("softmax-phase-3")
                     txl.cuda.iket.range_end(softmax_tmem_st_token[0])
                     softmax_corr.empty.wait(wg_id, softmax_epoch.phase)
-                    with txl.If(warp_id == 0), txl.Then():
+                    with txl.if_(warp_id == 0), txl.then_():
                         txl.cuda.iket.mark("softmax-phase-4")
                     softmax_sum_token = iket_range("softmax-sum", leader_only=True)
                     score_epoch.advance()
@@ -1193,7 +1193,7 @@ def make_kernel(
                     else:
                         txl.assign(row_sum[0], row_sum[0] * acc_scale)
                         reduce_sum_128(row_sum, s_chunk, accum=True)
-                    with txl.If(warp_id == 0), txl.Then():
+                    with txl.if_(warp_id == 0), txl.then_():
                         txl.cuda.iket.mark("softmax-phase-5")
                     txl.cuda.iket.range_end(softmax_sum_token[0])
 
@@ -1242,7 +1242,7 @@ def make_kernel(
                     o_row_f32_sm = txl.alloc_local([EPI_LD_SM], "float32")
                     o_row_f16_sm = txl.alloc_local([EPI_LD_SM // 2], "uint32")
                     for epi_q in range(2):
-                        with txl.If(wg_id == epi_q), txl.Then():
+                        with txl.if_(wg_id == epi_q), txl.then_():
                             for d_tile in range(ceildiv(HEAD_DIM, EPI_LD_SM)):
                                 d_start = d_tile * EPI_LD_SM
                                 tmem_load(
@@ -1269,7 +1269,7 @@ def make_kernel(
                     p_o_rescale_remote.arrive(wg_id)
                     o_epi_epoch.advance()
                 else:
-                    with txl.If(tid_in_wg < BLK_M), txl.Then():
+                    with txl.if_(tid_in_wg < BLK_M), txl.then_():
                         txl.ptx.st.shared.f32(
                             sScale.ptr_to([ROW_SUM_BASE + tid_in_wg + wg_id * BLK_M]), row_sum[0]
                         )
@@ -1300,8 +1300,8 @@ def make_kernel(
                         correction_token = iket_range("correction", leader_only=True)
                         acc_scale = txl.local_scalar("float32")
                         should_rescale = txl.local_scalar("int32")
-                        with txl.If(tid_in_wg < BLK_M):
-                            with txl.Then():
+                        with txl.if_(tid_in_wg < BLK_M):
+                            with txl.then_():
                                 txl.ptx.ld.shared.f32(
                                     acc_scale,
                                     sScale.ptr_to([ACC_SCALE_BASE + tid_in_wg + i_q * BLK_M]),
@@ -1309,15 +1309,15 @@ def make_kernel(
                                 txl.assign(
                                     should_rescale, txl.Select(acc_scale < txl.float32(1.0), 1, 0)
                                 )
-                            with txl.Else():
+                            with txl.else_():
                                 txl.assign(should_rescale, 0)
                         # Materialize the collective before divergence.
                         any_needs_rescale = txl.local_scalar("uint32")
                         txl.ptx.vote_sync.any.pred(
                             any_needs_rescale, txl.ptx.pred(should_rescale), txl.uint32(0xFFFFFFFF)
                         )
-                        with txl.If(any_needs_rescale != 0), txl.Then():
-                            with txl.If(tid_in_wg < BLK_M), txl.Then():
+                        with txl.if_(any_needs_rescale != 0), txl.then_():
+                            with txl.if_(tid_in_wg < BLK_M), txl.then_():
                                 RESCALE_TILE = 16
                                 o_row = txl.alloc_local([RESCALE_TILE], "float32")
                                 for d_tile in range(ceildiv(HEAD_DIM, RESCALE_TILE)):
@@ -1389,7 +1389,7 @@ def make_kernel(
             txl.cuda.cluster_sync()
         else:
             txl.cuda.cta_sync()
-        with txl.If(tvm_tirx.tirx.all(wg_id == 0, warp_id == 0)), txl.Then():
+        with txl.if_(tvm_tirx.tirx.all(wg_id == 0, warp_id == 0)), txl.then_():
             dealloc = txl.local_scalar("uint32")
             txl.ptx.ld.shared.u32(dealloc, tmem_addr.ptr_to([0]))
             txl.ptx[tmem_relinquish]()

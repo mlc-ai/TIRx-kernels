@@ -98,8 +98,8 @@ def _add_f32(lhs, rhs):
 
 
 def _add_bf16_to_f32(bits, value):
-    out = txl.local_scalar(txl.f32)
-    txl.ptx.add.rn.f32.bf16(out, txl.cast(bits, txl.u16), value)
+    out = txl.local_scalar("float32")
+    txl.ptx.add.rn.f32.bf16(out, txl.cast(bits, "uint16"), value)
     return out
 
 
@@ -124,7 +124,7 @@ def _rsqrt_approx_ftz(value):
 
 
 def _cvt_bf16_to_f32(bits):
-    return _ptx_unary("cvt.f32.bf16", txl.cast(bits, txl.u16))
+    return _ptx_unary("cvt.f32.bf16", txl.cast(bits, "uint16"))
 
 
 def _cvt_f32_to_bf16(value):
@@ -136,15 +136,15 @@ def _cvt_pair_f32_to_bf16(high, low):
 
 
 def _shfl_bfly_f32(value, lane_xor: int):
-    out = txl.local_scalar(txl.u32)
+    out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         out,
-        txl.reinterpret(value, ty=txl.u32),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(lane_xor),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret(out, ty=txl.f32)
+    return txl.reinterpret(out, ty="float32")
 
 
 def _butterfly_sum_f32(value):
@@ -169,7 +169,7 @@ def _load_x(buffer, index, values, value_offset, VEC: int):
             buffer.ptr_to([index]),
         )
     else:
-        words = txl.alloc_local([4], txl.u32)
+        words = txl.alloc_local([4], "uint32")
         txl.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
         for pair in range(4):
             txl.ptx.mov.b32(
@@ -178,8 +178,8 @@ def _load_x(buffer, index, values, value_offset, VEC: int):
 
 
 def _load_affine_f32x8(gamma, beta, index, gamma_frag, beta_frag, value_offset):
-    gamma_words = txl.alloc_local([4], txl.u64)
-    beta_words = txl.alloc_local([4], txl.u64)
+    gamma_words = txl.alloc_local([4], "uint64")
+    beta_words = txl.alloc_local([4], "uint64")
     txl.ptx.ld.global_.v4.b64(
         gamma_words[0], gamma_words[1], gamma_words[2], gamma_words[3], gamma.ptr_to([index])
     )
@@ -200,8 +200,8 @@ def _load_affine_f32x8(gamma, beta, index, gamma_frag, beta_frag, value_offset):
 
 
 def _load_affine_f32x4(gamma, beta, index, gamma_frag, beta_frag, value_offset):
-    gamma_words = txl.alloc_local([2], txl.u64)
-    beta_words = txl.alloc_local([2], txl.u64)
+    gamma_words = txl.alloc_local([2], "uint64")
+    beta_words = txl.alloc_local([2], "uint64")
     txl.ptx.ld.global_.v2.b64(gamma_words[0], gamma_words[1], gamma.ptr_to([index]))
     txl.ptx.ld.global_.v2.b64(beta_words[0], beta_words[1], beta.ptr_to([index]))
     for pair in range(2):
@@ -350,18 +350,18 @@ def get_kernel(
 
     @txl.kernel()
     def flashinfer_layernorm(
-        out: txl.Tensor((txl.int64(),), txl.bf16),
-        x: txl.Tensor((txl.int64(),), txl.bf16),
-        gamma: txl.Tensor((txl.int64(),), txl.f32),
-        beta: txl.Tensor((txl.int64(),), txl.f32),
-        runtime_M: txl.i64,
-        runtime_eps: txl.f32,
-        y_row_stride: txl.i64,
-        x_row_stride: txl.i64,
+        out: txl.Tensor((txl.int64(),), "bfloat16"),
+        x: txl.Tensor((txl.int64(),), "bfloat16"),
+        gamma: txl.Tensor((txl.int64(),), "float32"),
+        beta: txl.Tensor((txl.int64(),), "float32"),
+        runtime_M: "int64",
+        runtime_eps: "float32",
+        y_row_stride: "int64",
+        x_row_stride: "int64",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
-                grid=txl.cast(runtime_M, txl.i32),
+                grid=txl.cast(runtime_M, "int32"),
                 block=warps * 32,
                 dynamic_smem_bytes=smem_bytes,
                 programmatic_stream_serialization=enable_pdl,
@@ -371,28 +371,28 @@ def get_kernel(
 
         row_raw = txl.cta_id()
         tid = txl.thread_id()
-        row = txl.cast(row_raw, txl.i64)
+        row = txl.cast(row_raw, "int64")
         lane = tid % 32
         warp = tid // 32
 
         if warps > 1:
-            shared_raw = txl.alloc_tensor([smem_bytes], txl.u8, scope="shared.dyn", align=1024)
+            shared_raw = txl.alloc_tensor([smem_bytes], "uint8", scope="shared.dyn", align=1024)
         if enable_pdl:
             txl.ptx.griddepcontrol.wait()
 
-        x_bits = txl.alloc_local([pair_values], txl.u16)
-        x_f32 = txl.alloc_local([pair_values], txl.f32)
+        x_bits = txl.alloc_local([pair_values], "uint16")
+        x_f32 = txl.alloc_local([pair_values], "float32")
         for value in range(total_values):
             txl.assign(x_bits[value], txl.uint16(0))
         for vb in range(vec_blocks):
             col = (tid + vb * threads) * vec
-            x_offset = row * x_row_stride + txl.cast(col, txl.i64)
-            with txl.If(col < H), txl.Then():
+            x_offset = row * x_row_stride + txl.cast(col, "int64")
+            with txl.if_(col < H), txl.then_():
                 _load_x(x, x_offset, x_bits, vb * vec, VEC=vec)
         for value in range(total_values):
             txl.assign(x_f32[value], _cvt_bf16_to_f32(x_bits[value]))
 
-        local_sum = txl.local_scalar(txl.f32, init=_add_f32(x_f32[0], txl.float32(0.0)))
+        local_sum = txl.local_scalar("float32", init=_add_f32(x_f32[0], txl.float32(0.0)))
         if total_values > 1:
             for step in range(total_values - 1):
                 value = step + 1
@@ -402,16 +402,16 @@ def get_kernel(
                     txl.assign(local_sum, _add_f32(local_sum, x_f32[value]))
         warp_sum = _butterfly_sum_f32(local_sum)
         if warps > 1:
-            with txl.If(lane == 0), txl.Then():
+            with txl.if_(lane == 0), txl.then_():
                 txl.ptx.st.shared.b32(
-                    shared_raw.ptr_to([warp * 4]), txl.reinterpret(warp_sum, ty=txl.u32)
+                    shared_raw.ptr_to([warp * 4]), txl.reinterpret(warp_sum, ty="uint32")
                 )
             txl.ptx.bar.sync(txl.uint32(0))
-            block_sum = txl.local_scalar(txl.f32, init=txl.float32(0.0))
-            with txl.If(lane < warps), txl.Then():
-                sum_word = txl.local_scalar(txl.u32)
+            block_sum = txl.local_scalar("float32", init=txl.float32(0.0))
+            with txl.if_(lane < warps), txl.then_():
+                sum_word = txl.local_scalar("uint32")
                 txl.ptx.ld.shared.b32(sum_word, shared_raw.ptr_to([lane * 4]))
-                txl.assign(block_sum, txl.reinterpret(sum_word, ty=txl.f32))
+                txl.assign(block_sum, txl.reinterpret(sum_word, ty="float32"))
             sum_x = _butterfly_sum_f32(block_sum)
         else:
             sum_x = warp_sum
@@ -423,8 +423,8 @@ def get_kernel(
         else:
             negative_mean = _div_rn_f32(sum_x, txl.float32(-H))
 
-        diff = txl.alloc_local([pair_values], txl.f32)
-        diff_sq = txl.alloc_local([pair_values], txl.f32)
+        diff = txl.alloc_local([pair_values], "float32")
+        diff_sq = txl.alloc_local([pair_values], "float32")
         if total_values == 1:
             if H & (H - 1) == 0:
                 txl.assign(diff[0], _sub_f32(x_f32[0], mean))
@@ -433,7 +433,7 @@ def get_kernel(
             txl.assign(diff_sq[0], _mul_f32(diff[0], diff[0]))
         else:
             for pair in range(packed_pairs):
-                packed = txl.local_scalar(txl.u64)
+                packed = txl.local_scalar("uint64")
                 txl.ptx.sub.f32x2(
                     packed,
                     txl.cuda.make_float2(x_f32[pair * 2], x_f32[pair * 2 + 1]),
@@ -441,34 +441,34 @@ def get_kernel(
                 )
                 txl.ptx.mov.b64(diff[pair * 2], diff[pair * 2 + 1], packed)
             for pair in range(packed_pairs):
-                packed = txl.local_scalar(txl.u64)
+                packed = txl.local_scalar("uint64")
                 diff_pair = txl.cuda.make_float2(diff[pair * 2], diff[pair * 2 + 1])
                 txl.ptx.mul.f32x2(packed, diff_pair, diff_pair)
                 txl.ptx.mov.b64(diff_sq[pair * 2], diff_sq[pair * 2 + 1], packed)
 
         for vb in range(vec_blocks):
             col = (tid + vb * threads) * vec
-            with txl.If(col >= H), txl.Then():
+            with txl.if_(col >= H), txl.then_():
                 for e in range(vec):
                     txl.assign(diff_sq[vb * vec + e], txl.float32(0.0))
 
-        local_var = txl.local_scalar(txl.f32, init=_add_f32(diff_sq[0], txl.float32(0.0)))
+        local_var = txl.local_scalar("float32", init=_add_f32(diff_sq[0], txl.float32(0.0)))
         if total_values > 1:
             for step in range(total_values - 1):
                 value = step + 1
                 txl.assign(local_var, _add_f32(local_var, diff_sq[value]))
         warp_var = _butterfly_sum_f32(local_var)
         if warps > 1:
-            with txl.If(lane == 0), txl.Then():
+            with txl.if_(lane == 0), txl.then_():
                 txl.ptx.st.shared.b32(
-                    shared_raw.ptr_to([warps * 4 + warp * 4]), txl.reinterpret(warp_var, ty=txl.u32)
+                    shared_raw.ptr_to([warps * 4 + warp * 4]), txl.reinterpret(warp_var, ty="uint32")
                 )
             txl.ptx.bar.sync(txl.uint32(0))
-            block_var = txl.local_scalar(txl.f32, init=txl.float32(0.0))
-            with txl.If(lane < warps), txl.Then():
-                var_word = txl.local_scalar(txl.u32)
+            block_var = txl.local_scalar("float32", init=txl.float32(0.0))
+            with txl.if_(lane < warps), txl.then_():
+                var_word = txl.local_scalar("uint32")
                 txl.ptx.ld.shared.b32(var_word, shared_raw.ptr_to([warps * 4 + lane * 4]))
-                txl.assign(block_var, txl.reinterpret(var_word, ty=txl.f32))
+                txl.assign(block_var, txl.reinterpret(var_word, ty="float32"))
             sum_diff_sq = _butterfly_sum_f32(block_var)
         else:
             sum_diff_sq = warp_var
@@ -480,8 +480,8 @@ def get_kernel(
         rstd = _rsqrt_approx_ftz(shifted_var)
         txl.ptx.bar.sync(txl.uint32(0))
 
-        gamma_frag = txl.alloc_local([pair_values], txl.f32)
-        beta_frag = txl.alloc_local([pair_values], txl.f32)
+        gamma_frag = txl.alloc_local([pair_values], "float32")
+        beta_frag = txl.alloc_local([pair_values], "float32")
         for value in range(total_values):
             txl.assign(gamma_frag[value], txl.float32(0.0))
             txl.assign(beta_frag[value], txl.float32(0.0))
@@ -495,7 +495,7 @@ def get_kernel(
                     else:
                         _load_affine_f32x4(gamma, beta, col, gamma_frag, beta_frag, value_offset)
                 else:
-                    with txl.If(col < H), txl.Then():
+                    with txl.if_(col < H), txl.then_():
                         if vec == 8:
                             _load_affine_f32x8(
                                 gamma, beta, col, gamma_frag, beta_frag, value_offset
@@ -509,19 +509,19 @@ def get_kernel(
                 for e in range(vec):
                     value = vb * vec + e
                     col = tid * vec + vb * threads * vec + e
-                    with txl.If(col < H), txl.Then():
+                    with txl.if_(col < H), txl.then_():
                         txl.ptx.ld.global_.b32(gamma_frag[value], gamma.ptr_to([col]))
                         txl.ptx.ld.global_.b32(beta_frag[value], beta.ptr_to([col]))
 
-        y_f32 = txl.alloc_local([pair_values], txl.f32)
+        y_f32 = txl.alloc_local([pair_values], "float32")
         if total_values == 1:
             normalized = _mul_f32(diff[0], rstd)
             txl.assign(y_f32[0], _fma_rn_f32(normalized, gamma_frag[0], beta_frag[0]))
         else:
-            normalized = txl.alloc_local([pair_values], txl.f32)
-            scaled = txl.alloc_local([pair_values], txl.f32)
+            normalized = txl.alloc_local([pair_values], "float32")
+            scaled = txl.alloc_local([pair_values], "float32")
             for pair in range(packed_pairs):
-                packed = txl.local_scalar(txl.u64)
+                packed = txl.local_scalar("uint64")
                 txl.ptx.mul.f32x2(
                     packed,
                     txl.cuda.make_float2(diff[pair * 2], diff[pair * 2 + 1]),
@@ -529,7 +529,7 @@ def get_kernel(
                 )
                 txl.ptx.mov.b64(normalized[pair * 2], normalized[pair * 2 + 1], packed)
             for pair in range(packed_pairs):
-                packed = txl.local_scalar(txl.u64)
+                packed = txl.local_scalar("uint64")
                 txl.ptx.mul.f32x2(
                     packed,
                     txl.cuda.make_float2(normalized[pair * 2], normalized[pair * 2 + 1]),
@@ -537,7 +537,7 @@ def get_kernel(
                 )
                 txl.ptx.mov.b64(scaled[pair * 2], scaled[pair * 2 + 1], packed)
             for pair in range(packed_pairs):
-                packed = txl.local_scalar(txl.u64)
+                packed = txl.local_scalar("uint64")
                 txl.ptx.add.f32x2(
                     packed,
                     txl.cuda.make_float2(scaled[pair * 2], scaled[pair * 2 + 1]),
@@ -545,8 +545,8 @@ def get_kernel(
                 )
                 txl.ptx.mov.b64(y_f32[pair * 2], y_f32[pair * 2 + 1], packed)
 
-        y_bits = txl.alloc_local([pair_values], txl.u16)
-        y_words = txl.alloc_local([max(packed_pairs, 1)], txl.u32)
+        y_bits = txl.alloc_local([pair_values], "uint16")
+        y_words = txl.alloc_local([max(packed_pairs, 1)], "uint32")
         if vec == 1:
             for value in range(total_values):
                 txl.assign(y_bits[value], _cvt_f32_to_bf16(y_f32[value]))
@@ -557,8 +557,8 @@ def get_kernel(
                 )
         for vb in range(vec_blocks):
             col = (tid + vb * threads) * vec
-            y_offset = row * y_row_stride + txl.cast(col, txl.i64)
-            with txl.If(col < H), txl.Then():
+            y_offset = row * y_row_stride + txl.cast(col, "int64")
+            with txl.if_(col < H), txl.then_():
                 _store_y(out, y_offset, y_bits, y_words, vb * vec, vb * vec // 2, VEC=vec)
         if enable_pdl:
             txl.ptx.griddepcontrol.launch_dependents()

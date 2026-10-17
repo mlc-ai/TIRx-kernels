@@ -130,13 +130,13 @@ def _tmem_store16(src, base, address):
 def _shfl_bfly_f32(value, lane_xor, membermask):
     out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
-        out, txl.reinterpret(value, ty=txl.u32), txl.uint32(lane_xor), txl.uint32(31), membermask
+        out, txl.reinterpret(value, ty="uint32"), txl.uint32(lane_xor), txl.uint32(31), membermask
     )
-    return txl.reinterpret(out, ty=txl.f32)
+    return txl.reinterpret(out, ty="float32")
 
 
 def _butterfly_sum_f32(value):
-    membermask = txl.local_scalar("uint32", init=txl.tvm_warp_activemask())
+    membermask = txl.local_scalar("uint32", init=txl.gpu_warp_activemask())
     for lane_xor in (1, 2, 4):
         peer = _shfl_bfly_f32(value, lane_xor, membermask)
         total = txl.local_scalar("float32")
@@ -275,10 +275,10 @@ def get_kernel(*, backend_config=None, **config):
 
     @txl.kernel()
     def preprocess(
-        o: txl.Tensor((txl.int64(),), txl.bf16),
-        do: txl.Tensor((txl.int64(),), txl.bf16),
-        lse: txl.Tensor((txl.int64(),), txl.f32),
-        workspace: txl.Tensor((txl.int64(),), txl.f32),
+        o: txl.Tensor((txl.int64(),), "bfloat16"),
+        do: txl.Tensor((txl.int64(),), "bfloat16"),
+        lse: txl.Tensor((txl.int64(),), "float32"),
+        workspace: txl.Tensor((txl.int64(),), "float32"),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -295,11 +295,11 @@ def get_kernel(*, backend_config=None, **config):
         rows_per_wave = 256 // threads_per_row
         row_lane = tid // txl.int32(threads_per_row)
         dim8 = (tid % txl.int32(threads_per_row)) * txl.int32(8)
-        membermask = txl.local_scalar("uint32", init=txl.tvm_warp_activemask())
+        membermask = txl.local_scalar("uint32", init=txl.gpu_warp_activemask())
         for row_repeat in range(128 // rows_per_wave):
             q_idx = q_tile * txl.int32(128) + row_lane + txl.int32(row_repeat * rows_per_wave)
             acc = txl.local_scalar("float32", init=txl.float32(0.0))
-            with txl.If(q_idx < txl.int32(seqlen_q)), txl.Then():
+            with txl.if_(q_idx < txl.int32(seqlen_q)), txl.then_():
                 row = (
                     (
                         (
@@ -355,20 +355,20 @@ def get_kernel(*, backend_config=None, **config):
                 combined = txl.local_scalar("float32")
                 txl.ptx.add.f32(combined, total, peer)
                 txl.assign(total, combined)
-            with txl.If((tid % txl.int32(threads_per_row)) == txl.int32(0)), txl.Then():
+            with txl.if_((tid % txl.int32(threads_per_row)) == txl.int32(0)), txl.then_():
                 bhq = (
                     txl.cast(batch_idx, "int64") * txl.int64(heads) + txl.cast(head, "int64")
                 ) * txl.int64(q128) + txl.cast(q_idx, "int64")
                 txl.ptx.st.global_.b32(workspace.ptr_to([bhq]), total)
                 scaled = txl.local_scalar("float32", init=txl.float32(0.0))
-                with txl.If(q_idx < txl.int32(seqlen_q)), txl.Then():
+                with txl.if_(q_idx < txl.int32(seqlen_q)), txl.then_():
                     lse_value = txl.local_scalar("float32")
                     lse_index = (
                         txl.cast(batch_idx, "int64") * txl.int64(heads) + txl.cast(head, "int64")
                     ) * txl.int64(seqlen_q) + txl.cast(q_idx, "int64")
                     txl.ptx.ld.global_.b32(lse_value, lse.ptr_to([lse_index]))
                     txl.ptx.mul.f32(scaled, lse_value, txl.float32(1.4426950408889634))
-                    with txl.If(lse_value == txl.float32(float("-inf"))), txl.Then():
+                    with txl.if_(lse_value == txl.float32(float("-inf"))), txl.then_():
                         txl.assign(scaled, txl.float32(0.0))
                 txl.ptx.st.global_.b32(workspace.ptr_to([txl.int64(sum_plane) + bhq]), scaled)
         txl.ptx.griddepcontrol.launch_dependents()
@@ -393,13 +393,13 @@ def get_kernel(*, backend_config=None, **config):
         do_map: txl.Ptr(txl.TensorMap),
         dv_map: txl.Ptr(txl.TensorMap),
         dk_map: txl.Ptr(txl.TensorMap),
-        dk_output: txl.Tensor((txl.int64(),), txl.bf16),
-        dv_output: txl.Tensor((txl.int64(),), txl.bf16),
-        bucketed_offsets: txl.Tensor((txl.int64(),), txl.i32),
-        bucketed_indices: txl.Tensor((txl.int64(),), txl.i32),
-        workspace: txl.Tensor((txl.int64(),), txl.f32),
-        edge_stride: txl.i64,
-        softmax_scale: txl.f32,
+        dk_output: txl.Tensor((txl.int64(),), "bfloat16"),
+        dv_output: txl.Tensor((txl.int64(),), "bfloat16"),
+        bucketed_offsets: txl.Tensor((txl.int64(),), "int32"),
+        bucketed_indices: txl.Tensor((txl.int64(),), "int32"),
+        workspace: txl.Tensor((txl.int64(),), "float32"),
+        edge_stride: "int64",
+        softmax_scale: "float32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(tasks * groups, heads, batch), block=WARPS * 32),
@@ -409,8 +409,8 @@ def get_kernel(*, backend_config=None, **config):
 
         block, head, batch_idx = txl.cta_id()
         warp = txl.warp_id()
-        with txl.If(warp == txl.int32(13)), txl.Then():
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+        with txl.if_(warp == txl.int32(13)), txl.then_():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 txl.ptx.prefetch.tensormap(txl.address_of(q_map))
                 txl.ptx.prefetch.tensormap(txl.address_of(k_map))
                 txl.ptx.prefetch.tensormap(txl.address_of(v_map))
@@ -419,7 +419,7 @@ def get_kernel(*, backend_config=None, **config):
                     txl.ptx.prefetch.tensormap(txl.address_of(dv_map))
                     txl.ptx.prefetch.tensormap(txl.address_of(dk_map))
 
-        arena = txl.alloc_tensor((shared_bytes,), txl.u8, scope="shared.dyn", align=1024)
+        arena = txl.alloc_tensor((shared_bytes,), "uint8", scope="shared.dyn", align=1024)
         pool = txl.smem_pool(base=arena).pool
         q_pipe = _PipelinePair(txl.TMABar(pool, 2), txl.TCGen05Bar(pool, 2))
         do_pipe = _PipelinePair(txl.TMABar(pool, 1), txl.TCGen05Bar(pool, 1))
@@ -489,7 +489,7 @@ def get_kernel(*, backend_config=None, **config):
             bh_edge = bh * edge_stride
             bh_q = bh * txl.int64(q128)
 
-            with txl.While(edge < count):
+            with txl.while_(edge < count):
                 q_block = _load_i32(bucketed_indices, bh_edge + txl.cast(begin + edge, "int64"))
                 q_block_safe = txl.Select(
                     q_block < txl.int32(q_blocks), q_block, txl.int32(q_blocks - 1)
@@ -497,13 +497,13 @@ def get_kernel(*, backend_config=None, **config):
                 first = edge == txl.int32(0)
 
                 q_pipe.empty.wait(q_prod.stage, q_prod.phase ^ 1)
-                with txl.If(leader != txl.uint32(0)), txl.Then():
+                with txl.if_(leader != txl.uint32(0)), txl.then_():
                     q_bar = q_pipe.full.buf.ptr_to([q_prod.stage])
                     q_tx = txl.local_scalar("uint32", init=txl.uint32(head_dim * 256))
-                    with txl.If(first), txl.Then():
+                    with txl.if_(first), txl.then_():
                         txl.assign(q_tx, txl.uint32(head_dim * 512))
                     txl.ptx.mbarrier.arrive.expect_tx.shared.b64(q_bar, q_tx)
-                    with txl.If(first), txl.Then():
+                    with txl.if_(first), txl.then_():
                         _issue_tma_tile(
                             k_map,
                             arena,
@@ -525,7 +525,7 @@ def get_kernel(*, backend_config=None, **config):
                         head_dim,
                     )
                 lse_pipe.empty.wait(q_prod.stage, q_prod.phase ^ 1)
-                with txl.If(leader != txl.uint32(0)), txl.Then():
+                with txl.if_(leader != txl.uint32(0)), txl.then_():
                     lse_bar = lse_pipe.full.buf.ptr_to([q_prod.stage])
                     _bulk_stats(
                         arena,
@@ -543,13 +543,13 @@ def get_kernel(*, backend_config=None, **config):
                 q_prod.advance()
 
                 do_pipe.empty.wait(do_prod.stage, do_prod.phase ^ 1)
-                with txl.If(leader != txl.uint32(0)), txl.Then():
+                with txl.if_(leader != txl.uint32(0)), txl.then_():
                     do_bar = do_pipe.full.buf.ptr_to([do_prod.stage])
                     do_tx = txl.local_scalar("uint32", init=txl.uint32(head_dim * 256))
-                    with txl.If(first), txl.Then():
+                    with txl.if_(first), txl.then_():
                         txl.assign(do_tx, txl.uint32(head_dim * 512))
                     txl.ptx.mbarrier.arrive.expect_tx.shared.b64(do_bar, do_tx)
-                    with txl.If(first), txl.Then():
+                    with txl.if_(first), txl.then_():
                         _issue_tma_tile(
                             v_map,
                             arena,
@@ -571,7 +571,7 @@ def get_kernel(*, backend_config=None, **config):
                         head_dim,
                     )
                 sum_pipe.empty.wait(do_prod.stage, do_prod.phase ^ 1)
-                with txl.If(leader != txl.uint32(0)), txl.Then():
+                with txl.if_(leader != txl.uint32(0)), txl.then_():
                     sum_bar = sum_pipe.full.buf.ptr_to([do_prod.stage])
                     _bulk_stats(
                         arena,
@@ -583,7 +583,7 @@ def get_kernel(*, backend_config=None, **config):
                 do_prod.advance()
                 txl.assign(edge, edge + txl.int32(1))
 
-            with txl.If(work), txl.Then():
+            with txl.if_(work), txl.then_():
                 # Source producer_tail drains both Q/LSE ring stages and the
                 # single dO/dPsum stage only for a processed tile.
                 q_pipe.empty.wait(q_prod.stage, q_prod.phase ^ 1)
@@ -647,7 +647,7 @@ def get_kernel(*, backend_config=None, **config):
                     t_dq, d_ds, d_k, id_dq, reduce_offsets, reduce_offsets, txl.uint32(0), elected
                 )
 
-            with txl.If(work), txl.Then():
+            with txl.if_(work), txl.then_():
                 q_pipe.full.wait(q_cons.stage, q_cons.phase)
                 s_pipe.empty.wait(s_prod.stage, s_prod.phase ^ 1)
                 issue_qk(q_cons)
@@ -669,7 +669,7 @@ def get_kernel(*, backend_config=None, **config):
 
                 edge = txl.local_scalar("int32", init=txl.int32(1))
                 dk_accumulate = txl.local_scalar("uint32", init=txl.uint32(0))
-                with txl.While(edge < count):
+                with txl.while_(edge < count):
                     q_pipe.full.wait(q_cons.stage, q_cons.phase)
                     issue_qk(q_cons)
                     q_cons.advance()
@@ -744,7 +744,7 @@ def get_kernel(*, backend_config=None, **config):
             ds_prod = txl.PipelineState(1, phase=0)
             dkdv_cons = txl.PipelineState(2, phase=0)
             edge = txl.local_scalar("int32", init=txl.int32(0))
-            with txl.While(edge < count):
+            with txl.while_(edge < count):
                 lse_pipe.full.wait(lse_cons.stage, lse_cons.phase)
                 s_pipe.full.wait(s_cons.stage, s_cons.phase)
                 scores = txl.alloc_local((64,), "float32")
@@ -755,8 +755,8 @@ def get_kernel(*, backend_config=None, **config):
                     _tmem_load32(scores, rep * 32, address)
                 kv_live = task * txl.int32(128) + crow < txl.int32(seqlen_kv)
                 for j in range(64):
-                    with txl.If(kv_live == txl.bool(False)), txl.Then():
-                        txl.assign(scores[j], txl.reinterpret(txl.uint32(0xFF800000), ty=txl.f32))
+                    with txl.if_(kv_live == txl.bool(False)), txl.then_():
+                        txl.assign(scores[j], txl.reinterpret(txl.uint32(0xFF800000), ty="float32"))
                 for rep in range(2):
                     for pair in range(16):
                         j = rep * 32 + pair * 2
@@ -803,10 +803,10 @@ def get_kernel(*, backend_config=None, **config):
                     )
                 txl.ptx["tcgen05.wait::st.sync.aligned"]()
                 txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE[0]), txl.uint32(BAR_COMPUTE[1]))
-                with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                     s_pipe.empty.arrive(s_cons.stage)
                 s_cons.advance()
-                with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                     lse_pipe.empty.arrive(lse_cons.stage)
                 lse_cons.advance()
 
@@ -862,20 +862,20 @@ def get_kernel(*, backend_config=None, **config):
                             packed_ds[base + 3],
                         )
                 txl.ptx["tcgen05.wait::st.sync.aligned"]()
-                with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                     dp_pipe.empty.arrive(dp_cons.stage)
                 dp_cons.advance()
                 txl.ptx.fence.proxy.async_.shared__cta()
                 txl.ptx.bar.sync(txl.uint32(BAR_COMPUTE[0]), txl.uint32(BAR_COMPUTE[1]))
-                with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                     sum_pipe.empty.arrive(sum_cons.stage)
                 sum_cons.advance()
-                with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                     ds_pipe.full.arrive(ds_prod.stage)
                 ds_prod.advance()
                 txl.assign(edge, edge + txl.int32(1))
 
-            with txl.If(work), txl.Then():
+            with txl.if_(work), txl.then_():
                 bh = txl.cast(batch_idx, "int64") * txl.int64(heads) + txl.cast(head, "int64")
                 for is_dk in (False, True):
                     dkdv_pipe.full.wait(dkdv_cons.stage, dkdv_cons.phase)
@@ -925,8 +925,8 @@ def get_kernel(*, backend_config=None, **config):
                             )
                         txl.ptx.fence.proxy.async_.shared__cta()
                         txl.ptx.bar.sync(txl.cast(txl.int32(1) + wg, "uint32"), txl.uint32(128))
-                        with txl.If(crow < txl.int32(32)), txl.Then():
-                            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(crow < txl.int32(32)), txl.then_():
+                            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                                 target_map = dk_map if is_dk else dv_map
                                 txl.ptx[TMA_S2G](
                                     txl.address_of(target_map),
@@ -972,8 +972,8 @@ def get_kernel(*, backend_config=None, **config):
                                 )
                             txl.ptx.fence.proxy.async_.shared__cta()
                             txl.ptx.bar.sync(txl.cast(txl.int32(1) + wg, "uint32"), txl.uint32(128))
-                            with txl.If(crow < txl.int32(32)), txl.Then():
-                                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                            with txl.if_(crow < txl.int32(32)), txl.then_():
+                                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                                     base = dk_base if is_dk else dv_base
                                     dst = (
                                         txl.int64(base)
@@ -997,12 +997,12 @@ def get_kernel(*, backend_config=None, **config):
                                 )
                             txl.ptx.fence.proxy.async_.shared__cta()
                             txl.ptx.bar.sync(txl.cast(txl.int32(1) + wg, "uint32"), txl.uint32(160))
-                    with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                    with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                         dkdv_pipe.empty.arrive(dkdv_cons.stage)
                     dkdv_cons.advance()
             if direct_dkv:
                 tile_live = task * txl.int32(128) < txl.int32(seqlen_kv)
-                with txl.If((work == txl.bool(False)) & tile_live), txl.Then():
+                with txl.if_((work == txl.bool(False)) & tile_live), txl.then_():
                     row = ctid % txl.int32(128)
                     seq = task * txl.int32(128) + row
                     compute_half = ctid // txl.int32(128) - txl.int32(1)
@@ -1025,8 +1025,8 @@ def get_kernel(*, backend_config=None, **config):
                             + txl.cast(seq, "int64")
                         )
                     ) * txl.int64(head_dim)
-                    with txl.If(seq < txl.int32(seqlen_kv)), txl.Then():
-                        with txl.If(compute_half == txl.int32(0)), txl.Then():
+                    with txl.if_(seq < txl.int32(seqlen_kv)), txl.then_():
+                        with txl.if_(compute_half == txl.int32(0)), txl.then_():
                             for vec in range(head_dim // 8):
                                 txl.ptx.st.global_.v4.b32(
                                     dk_output.ptr_to([destination + txl.int64(vec * 8)]),
@@ -1035,7 +1035,7 @@ def get_kernel(*, backend_config=None, **config):
                                     txl.uint32(0),
                                     txl.uint32(0),
                                 )
-                        with txl.If(compute_half == txl.int32(1)), txl.Then():
+                        with txl.if_(compute_half == txl.int32(1)), txl.then_():
                             for vec in range(head_dim // 8):
                                 txl.ptx.st.global_.v4.b32(
                                     dv_output.ptr_to([destination + txl.int64(vec * 8)]),
@@ -1056,7 +1056,7 @@ def get_kernel(*, backend_config=None, **config):
             edge = txl.local_scalar("int32", init=txl.int32(0))
             bh = txl.cast(batch_idx, "int64") * txl.int64(heads) + txl.cast(head, "int64")
             bh_edge = bh * edge_stride
-            with txl.While(edge < count):
+            with txl.while_(edge < count):
                 dq_pipe.full.wait(dq_cons.stage, dq_cons.phase)
                 q_block = _load_i32(bucketed_indices, bh_edge + txl.cast(begin + edge, "int64"))
                 q_block_safe = txl.Select(
@@ -1070,7 +1070,7 @@ def get_kernel(*, backend_config=None, **config):
                     _tmem_load32(values, chunk * 32, address)
                 txl.ptx["tcgen05.wait::ld.sync.aligned"]()
                 txl.ptx.bar.warp.sync(txl.uint32(0xFFFFFFFF))
-                with txl.If(txl.lane_id() == txl.int32(0)), txl.Then():
+                with txl.if_(txl.lane_id() == txl.int32(0)), txl.then_():
                     dq_pipe.empty.arrive(dq_cons.stage)
                 dq_cons.advance()
 
@@ -1092,8 +1092,8 @@ def get_kernel(*, backend_config=None, **config):
                         )
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx.bar.sync(txl.uint32(BAR_REDUCE[0]), txl.uint32(BAR_REDUCE[1]))
-                    with txl.If(txl.warp_id() == txl.int32(0)), txl.Then():
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(txl.warp_id() == txl.int32(0)), txl.then_():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             dst = (
                                 txl.int64(dq_base)
                                 + bh * txl.int64(q128 * head_dim)
@@ -1110,8 +1110,8 @@ def get_kernel(*, backend_config=None, **config):
                     txl.ptx.bar.sync(txl.uint32(BAR_REDUCE[0]), txl.uint32(BAR_REDUCE[1]))
                     txl.assign(store_stage, txl.Select(store_stage == txl.int32(1), 0, 1))
                 txl.assign(edge, edge + txl.int32(1))
-            with txl.If(work), txl.Then():
-                with txl.If(txl.warp_id() == txl.int32(0)), txl.Then():
+            with txl.if_(work), txl.then_():
+                with txl.if_(txl.warp_id() == txl.int32(0)), txl.then_():
                     txl.ptx.cp.async_.bulk.wait_group.read(0)
                 txl.ptx.bar.sync(txl.uint32(BAR_REDUCE[0]), txl.uint32(BAR_REDUCE[1]))
             txl.ptx.cp.async_.bulk.wait_group.read(0)
@@ -1125,9 +1125,9 @@ def get_kernel(*, backend_config=None, **config):
     def make_postprocess(seq_len, padded_len, source_base):
         @txl.kernel()
         def postprocess(
-            workspace: txl.Tensor((txl.int64(),), txl.f32),
-            output: txl.Tensor((txl.int64(),), txl.bf16),
-            output_scale: txl.f32,
+            workspace: txl.Tensor((txl.int64(),), "float32"),
+            output: txl.Tensor((txl.int64(),), "bfloat16"),
+            output_scale: "float32",
         ):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(
@@ -1143,7 +1143,7 @@ def get_kernel(*, backend_config=None, **config):
             tid = txl.thread_id()
             seq = seq_tile * txl.int32(128) + tid
             bh = txl.cast(batch_idx, "int64") * txl.int64(heads) + txl.cast(head, "int64")
-            arena = txl.alloc_tensor((128 * head_dim * 4,), txl.u8, scope="shared.dyn", align=1024)
+            arena = txl.alloc_tensor((128 * head_dim * 4,), "uint8", scope="shared.dyn", align=1024)
             source = (
                 txl.int64(source_base)
                 + bh * txl.int64(padded_len * head_dim)
@@ -1200,7 +1200,7 @@ def get_kernel(*, backend_config=None, **config):
             for rep in range(head_dim // 8):
                 row = row_base + txl.int32(rep) * row_step
                 seq = seq_tile * txl.int32(128) + row
-                with txl.If(seq < txl.int32(seq_len)), txl.Then():
+                with txl.if_(seq < txl.int32(seq_len)), txl.then_():
                     words = txl.alloc_local((4,), "uint32")
                     byte = _tile_byte(0, row, feature)
                     txl.ptx.ld.shared_.v4.b32(

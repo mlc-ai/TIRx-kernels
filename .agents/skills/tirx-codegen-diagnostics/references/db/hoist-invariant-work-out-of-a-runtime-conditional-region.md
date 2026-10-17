@@ -20,7 +20,7 @@ and index that array inside the guarded block.
 ```python
 # before: the swizzled store offsets are iteration-invariant, but the
 # guard stops the compiler from hoisting them.
-with txl.If(do_snapshot), txl.Then():
+with txl.if_(do_snapshot), txl.then_():
     for sub in range(SUBTILES):
         for group in range(GROUPS):
             column = sub * SUB_COLS + group * 8
@@ -43,7 +43,7 @@ for sub in range(SUBTILES):
         )
         txl.assign(snapshot_off[sub * GROUPS + group], BASE + element * 2)
 ...
-with txl.If(do_snapshot), txl.Then():
+with txl.if_(do_snapshot), txl.then_():
     for sub in range(SUBTILES):
         for group in range(GROUPS):
             txl.ptx.st.shared.v4.b32(

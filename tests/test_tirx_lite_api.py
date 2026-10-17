@@ -58,7 +58,7 @@ def test_device_entry_keeps_runtime_values_as_region_operands():
     bound = {}
 
     @txl.kernel()
-    def probe(out: txl.Tensor((txl.int64(),), txl.i32), rows: txl.i32):
+    def probe(out: txl.Tensor((txl.int64(),), "int32"), rows: "int32"):
         bound["rows"] = rows
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(rows, 2), block=128, cluster=(1, 2)),
@@ -127,7 +127,9 @@ def test_mma_desc_loop_invariance_handles_unstaged_and_staged_tiles():
                 txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
                 shape = (16, 128) if mode == "unstaged" else (2, 16, 128)
-                tile = txl.smem_pool().alloc(shape, txl.bf16, swizzle=txl.SW128B)
+                tile = txl.smem_pool().alloc(
+                    shape, "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM
+                )
                 with txl.serial(2) as i:
                     view = tile if mode == "unstaged" else tile[i if mode == "varying" else 0]
                     desc = view.mma_desc()
@@ -196,7 +198,9 @@ def test_mma_chain_encodes_descriptor_before_branch_guard():
     def probe():
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
-        tile = txl.smem_pool().alloc((1, 64, 64), txl.f16, swizzle=txl.SW128B)
+        tile = txl.smem_pool().alloc(
+            (1, 64, 64), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM
+        )
         view = tile[0]
         txl.idioms.mma_chain(
             "tcgen05.mma.cta_group::1.kind::f16",
@@ -439,9 +443,9 @@ def test_unsupported_tmem_buffer_scope_is_rejected():
     import pytest
 
     with pytest.raises(ValueError, match='scope="tmem"'):
-        txl.alloc_tensor((1,), txl.u32, scope="tmem")
+        txl.alloc_tensor((1,), "uint32", scope="tmem")
     with pytest.raises(ValueError, match='scope="tmem"'):
-        txl.decl_tensor((1,), txl.u32, scope="tmem")
+        txl.decl_tensor((1,), "uint32", scope="tmem")
 
     with pytest.raises(AttributeError, match="deliberately does not expose"):
         txl.TMEMPool
@@ -451,14 +455,14 @@ def test_unsupported_tmem_buffer_scope_is_rejected():
 @pytest.mark.parametrize("removed", ["strides", "offset_factor", "allocated_addr"])
 def test_buffer_removed_options_are_rejected(buffer_api, removed):
     with pytest.raises(TypeError, match=removed):
-        buffer_api((1,), txl.u32, **{removed: None})
+        buffer_api((1,), "uint32", **{removed: None})
 
 
 def test_alloc_tensor_preserves_defaults_and_positional_options():
     def build(out):
         region = txl.alloc_tensor((2,), scope="local")
         assert region.dtype == "float32"
-        view = txl.alloc_tensor((1,), txl.f32, region.data, 1, None, "local", 16)
+        view = txl.alloc_tensor((1,), "float32", region.data, 1, None, "local", 16)
         assert int(view.elem_offset) == 1
         assert str(view.scope()) == "local"
         assert view.data_alignment == 16
@@ -472,7 +476,7 @@ def test_decl_tensor_preserves_defaults_and_positional_options():
     def build(out):
         region = txl.decl_tensor((2,), scope="local")
         assert region.dtype == "float32"
-        view = txl.decl_tensor((1,), txl.f32, region.data, 1, None, "local", 16)
+        view = txl.decl_tensor((1,), "float32", region.data, 1, None, "local", 16)
         assert int(view.elem_offset) == 1
         assert str(view.scope()) == "local"
         assert view.data_alignment == 16
@@ -494,7 +498,7 @@ def test_decl_tensor_strided_shared_alias_is_rejected():
             region = smem.pool.alloc((2, 4, 512), "uint32", align=128)
             txl.decl_tensor(
                 (2, 4, 32),
-                txl.f32,
+                "float32",
                 data=region.data,
                 elem_offset=int(region.elem_offset),
                 strides=(2048, 512, 1),
@@ -505,8 +509,8 @@ def test_decl_tensor_strided_shared_alias_is_rejected():
 
 def test_default_buffer_strides_preserve_layout():
     def build(out):
-        region = txl.alloc_tensor((2, 4, 512), txl.f32, scope="local")
-        view = txl.decl_tensor((2, 4, 512), txl.f32, data=region.data, scope="local")
+        region = txl.alloc_tensor((2, 4, 512), "float32", scope="local")
+        view = txl.decl_tensor((2, 4, 512), "float32", data=region.data, scope="local")
         ir.assert_structural_equal(view.layout, region.layout)
         assert not view.strides
         txl.assign(view[0, 2, 7], txl.float32(1))
@@ -532,7 +536,7 @@ def test_thread_layout_is_not_a_kernel_entry_option():
     with pytest.raises(TypeError, match="thread_layout"):
 
         @txl.kernel(thread_layout=False)
-        def probe(out: txl.Tensor((txl.int64(),), txl.f32)):
+        def probe(out: txl.Tensor((txl.int64(),), "float32")):
             txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
             txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
@@ -548,7 +552,7 @@ def test_entry_usage_cap_does_not_shrink_cta_register_pool():
     assert cta_register_pool(warps=4, min_blocks_per_sm=2) == 32768
 
     @txl.kernel()
-    def probe(out: txl.Tensor((txl.int64(),), txl.f32)):
+    def probe(out: txl.Tensor((txl.int64(),), "float32")):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=1, block=4 * 32),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=2),
@@ -568,7 +572,7 @@ def test_specialize_uses_rounded_cta_register_pool_as_ceiling():
 
     def build(aux_regs):
         @txl.kernel()
-        def probe(out: txl.Tensor((txl.int64(),), txl.f32)):
+        def probe(out: txl.Tensor((txl.int64(),), "float32")):
             txl.device_entry(
                 launch=txl.cuda.LaunchConfig(grid=1, block=20 * 32),
                 kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
@@ -598,12 +602,12 @@ def test_specialize_uses_rounded_cta_register_pool_as_ceiling():
 
 
 def test_tensor_shape_reuses_entry_scalar_parameters():
-    _shape_cols = txl.Var("cols", txl.i32)
-    _shape_rows = txl.Var("rows", txl.i32)
+    _shape_cols = txl.Var("cols", "int32")
+    _shape_rows = txl.Var("rows", "int32")
 
     @txl.kernel()
     def probe(
-        out: txl.Tensor((_shape_rows, _shape_cols), txl.f32), rows: _shape_rows, cols: _shape_cols
+        out: txl.Tensor((_shape_rows, _shape_cols), "float32"), rows: _shape_rows, cols: _shape_cols
     ):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
@@ -646,7 +650,7 @@ def test_kernel_records_python_source_locations():
         txl.ptx.st.global_.f32(out.ptr_to([0]), txl.float32(0))
 
     @txl.kernel()
-    def probe(out: txl.Tensor((txl.int64(),), txl.f32)):
+    def probe(out: txl.Tensor((txl.int64(),), "float32")):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
         txl.ptx.st.global_.f32(out.ptr_to([1]), txl.float32(1))
@@ -693,7 +697,7 @@ def test_kernel_source_location_tracer_is_restored_after_failure():
     with pytest.raises(RuntimeError, match="trace failed"):
 
         @txl.kernel()
-        def probe(out: txl.Tensor((txl.int64(),), txl.f32)):
+        def probe(out: txl.Tensor((txl.int64(),), "float32")):
             txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
             raise RuntimeError("trace failed")

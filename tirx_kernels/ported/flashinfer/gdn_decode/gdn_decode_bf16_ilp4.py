@@ -354,25 +354,25 @@ def _make_gdn_decode_bf16_ilp4(
 ):
     @txl.kernel()
     def gdn_decode_bf16_ilp4(
-        state: txl.Tensor((txl.int64(),), txl.bf16),
-        intermediate: txl.Tensor((txl.int64(),), txl.bf16),
-        A_log: txl.Tensor((txl.int64(),), txl.f32),
-        a: txl.Tensor((txl.int64(),), txl.bf16),
-        dt_bias: txl.Tensor((txl.int64(),), txl.f32),
-        q: txl.Tensor((txl.int64(),), txl.bf16),
-        k: txl.Tensor((txl.int64(),), txl.bf16),
-        v: txl.Tensor((txl.int64(),), txl.bf16),
-        b_gate: txl.Tensor((txl.int64(),), txl.bf16),
-        output: txl.Tensor((txl.int64(),), txl.bf16),
-        read_indices: txl.Tensor((txl.int64(),), txl.i32),
-        write_indices: txl.Tensor((txl.int64(),), txl.i32),
-        accepted_steps: txl.Tensor((txl.int64(),), txl.i32),
-        ssm_state_indices: txl.Tensor((txl.int64(),), txl.i32),
-        state_slot_stride: txl.i64,
-        q_batch_stride: txl.i64,
-        k_batch_stride: txl.i64,
-        v_batch_stride: txl.i64,
-        batch: txl.i32,
+        state: txl.Tensor((txl.int64(),), "bfloat16"),
+        intermediate: txl.Tensor((txl.int64(),), "bfloat16"),
+        A_log: txl.Tensor((txl.int64(),), "float32"),
+        a: txl.Tensor((txl.int64(),), "bfloat16"),
+        dt_bias: txl.Tensor((txl.int64(),), "float32"),
+        q: txl.Tensor((txl.int64(),), "bfloat16"),
+        k: txl.Tensor((txl.int64(),), "bfloat16"),
+        v: txl.Tensor((txl.int64(),), "bfloat16"),
+        b_gate: txl.Tensor((txl.int64(),), "bfloat16"),
+        output: txl.Tensor((txl.int64(),), "bfloat16"),
+        read_indices: txl.Tensor((txl.int64(),), "int32"),
+        write_indices: txl.Tensor((txl.int64(),), "int32"),
+        accepted_steps: txl.Tensor((txl.int64(),), "int32"),
+        ssm_state_indices: txl.Tensor((txl.int64(),), "int32"),
+        state_slot_stride: "int64",
+        q_batch_stride: "int64",
+        k_batch_stride: "int64",
+        v_batch_stride: "int64",
+        batch: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -384,11 +384,11 @@ def _make_gdn_decode_bf16_ilp4(
 
         smem = txl.smem_pool()
         if SEQ_LEN > 1:
-            s_q = smem.alloc((S_K_BYTE_OFFSET // 4,), txl.f32, align=16)
-            s_k = smem.alloc(((S_GB_BYTE_OFFSET - S_K_BYTE_OFFSET) // 4,), txl.f32, align=16)
-            s_gb = smem.alloc((SEQ_LEN * 2,), txl.f32, align=16)
+            s_q = smem.alloc((S_K_BYTE_OFFSET // 4,), "float32", align=16)
+            s_k = smem.alloc(((S_GB_BYTE_OFFSET - S_K_BYTE_OFFSET) // 4,), "float32", align=16)
+            s_gb = smem.alloc((SEQ_LEN * 2,), "float32", align=16)
         else:
-            scratch = smem.alloc((SHARED_BYTES,), txl.u8, align=16)
+            scratch = smem.alloc((SHARED_BYTES,), "uint8", align=16)
             s_q = s_k = s_gb = scratch
         smem.commit(SHARED_BYTES)
         linear_cta = txl.cuda.block_idx("x")
@@ -434,7 +434,7 @@ def _make_gdn_decode_bf16_ilp4(
         if SEQ_LEN > 1:
             for pass_index in range((SEQ_LEN + NUM_WARPS - 1) // NUM_WARPS):
                 t_pre = _local_scalar("int32", pass_index * NUM_WARPS + warp[0])
-                with txl.If(t_pre[0] < SEQ_LEN), txl.Then():
+                with txl.if_(t_pre[0] < SEQ_LEN), txl.then_():
                     q_bits = txl.alloc_local((ELEMS_PER_LANE,), "uint16")
                     k_bits = txl.alloc_local((ELEMS_PER_LANE,), "uint16")
                     r_q_pre = txl.alloc_local((ELEMS_PER_LANE,), "float32")
@@ -533,7 +533,7 @@ def _make_gdn_decode_bf16_ilp4(
                                 (n[0] * SEQ_LEN + t_pre[0]) * NUM_V_HEADS + hv[0],
                             ),
                         )
-                        with txl.If(lane[0] == 0), txl.Then():
+                        with txl.if_(lane[0] == 0), txl.then_():
                             txl.ptx.st.shared.v2.b32(
                                 s_gb.ptr_to([t_pre[0] * 2]),
                                 txl.reinterpret(txl.cuda.float2_x(gate[0]), ty="uint32"),
@@ -792,7 +792,7 @@ def _make_gdn_decode_bf16_ilp4(
                             ((n[0] * SEQ_LEN + t) * NUM_V_HEADS + hv[0]) * V + v_base[0], "int64"
                         ),
                     )
-                    with txl.If(lane[0] == 0), txl.Then():
+                    with txl.if_(lane[0] == 0), txl.then_():
                         output_bits = txl.alloc_local((ILP_ROWS,), "uint16")
                         for row in range(ILP_ROWS):
                             txl.ptx.cvt.rn.bf16.f32(output_bits[row], output_sums[row])

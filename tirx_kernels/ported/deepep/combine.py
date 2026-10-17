@@ -165,16 +165,16 @@ def _build_combine_kernel(
 
     @txl.kernel()
     def deepep_combine(
-        x: txl.Tensor((txl.int64(),), txl.u8),
-        topk_weights: txl.Tensor((txl.int64(),), txl.f32),
-        src_metadata: txl.Tensor((txl.int64(),), txl.i32),
-        psum_rank: txl.Tensor((NUM_RANKS_,), txl.i32),
-        peer_ws: txl.Tensor((NUM_RANKS_,), txl.i64),
-        peer_buf: txl.Tensor((NUM_RANKS_,), txl.i64),
-        workspace_addr: txl.i64,
-        buffer_addr: txl.i64,
-        num_reduced_tokens: txl.i32,
-        rank_idx: txl.i32,
+        x: txl.Tensor((txl.int64(),), "uint8"),
+        topk_weights: txl.Tensor((txl.int64(),), "float32"),
+        src_metadata: txl.Tensor((txl.int64(),), "int32"),
+        psum_rank: txl.Tensor((NUM_RANKS_,), "int32"),
+        peer_ws: txl.Tensor((NUM_RANKS_,), "int64"),
+        peer_buf: txl.Tensor((NUM_RANKS_,), "int64"),
+        workspace_addr: "int64",
+        buffer_addr: "int64",
+        num_reduced_tokens: "int32",
+        rank_idx: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -205,7 +205,7 @@ def _build_combine_kernel(
 
         # --- NVLink barrier (comm.cuh:88-129), SM 0 only --------------------
         def nvlink_barrier(tag):
-            with txl.If(sm_idx == 0), txl.Then():
+            with txl.if_(sm_idx == 0), txl.then_():
                 counter_ptr = _gptr(ws_u64, WS_BARRIER_COUNTER)
                 # Plain low-word read of the counter (comm.cuh:98; reviewer r2)
                 status32 = txl.alloc_local([1], "uint32")
@@ -213,25 +213,25 @@ def _build_combine_kernel(
                 status = txl.cast(txl.bitwise_and(status32[0], txl.uint32(3)), "int32")
                 bphase = txl.bitwise_and(status, 1)
                 bsign = status // 2
-                with txl.If(thread_idx < NUM_RANKS_), txl.Then():
+                with txl.if_(thread_idx < NUM_RANKS_), txl.then_():
                     delta = txl.Select(bsign == 0, txl.int32(1), txl.int32(-1))
                     txl.ptx.red.release.sys.global_.add.s32(
                         _gptr(_peer_u64(peer_ws, thread_idx), WS_BARRIER_SIGNAL + bphase * 4), delta
                     )
                 # comm.cuh:107 __syncthreads (SM 0's CTA only)
                 txl.ptx.bar.sync(txl.uint32(0), txl.uint32(NUM_THREADS))
-                with txl.If(thread_idx == 0), txl.Then():
+                with txl.if_(thread_idx == 0), txl.then_():
                     old = txl.alloc_local([1], "uint64")
                     txl.ptx.atom.global_.add.u64(old[0], counter_ptr, txl.uint64(1))
                     target = txl.Select(bsign == 0, txl.int32(NUM_RANKS_), txl.int32(0))
                     sig = txl.alloc_local([1], "int32")
                     sig_ptr = _gptr(ws_u64, WS_BARRIER_SIGNAL + bphase * 4)
                     txl.ptx["ld.acquire.sys.L1::no_allocate.global.s32"](sig[0], sig_ptr)
-                    start_clock = txl.local_scalar(txl.u64, init=txl.cuda.clock64())
-                    with txl.While(sig[0] != target):
+                    start_clock = txl.local_scalar("uint64", init=txl.cuda.clock64())
+                    with txl.while_(sig[0] != target):
                         with (
-                            txl.If(txl.cuda.clock64() - start_clock >= txl.uint64(TIMEOUT_CYCLES)),
-                            txl.Then(),
+                            txl.if_(txl.cuda.clock64() - start_clock >= txl.uint64(TIMEOUT_CYCLES)),
+                            txl.then_(),
                         ):
                             txl.cuda.printf(
                                 "DeepEP NVLink barrier timeout, tag: %d, nvl: %d, "
@@ -251,7 +251,7 @@ def _build_combine_kernel(
             # by byte offset into the workspace, so `ptx_type` states its
             # width rather than respelling a known one.
             counter_ptr = _gptr(ws_u64, WS_PORT_SCRATCH + site * 8)
-            with txl.If(thread_idx == 0), txl.Then():
+            with txl.if_(thread_idx == 0), txl.then_():
                 c0 = txl.alloc_local([1], "uint64")
                 txl.ptx.ld.acquire.gpu.global_.u64(c0[0], counter_ptr)
                 target = (c0[0] // txl.uint64(num_sms) + txl.uint64(1)) * txl.uint64(num_sms)
@@ -277,7 +277,7 @@ def _build_combine_kernel(
 
         phase = txl.alloc_local([1], "uint32")
         txl.assign(phase[0], txl.uint32(0))
-        with txl.If(txl.cuda.elect_sync()), txl.Then():
+        with txl.if_(txl.cuda.elect_sync()), txl.then_():
             txl.ptx.mbarrier.init.shared.b64(tma_mbar, txl.uint32(1))
             txl.ptx.fence.mbarrier_init.release.cluster()
         txl.cuda.warp_sync()
@@ -309,7 +309,7 @@ def _build_combine_kernel(
             )
 
             # no_local_reduce is always true in this specialization (combine.cuh:125-127)
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 # Drain the previous token's TMA store before reusing the SMEM slot
                 txl.ptx.cp.async_.bulk.wait_group(0)
                 txl.ptx[_BULK_G2S_CHAIN](
@@ -333,7 +333,7 @@ def _build_combine_kernel(
 
             # Write this token's top-k weights into the same remote slot
             # (combine.cuh:216-226)
-            with txl.If(lane < NUM_TOPK), txl.Then():
+            with txl.if_(lane < NUM_TOPK), txl.then_():
                 w = txl.alloc_local([1], "float32")
                 txl.ptx["ld.global.nc.f32"](w[0], topk_weights.ptr_to([i * NUM_TOPK + lane]))
                 txl.ptx.st.global_.b32(
@@ -368,11 +368,11 @@ def _build_reduce_epilogue_kernel(
 
     @txl.kernel()
     def deepep_combine_reduce_epilogue(
-        combined_x: txl.Tensor((txl.int64(),), txl.u8),
-        combined_topk_weights: txl.Tensor((txl.int64(),), txl.f32),
-        combined_topk_idx: txl.Tensor((txl.int64(),), txl.i32),
-        buffer_addr: txl.i64,
-        num_combined_tokens: txl.i32,
+        combined_x: txl.Tensor((txl.int64(),), "uint8"),
+        combined_topk_weights: txl.Tensor((txl.int64(),), "float32"),
+        combined_topk_idx: txl.Tensor((txl.int64(),), "int32"),
+        buffer_addr: "int64",
+        num_combined_tokens: "int32",
     ):
         # The i64 top-k indices are passed as an int32 view; the source reads
         # only the little-endian low word of each entry (reviewer r2 finding 3)
@@ -415,7 +415,7 @@ def _build_reduce_epilogue_kernel(
             # __ldg: "PDL is used, please do not use __ldg")
             dst_expert = txl.alloc_local([1], "int32")
             txl.assign(dst_expert[0], -1)
-            with txl.If(lane < NUM_TOPK), txl.Then():
+            with txl.if_(lane < NUM_TOPK), txl.then_():
                 txl.ptx["ld.global.b32"](
                     dst_expert[0], combined_topk_idx.ptr_to([token_idx * NUM_TOPK * 2 + lane * 2])
                 )
@@ -445,8 +445,8 @@ def _build_reduce_epilogue_kernel(
 
             # combine_reduce<896, 4, 6, 6>: no bias in this specialization, so the
             # path selector is exactly (topk_slot[2] < 0) (utils.cuh:68-70)
-            with txl.If(topk_slot[2] < 0):
-                with txl.Then():
+            with txl.if_(topk_slot[2] < 0):
+                with txl.then_():
                     # --- bf16 hadd path (utils.cuh:73-110) ---
                     with txl.serial(0, 7) as c:
                         values_0 = txl.alloc_local([16], "int32", align=16)
@@ -454,7 +454,7 @@ def _build_reduce_epilogue_kernel(
                         with txl.unroll(16) as j:
                             txl.assign(values_0[j], txl.uint32(0))
                             txl.assign(values_1[j], txl.uint32(0))
-                        with txl.If(topk_slot[0] >= 0), txl.Then():
+                        with txl.if_(topk_slot[0] >= 0), txl.then_():
                             base0 = buf_u64 + txl.cast(
                                 (topk_slot[0] * num_max_tokens_per_rank + token_idx)
                                 * COMBINE_TOKEN_BYTES,
@@ -472,7 +472,7 @@ def _build_reduce_epilogue_kernel(
                                     ),
                                     txl.uint64(_EVICT_FIRST),
                                 )
-                        with txl.If(topk_slot[1] >= 0), txl.Then():
+                        with txl.if_(topk_slot[1] >= 0), txl.then_():
                             base1 = buf_u64 + txl.cast(
                                 (topk_slot[1] * num_max_tokens_per_rank + token_idx)
                                 * COMBINE_TOKEN_BYTES,
@@ -490,7 +490,7 @@ def _build_reduce_epilogue_kernel(
                                     ),
                                     txl.uint64(_EVICT_FIRST),
                                 )
-                        with txl.If(c == 0), txl.Then():
+                        with txl.if_(c == 0), txl.then_():
                             # Drain the previous token's TMA store before reusing smem
                             txl.ptx.cp.async_.bulk.wait_group(0)
                             txl.cuda.warp_sync()
@@ -509,7 +509,7 @@ def _build_reduce_epilogue_kernel(
                                 sums[2],
                                 sums[3],
                             )
-                with txl.Else():
+                with txl.else_():
                     # --- fp32 accumulate path (utils.cuh:111-168) ---
                     with txl.serial(0, 7) as c:
                         reduced = txl.alloc_local([32], "float32")
@@ -519,7 +519,7 @@ def _build_reduce_epilogue_kernel(
                             values = txl.alloc_local([16], "int32", align=16)
                             with txl.unroll(16) as j:
                                 txl.assign(values[j], txl.uint32(0))
-                            with txl.If(topk_slot[k] >= 0), txl.Then():
+                            with txl.if_(topk_slot[k] >= 0), txl.then_():
                                 base_k = buf_u64 + txl.cast(
                                     (topk_slot[k] * num_max_tokens_per_rank + token_idx)
                                     * COMBINE_TOKEN_BYTES,
@@ -548,7 +548,7 @@ def _build_reduce_epilogue_kernel(
                                     e = j * 8 + w * 2
                                     txl.ptx.add.rn.f32.bf16(reduced[e], lo, reduced[e])
                                     txl.ptx.add.rn.f32.bf16(reduced[e + 1], hi, reduced[e + 1])
-                        with txl.If(c == 0), txl.Then():
+                        with txl.if_(c == 0), txl.then_():
                             txl.ptx.cp.async_.bulk.wait_group(0)
                             txl.cuda.warp_sync()
                         with txl.unroll(4) as j:
@@ -573,7 +573,7 @@ def _build_reduce_epilogue_kernel(
             txl.cuda.warp_sync()
 
             # TMA-store the reduced token (epilogue.cuh:120-123)
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 txl.ptx[_BULK_S2G_CHAIN](
                     combined_x.ptr_to([token_idx * OUTPUT_TOKEN_BYTES]),
                     smem.ptr_to([tok_off]),
@@ -585,10 +585,10 @@ def _build_reduce_epilogue_kernel(
 
             # Write combined top-k weights from the master lane's rank buffer
             # (epilogue.cuh:128-141)
-            with txl.If(lane < NUM_TOPK), txl.Then():
+            with txl.if_(lane < NUM_TOPK), txl.then_():
                 w32 = txl.alloc_local([1], "uint32")
                 txl.assign(w32[0], txl.uint32(0))
-                with txl.If(dst_rank >= 0), txl.Then():
+                with txl.if_(dst_rank >= 0), txl.then_():
                     txl.ptx["ld.global.b32"](
                         w32[0],
                         _gptr(

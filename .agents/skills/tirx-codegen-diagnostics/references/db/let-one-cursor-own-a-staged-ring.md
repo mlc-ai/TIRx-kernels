@@ -15,7 +15,7 @@ verify the final lowering rather than assuming the abstraction is free.
 
 ```python
 state = txl.PipelineState(NUM_STAGES, phase=0)
-with txl.While(index < total):
+with txl.while_(index < total):
     full_barriers[state.stage].wait(state.phase)
     ...
     txl.assign(index, index + STEP)

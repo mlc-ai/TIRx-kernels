@@ -152,7 +152,7 @@ class Role:
         # else-if chain (Specialize.chain_dispatch). Read back off the frame
         # rather than kept from above because `warp_id == lo` hands back an
         # EqualOp proxy, and the node the frame holds is the converted one.
-        # Identity, not structure: a user-written `txl.If` spelling the same
+        # Identity, not structure: a user-written `txl.if_` spelling the same
         # predicate is a different node and must not be chained.
         self.owner.dispatch.append((self._frames[0].condition, self))
         for frame in self._frames:
@@ -326,7 +326,7 @@ class Specialize:
 
             The ``else_case is not None`` arm is **defensive and currently
             unreachable**: a role guard is built by :meth:`Role.__enter__` as
-            ``If`` + ``Then`` only, and ``txl.Else`` cannot be attached to it
+            ``if_`` + ``then_`` only, and ``txl.else_`` cannot be attached to it
             (the frames close on ``__exit__``, and the role is not exposed
             during the window where an else could be opened). It is written
             anyway because ``chain_run`` below *discards* ``else_case`` when it

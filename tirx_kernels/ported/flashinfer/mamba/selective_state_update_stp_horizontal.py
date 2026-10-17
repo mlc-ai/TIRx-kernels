@@ -75,10 +75,10 @@ def _mbarrier_arrive_wait(barrier):
     token = txl.local_scalar("uint64")
     done = txl.local_scalar("uint32")
     txl.ptx.mbarrier.arrive.shared__cta.b64(token, barrier, txl.uint32(1))
-    with txl.While(True):
+    with txl.while_(True):
         txl.ptx.mbarrier.try_wait.shared__cta.b64(done, barrier, token)
-        with txl.If(done != txl.uint32(0)), txl.Then():
-            txl.Break()
+        with txl.if_(done != txl.uint32(0)), txl.then_():
+            txl.break_()
 
 
 def _tma_g2s_horizontal(dst, tensor_state, column, head, state_batch, barrier):
@@ -361,30 +361,30 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
     def selective_state_update_stp_horizontal(
         tensor_state: txl.Ptr(txl.TensorMap),
         state: txl.Tensor((txl.int64(),), spec["STATE_DTYPE"]),
-        x: txl.Tensor((txl.int64(),), txl.bf16),
+        x: txl.Tensor((txl.int64(),), "bfloat16"),
         dt: txl.Tensor((txl.int64(),), spec["WEIGHT_DTYPE"]),
-        matrix_a: txl.Tensor((txl.int64(),), txl.f32),
-        matrix_b: txl.Tensor((txl.int64(),), txl.bf16),
-        matrix_c: txl.Tensor((txl.int64(),), txl.bf16),
+        matrix_a: txl.Tensor((txl.int64(),), "float32"),
+        matrix_b: txl.Tensor((txl.int64(),), "bfloat16"),
+        matrix_c: txl.Tensor((txl.int64(),), "bfloat16"),
         d_weight: txl.Tensor((txl.int64(),), spec["WEIGHT_DTYPE"]),
-        z: txl.Tensor((txl.int64(),), txl.bf16),
+        z: txl.Tensor((txl.int64(),), "bfloat16"),
         dt_bias: txl.Tensor((txl.int64(),), spec["WEIGHT_DTYPE"]),
         state_indices: txl.Tensor((txl.int64(),), spec["INDEX_DTYPE"]),
         dst_indices: txl.Tensor((txl.int64(),), spec["INDEX_DTYPE"]),
-        rand_seed: txl.Tensor((txl.int64(),), txl.i64),
-        output: txl.Tensor((txl.int64(),), txl.bf16),
-        state_stride_batch: txl.i64,
-        x_stride_batch: txl.i64,
-        dt_stride_batch: txl.i64,
-        b_stride_batch: txl.i64,
-        c_stride_batch: txl.i64,
-        z_stride_batch: txl.i64,
-        out_stride_batch: txl.i64,
-        state_indices_stride_batch: txl.i64,
-        dst_indices_stride_batch: txl.i64,
-        dt_softplus: txl.i32,
-        update_state: txl.i32,
-        pad_slot_id: txl.i32,
+        rand_seed: txl.Tensor((txl.int64(),), "int64"),
+        output: txl.Tensor((txl.int64(),), "bfloat16"),
+        state_stride_batch: "int64",
+        x_stride_batch: "int64",
+        dt_stride_batch: "int64",
+        b_stride_batch: "int64",
+        c_stride_batch: "int64",
+        z_stride_batch: "int64",
+        out_stride_batch: "int64",
+        state_indices_stride_batch: "int64",
+        dst_indices_stride_batch: "int64",
+        dt_softplus: "int32",
+        update_state: "int32",
+        pad_slot_id: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -399,8 +399,8 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
         s_state = smem.alloc(
             (spec["NUM_STAGES"] * spec["STATE_STAGE_VALUES"],), spec["STATE_DTYPE"], align=128
         )
-        s_b = smem.alloc((spec["DSTATE"],), txl.bf16, align=16)
-        s_c = smem.alloc((spec["DSTATE"],), txl.bf16, align=16)
+        s_b = smem.alloc((spec["DSTATE"],), "bfloat16", align=16)
+        s_c = smem.alloc((spec["DSTATE"],), "bfloat16", align=16)
         empty = txl.MBarrier(smem, spec["NUM_STAGES"])
         full = txl.MBarrier(smem, spec["NUM_STAGES"])
         consumers_ready = txl.MBarrier(smem, 1)
@@ -502,18 +502,18 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
 
         def dispatch_producer(state_batch, dst_state_batch):
             read_state: txl.bool = state_batch != txl.cast(pad_slot_id, "int64")
-            with txl.If(read_state):
-                with txl.Then():
-                    with txl.If(update_state != 0):
-                        with txl.Then():
+            with txl.if_(read_state):
+                with txl.then_():
+                    with txl.if_(update_state != 0):
+                        with txl.then_():
                             producer_pipeline(
                                 state_batch, dst_state_batch, READ_STATE=True, WRITE_STATE=True
                             )
-                        with txl.Else():
+                        with txl.else_():
                             producer_pipeline(
                                 state_batch, dst_state_batch, READ_STATE=True, WRITE_STATE=False
                             )
-                with txl.Else():
+                with txl.else_():
                     producer_pipeline(
                         state_batch, dst_state_batch, READ_STATE=False, WRITE_STATE=False
                     )
@@ -547,7 +547,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
             random_words = txl.alloc_local((4,), "uint32")
             i_begin = txl.local_scalar("int32", init=0)
             state_pipe = txl.PipelineState(NUM_STAGES, phase=0)
-            with txl.While(i_begin < DSTATE):
+            with txl.while_(i_begin < DSTATE):
                 _mbarrier_arrive_wait(full_barriers_buf.ptr_to([state_pipe.stage]))
                 with txl.unroll(ITEMS_PER_THREAD // STATE_VALUES_PER_BANK) as item_iter:
                     item: txl.int32 = item_iter * STATE_VALUES_PER_BANK
@@ -570,7 +570,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         c_bits = _load_two_byte_vector(
                             s_c, state_column, STATE_VALUES_PER_BANK, "shared"
                         )
-                        with txl.If(txl.And(PHILOX_ROUNDS > 0, item_iter % 2 == 0)), txl.Then():
+                        with txl.if_(txl.And(PHILOX_ROUNDS > 0, item_iter % 2 == 0)), txl.then_():
                             random_offset: txl.int64 = state_ptr_offset + txl.cast(
                                 d * DSTATE + state_column, "int64"
                             )
@@ -720,7 +720,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
             txl.keep_alive(state.data)
 
             if ROLE == "producer":
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     if HAS_DST_INDICES and INDEX_DTYPE == "int32":
                         dispatch_producer(state_batch, dst_state_batch_i32)
                     else:
@@ -747,8 +747,8 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                 if HAS_DT_BIAS:
                     bias_value: txl.float32 = _load_weight(dt_bias, head, WEIGHT_DTYPE)
                     txl.ptx["add.ftz.f32"](dt_value, dt_value, bias_value)
-                with txl.If(dt_softplus != 0), txl.Then():
-                    with txl.If(dt_value <= txl.float32(20.0)), txl.Then():
+                with txl.if_(dt_softplus != 0), txl.then_():
+                    with txl.if_(dt_value <= txl.float32(20.0)), txl.then_():
                         mul_4 = txl.local_scalar("float32")
                         txl.ptx["mul.ftz.f32"](mul_4, dt_value, txl.float32(_LOG2_E))
                         dt_exp_arg: txl.float32 = mul_4
@@ -763,10 +763,10 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         dt_log2: txl.float32 = log2_0
                         txl.ptx["mul.ftz.f32"](dt_value, dt_log2, txl.float32(_LN_2))
 
-                with txl.If(warp == 0):
-                    with txl.Then():
+                with txl.if_(warp == 0):
+                    with txl.then_():
                         b_column = txl.local_scalar("int32", init=lane * 8)
-                        with txl.While(b_column < DSTATE):
+                        with txl.while_(b_column < DSTATE):
                             _copy_bf16x8_g2s(
                                 matrix_b,
                                 txl.cast(batch_i, "int64") * b_stride_batch
@@ -776,10 +776,10 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                 b_column,
                             )
                             txl.assign(b_column, b_column + 32 * 8)
-                    with txl.Else():
-                        with txl.If(warp == 1), txl.Then():
+                    with txl.else_():
+                        with txl.if_(warp == 1), txl.then_():
                             c_column = txl.local_scalar("int32", init=lane * 8)
-                            with txl.While(c_column < DSTATE):
+                            with txl.while_(c_column < DSTATE):
                                 _copy_bf16x8_g2s(
                                     matrix_c,
                                     txl.cast(batch_i, "int64") * c_stride_batch
@@ -815,8 +815,8 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                 _mbarrier_arrive_wait(consumers_ready_buf.ptr_to([0]))
                 out_accum = txl.alloc_local((1,), "float32")
                 txl.assign(out_accum[0], 0.0)
-                with txl.If(state_batch != txl.cast(pad_slot_id, "int64")):
-                    with txl.Then():
+                with txl.if_(state_batch != txl.cast(pad_slot_id, "int64")):
+                    with txl.then_():
                         consumer_pipeline(
                             out_accum,
                             d,
@@ -829,7 +829,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                             state_ptr_offset,
                             USE_STATE_CACHE=True,
                         )
-                    with txl.Else():
+                    with txl.else_():
                         consumer_pipeline(
                             out_accum,
                             d,
@@ -847,7 +847,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                 txl.ptx["add.ftz.f32"](
                     out_value, out_value, _simple._shfl_down_f32(out_value, txl.int32(16))
                 )
-                with txl.If(member == 0), txl.Then():
+                with txl.if_(member == 0), txl.then_():
                     txl.ptx["fma.rn.ftz.f32"](out_value, d_value, x_value, out_value)
                     if HAS_Z:
                         sub_0 = txl.local_scalar("float32")

@@ -16,13 +16,13 @@ Keep the original partitioning and final reduction.
 
 ```python
 # before:
-with txl.While(position < end):
+with txl.while_(position < end):
     load_vector(payload, address(position))
     update_predicate(payload)
     txl.assign(position, position + stride)
 
 # after:
-with txl.While(position < end):
+with txl.while_(position < end):
     for group in range(4):
         load_vector(payloads[group], bounded_address(position + group * stride))
     for group in range(4):

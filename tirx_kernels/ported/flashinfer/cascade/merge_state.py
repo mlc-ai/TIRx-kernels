@@ -114,11 +114,11 @@ def get_kernel(
     @txl.kernel()
     def merge_state(
         v_a: txl.Tensor((txl.int64(),), dtype),
-        s_a: txl.Tensor((txl.int64(),), txl.f32),
+        s_a: txl.Tensor((txl.int64(),), "float32"),
         v_b: txl.Tensor((txl.int64(),), dtype),
-        s_b: txl.Tensor((txl.int64(),), txl.f32),
+        s_b: txl.Tensor((txl.int64(),), "float32"),
         v_merged: txl.Tensor((txl.int64(),), dtype),
-        s_merged: txl.Tensor((txl.int64(),), txl.f32),
+        s_merged: txl.Tensor((txl.int64(),), "float32"),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=seq_len, block=warps * 32),
@@ -239,7 +239,7 @@ def get_kernel(
 
             # One thread per head owns the scalar output, even though every
             # thread computed the same blend weights. Keep the optional-output guard.
-            with txl.If(txl.And(tx == 0, txl.Not(txl.isnullptr(s_merged.data)))), txl.Then():
+            with txl.if_(txl.And(tx == 0, txl.Not(txl.isnullptr(s_merged.data)))), txl.then_():
                 lg = txl.local_scalar("float32")
                 lse = txl.local_scalar("float32")
                 txl.ptx.lg2.approx.ftz.f32(lg, denom)  # math::ptx_log2
@@ -251,7 +251,7 @@ def get_kernel(
         else:
             # The source block is exactly bdx * bdy threads; tirx-lite pads it to whole
             # warps, so the padding threads (which would alias head bdy) must idle.
-            with txl.If(tid < nthreads), txl.Then():
+            with txl.if_(tid < nthreads), txl.then_():
                 body()
 
     return merge_state.func

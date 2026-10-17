@@ -36,7 +36,7 @@ mma_k_rounded: T.int32
 mma_k_rounded = ((mma_kblocks + (UNROLL - 1)) // UNROLL) * UNROLL
 while mma_k < mma_k_rounded:
     for u in T.unroll(0, UNROLL):
-        with T.If(mma_k < mma_kblocks), T.Then():
+        with T.if_(mma_k < mma_kblocks), T.then_():
             if u % stages_per_load == 0:
                 _copy_scale_factors(...)
             ...

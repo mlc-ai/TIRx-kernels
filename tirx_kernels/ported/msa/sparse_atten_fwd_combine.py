@@ -79,7 +79,7 @@ _TORCH_DTYPES = {
 # are moved as raw bytes and converted with PTX on the bit pattern. An fp8
 # partial buffer therefore binds as `uint8`, exactly as the forward port and
 # `flashmla/sparse_decode_head64.py` do.
-_TXL_DTYPES = {"bfloat16": txl.bf16, "float16": txl.f16, "float32": txl.f32, "float8_e4m3": txl.u8}
+_TXL_DTYPES = {"bfloat16": "bfloat16", "float16": "float16", "float32": "float32", "float8_e4m3": "uint8"}
 
 
 def _torch_dtype(name: str):
@@ -194,31 +194,31 @@ def make_kernel(
     @txl.kernel()
     def msa_sparse_atten_fwd_combine(
         o_partial: txl.Tensor((txl.int64(),), partial_ty),
-        lse_partial: txl.Tensor((txl.int64(),), txl.f32),
-        o_out: txl.Tensor((txl.int64(),), txl.bf16),
-        lse_out: txl.Tensor((txl.int64(),), txl.f32),
-        lse_temperature_partial: txl.Tensor((txl.int64(),), txl.f32),
-        lse_temperature_out: txl.Tensor((txl.int64(),), txl.f32),
-        cu_seqlens: txl.Tensor((txl.int64(),), txl.i32),
-        seqused_q: txl.Tensor((txl.int64(),), txl.i32),
-        split_counts: txl.Tensor((txl.int64(),), txl.i32),
-        output_scale_ptr: txl.Tensor((txl.int64(),), txl.f32),
-        stride_op_split: txl.i32,
-        stride_op_q: txl.i32,
-        stride_op_h: txl.i32,
-        stride_lp_split: txl.i32,
-        stride_lp_q: txl.i32,
-        stride_o_q: txl.i32,
-        stride_o_h: txl.i32,
-        stride_l_q: txl.i32,
-        stride_sc_q: txl.i32,
-        qhead_per_kv: txl.i32,
-        total_q: txl.i32,
-        head_q: txl.i32,
-        num_batches: txl.i32,
-        head_div_mul: txl.i32,
-        head_div_s1: txl.i32,
-        head_div_s2: txl.i32,
+        lse_partial: txl.Tensor((txl.int64(),), "float32"),
+        o_out: txl.Tensor((txl.int64(),), "bfloat16"),
+        lse_out: txl.Tensor((txl.int64(),), "float32"),
+        lse_temperature_partial: txl.Tensor((txl.int64(),), "float32"),
+        lse_temperature_out: txl.Tensor((txl.int64(),), "float32"),
+        cu_seqlens: txl.Tensor((txl.int64(),), "int32"),
+        seqused_q: txl.Tensor((txl.int64(),), "int32"),
+        split_counts: txl.Tensor((txl.int64(),), "int32"),
+        output_scale_ptr: txl.Tensor((txl.int64(),), "float32"),
+        stride_op_split: "int32",
+        stride_op_q: "int32",
+        stride_op_h: "int32",
+        stride_lp_split: "int32",
+        stride_lp_q: "int32",
+        stride_o_q: "int32",
+        stride_o_h: "int32",
+        stride_l_q: "int32",
+        stride_sc_q: "int32",
+        qhead_per_kv: "int32",
+        total_q: "int32",
+        head_q: "int32",
+        num_batches: "int32",
+        head_div_mul: "int32",
+        head_div_s1: "int32",
+        head_div_s2: "int32",
     ):
         # ===== MSA COMBINE TRANSCRIPTION START =====
         # Grid: (ceil(seqlen*num_head / tile_m), ceil(head_dim / k_block), batch)
@@ -252,7 +252,7 @@ def make_kernel(
         # declares it unconditionally, and every later offset depends on it.
         # -------------------------------------------------------------------
         pool = txl.smem_pool()
-        raw = pool.alloc((SMEM_TOTAL,), txl.u8, align=1024)
+        raw = pool.alloc((SMEM_TOTAL,), "uint8", align=1024)
         pool.commit(SMEM_TOTAL)
 
         def _view(shape, dtype, byte_offset):
@@ -260,13 +260,13 @@ def make_kernel(
                 shape, dtype, data=raw.data, scope="shared.dyn", byte_offset=byte_offset, align=1024
             )
 
-        s_lse = _view((topk * TILE_M,), txl.f32, OFF_SLSE)
-        s_maxvalid = _view((TILE_M,), txl.i32, off_maxvalid)
+        s_lse = _view((topk * TILE_M,), "float32", OFF_SLSE)
+        s_maxvalid = _view((TILE_M,), "int32", off_maxvalid)
         s_o = _view((STAGES * TILE_M * K_BLOCK_SIZE,), partial_ty, off_so)
-        s_perm = _view((TILE_M * PERM_ROW,), txl.bf16, off_sperm)
-        s_perm_i32 = _view((TILE_M * PERM_ROW // 2,), txl.u32, off_sperm)
+        s_perm = _view((TILE_M * PERM_ROW,), "bfloat16", off_sperm)
+        s_perm_i32 = _view((TILE_M * PERM_ROW // 2,), "uint32", off_sperm)
         if temperature:
-            s_lse_t = _view((topk * TILE_M,), txl.f32, OFF_SLSE_T)
+            s_lse_t = _view((topk * TILE_M,), "float32", OFF_SLSE_T)
 
         # The thread decomposition the source's four tiled copies imply. These
         # are four distinct maps over the same 256 threads and they are never
@@ -301,8 +301,8 @@ def make_kernel(
             txl.assign(seqlen, _ld_u32(cu_seqlens, batch + 1) - q_offset)
         max_idx = txl.local_scalar("int32", init=seqlen * head_q)
 
-        with txl.If(m_block * TILE_M < max_idx):
-            with txl.Then():
+        with txl.if_(m_block * TILE_M < max_idx):
+            with txl.then_():
                 # The source opens this block at :547 and closes it at :1125:
                 # the guard covers the WHOLE body, not just the wait. That is
                 # what retires a tail CTA before it reaches any barrier, so
@@ -457,8 +457,8 @@ def make_kernel(
                     )
 
                 idx1 = txl.local_scalar("int32", init=m_block * TILE_M + lse_row)
-                with txl.If(idx1 < max_idx):
-                    with txl.Then():
+                with txl.if_(idx1 < max_idx):
+                    with txl.then_():
                         m_idx1, head_idx1 = _divmod_row(idx1)
                         row_count = txl.local_scalar(
                             "int32", init=_split_count(m_idx1, head_idx1, False)
@@ -472,8 +472,8 @@ def make_kernel(
                         for i in range(SPLITS_PT):
                             si = lse_split0 + 4 * i
                             dst = s_lse.ptr_to([_slse_base(lse_split0, lse_row) + i * (4 * TILE_M)])
-                            with txl.If(si < row_count):
-                                with txl.Then():
+                            with txl.if_(si < row_count):
+                                with txl.then_():
                                     txl.ptx["cp.async.ca.shared.global"](
                                         dst,
                                         lse_partial.ptr_to(
@@ -501,7 +501,7 @@ def make_kernel(
                                             4,
                                             4,
                                         )
-                                with txl.Else():
+                                with txl.else_():
                                     txl.ptx.st.shared.u32(dst, txl.uint32(0xFF800000))
                                     if temperature:
                                         txl.ptx.st.shared.u32(
@@ -510,7 +510,7 @@ def make_kernel(
                                             ),
                                             txl.uint32(0xFF800000),
                                         )
-                    with txl.Else():
+                    with txl.else_():
                         for i in range(SPLITS_PT):
                             txl.ptx.st.shared.u32(
                                 s_lse.ptr_to([_slse_base(lse_split0, lse_row) + i * (4 * TILE_M)]),
@@ -544,8 +544,8 @@ def make_kernel(
                     idx2 = txl.local_scalar(
                         "int32", init=m_block * TILE_M + o_row0 + m * O_ROW_STEP
                     )
-                    with txl.If(idx2 < max_idx):
-                        with txl.Then():
+                    with txl.if_(idx2 < max_idx):
+                        with txl.then_():
                             q2, h2 = _divmod_row(idx2)
                             txl.assign(midx[m], q2)
                             txl.assign(hidx[m], h2)
@@ -586,10 +586,10 @@ def make_kernel(
                         # copy nor the fill. Collapsing them into a single `and`
                         # would make a dead row write 16 zero bytes the reference
                         # never writes.
-                        with txl.If(hidx[m] >= 0):
-                            with txl.Then():
-                                with txl.If(split < scount[m]):
-                                    with txl.Then():
+                        with txl.if_(hidx[m] >= 0):
+                            with txl.then_():
+                                with txl.if_(split < scount[m]):
+                                    with txl.then_():
                                         txl.ptx["cp.async.cg.shared.global"](
                                             dst,
                                             o_partial.ptr_to(
@@ -603,7 +603,7 @@ def make_kernel(
                                             16,
                                             16,
                                         )
-                                    with txl.Else():
+                                    with txl.else_():
                                         _store_zero_vec(dst)
 
                 for stage in range(STAGES - 1):
@@ -742,8 +742,8 @@ def make_kernel(
                 txl.ptx.setp.equ.f32(bad_sum, lse_sum_all, txl.float32(0.0))
                 degenerate = txl.local_scalar("uint32")
                 txl.ptx.or_.pred(degenerate, txl.ptx.pred(bad_idx), txl.ptx.pred(bad_sum))
-                with txl.If(degenerate == txl.uint32(0)):
-                    with txl.Then():
+                with txl.if_(degenerate == txl.uint32(0)):
+                    with txl.then_():
                         lg = txl.local_scalar("float32")
                         txl.ptx.lg2.approx.ftz.f32(lg, lse_sum_all)
                         txl.ptx["fma.rn.f32"](final_lse, lg, txl.float32(LN_2), lse_max)
@@ -799,8 +799,8 @@ def make_kernel(
                     txl.ptx.setp.equ.f32(t_bad, t_sum_all, txl.float32(0.0))
                     t_degen = txl.local_scalar("uint32")
                     txl.ptx.or_.pred(t_degen, txl.ptx.pred(bad_idx), txl.ptx.pred(t_bad))
-                    with txl.If(t_degen == txl.uint32(0)):
-                        with txl.Then():
+                    with txl.if_(t_degen == txl.uint32(0)):
+                        with txl.then_():
                             tlg = txl.local_scalar("float32")
                             txl.ptx.lg2.approx.ftz.f32(tlg, t_sum_all)
                             txl.ptx["fma.rn.f32"](final_lse_t, tlg, txl.float32(LN_2), t_max_all)
@@ -814,8 +814,8 @@ def make_kernel(
                         s_lse.ptr_to([_slse_base(s2r_split0, s2r_row) + i * (4 * TILE_M)]),
                         lse_reg[i],
                     )
-                with txl.If(s2r_split0 == 0):
-                    with txl.Then():
+                with txl.if_(s2r_split0 == 0):
+                    with txl.then_():
                         txl.ptx.st.shared.u32(
                             s_maxvalid.ptr_to([s2r_row]), txl.reinterpret(max_valid, ty="uint32")
                         )
@@ -824,11 +824,11 @@ def make_kernel(
                 # Step 5: the authoritative LSE_out store (combine.py:880-898). The two
                 # zero-tests are OR-fused into one compare, as at :815.
                 # -------------------------------------------------------------------
-                with txl.If(txl.bitwise_or(s2r_split0, k_block) == 0):
-                    with txl.Then():
+                with txl.if_(txl.bitwise_or(s2r_split0, k_block) == 0):
+                    with txl.then_():
                         idx5 = txl.local_scalar("int32", init=m_block * TILE_M + s2r_row)
-                        with txl.If(idx5 < max_idx):
-                            with txl.Then():
+                        with txl.if_(idx5 < max_idx):
+                            with txl.then_():
                                 # `(q_offset + m_idx)*head_q + h` is identically
                                 # `q_offset*head_q + idx`, and these stores are the
                                 # only consumers of the decomposition here, so the
@@ -878,8 +878,8 @@ def make_kernel(
                     # the scales by the absolute split -- so putting the global
                     # transfers in flight first lets them overlap the shared-load
                     # latency instead of queueing behind it.
-                    with txl.If(sp + (STAGES - 1) <= thr_max_valid):
-                        with txl.Then():
+                    with txl.if_(sp + (STAGES - 1) <= thr_max_valid):
+                        with txl.then_():
                             _load_o_partial(sp + (STAGES - 1), stage_load)
                     txl.ptx.cp.async_.commit_group()
                     for m in range(NUM_ROWS):
@@ -910,8 +910,8 @@ def make_kernel(
                     for m in range(NUM_ROWS):
                         # `setp.leu.f32` is unordered, so a NaN scale skips the row too;
                         # the `hidx >= 0` half reuses the predicate step 2 computed.
-                        with txl.If(txl.And(hidx[m] >= 0, scale[m] > txl.float32(0.0))):
-                            with txl.Then():
+                        with txl.if_(txl.And(hidx[m] >= 0, scale[m] > txl.float32(0.0))):
+                            with txl.then_():
                                 for v in range(NUM_VALS):
                                     txl.ptx["fma.rn.f32"](
                                         acc[m * NUM_VALS + v],
@@ -961,8 +961,8 @@ def make_kernel(
                     return nt + group * 8 + lane * 2 + elem
 
                 for m in range(NUM_ROWS):
-                    with txl.If(hidx[m] >= 0):
-                        with txl.Then():
+                    with txl.if_(hidx[m] >= 0):
+                        with txl.then_():
                             for vp in range(NUM_VALS // 2):
                                 v = 2 * vp
                                 # real_col for the pair; the two halves differ only in
@@ -1013,8 +1013,8 @@ def make_kernel(
                         s_perm_i32.ptr_to([row_out * (PERM_ROW // 2) + txl.truncdiv(st_col, 2)]),
                     )
                     idx7 = txl.local_scalar("int32", init=m_block * TILE_M + row_out)
-                    with txl.If(idx7 < max_idx):
-                        with txl.Then():
+                    with txl.if_(idx7 < max_idx):
+                        with txl.then_():
                             # Same identity as the partial address and the LSE
                             # store: the decomposition is multiplied straight back
                             # out and has no other consumer here, so four divmods

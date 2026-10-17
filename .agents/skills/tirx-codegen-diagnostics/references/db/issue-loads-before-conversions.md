@@ -53,7 +53,7 @@ previous_words = txl.alloc_local([N], "uint32")
 current_words = txl.alloc_local([N], "uint32")
 
 # before: the first conversion chain separates the two load groups.
-with txl.If(has_previous):
+with txl.if_(has_previous):
     load_group(previous_words, previous_ptr)
     convert_group(previous_values, previous_words)
 load_group(current_words, current_ptr)
@@ -61,9 +61,9 @@ convert_group(current_values, current_words)
 
 # after: every independent load is issued before either conversion chain.
 load_group(current_words, current_ptr)
-with txl.If(has_previous):
+with txl.if_(has_previous):
     load_group(previous_words, previous_ptr)
-with txl.If(has_previous):
+with txl.if_(has_previous):
     convert_group(previous_values, previous_words)
 convert_group(current_values, current_words)
 ```

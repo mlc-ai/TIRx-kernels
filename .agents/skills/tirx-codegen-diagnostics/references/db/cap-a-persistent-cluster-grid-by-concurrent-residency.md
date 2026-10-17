@@ -28,7 +28,7 @@ num_clusters = min(cluster_work, active_cap)
 def kernel(...):
     _, _, cluster_work_id = txl.cta_id()
     work = txl.local_scalar("int32", init=cluster_work_id)
-    with txl.While(work < cluster_work):
+    with txl.while_(work < cluster_work):
         ...
         txl.assign(work, work + num_clusters)
 ```

@@ -136,24 +136,24 @@ _shfl_idx_i32 = shfl_idx_i32
 # ---------------------------------------------------------------------------
 # Target entry.
 # ---------------------------------------------------------------------------
-_shape_num_batches = txl.Var("num_batches", txl.i32)
-_shape_num_heads_kv = txl.Var("num_heads_kv", txl.i32)
-_shape_total_rows = txl.Var("total_rows", txl.i32)
-_shape_work_capacity = txl.Var("work_capacity", txl.i32)
+_shape_num_batches = txl.Var("num_batches", "int32")
+_shape_num_heads_kv = txl.Var("num_heads_kv", "int32")
+_shape_total_rows = txl.Var("total_rows", "int32")
+_shape_work_capacity = txl.Var("work_capacity", "int32")
 
 
 @txl.kernel()
 def _kernel(
-    k2q_row_ptr: txl.Tensor((_shape_num_heads_kv * (_shape_total_rows + 1),), txl.i32),
-    cu_seqlens_k: txl.Tensor((_shape_num_batches + 1,), txl.i32),
-    scheduler_metadata: txl.Tensor((_shape_work_capacity * WORK_FIELDS,), txl.i32),
-    work_count: txl.Tensor((1,), txl.i32),
+    k2q_row_ptr: txl.Tensor((_shape_num_heads_kv * (_shape_total_rows + 1),), "int32"),
+    cu_seqlens_k: txl.Tensor((_shape_num_batches + 1,), "int32"),
+    scheduler_metadata: txl.Tensor((_shape_work_capacity * WORK_FIELDS,), "int32"),
+    work_count: txl.Tensor((1,), "int32"),
     total_rows: _shape_total_rows,
     num_batches: _shape_num_batches,
-    target: txl.i32,
+    target: "int32",
     work_capacity: _shape_work_capacity,
     num_heads_kv: _shape_num_heads_kv,
-    blk_kv: txl.i32,
+    blk_kv: "int32",
 ):
     # CUDA TRANSCRIPTION START
     # sketch: static ABI/launch, one warp per (row, head) -> :290-295.
@@ -165,21 +165,21 @@ def _kernel(
 
     block = txl.cta_id()
     tidx = txl.thread_id()
-    lane = txl.local_scalar(txl.i32, init=tidx % 32, name="lane")
-    warp = txl.local_scalar(txl.i32, init=tidx // 32, name="warp")
-    row_head_idx = txl.local_scalar(txl.i32, init=block * WARPS_PER_CTA + warp, name="row_head_idx")
+    lane = txl.local_scalar("int32", init=tidx % 32, name="lane")
+    warp = txl.local_scalar("int32", init=tidx // 32, name="warp")
+    row_head_idx = txl.local_scalar("int32", init=block * WARPS_PER_CTA + warp, name="row_head_idx")
     total_row_heads = txl.local_scalar(
-        txl.i32, init=total_rows * num_heads_kv, name="total_row_heads"
+        "int32", init=total_rows * num_heads_kv, name="total_row_heads"
     )
 
     # sketch: the six scalars the warp publishes, zeroed BEFORE the grid-tail
     # guard so an empty tail warp still broadcasts defined values -> :297-302.
-    row_count = txl.local_scalar(txl.i32, name="row_count")
-    num_chunks = txl.local_scalar(txl.i32, name="num_chunks")
-    batch_idx = txl.local_scalar(txl.i32, name="batch_idx")
-    kv_block_idx = txl.local_scalar(txl.i32, name="kv_block_idx")
-    head_kv_idx = txl.local_scalar(txl.i32, name="head_kv_idx")
-    row_linear = txl.local_scalar(txl.i32, name="row_linear")
+    row_count = txl.local_scalar("int32", name="row_count")
+    num_chunks = txl.local_scalar("int32", name="num_chunks")
+    batch_idx = txl.local_scalar("int32", name="batch_idx")
+    kv_block_idx = txl.local_scalar("int32", name="kv_block_idx")
+    head_kv_idx = txl.local_scalar("int32", name="head_kv_idx")
+    row_linear = txl.local_scalar("int32", name="row_linear")
     txl.assign(row_count, txl.int32(0))
     txl.assign(num_chunks, txl.int32(0))
     txl.assign(batch_idx, txl.int32(0))
@@ -188,40 +188,40 @@ def _kernel(
     txl.assign(row_linear, txl.int32(0))
 
     # sketch: grid tail, then the row/head split -> :303-305.
-    with txl.If(row_head_idx < total_row_heads), txl.Then():
+    with txl.if_(row_head_idx < total_row_heads), txl.then_():
         txl.assign(row_linear, _udiv_i32(row_head_idx, num_heads_kv))
         txl.assign(head_kv_idx, row_head_idx - row_linear * num_heads_kv)
 
         # sketch: lane 0 owns the whole decode -> :306-318.
-        with txl.If(lane == 0), txl.Then():
+        with txl.if_(lane == 0), txl.then_():
             row_base = txl.local_scalar(
-                txl.i32, init=head_kv_idx * (total_rows + 1) + row_linear, name="row_base"
+                "int32", init=head_kv_idx * (total_rows + 1) + row_linear, name="row_base"
             )
             row_start = txl.local_scalar(
-                txl.i32, init=_ld_global_i32(k2q_row_ptr, row_base), name="row_start"
+                "int32", init=_ld_global_i32(k2q_row_ptr, row_base), name="row_start"
             )
             row_end = txl.local_scalar(
-                txl.i32, init=_ld_global_i32(k2q_row_ptr, row_base + 1), name="row_end"
+                "int32", init=_ld_global_i32(k2q_row_ptr, row_base + 1), name="row_end"
             )
             txl.assign(row_count, row_end - row_start)
 
-            prev = txl.local_scalar(txl.i32, name="prev")
+            prev = txl.local_scalar("int32", name="prev")
             # The source pins `unroll=1` on every batch scan (:177, :190, :222)
             # and its export carries `.pragma "nounroll"` on each.  A TIRx `For`
             # emits no unroll pragma, so nvcc unrolls these scans fourfold and
             # triples the decode's load and divide traffic; a `While` lowers with
             # `#pragma unroll 1`, which is the shape the source has.  Hence the
             # explicit counters.
-            batch_cursor = txl.local_scalar(txl.i32, name="batch_cursor")
+            batch_cursor = txl.local_scalar("int32", name="batch_cursor")
 
             # sketch 2a: _max_rows_per_batch -> :183-193.  The base element is
             # hoisted and rotated forward, so the body holds one load.
-            max_rows = txl.local_scalar(txl.i32, init=txl.int32(0), name="max_rows")
+            max_rows = txl.local_scalar("int32", init=txl.int32(0), name="max_rows")
             txl.assign(prev, _ld_global_i32(cu_seqlens_k, 0))
             txl.assign(batch_cursor, txl.int32(0))
-            with txl.While(batch_cursor < num_batches):
+            with txl.while_(batch_cursor < num_batches):
                 next_seq = txl.local_scalar(
-                    txl.i32, init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1), name="next_seq"
+                    "int32", init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1), name="next_seq"
                 )
                 txl.assign(max_rows, txl.max(max_rows, _uceil_div_i32(next_seq - prev, blk_kv)))
                 txl.assign(prev, next_seq)
@@ -229,22 +229,22 @@ def _kernel(
 
             # sketch 2b: binary search over levels -> :202-215.  `probe_base` is
             # hoisted above the search, and each probe re-seeds `prev` from it.
-            lo = txl.local_scalar(txl.i32, name="lo")
-            hi = txl.local_scalar(txl.i32, name="hi")
+            lo = txl.local_scalar("int32", name="lo")
+            hi = txl.local_scalar("int32", name="hi")
             txl.assign(lo, txl.int32(0))
             txl.assign(hi, max_rows)
             probe_base = txl.local_scalar(
-                txl.i32, init=_ld_global_i32(cu_seqlens_k, 0), name="probe_base"
+                "int32", init=_ld_global_i32(cu_seqlens_k, 0), name="probe_base"
             )
-            rows_before_next = txl.local_scalar(txl.i32, name="rows_before_next")
-            with txl.While(lo < hi):
-                mid = txl.local_scalar(txl.i32, init=_udiv_i32(lo + hi, 2), name="mid")
+            rows_before_next = txl.local_scalar("int32", name="rows_before_next")
+            with txl.while_(lo < hi):
+                mid = txl.local_scalar("int32", init=_udiv_i32(lo + hi, 2), name="mid")
                 txl.assign(rows_before_next, txl.int32(0))
                 txl.assign(prev, probe_base)
                 txl.assign(batch_cursor, txl.int32(0))
-                with txl.While(batch_cursor < num_batches):
+                with txl.while_(batch_cursor < num_batches):
                     probe_seq = txl.local_scalar(
-                        txl.i32,
+                        "int32",
                         init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1),
                         name="probe_seq",
                     )
@@ -255,20 +255,20 @@ def _kernel(
                     )
                     txl.assign(prev, probe_seq)
                     txl.assign(batch_cursor, batch_cursor + 1)
-                with txl.If(rows_before_next <= row_linear):
-                    with txl.Then():
+                with txl.if_(rows_before_next <= row_linear):
+                    with txl.then_():
                         txl.assign(lo, mid + 1)
-                    with txl.Else():
+                    with txl.else_():
                         txl.assign(hi, mid)
-            level = txl.local_scalar(txl.i32, init=lo, name="level")
+            level = txl.local_scalar("int32", init=lo, name="level")
 
             # sketch 2c: offset inside the level band -> :217.
-            rows_before = txl.local_scalar(txl.i32, init=txl.int32(0), name="rows_before")
+            rows_before = txl.local_scalar("int32", init=txl.int32(0), name="rows_before")
             txl.assign(prev, _ld_global_i32(cu_seqlens_k, 0))
             txl.assign(batch_cursor, txl.int32(0))
-            with txl.While(batch_cursor < num_batches):
+            with txl.while_(batch_cursor < num_batches):
                 before_seq = txl.local_scalar(
-                    txl.i32, init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1), name="before_seq"
+                    "int32", init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1), name="before_seq"
                 )
                 txl.assign(
                     rows_before,
@@ -276,33 +276,33 @@ def _kernel(
                 )
                 txl.assign(prev, before_seq)
                 txl.assign(batch_cursor, batch_cursor + 1)
-            offset = txl.local_scalar(txl.i32, init=row_linear - rows_before, name="offset")
+            offset = txl.local_scalar("int32", init=row_linear - rows_before, name="offset")
 
             # sketch 2d: the offset-th batch above `level` -> :218-229.  The scan
             # runs to `num_batches` even after the batch is found, and its two
             # loads stay in the body because the predicate breaks the rotation.
-            active_idx = txl.local_scalar(txl.i32, name="active_idx")
-            found = txl.local_scalar(txl.i32, name="found")
+            active_idx = txl.local_scalar("int32", name="active_idx")
+            found = txl.local_scalar("int32", name="found")
             txl.assign(active_idx, txl.int32(0))
             txl.assign(found, txl.int32(0))
             txl.assign(batch_cursor, txl.int32(0))
-            with txl.While(batch_cursor < num_batches):
-                with txl.If(found == 0), txl.Then():
+            with txl.while_(batch_cursor < num_batches):
+                with txl.if_(found == 0), txl.then_():
                     scan_next = txl.local_scalar(
-                        txl.i32,
+                        "int32",
                         init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1),
                         name="scan_next",
                     )
                     scan_prev = txl.local_scalar(
-                        txl.i32, init=_ld_global_i32(cu_seqlens_k, batch_cursor), name="scan_prev"
+                        "int32", init=_ld_global_i32(cu_seqlens_k, batch_cursor), name="scan_prev"
                     )
                     scan_rows = txl.local_scalar(
-                        txl.i32,
+                        "int32",
                         init=_uceil_div_i32(scan_next - scan_prev, blk_kv),
                         name="scan_rows",
                     )
-                    with txl.If(scan_rows > level), txl.Then():
-                        with txl.If(active_idx == offset), txl.Then():
+                    with txl.if_(scan_rows > level), txl.then_():
+                        with txl.if_(active_idx == offset), txl.then_():
                             txl.assign(batch_idx, batch_cursor)
                             txl.assign(found, txl.int32(1))
                         txl.assign(active_idx, active_idx + 1)
@@ -310,7 +310,7 @@ def _kernel(
             txl.assign(kv_block_idx, level)
 
             # sketch 2e: a row with no references emits nothing -> :315-318.
-            with txl.If(row_count > 0), txl.Then():
+            with txl.if_(row_count > 0), txl.then_():
                 txl.assign(num_chunks, _uceil_div_i32(row_count, target))
 
     # sketch: publish lane 0's four scalars to the warp -> :319-322.  Executed by
@@ -321,17 +321,17 @@ def _kernel(
     txl.assign(kv_block_idx, _shfl_idx_i32(kv_block_idx, 0))
 
     # sketch: lane-strided chunk emission -> :324-345.
-    chunk_idx = txl.local_scalar(txl.i32, init=lane, name="chunk_idx")
-    with txl.While(chunk_idx < num_chunks):
+    chunk_idx = txl.local_scalar("int32", init=lane, name="chunk_idx")
+    with txl.while_(chunk_idx < num_chunks):
         work_idx = txl.local_scalar(
-            txl.i32, init=_atom_add_global_i32(work_count, 0, txl.uint32(1)), name="work_idx"
+            "int32", init=_atom_add_global_i32(work_count, 0, txl.uint32(1)), name="work_idx"
         )
-        q_begin = txl.local_scalar(txl.i32, init=chunk_idx * target, name="q_begin")
+        q_begin = txl.local_scalar("int32", init=chunk_idx * target, name="q_begin")
         q_count = txl.local_scalar(
-            txl.i32, init=txl.min(target, row_count - q_begin), name="q_count"
+            "int32", init=txl.min(target, row_count - q_begin), name="q_count"
         )
-        with txl.If(work_idx < work_capacity), txl.Then():
-            work_base = txl.local_scalar(txl.i32, init=work_idx * WORK_FIELDS, name="work_base")
+        with txl.if_(work_idx < work_capacity), txl.then_():
+            work_base = txl.local_scalar("int32", init=work_idx * WORK_FIELDS, name="work_base")
             _st_global_i32(scheduler_metadata, work_base, head_kv_idx)
             _st_global_i32(scheduler_metadata, work_base + 1, row_linear)
             _st_global_i32(scheduler_metadata, work_base + 2, q_begin)

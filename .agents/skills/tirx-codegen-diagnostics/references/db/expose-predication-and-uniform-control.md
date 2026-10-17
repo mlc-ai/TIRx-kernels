@@ -89,7 +89,7 @@ no spill.
 
   ```python
   # before: one elected region holds the waits, the arrivals and the issues.
-  with txl.If(_elected()), txl.Then():
+  with txl.if_(_elected()), txl.then_():
       _wait_barrier(...)
       _expect_tx(...)
       _issue_transfer(...)
@@ -108,9 +108,9 @@ no spill.
 
   ```python
   # before: both unrolled arithmetic bodies survive behind half-warp control.
-  with txl.If(lane < HALF), txl.Then():
+  with txl.if_(lane < HALF), txl.then_():
       result = _left_path(inputs)
-  with txl.Else():
+  with txl.else_():
       result = _right_path(inputs)
 
   # after: one straight-line body selects with exact arithmetic identities.

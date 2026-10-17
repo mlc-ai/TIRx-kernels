@@ -32,17 +32,19 @@ def test_descriptor_selection_is_an_mma_operand(constructor, operand, arguments)
     )
 
     @txl.kernel()
-    def probe(choose_first: txl.i32, tmem: txl.u32):
+    def probe(choose_first: "int32", tmem: "uint32"):
         txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
 
         smem = txl.smem_pool()
         for _ in range(2):
-            tile = smem.alloc((64, 64), txl.bf16, align=1024, swizzle=txl.SW128B)
+            tile = smem.alloc(
+                (64, 64), "bfloat16", align=1024, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM
+            )
             if constructor == "raw":
                 descriptor = txl.SmemDescriptor()
                 # This tile is one 128B swizzle atom wide: LBO is zero and
                 # the stride of eight rows is 64 units of 16 bytes.
-                descriptor.init(tile.ptr_to(0, 0), 0, 64, txl.SW128B.value)
+                descriptor.init(tile.ptr_to(0, 0), 0, 64, txl.SwizzleMode.SWIZZLE_128B_ATOM.value)
                 value = descriptor.desc
             elif constructor == "mma_desc":
                 descriptor = tile.mma_desc(major="k", mma_k=16)
@@ -58,7 +60,7 @@ def test_descriptor_selection_is_an_mma_operand(constructor, operand, arguments)
         a_value, b_value = (
             (selected, descriptor_values[1]) if operand == "a" else (descriptor_values[0], selected)
         )
-        with txl.If(txl.lane_id() == 0), txl.Then():
+        with txl.if_(txl.lane_id() == 0), txl.then_():
             txl.ptx["tcgen05.mma.cta_group::1.kind::f16"](
                 tmem, a_value, b_value, txl.uint32(idesc), 0, 0, 0, 0, txl.ptx.pred(0)
             )

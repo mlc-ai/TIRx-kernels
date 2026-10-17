@@ -21,17 +21,17 @@ class RingState:
             raise ValueError(f"ring stride must be in [1, {depth}], got {stride!r}")
         self.depth = depth
         self.stride = stride
-        self.stage = txl.local_scalar(txl.u32, name="stage")
-        self.phase = txl.local_scalar(txl.u32, name="phase")
+        self.stage = txl.local_scalar("uint32", name="stage")
+        self.phase = txl.local_scalar("uint32", name="phase")
         self.init(stage, phase)
 
     def init(self, stage=0, phase=0):
-        txl.assign(self.stage, txl.Cast(stage, txl.u32))
-        txl.assign(self.phase, txl.Cast(phase, txl.u32))
+        txl.assign(self.stage, txl.Cast(stage, "uint32"))
+        txl.assign(self.phase, txl.Cast(phase, "uint32"))
 
     def advance(self):
         txl.assign(self.stage, self.stage + txl.uint32(self.stride))
-        with txl.If(self.stage >= txl.uint32(self.depth)), txl.Then():
+        with txl.if_(self.stage >= txl.uint32(self.depth)), txl.then_():
             txl.assign(self.stage, self.stage - txl.uint32(self.depth))
             txl.assign(self.phase, self.phase ^ txl.uint32(1))
 

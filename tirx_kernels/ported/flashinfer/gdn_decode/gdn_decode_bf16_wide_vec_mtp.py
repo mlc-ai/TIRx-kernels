@@ -338,25 +338,25 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
 ):
     @txl.kernel()
     def gdn_decode_bf16_wide_vec_mtp(
-        state: txl.Tensor((txl.int64(),), txl.bf16),
-        intermediate: txl.Tensor((txl.int64(),), txl.bf16),
-        A_log: txl.Tensor((txl.int64(),), txl.f32),
-        a: txl.Tensor((txl.int64(),), txl.bf16),
-        dt_bias: txl.Tensor((txl.int64(),), txl.f32),
-        q: txl.Tensor((txl.int64(),), txl.bf16),
-        k: txl.Tensor((txl.int64(),), txl.bf16),
-        v: txl.Tensor((txl.int64(),), txl.bf16),
-        b_gate: txl.Tensor((txl.int64(),), txl.bf16),
-        output: txl.Tensor((txl.int64(),), txl.bf16),
-        read_indices: txl.Tensor((txl.int64(),), txl.i32),
-        write_indices: txl.Tensor((txl.int64(),), txl.i32),
-        accepted_steps: txl.Tensor((txl.int64(),), txl.i32),
-        ssm_state_indices: txl.Tensor((txl.int64(),), txl.i32),
-        state_slot_stride: txl.i64,
-        q_batch_stride: txl.i64,
-        k_batch_stride: txl.i64,
-        v_batch_stride: txl.i64,
-        batch: txl.i32,
+        state: txl.Tensor((txl.int64(),), "bfloat16"),
+        intermediate: txl.Tensor((txl.int64(),), "bfloat16"),
+        A_log: txl.Tensor((txl.int64(),), "float32"),
+        a: txl.Tensor((txl.int64(),), "bfloat16"),
+        dt_bias: txl.Tensor((txl.int64(),), "float32"),
+        q: txl.Tensor((txl.int64(),), "bfloat16"),
+        k: txl.Tensor((txl.int64(),), "bfloat16"),
+        v: txl.Tensor((txl.int64(),), "bfloat16"),
+        b_gate: txl.Tensor((txl.int64(),), "bfloat16"),
+        output: txl.Tensor((txl.int64(),), "bfloat16"),
+        read_indices: txl.Tensor((txl.int64(),), "int32"),
+        write_indices: txl.Tensor((txl.int64(),), "int32"),
+        accepted_steps: txl.Tensor((txl.int64(),), "int32"),
+        ssm_state_indices: txl.Tensor((txl.int64(),), "int32"),
+        state_slot_stride: "int64",
+        q_batch_stride: "int64",
+        k_batch_stride: "int64",
+        v_batch_stride: "int64",
+        batch: "int32",
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(
@@ -366,9 +366,9 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
         )
 
         smem = txl.smem_pool()
-        s_q = smem.alloc((S_K_BYTE_OFFSET // 4,), txl.f32, align=16)
-        s_k = smem.alloc(((S_GB_BYTE_OFFSET - S_K_BYTE_OFFSET) // 4,), txl.f32, align=16)
-        s_gb = smem.alloc((SEQ_LEN * 2,), txl.f32, align=16)
+        s_q = smem.alloc((S_K_BYTE_OFFSET // 4,), "float32", align=16)
+        s_k = smem.alloc(((S_GB_BYTE_OFFSET - S_K_BYTE_OFFSET) // 4,), "float32", align=16)
+        s_gb = smem.alloc((SEQ_LEN * 2,), "float32", align=16)
         smem.commit(SHARED_BYTES)
         linear_cta = txl.cta_id()
         tid = txl.thread_id()
@@ -444,7 +444,7 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
             t_pre = _local_scalar("int32", pass_index * NUM_WARPS + warp)
             member_pre = _local_scalar("int32", lane_in_warp % LANES_PER_GROUP)
             k_pre = _local_scalar("int32", member_pre[0] * ELEMS_PER_LANE)
-            with txl.If(t_pre[0] < SEQ_LEN), txl.Then():
+            with txl.if_(t_pre[0] < SEQ_LEN), txl.then_():
                 q_bits = txl.alloc_local((ELEMS_PER_LANE,), "uint16")
                 k_bits = txl.alloc_local((ELEMS_PER_LANE,), "uint16")
                 r_q = txl.alloc_local((ELEMS_PER_LANE,), "float32")
@@ -565,7 +565,7 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                 _mul6 = txl.local_scalar("float32")
                 txl.ptx["mul.f32"](_mul6, _sub2, softplus_x[0])
                 gate_exponent = _local_scalar("float32", _mul6)
-                with txl.If(lane_in_warp == 0), txl.Then():
+                with txl.if_(lane_in_warp == 0), txl.then_():
                     b_bits = txl.local_scalar("uint16")
                     txl.ptx.ld.global_.b16(
                         b_bits, b_gate.ptr_to([(n[0] * SEQ_LEN + t_pre[0]) * NUM_V_HEADS + hv[0]])

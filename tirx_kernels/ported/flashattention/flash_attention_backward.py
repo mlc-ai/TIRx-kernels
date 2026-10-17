@@ -136,12 +136,12 @@ def build_preprocess(B, S, H, D, *, backend_config=None):
 
     @txl.kernel()
     def preprocess_kernel(
-        dO_g: txl.Tensor((txl.int64(),), txl.f16),
-        O_g: txl.Tensor((txl.int64(),), txl.f16),
-        LSE_g: txl.Tensor((txl.int64(),), txl.f32),
-        dpsum_g: txl.Tensor((txl.int64(),), txl.f32),
-        LSE_log2_g: txl.Tensor((txl.int64(),), txl.f32),
-        dQ_accum_g: txl.Tensor((txl.int64(),), txl.f32),
+        dO_g: txl.Tensor((txl.int64(),), "float16"),
+        O_g: txl.Tensor((txl.int64(),), "float16"),
+        LSE_g: txl.Tensor((txl.int64(),), "float32"),
+        dpsum_g: txl.Tensor((txl.int64(),), "float32"),
+        LSE_log2_g: txl.Tensor((txl.int64(),), "float32"),
+        dQ_accum_g: txl.Tensor((txl.int64(),), "float32"),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(nblk, H, B), block=PRE_BLOCK // 32 * 32),
@@ -192,7 +192,7 @@ def build_preprocess(B, S, H, D, *, backend_config=None):
 
         # Overlap the independent LSE load with the O/dO dot products.
         lse_for_log2 = txl.local_scalar("float32", init=txl.float32(0))
-        with txl.If(tx < PRE_ROWS_PER_BLOCK), txl.Then():
+        with txl.if_(tx < PRE_ROWS_PER_BLOCK), txl.then_():
             txl.ptx.ld.global_.f32(
                 lse_for_log2, LSE_g.ptr_to([(bz * H + by) * S + bx * PRE_ROWS_PER_BLOCK + tx])
             )
@@ -223,12 +223,12 @@ def build_preprocess(B, S, H, D, *, backend_config=None):
                     peer_acc, acc[0], txl.uint32(delta), shfl_clamp, txl.uint32(0xFFFFFFFF)
                 )
                 txl.assign(acc[0], acc[0] + peer_acc)
-            with txl.If(col_in_row == 0), txl.Then():
+            with txl.if_(col_in_row == 0), txl.then_():
                 txl.ptx.st.global_.f32(dpsum_g.ptr_to([(bz * H + by) * S + s]), acc[0])
 
         # One independent scalar per row: spread the 128 rows over 128 threads
         # instead of serializing eight conversions on each row leader.
-        with txl.If(tx < PRE_ROWS_PER_BLOCK), txl.Then():
+        with txl.if_(tx < PRE_ROWS_PER_BLOCK), txl.then_():
             lse_s = (bz * H + by) * S + bx * PRE_ROWS_PER_BLOCK + tx
             txl.ptx.st.global_.f32(
                 LSE_log2_g.ptr_to([lse_s]),
@@ -255,7 +255,7 @@ def _build_cast_f32_to_f16_default(B, S, H, D, scale, *, backend_config=None):
 
     @txl.kernel()
     def cast_kernel(
-        src: txl.Tensor((txl.int64(),), txl.f32), dst: txl.Tensor((txl.int64(),), txl.f16)
+        src: txl.Tensor((txl.int64(),), "float32"), dst: txl.Tensor((txl.int64(),), "float16")
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=nblk, block=CAST_BLOCK // 32 * 32),
@@ -278,7 +278,7 @@ def _build_cast_f32_to_f16_default(B, S, H, D, scale, *, backend_config=None):
 
         for e in range(CAST_GROUPS_PER_THREAD):
             group = bx * groups_per_block + e * CAST_BLOCK + tx
-            with txl.If(group < num_groups), txl.Then():
+            with txl.if_(group < num_groups), txl.then_():
                 d_group = group % (D // CAST_GROUP_WIDTH)
                 h = group // (D // CAST_GROUP_WIDTH) % H
                 s = group // (D // CAST_GROUP_WIDTH * H) % S
@@ -312,7 +312,7 @@ def _build_cast_f32_to_f16_thor(B, S, H, D, scale, *, backend_config=None):
 
     @txl.kernel()
     def cast_kernel(
-        src: txl.Tensor((txl.int64(),), txl.f32), dst: txl.Tensor((txl.int64(),), txl.f16)
+        src: txl.Tensor((txl.int64(),), "float32"), dst: txl.Tensor((txl.int64(),), "float16")
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(S // tile_rows, H, B), block=4 * 32),
@@ -321,7 +321,7 @@ def _build_cast_f32_to_f16_thor(B, S, H, D, scale, *, backend_config=None):
 
         bx, by, bz = txl.cta_id()
         tx = txl.thread_id()
-        staging = txl.alloc_tensor((tile_elements,), txl.f32, scope="shared.dyn", align=1024)
+        staging = txl.alloc_tensor((tile_elements,), "float32", scope="shared.dyn", align=1024)
         values = txl.alloc_local((4,), "float32")
         scaled = txl.alloc_local((4,), "float32")
         packed = txl.alloc_local((2,), "uint32")
@@ -462,9 +462,9 @@ def build_kernel(
     ID_SS = 270532624  # 0x10200010: M=256 N=128, A k-major, B k-major
     ID_TS = 270598160  # 0x10210010: M=256 N=128, A in tmem,  B mn-major
     ID_DQ = 136413200  # 0x08218010: M=128 N=128, A mn-major, B mn-major
-    DESC_K_ROW = encode_smem_descriptor_base_uint64(1024, 64, txl.SW128B.value)
-    DESC_ROW = encode_smem_descriptor_base_uint64(512, 64, txl.SW128B.value)
-    DESC_MN = encode_smem_descriptor_base_uint64(0, 64, txl.SW128B.value)
+    DESC_K_ROW = encode_smem_descriptor_base_uint64(1024, 64, txl.SwizzleMode.SWIZZLE_128B_ATOM.value)
+    DESC_ROW = encode_smem_descriptor_base_uint64(512, 64, txl.SwizzleMode.SWIZZLE_128B_ATOM.value)
+    DESC_MN = encode_smem_descriptor_base_uint64(0, 64, txl.SwizzleMode.SWIZZLE_128B_ATOM.value)
 
     # cta_group::2 takes an EIGHT-lane disable-output-lane vector; nothing is
     # disabled here, but the operands are not optional.
@@ -490,15 +490,15 @@ def build_kernel(
     # fmt: off
     @txl.kernel()
     def kernel(
-        Q_g: txl.Tensor((txl.int64(),), txl.f16),
-        K_g: txl.Tensor((txl.int64(),), txl.f16),
-        V_g: txl.Tensor((txl.int64(),), txl.f16),
-        dO_g: txl.Tensor((txl.int64(),), txl.f16),
-        LSE_g: txl.Tensor((txl.int64(),), txl.f32),
-        dpsum_g: txl.Tensor((txl.int64(),), txl.f32),
-        dK_g: txl.Tensor((txl.int64(),), txl.f16),
-        dV_g: txl.Tensor((txl.int64(),), txl.f16),
-        dQ_acc_g: txl.Tensor((txl.int64(),), txl.f32),
+        Q_g: txl.Tensor((txl.int64(),), "float16"),
+        K_g: txl.Tensor((txl.int64(),), "float16"),
+        V_g: txl.Tensor((txl.int64(),), "float16"),
+        dO_g: txl.Tensor((txl.int64(),), "float16"),
+        LSE_g: txl.Tensor((txl.int64(),), "float32"),
+        dpsum_g: txl.Tensor((txl.int64(),), "float32"),
+        dK_g: txl.Tensor((txl.int64(),), "float16"),
+        dV_g: txl.Tensor((txl.int64(),), "float16"),
+        dQ_acc_g: txl.Tensor((txl.int64(),), "float32"),
         q_row_map: txl.Ptr(txl.TensorMap),
         q_col_map: txl.Ptr(txl.TensorMap),
         k_row_map: txl.Ptr(txl.TensorMap),
@@ -520,7 +520,7 @@ def build_kernel(
 
         # ---------------- barriers, in the original's declaration order -----
         smem = txl.smem_pool()
-        tmem_addr = smem.alloc((1,), txl.u32)
+        tmem_addr = smem.alloc((1,), "uint32")
         # orig picks wg3/warp0/lane0 = CTA thread 384 as this one's init leader.
         tmem_dealloc_mbar = txl.MBarrier(smem, 1, leader=(txl.thread_id() == 12 * 32))
 
@@ -554,28 +554,28 @@ def build_kernel(
         # ---------------- smem plan -----------------------------------------
         # Physical order matches the upstream 2-CTA D=128 SharedStorage:
         # sQ, sK, sV, sdO, sQt, sdOt, sdS_xchg, sKt, sdS.
-        # swizzle=txl.SW128B is the composed layout the original spells by hand as
+        # swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM is the composed layout the original spells by hand as
         # `tma_shared_layout`: the last two dims tiled into [8, 64] f16 atoms
         # with the xor inside the atom.
-        Q_row = smem.alloc((1, B_N, HEAD_DIM), txl.f16, swizzle=txl.SW128B)  # 16KB
-        K_smem = smem.alloc((CTA_N, HEAD_DIM), txl.f16, swizzle=txl.SW128B)  # 32KB
-        V_smem = smem.alloc((CTA_N, HEAD_DIM), txl.f16, swizzle=txl.SW128B)  # 32KB
-        dO_row = smem.alloc((B_N, HEAD_DIM), txl.f16, swizzle=txl.SW128B)  # 16KB
-        Q_col = smem.alloc((BLK_M, B_N_COL), txl.f16, swizzle=txl.SW128B)  # 16KB
-        dO_col = smem.alloc((BLK_M, B_N_COL), txl.f16, swizzle=txl.SW128B)  # 16KB
-        dS_send = smem.alloc((CTA_N, B_N), txl.f16, swizzle=txl.SW128B)  # 16KB
-        K_col = smem.alloc((BLK_N, B_N_COL), txl.f16, swizzle=txl.SW128B)  # 32KB
-        dS_exch = smem.alloc((BLK_N, B_N), txl.f16, swizzle=txl.SW128B)  # 32KB
-        sLSE = smem.alloc((1, BLK_M), txl.f32)  # 512B
-        sDPsum = smem.alloc((BLK_M,), txl.f32)  # 512B
+        Q_row = smem.alloc((1, B_N, HEAD_DIM), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)  # 16KB
+        K_smem = smem.alloc((CTA_N, HEAD_DIM), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)  # 32KB
+        V_smem = smem.alloc((CTA_N, HEAD_DIM), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)  # 32KB
+        dO_row = smem.alloc((B_N, HEAD_DIM), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)  # 16KB
+        Q_col = smem.alloc((BLK_M, B_N_COL), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)  # 16KB
+        dO_col = smem.alloc((BLK_M, B_N_COL), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)  # 16KB
+        dS_send = smem.alloc((CTA_N, B_N), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)  # 16KB
+        K_col = smem.alloc((BLK_N, B_N_COL), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)  # 32KB
+        dS_exch = smem.alloc((BLK_N, B_N), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)  # 32KB
+        sLSE = smem.alloc((1, BLK_M), "float32")  # 512B
+        sDPsum = smem.alloc((BLK_M,), "float32")  # 512B
         # One flat row per stage: the original's (BLK_M, DQ_RED_N) row-major
         # tile linearises identically and the writes below are flat anyway.
-        dQ_smem = smem.alloc((DQ_STAGES, BLK_M * DQ_RED_N), txl.f32, align=1024)
+        dQ_smem = smem.alloc((DQ_STAGES, BLK_M * DQ_RED_N), "float32", align=1024)
         # The two-stage dKV epilogue reuses sV for dV and sK for dK.
         smem.pool.move_base_to(K_smem.buf.elem_offset * DTYPE_SIZE)
-        dK_epi = smem.alloc((2, CTA_N, EPI_N), txl.f16, swizzle=txl.SW128B)
+        dK_epi = smem.alloc((2, CTA_N, EPI_N), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
         smem.pool.move_base_to(V_smem.buf.elem_offset * DTYPE_SIZE)
-        dV_epi = smem.alloc((2, CTA_N, EPI_N), txl.f16, swizzle=txl.SW128B)
+        dV_epi = smem.alloc((2, CTA_N, EPI_N), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
 
         tma_kv.init(1)
         tma_a.init(1)
@@ -701,7 +701,7 @@ def build_kernel(
         # ================================================================
         # ---- TMA warp -----------------------------------------------------
         with tma:
-            with txl.If(elected()), txl.Then():
+            with txl.if_(elected()), txl.then_():
                 for m in (
                     q_row_map, q_col_map, k_row_map, k_col_map, v_row_map,
                     do_row_map, do_col_map, dk_map, dv_map, dq_map,
@@ -715,18 +715,18 @@ def build_kernel(
 
             def load_q_row(m_st):
                 q_consumed.wait(0, q_cons_ph.phase)
-                with txl.If(elected()), txl.Then():
+                with txl.if_(elected()), txl.then_():
                     tma_g2s(
                         5, Q_row[0].ptr_to(0, 0), tma_q_cta0.ptr_to([0]), q_row_map,
                         0, m_st + id_in_pair * B_N, 0, h_idx, b_idx,
                     )
-                    with txl.If(id_in_pair == 0), txl.Then():
+                    with txl.if_(id_in_pair == 0), txl.then_():
                         tma_q.arrive(0, Q_BATCH_BYTES)
                 q_cons_ph.advance()
 
             def load_lse(m_st):
                 lse_consumed.wait(0, lse_cons_ph.phase)
-                with txl.If(elected()), txl.Then():
+                with txl.if_(elected()), txl.then_():
                     tma_lse.arrive(0, LSE_BYTES)
                     txl.ptx[BULK_G2S_CTA](
                         sLSE.ptr_to([0, 0]),
@@ -738,7 +738,7 @@ def build_kernel(
 
             def load_do(m_st):
                 buf_a_consumed.wait(0, a_cons_ph.phase)
-                with txl.If(elected()), txl.Then():
+                with txl.if_(elected()), txl.then_():
                     tma_g2s(
                         5, dO_row.ptr_to(0, 0), tma_a_cta0.ptr_to([0]), do_row_map,
                         0, m_st + id_in_pair * B_N, 0, h_idx, b_idx,
@@ -747,13 +747,13 @@ def build_kernel(
                         4, dO_col.ptr_to(0, 0), tma_a_cta0.ptr_to([0]), do_col_map,
                         id_in_pair * B_N_COL, m_st, h_idx, b_idx,
                     )
-                    with txl.If(id_in_pair == 0), txl.Then():
+                    with txl.if_(id_in_pair == 0), txl.then_():
                         tma_a.arrive(0, DO_BATCH_BYTES)
                 a_cons_ph.advance()
 
             def load_dpsum(m_st):
                 dpsum_consumed.wait(0, dpsum_cons_ph.phase)
-                with txl.If(elected()), txl.Then():
+                with txl.if_(elected()), txl.then_():
                     tma_dpsum.arrive(0, DPSUM_BYTES)
                     txl.ptx[BULK_G2S_CTA](
                         sDPsum.ptr_to([0]),
@@ -765,18 +765,18 @@ def build_kernel(
 
             def load_q_col(m_st):
                 qcol_consumed.wait(0, qcol_cons_ph.phase)
-                with txl.If(elected()), txl.Then():
+                with txl.if_(elected()), txl.then_():
                     tma_g2s(
                         4, Q_col.ptr_to(0, 0), tma_qcol_cta0.ptr_to([0]), q_col_map,
                         id_in_pair * B_N_COL, m_st, h_idx, b_idx,
                     )
-                    with txl.If(id_in_pair == 0), txl.Then():
+                    with txl.if_(id_in_pair == 0), txl.then_():
                         tma_qcol.arrive(0, QCOL_BATCH_BYTES)
                 qcol_cons_ph.advance()
 
             # K/V: each CTA loads its CTA_N=128 rows; K_col is all BLK_N
             # rows and this CTA's 64 columns.
-            with txl.If(elected()), txl.Then():
+            with txl.if_(elected()), txl.then_():
                 tma_g2s(
                     5, K_smem.ptr_to(0, 0), tma_kv_cta0.ptr_to([0]), k_row_map,
                     0, n_st_cta, 0, h_idx, b_idx,
@@ -789,7 +789,7 @@ def build_kernel(
                     4, K_col.ptr_to(0, 0), tma_kv_cta0.ptr_to([0]), k_col_map,
                     id_in_pair * B_N_COL, n_st, h_idx, b_idx,
                 )
-                with txl.If(id_in_pair == 0), txl.Then():
+                with txl.if_(id_in_pair == 0), txl.then_():
                     tma_kv.arrive(0, KV_TOTAL_BYTES)
 
             # Prologue: Q/Q_col/dO use the cluster MMA pipelines; LSE and
@@ -825,7 +825,7 @@ def build_kernel(
             txl.ptx.barrier.sync(txl.uint32(5), 416)
 
             # Only the pair leader issues the cta_group::2 matrix work.
-            with txl.If(id_in_pair == 0), txl.Then():
+            with txl.if_(id_in_pair == 0), txl.then_():
                 # Every operand is one of three physical layouts. Their fields
                 # are compile-time constants; only the start address is live.
                 anchor = Q_row[0]
@@ -915,12 +915,12 @@ def build_kernel(
 
                 def phase_a_issue():
                     txl.assign(accum_var, 0)
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         mma_chain2(
                             TMEM_OFF_A, a=d_k_row, b=q_row_operand(),
                             idesc=ID_SS, accumulate=accum_var,
                         )
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         mma2wg0_s.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
                         tcgen05_commit(q_consumed.ptr_to([0]))
 
@@ -929,25 +929,25 @@ def build_kernel(
                     tma_a.wait(0, a_ph.phase)
                     a_ph.advance()
                     txl.assign(accum_var, 0)
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         mma_chain2(
                             TMEM_OFF_DP, a=d_v_row, b=d_do_row,
                             idesc=ID_SS, accumulate=accum_var,
                         )
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         mma2wg0_dp.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
 
                 def phase_c():
                     """dV += P^T @ dO_col; waits for the P strips."""
                     strip_ready.wait(0, strip_ready_ph.phase)
                     strip_ready_ph.advance()
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         mma_chain2(
                             TMEM_OFF_B, a=TMEM_OFF_A * 2, b=d_do_col,
                             idesc=ID_TS, accumulate=accum_dv,
                         )
                     txl.assign(accum_dv, 1)
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         tcgen05_commit(buf_a_consumed.ptr_to([0]))
 
                 def phase_d(*, is_last=False):
@@ -962,12 +962,12 @@ def build_kernel(
                     wg0_ph.advance()
                     tma_qcol.wait(0, qcol_ph.phase)
                     qcol_ph.advance()
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         mma_chain2(
                             TMEM_OFF_C, a=TMEM_OFF_DP, b=d_q_col,
                             idesc=ID_TS, accumulate=accum_dk,
                         )
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         tcgen05_commit(qcol_consumed.ptr_to([0]))
                         if is_last:
                             # sdKVaccum stage 1: release dK independently after
@@ -978,12 +978,12 @@ def build_kernel(
 
                 def phase_e_issue():
                     txl.assign(accum_var, 0)
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         mma_chain2(
                             TMEM_OFF_DQ, a=d_ds_exch, b=d_k_col,
                             idesc=ID_DQ, accumulate=accum_var,
                         )
-                    with txl.If(elected()), txl.Then():
+                    with txl.if_(elected()), txl.then_():
                         mma2wg0_dq.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
                         tcgen05_commit(ds_exch_consumed.ptr_to([0]))
 
@@ -1025,7 +1025,7 @@ def build_kernel(
                 # dV is complete before the remaining dK/dQ tail. Match
                 # sdKVaccum stage 0 by releasing all compute warps now so its
                 # epilogue overlaps the tail below.
-                with txl.If(elected()), txl.Then():
+                with txl.if_(elected()), txl.then_():
                     tcgen05_commit(dv_done.ptr_to([0]))
 
                 # ---- after the loop: Phase D[N-1], Phase E[N-1] ----
@@ -1063,7 +1063,7 @@ def build_kernel(
             ) as _r:
                 ds_exch_mbar.wait(0, relay_ph.phase)
                 relay_ph.advance()
-                with txl.If(elected()), txl.Then():
+                with txl.if_(elected()), txl.then_():
                     wg02mma.arrive(0, remote=0, pred=True)
 
         with idle:
@@ -1123,7 +1123,7 @@ def build_kernel(
                 # dS commit: publish the previous tile's dQ-safe token as soon as
                 # this warp drained the next tile's S load, before any P math.
                 txl.ptx.tcgen05.wait__ld.sync.aligned()
-                with txl.If((i_m_inner > 0) & (lane_id == 0)), txl.Then():
+                with txl.if_((i_m_inner > 0) & (lane_id == 0)), txl.then_():
                     s_tmem_consumed.arrive(0, remote=0, pred=True)
 
                 # P^T = exp2(S^T * scale_log2 - LSE_log2[m]); the base conversion
@@ -1152,7 +1152,7 @@ def build_kernel(
                         # K/V cluster can intersect the diagonal. The uniform
                         # branch is hoisted out of the unrolled element loop so
                         # later tiles pay one branch per 32-column stage.
-                        with txl.If(i_m < m_tile_start + BLK_N // BLK_M), txl.Then():
+                        with txl.if_(i_m < m_tile_start + BLK_N // BLK_M), txl.then_():
                             key_idx = n_st_cta + row_local
                             for j_inner in range(32 // 2):
                                 j = stage * (32 // 2) + j_inner
@@ -1187,10 +1187,10 @@ def build_kernel(
                 txl.ptx.bar.sync(txl.uint32(8), 256)
                 # Bridge the generic LSE reads into the async proxy, then publish
                 # the release only after the rendezvous ordered every reader.
-                with txl.If(lane_id == 0), txl.Then():
+                with txl.if_(lane_id == 0), txl.then_():
                     lse_consumed.arrive(0)
 
-                with txl.If(elected()), txl.Then():
+                with txl.if_(elected()), txl.then_():
                     strip_ready.arrive(0, remote=0, pred=True)
 
                 # ---- Phase B: wait for dPsum and dP^T, read strip ----
@@ -1241,7 +1241,7 @@ def build_kernel(
 
                 # The dK MMA only consumes dS from TMEM: release that dependency
                 # before the independent SMEM visibility / DSMEM exchange path.
-                with txl.If(elected()), txl.Then():
+                with txl.if_(elected()), txl.then_():
                     wg02mma_tmem.arrive(0, remote=0, pred=True)
 
                 # The DSMEM path is independent of dK. The buffer is
@@ -1256,14 +1256,14 @@ def build_kernel(
                 # Logical (row, col) into the swizzled tile: the composed layout
                 # re-applies the xor the original spells by hand with a signed
                 # stride table (`RowiseSwizzleOffset`).
-                with txl.If(compute_wg == id_in_pair):
-                    with txl.Then():
+                with txl.if_(compute_wg == id_in_pair):
+                    with txl.then_():
                         for ni in range(STRIP_SIZE // 8):
                             txl.ptx.st.weak.shared__cta.b128(
                                 dS_exch.ptr_to(id_in_pair * CTA_N + row_local, ni * 8),
                                 dS_full_f16.view("uint128")[ni],
                             )
-                    with txl.Else():
+                    with txl.else_():
                         for ni in range(STRIP_SIZE // 8):
                             txl.ptx.st.weak.shared__cta.b128(
                                 dS_send.ptr_to(row_local, ni * 8),
@@ -1275,13 +1275,13 @@ def build_kernel(
 
                 # This fence/rendezvous bridges both the dS stores used by the
                 # DSMEM copy and the completed generic dPsum reads.
-                with txl.If(lane_id == 0), txl.Then():
+                with txl.if_(lane_id == 0), txl.then_():
                     dpsum_consumed.arrive(0)
 
                 # The sender WG starts the peer copy directly. Its source has
                 # independent storage, so the load warp can reuse dO as soon as
                 # Phase C commits, without a relay-warp drain.
-                with txl.If((compute_wg != id_in_pair) & (warp_id == 0) & (lane_id == 0)), txl.Then():
+                with txl.if_((compute_wg != id_in_pair) & (warp_id == 0) & (lane_id == 0)), txl.then_():
                     peer_cta = 1 - id_in_pair
                     ds_copy_bytes = CTA_N * B_N * DTYPE_SIZE
                     # mapa writes its result, so the peer-window addresses are
@@ -1334,12 +1334,12 @@ def build_kernel(
                     )
                 txl.ptx.fence.proxy.async_.shared__cta()
                 txl.ptx.bar.sync(txl.Cast(wg_bar, "uint32"), 128)
-                with txl.If((warp_id == 0) & (lane_id == 0)), txl.Then():
+                with txl.if_((warp_id == 0) & (lane_id == 0)), txl.then_():
                     tma_s2g(
                         4, epi_tile[compute_wg].ptr_to(0, 0), tensormap,
                         compute_wg * EPI_N, n_st_cta, h_idx, b_idx,
                     )
-                with txl.If(warp_id == 0), txl.Then():
+                with txl.if_(warp_id == 0), txl.then_():
                     txl.ptx.bar.arrive(txl.Cast(wg_bar, "uint32"), 160)
                 txl.ptx.fence.proxy.async_.shared__cta()
                 txl.ptx.bar.sync(txl.Cast(wg_bar, "uint32"), 160)
@@ -1349,7 +1349,7 @@ def build_kernel(
             # Keep both terminal dV/dK stores asynchronous but in one explicit
             # bulk group so their lifetime stays visible; neither source is
             # reused.
-            with txl.If((warp_id == 0) & (lane_id == 0)), txl.Then():
+            with txl.if_((warp_id == 0) & (lane_id == 0)), txl.then_():
                 txl.ptx.cp.async_.bulk.commit_group()
             txl.ptx.bar.arrive(txl.uint32(5), 416)
 
@@ -1379,7 +1379,7 @@ def build_kernel(
                 # Drain dQ before releasing the shared dP/dQ region.
                 txl.ptx.tcgen05.wait__ld.sync.aligned()
                 txl.cuda.warp_sync()
-                with txl.If(elected()), txl.Then():
+                with txl.if_(elected()), txl.then_():
                     dq_tmem_free.arrive(0, remote=0, pred=True)
 
                 m_st_cta = m_st_val + id_in_pair * DQ_M_PER_CTA
@@ -1397,8 +1397,8 @@ def build_kernel(
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.cuda.warpgroup_sync(4)
 
-                    with txl.If(warp_id == 0), txl.Then():
-                        with txl.If(dq_reduce_elected != txl.uint32(0)), txl.Then():
+                    with txl.if_(warp_id == 0), txl.then_():
+                        with txl.if_(dq_reduce_elected != txl.uint32(0)), txl.then_():
                             txl.ptx[TMA_S2G_REDUCE.format(dim=4, redop="add")](
                                 txl.address_of(dq_map),
                                 0,
@@ -1412,7 +1412,7 @@ def build_kernel(
                     txl.cuda.warpgroup_sync(4)
 
             # Wait for all pending TMA reduces
-            with txl.If(warp_id == 0), txl.Then():
+            with txl.if_(warp_id == 0), txl.then_():
                 txl.ptx.cp.async_.bulk.wait_group(0)
             txl.cuda.warpgroup_sync(4)
             txl.ptx.bar.arrive(txl.uint32(5), 416)

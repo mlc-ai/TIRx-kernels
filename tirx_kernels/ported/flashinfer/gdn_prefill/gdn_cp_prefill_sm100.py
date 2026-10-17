@@ -531,12 +531,12 @@ def _t_store_t_fragment(
         output_lo = txl.local_scalar("float32", init=0.0)
         output_hi = txl.local_scalar("float32", init=0.0)
         beta_value = txl.local_scalar("float32")
-        with txl.If(txl.And(row < valid_len, col < valid_len)):
-            with txl.Then():
+        with txl.if_(txl.And(row < valid_len, col < valid_len)):
+            with txl.then_():
                 _load_shared_f32(beta_value, beta_storage.ptr_to([col]))
                 txl.assign(output_lo, -beta_value * inverse_lo)
-        with txl.If(txl.And(row < valid_len, col + 1 < valid_len)):
-            with txl.Then():
+        with txl.if_(txl.And(row < valid_len, col + 1 < valid_len)):
+            with txl.then_():
                 _load_shared_f32(beta_value, beta_storage.ptr_to([col + 1]))
                 txl.assign(output_hi, -beta_value * inverse_hi)
         txl.ptx.st.global_.b16(
@@ -640,13 +640,13 @@ def _t_inverse_32_to_64(storage, local_warp, lane):
         )
 
     txl.cuda.cta_sync()
-    with txl.If(x == 0):
-        with txl.Then():
+    with txl.if_(x == 0):
+        with txl.then_():
             _t_stmatrix_x4(storage, row_base, 0, lane, output0_f16)
             _t_stmatrix_x4(storage, row_base, 16, lane, output1_f16)
     txl.cuda.cta_sync()
-    with txl.If(x == 1):
-        with txl.Then():
+    with txl.if_(x == 1):
+        with txl.then_():
             _t_ldmatrix_x4(storage, row_base, 0, lane, False, reduced0)
             _t_ldmatrix_x4(storage, row_base, 16, lane, False, reduced1)
             with txl.unroll(4) as pair:
@@ -1419,8 +1419,8 @@ def _prefill_opt_transform_t(
             + (i >> 3) * 16,
         )
         valid = txl.local_scalar("bool", init=s_coord >= t_coord)
-        with txl.If(is_final_block):
-            with txl.Then():
+        with txl.if_(is_final_block):
+            with txl.then_():
                 txl.assign(
                     valid, txl.And(txl.And(valid, s_coord < valid_tokens), t_coord < valid_tokens)
                 )
@@ -1561,7 +1561,7 @@ def _make_t_precompute(spec, *, backend_config=None):
     @txl.kernel()
     def t_precompute(
         k: txl.Tensor((txl.int64(),), io_dtype),
-        beta: txl.Tensor((txl.int64(),), txl.f32),
+        beta: txl.Tensor((txl.int64(),), "float32"),
         t: txl.Tensor((txl.int64(),), io_dtype),
         cu_seqlens: txl.Tensor((txl.int64(),), cu_dtype),
         k_map: txl.Ptr(txl.TensorMap),
@@ -1580,10 +1580,10 @@ def _make_t_precompute(spec, *, backend_config=None):
         beta_ready = txl.MBarrier(smem, 1)
         k_ready.init(1)
         beta_ready.init(32)
-        s_k = smem.alloc((T_BLOCK, D_HEAD), io_dtype, swizzle=txl.SW128B)
-        s_inv = smem.alloc((T_BLOCK, T_BLOCK), txl.f16, swizzle=txl.SW128B)
-        s_beta = smem.alloc((T_BLOCK,), txl.f32, align=16)
-        with txl.If(txl.thread_id() == 0), txl.Then():
+        s_k = smem.alloc((T_BLOCK, D_HEAD), io_dtype, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_inv = smem.alloc((T_BLOCK, T_BLOCK), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_beta = smem.alloc((T_BLOCK,), "float32", align=16)
+        with txl.if_(txl.thread_id() == 0), txl.then_():
             txl.ptx.fence.mbarrier_init.release.cluster()
         txl.cuda.cta_sync()
 
@@ -1600,13 +1600,13 @@ def _make_t_precompute(spec, *, backend_config=None):
             seq_end = sequence_bounds[1]
             num_blocks = (seq_end - seq_start + T_BLOCK - 1) // T_BLOCK
 
-            with txl.If(block_in_seq < num_blocks), txl.Then():
+            with txl.if_(block_in_seq < num_blocks), txl.then_():
                 token_start = seq_start + block_in_seq * T_BLOCK
                 valid_len = txl.min(T_BLOCK, seq_end - token_start)
                 t_block = _device_chunk_bound(seq_idx, seq_start, T_BLOCK) + block_in_seq
 
-                with txl.If(warp == 1):
-                    with txl.Then(), txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(warp == 1):
+                    with txl.then_(), txl.if_(txl.cuda.elect_sync()), txl.then_():
                         txl.ptx.prefetch.tensormap(txl.address_of(k_map))
                         k_ready.arrive(0, tx_count=16384)
                         for d_coord in range(0, D_HEAD, 64):
@@ -1619,12 +1619,12 @@ def _make_t_precompute(spec, *, backend_config=None):
                                 k_ready.ptr_to([0]),
                                 txl.uint64(0),
                             )
-                    with txl.Else(), txl.If(warp == 2), txl.Then():
+                    with txl.else_(), txl.if_(warp == 2), txl.then_():
                         with txl.unroll(2) as beta_half:
                             beta_row = lane + beta_half * 32
                             beta_value = txl.alloc_local((1,), "float32")
                             txl.assign(beta_value[0], 0.0)
-                            with txl.If(beta_row < valid_len), txl.Then():
+                            with txl.if_(beta_row < valid_len), txl.then_():
                                 txl.ptx.ld.global_.nc.f32(
                                     beta_value[0],
                                     beta.ptr_to(
@@ -1651,27 +1651,27 @@ def _make_t_precompute(spec, *, backend_config=None):
                     with txl.unroll(T_BLOCK // 16) as n_group:
                         _t_ldmatrix_x4_k_b(s_k, n_group * 16, k_tile * 16, lane, b_regs)
                         if io_dtype == "float16":
-                            with txl.If(k_tile == 0):
-                                with txl.Then():
+                            with txl.if_(k_tile == 0):
+                                with txl.then_():
                                     _t_mma_m16n8k16_f16_zero(kk_acc, a_regs, b_regs, n_group * 8, 0)
                                     _t_mma_m16n8k16_f16_zero(
                                         kk_acc, a_regs, b_regs, n_group * 8 + 4, 2
                                     )
-                                with txl.Else():
+                                with txl.else_():
                                     _t_mma_m16n8k16_f16_acc(kk_acc, a_regs, b_regs, n_group * 8, 0)
                                     _t_mma_m16n8k16_f16_acc(
                                         kk_acc, a_regs, b_regs, n_group * 8 + 4, 2
                                     )
                         else:
-                            with txl.If(k_tile == 0):
-                                with txl.Then():
+                            with txl.if_(k_tile == 0):
+                                with txl.then_():
                                     _t_mma_m16n8k16_bf16_zero(
                                         kk_acc, a_regs, b_regs, n_group * 8, 0
                                     )
                                     _t_mma_m16n8k16_bf16_zero(
                                         kk_acc, a_regs, b_regs, n_group * 8 + 4, 2
                                     )
-                                with txl.Else():
+                                with txl.else_():
                                     _t_mma_m16n8k16_bf16_acc(kk_acc, a_regs, b_regs, n_group * 8, 0)
                                     _t_mma_m16n8k16_bf16_acc(
                                         kk_acc, a_regs, b_regs, n_group * 8 + 4, 2
@@ -1686,7 +1686,7 @@ def _make_t_precompute(spec, *, backend_config=None):
                             n_group * 16 + (element >> 2) * 8 + (lane & 3) * 2 + (within_mma & 1)
                         )
                         value_kk = txl.local_scalar("float32", init=0.0)
-                        with txl.If(row_kk > col_kk), txl.Then():
+                        with txl.if_(row_kk > col_kk), txl.then_():
                             beta_value = txl.alloc_local((1,), "float32")
                             txl.ptx.ld.shared.f32(beta_value[0], s_beta.ptr_to([row_kk]))
                             txl.assign(value_kk, kk_acc[n_group * 8 + element] * beta_value[0])
@@ -1701,7 +1701,7 @@ def _make_t_precompute(spec, *, backend_config=None):
                     _t_stmatrix_x4(s_inv, warp * 16, n_group * 16, lane, packed_kk)
                 txl.cuda.cta_sync()
 
-                with txl.If(tid < 64), txl.Then():
+                with txl.if_(tid < 64), txl.then_():
                     block8 = (tid >> 3) * 8
                     row8 = tid & 7
                     inverse_words = txl.alloc_local((4,), "uint32")
@@ -1735,29 +1735,29 @@ def _make_t_precompute(spec, *, backend_config=None):
                         )
                     with txl.unroll(8) as col8:
                         raw_value = inverse_row[col8]
-                        with txl.If(row8 == col8):
-                            with txl.Then():
+                        with txl.if_(row8 == col8):
+                            with txl.then_():
                                 txl.ptx.mov.b32(inverse_row[col8], txl.float32(1.0))
-                            with txl.Else(), txl.If(row8 < col8):
-                                with txl.Then():
+                            with txl.else_(), txl.if_(row8 < col8):
+                                with txl.then_():
                                     txl.ptx.mov.b32(inverse_row[col8], txl.float32(0.0))
-                                with txl.Else():
+                                with txl.else_():
                                     txl.ptx.mov.b32(inverse_row[col8], raw_value)
                     with txl.unroll(7) as src_row:
                         row_scale = txl.local_scalar("float32")
                         txl.ptx.neg.f32(row_scale, inverse_row[src_row])
                         with txl.unroll(7) as inverse_col:
-                            with txl.If(inverse_col < src_row), txl.Then():
+                            with txl.if_(inverse_col < src_row), txl.then_():
                                 pivot = txl.local_scalar("float32")
                                 txl.assign(
                                     pivot, _shfl_idx_f32(inverse_row[inverse_col], src_row, width=8)
                                 )
-                                with txl.If(row8 > src_row), txl.Then():
+                                with txl.if_(row8 > src_row), txl.then_():
                                     txl.ptx.mov.b32(
                                         inverse_row[inverse_col],
                                         (inverse_row[inverse_col] + row_scale * pivot),
                                     )
-                        with txl.If(row8 > src_row), txl.Then():
+                        with txl.if_(row8 > src_row), txl.then_():
                             txl.ptx.mov.b32(inverse_row[src_row], row_scale)
                     with txl.unroll(4) as pair8:
                         txl.ptx.mov.b32(
@@ -1774,7 +1774,7 @@ def _make_t_precompute(spec, *, backend_config=None):
                 txl.cuda.cta_sync()
                 _t_inverse_8_to_16(s_inv, warp * 16, lane)
                 txl.cuda.cta_sync()
-                with txl.If(tid < 64), txl.Then():
+                with txl.if_(tid < 64), txl.then_():
                     _t_inverse_16_to_32(s_inv, warp * 32, lane)
                 txl.cuda.cta_sync()
                 _t_inverse_32_to_64(s_inv, warp, lane)
@@ -1820,13 +1820,13 @@ def _make_fixup_simt(spec, *, backend_config=None):
 
     @txl.kernel()
     def fixup_simt(
-        transfer: txl.Tensor((txl.int64(),), txl.f32),
-        local_state: txl.Tensor((txl.int64(),), txl.f32),
+        transfer: txl.Tensor((txl.int64(),), "float32"),
+        local_state: txl.Tensor((txl.int64(),), "float32"),
         initial_state: txl.Tensor((txl.int64(),), state_dtype),
-        initial_state_workspace: txl.Tensor((txl.int64(),), txl.f32),
-        fixed_state: txl.Tensor((txl.int64(),), txl.f32),
+        initial_state_workspace: txl.Tensor((txl.int64(),), "float32"),
+        fixed_state: txl.Tensor((txl.int64(),), "float32"),
         final_state: txl.Tensor((txl.int64(),), state_dtype),
-        state_indices: txl.Tensor((txl.int64(),), txl.i32),
+        state_indices: txl.Tensor((txl.int64(),), "int32"),
         cu_seqlens: txl.Tensor((txl.int64(),), cu_dtype),
     ):
         txl.device_entry(
@@ -1838,7 +1838,7 @@ def _make_fixup_simt(spec, *, backend_config=None):
         roles = txl.specialize()
         compute = roles.role("compute", warps=range(4), regs=256)
         smem = txl.smem_pool()
-        shared_state = smem.alloc((rows_per_cta, D_HEAD), txl.f32, align=128)
+        shared_state = smem.alloc((rows_per_cta, D_HEAD), "float32", align=128)
 
         with compute:
             block = txl.cta_id()
@@ -1857,13 +1857,13 @@ def _make_fixup_simt(spec, *, backend_config=None):
             chunk_start = _device_chunk_bound(seq_idx, seq_start, cp_chunk_len)
             gap_start = chunk_start + num_chunks
             gap_end = txl.local_scalar("int32", init=total_cp_chunks)
-            with txl.If(seq_idx + 1 < num_sequences), txl.Then():
+            with txl.if_(seq_idx + 1 < num_sequences), txl.then_():
                 txl.assign(gap_end, _device_chunk_bound(seq_idx + 1, seq_end, cp_chunk_len))
             state_slot = txl.local_scalar("int32", init=seq_idx)
             if use_state_indices:
                 txl.ptx.ld.global_.nc.b32(state_slot, state_indices.ptr_to([seq_idx]))
 
-            with txl.If(num_chunks > 0), txl.Then():
+            with txl.if_(num_chunks > 0), txl.then_():
                 start = 0
                 if needs_initial_state:
                     initial_values = txl.alloc_local((rows_per_cta,), "float32")
@@ -1901,7 +1901,7 @@ def _make_fixup_simt(spec, *, backend_config=None):
                 accum_next = txl.alloc_local((rows_per_cta,), "float32")
                 m_values = txl.alloc_local((16,), "float32")
                 m_next = txl.alloc_local((16,), "float32")
-                with txl.If(start < num_chunks), txl.Then():
+                with txl.if_(start < num_chunks), txl.then_():
                     first_work_slot = chunk_start + start
                     with txl.unroll(rows_per_cta) as local_row:
                         first_work_index = (
@@ -1949,7 +1949,7 @@ def _make_fixup_simt(spec, *, backend_config=None):
                         with txl.unroll(16) as inner:
                             txl.ptx.mov.b32(m_values[inner], m_next[inner])
 
-                    with txl.If(next_chunk < num_chunks), txl.Then():
+                    with txl.if_(next_chunk < num_chunks), txl.then_():
                         next_slot = chunk_start + next_chunk
                         with txl.unroll(rows_per_cta) as local_row:
                             next_state_index = (
@@ -1986,7 +1986,7 @@ def _make_fixup_simt(spec, *, backend_config=None):
                         ) * D_HEAD + col
                         txl.ptx.st.global_.f32(fixed_state.ptr_to([fixed_index]), accum[local_row])
                     txl.cuda.cta_sync()
-                    with txl.If(next_chunk < num_chunks), txl.Then():
+                    with txl.if_(next_chunk < num_chunks), txl.then_():
                         with txl.unroll(rows_per_cta) as local_row:
                             txl.ptx.mov.b32(accum[local_row], accum_next[local_row])
                         with txl.unroll(16) as inner:
@@ -2024,13 +2024,13 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
 
     @txl.kernel()
     def fixup_utcmma(
-        transfer: txl.Tensor((txl.int64(),), txl.f32),
-        local_state: txl.Tensor((txl.int64(),), txl.f32),
+        transfer: txl.Tensor((txl.int64(),), "float32"),
+        local_state: txl.Tensor((txl.int64(),), "float32"),
         initial_state: txl.Tensor((txl.int64(),), state_dtype),
-        initial_state_workspace: txl.Tensor((txl.int64(),), txl.f32),
-        fixed_state: txl.Tensor((txl.int64(),), txl.f32),
+        initial_state_workspace: txl.Tensor((txl.int64(),), "float32"),
+        fixed_state: txl.Tensor((txl.int64(),), "float32"),
         final_state: txl.Tensor((txl.int64(),), state_dtype),
-        state_indices: txl.Tensor((txl.int64(),), txl.i32),
+        state_indices: txl.Tensor((txl.int64(),), "int32"),
         cu_seqlens: txl.Tensor((txl.int64(),), cu_dtype),
         transfer_map: txl.Ptr(txl.TensorMap),
         local_state_map: txl.Ptr(txl.TensorMap),
@@ -2052,10 +2052,10 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
         p_n = txl.Pipeline(smem, 1, full="tma", empty="mbar", init_empty=4)
         p_ready = txl.Pipeline(smem, 1, full="mbar", empty="tcgen05", init_full=128)
         p_done = txl.Pipeline(smem, 1, full="tcgen05", empty="mbar", init_empty=128)
-        tmem_holding = smem.alloc((1,), txl.i32, align=4)
-        s_m = smem.alloc((m_stages * 4, D_HEAD, 32), txl.f32, swizzle=txl.SW128B)
-        s_n = smem.alloc((4, rows, 32), txl.f32, swizzle=txl.SW128B)
-        with txl.If(txl.thread_id() == 0), txl.Then():
+        tmem_holding = smem.alloc((1,), "int32", align=4)
+        s_m = smem.alloc((m_stages * 4, D_HEAD, 32), "float32", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_n = smem.alloc((4, rows, 32), "float32", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        with txl.if_(txl.thread_id() == 0), txl.then_():
             txl.ptx.fence.mbarrier_init.release.cluster()
         txl.cuda.cta_sync()
 
@@ -2076,31 +2076,31 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
         if use_state_indices:
             txl.ptx.ld.global_.nc.b32(state_slot, state_indices.ptr_to([seq_idx]))
 
-        with txl.If(num_chunks == 0):
-            with txl.Then():
+        with txl.if_(num_chunks == 0):
+            with txl.then_():
                 warp = _warp_uniform_i32(txl.thread_id() >> 5)
                 empty_sequence_regs.emit()
-                with txl.If(warp == 0), txl.Then():
+                with txl.if_(warp == 0), txl.then_():
                     txl.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
                         txl.address_of(tmem_holding[0]), txl.uint32(_FIXUP_TMEM_COLUMNS)
                     )
                 tmem_base_invalid = txl.local_scalar("int32", init=0)
-                with txl.If(warp <= 4), txl.Then():
+                with txl.if_(warp <= 4), txl.then_():
                     txl.ptx.bar.sync(txl.uint32(_FIXUP_TMEM_ALLOC_BARRIER), txl.uint32(160))
                     txl.ptx.ld.volatile.shared.s32(
                         tmem_base_invalid, txl.address_of(tmem_holding[0])
                     )
-                with txl.If(warp == 0), txl.Then():
+                with txl.if_(warp == 0), txl.then_():
                     txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                     txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
                         txl.Cast(tmem_base_invalid, "uint32"), txl.uint32(_FIXUP_TMEM_COLUMNS)
                     )
-            with txl.Else():
+            with txl.else_():
                 with compute:
                     txl.ptx.setmaxnreg.inc.sync.aligned.u32(compute_regs)
                     compute_thread = txl.tid_in_role()
                     lane = txl.lane_id()
-                    with txl.If(txl.warp_id_in_role() == 0), txl.Then():
+                    with txl.if_(txl.warp_id_in_role() == 0), txl.then_():
                         txl.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
                             txl.address_of(tmem_holding[0]), txl.uint32(_FIXUP_TMEM_COLUMNS)
                         )
@@ -2151,7 +2151,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
                         )
                         txl.ptx.tcgen05.wait__ld.sync.aligned()
                         _fixup_store_f32(words, fixed_state, fixed_base, compute_thread, rows)
-                        with txl.If(lane == 0), txl.Then():
+                        with txl.if_(lane == 0), txl.then_():
                             p_n.empty.arrive(n_state.stage)
                         n_state.advance()
 
@@ -2162,7 +2162,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
                         _fixup_load_n_to_tmem(tmem_base[0], s_n, compute_thread, rows)
                         txl.ptx.tcgen05.wait__st.sync.aligned()
                         p_ready.full.arrive(ready_state.stage)
-                        with txl.If(lane == 0), txl.Then():
+                        with txl.if_(lane == 0), txl.then_():
                             p_n.empty.arrive(n_state.stage)
                         n_state.advance()
                         ready_state.advance()
@@ -2200,7 +2200,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
                             values, final_state, state_base, compute_thread, rows, state_dtype
                         )
 
-                    with txl.If(txl.warp_id_in_role() == 0), txl.Then():
+                    with txl.if_(txl.warp_id_in_role() == 0), txl.then_():
                         txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                         txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
                             txl.Cast(tmem_base[0], "uint32"), txl.uint32(_FIXUP_TMEM_COLUMNS)
@@ -2241,7 +2241,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
                     with txl.serial(num_chunks) as chunk:
                         cp_slot = chunk_start + chunk
                         p_n.empty.wait(n_state.stage, n_state.phase)
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             p_n.full.arrive(n_state.stage, tx_count=rows * D_HEAD * 4)
                             for part in range(4):
                                 txl.ptx[_FIXUP_TMA_G2S_4D](
@@ -2255,9 +2255,9 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
                                     txl.uint64(0),
                                 )
                         n_state.advance()
-                        with txl.If(chunk >= start), txl.Then():
+                        with txl.if_(chunk >= start), txl.then_():
                             p_m.empty.wait(m_state.stage, m_state.phase)
-                            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                                 p_m.full.arrive(m_state.stage, tx_count=D_HEAD * D_HEAD * 4)
                                 for part in range(4):
                                     txl.ptx[_FIXUP_TMA_G2S_4D](
@@ -2294,9 +2294,9 @@ def _make_mn_precompute(spec, *, backend_config=None):
         k: txl.Tensor((txl.int64(),), io_dtype),
         v: txl.Tensor((txl.int64(),), io_dtype),
         t: txl.Tensor((txl.int64(),), io_dtype),
-        alpha: txl.Tensor((txl.int64(),), txl.f32),
-        transfer: txl.Tensor((txl.int64(),), txl.f32),
-        local_state: txl.Tensor((txl.int64(),), txl.f32),
+        alpha: txl.Tensor((txl.int64(),), "float32"),
+        transfer: txl.Tensor((txl.int64(),), "float32"),
+        local_state: txl.Tensor((txl.int64(),), "float32"),
         cu_seqlens: txl.Tensor((txl.int64(),), cu_dtype),
         k_map: txl.Ptr(txl.TensorMap),
         v_map: txl.Ptr(txl.TensorMap),
@@ -2335,13 +2335,13 @@ def _make_mn_precompute(spec, *, backend_config=None):
         p_y_ready = txl.Pipeline(smem, 1, full="mbar", empty="mbar", init_full=128)
         p_n_acc = txl.Pipeline(smem, 1, full="tcgen05", empty="mbar", init_empty=128)
         p_done = txl.Pipeline(smem, 1, full="mbar", empty="mbar", init_full=128, init_empty=128)
-        tmem_holding = smem.alloc((1,), txl.i32, align=4)
-        s_k = smem.alloc((3, D_HEAD, T_BLOCK), io_dtype, swizzle=txl.SW128B)
-        s_v = smem.alloc((3, D_HEAD, T_BLOCK), io_dtype, swizzle=txl.SW128B)
-        s_t = smem.alloc((3, T_BLOCK, T_BLOCK), io_dtype, swizzle=txl.SW128B)
-        s_x = smem.alloc((2, D_HEAD, T_BLOCK), io_dtype, swizzle=txl.SW128B)
-        s_alpha = smem.alloc((4, 3, T_BLOCK), txl.f32, align=4)
-        with txl.If(txl.thread_id() == 0), txl.Then():
+        tmem_holding = smem.alloc((1,), "int32", align=4)
+        s_k = smem.alloc((3, D_HEAD, T_BLOCK), io_dtype, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_v = smem.alloc((3, D_HEAD, T_BLOCK), io_dtype, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_t = smem.alloc((3, T_BLOCK, T_BLOCK), io_dtype, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_x = smem.alloc((2, D_HEAD, T_BLOCK), io_dtype, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_alpha = smem.alloc((4, 3, T_BLOCK), "float32", align=4)
+        with txl.if_(txl.thread_id() == 0), txl.then_():
             txl.ptx.fence.mbarrier_init.release.cluster()
         txl.cuda.cta_sync()
 
@@ -2366,25 +2366,25 @@ def _make_mn_precompute(spec, *, backend_config=None):
             cp_chunk_len // T_BLOCK
         )
 
-        with txl.If(valid_chunk == 0):
-            with txl.Then():
+        with txl.if_(valid_chunk == 0):
+            with txl.then_():
                 invalid_chunk_regs.emit()
-                with txl.If(warp == 4), txl.Then():
+                with txl.if_(warp == 4), txl.then_():
                     txl.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
                         txl.address_of(tmem_holding[0]), txl.uint32(TMEM_COLUMNS)
                     )
                 tmem_base_invalid = txl.local_scalar("int32", init=0)
-                with txl.If((warp <= 8) | (warp == 11)), txl.Then():
+                with txl.if_((warp <= 8) | (warp == 11)), txl.then_():
                     txl.ptx.bar.sync(txl.uint32(MN_OPT_TMEM_ALLOC_BARRIER), txl.uint32(320))
                     txl.ptx.ld.volatile.shared.s32(
                         tmem_base_invalid, txl.address_of(tmem_holding[0])
                     )
-                with txl.If(warp == 4), txl.Then():
+                with txl.if_(warp == 4), txl.then_():
                     txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                     txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
                         txl.Cast(tmem_base_invalid, "uint32"), txl.uint32(TMEM_COLUMNS)
                     )
-            with txl.Else():
+            with txl.else_():
                 with cg0:
                     txl.ptx.barrier.sync(txl.uint32(MN_OPT_TMEM_ALLOC_BARRIER), txl.uint32(320))
                     tmem_base = txl.alloc_local((1,), "int32")
@@ -2414,7 +2414,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                         st_x_acc.advance()
                         st_x_ready.advance()
 
-                        with txl.If(block > 0), txl.Then():
+                        with txl.if_(block > 0), txl.then_():
                             p_m_input.empty.wait(st_m_input.stage, st_m_input.phase)
                             _mn_opt_matrix_to_io_input(
                                 tmem_base[0],
@@ -2460,7 +2460,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                     st_done.advance()
 
                 with cg1:
-                    with txl.If(txl.warp_id_in_role() == 0), txl.Then():
+                    with txl.if_(txl.warp_id_in_role() == 0), txl.then_():
                         txl.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
                             txl.address_of(tmem_holding[0]), txl.uint32(TMEM_COLUMNS)
                         )
@@ -2516,7 +2516,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                         p_y_ready.full.arrive(st_y_ready.stage)
                         p_n_acc.full.wait(st_n_acc.stage, st_n_acc.phase)
                         p_n_acc.empty.arrive(st_n_acc.stage)
-                        with txl.If(lane == 0), txl.Then():
+                        with txl.if_(lane == 0), txl.then_():
                             p_v.empty.arrive(st_v.stage)
                         p_alpha.empty.arrive(st_alpha.stage)
                         st_v.advance()
@@ -2536,7 +2536,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                     p_done.full.wait(st_done.stage, st_done.phase)
                     p_done.empty.arrive(st_done.stage)
                     txl.cuda.warpgroup_sync(MN_OPT_TMEM_DEALLOC_BARRIER)
-                    with txl.If(txl.warp_id_in_role() == 0), txl.Then():
+                    with txl.if_(txl.warp_id_in_role() == 0), txl.then_():
                         txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                         txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
                             txl.Cast(tmem_base[0], "uint32"), txl.uint32(TMEM_COLUMNS)
@@ -2557,7 +2557,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                     st_x_ready = txl.PipelineState(2, phase=0)
                     st_m_acc = txl.PipelineState(1, phase=1)
                     p_m_init.full.wait(st_m_init.stage, st_m_init.phase)
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         p_m_init.empty.arrive(st_m_init.stage)
                     st_m_init.advance()
 
@@ -2567,7 +2567,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                         k_desc_mn = _mn_opt_smem_desc_mn(
                             txl.cuda.cvta_generic_to_shared(s_k[st_k.stage].ptr_to(0, 0))
                         )
-                        with txl.If(block > 0), txl.Then():
+                        with txl.if_(block > 0), txl.then_():
                             p_m_input.full.wait(st_m_input.stage, st_m_input.phase)
                             p_z_acc.empty.wait(st_z_acc.stage, st_z_acc.phase)
                             _mn_opt_mma_ts_128x64_k128(
@@ -2578,7 +2578,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                                 io_dtype,
                             )
                             p_z_ready.full.wait(st_z_ready.stage, st_z_ready.phase)
-                            with txl.If(txl.cuda.elect_sync()), txl.Then():
+                            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                                 p_z_ready.empty.arrive(st_z_ready.stage)
                             _mn_opt_mma_commit(p_m_input.empty.ptr_to([st_m_input.stage]))
                             st_m_input.advance()
@@ -2590,8 +2590,8 @@ def _make_mn_precompute(spec, *, backend_config=None):
                         x_desc = _mn_opt_smem_desc_mn(
                             txl.cuda.cvta_generic_to_shared(s_x[st_x_ready.stage].ptr_to(0, 0))
                         )
-                        with txl.If(block == 0):
-                            with txl.Then():
+                        with txl.if_(block == 0):
+                            with txl.then_():
                                 _mn_opt_mma_ss_128x128_k64(
                                     tmem_base[0] + MN_OPT_TMEM_M_COL,
                                     k_desc_mn,
@@ -2599,7 +2599,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                                     p_m_acc.full.ptr_to([st_m_acc.stage]),
                                     io_dtype,
                                 )
-                            with txl.Else():
+                            with txl.else_():
                                 _mn_opt_mma_ts_128x128_k64(
                                     tmem_base[0] + MN_OPT_TMEM_M_COL,
                                     tmem_base[0] + MN_OPT_TMEM_M_INPUT_COL,
@@ -2627,7 +2627,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                     st_y_ready = txl.PipelineState(1, phase=0)
                     st_n_acc = txl.PipelineState(1, phase=1)
                     p_n_init.full.wait(st_n_init.stage, st_n_init.phase)
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         p_n_init.empty.arrive(st_n_init.stage)
                     st_n_init.advance()
 
@@ -2661,7 +2661,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                         _mn_opt_mma_commit(p_n_input.empty.ptr_to([st_n_input.stage]))
                         _mn_opt_mma_commit(p_k.empty.ptr_to([st_k.stage]))
                         p_y_ready.full.wait(st_y_ready.stage, st_y_ready.phase)
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             p_y_ready.empty.arrive(st_y_ready.stage)
                         p_n_acc.empty.wait(st_n_acc.stage, st_n_acc.phase)
                         x_desc = _mn_opt_smem_desc_mn(
@@ -2692,7 +2692,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                         p_k.empty.wait(st_k.stage, st_k.phase)
                         p_v.empty.wait(st_v.stage, st_v.phase)
                         p_t.empty.wait(st_t.stage, st_t.phase)
-                        with txl.If(txl.cuda.elect_sync()), txl.Then():
+                        with txl.if_(txl.cuda.elect_sync()), txl.then_():
                             p_k.full.arrive(st_k.stage, tx_count=16384)
                             p_v.full.arrive(st_v.stage, tx_count=16384)
                             p_t.full.arrive(st_t.stage, tx_count=8192)
@@ -2738,7 +2738,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                         alpha_values = txl.alloc_local((2,), "float32")
                         txl.ptx.mov.b32(alpha_values[0], txl.float32(1.0))
                         txl.ptx.mov.b32(alpha_values[1], txl.float32(1.0))
-                        with txl.If(token0 < valid_len), txl.Then():
+                        with txl.if_(token0 < valid_len), txl.then_():
                             txl.ptx.ld.global_.f32(
                                 alpha_values[0],
                                 alpha.ptr_to(
@@ -2748,7 +2748,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                                     ]
                                 ),
                             )
-                        with txl.If(token1 < valid_len), txl.Then():
+                        with txl.if_(token1 < valid_len), txl.then_():
                             txl.ptx.ld.global_.f32(
                                 alpha_values[1],
                                 alpha.ptr_to(
@@ -2770,7 +2770,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                             prior = txl.alloc_local((2,), "float32")
                             txl.ptx.mov.b32(prior[0], _shfl_up_f32(logs[0], scan_offset))
                             txl.ptx.mov.b32(prior[1], _shfl_up_f32(logs[1], scan_offset))
-                            with txl.If(lane >= scan_offset), txl.Then():
+                            with txl.if_(lane >= scan_offset), txl.then_():
                                 txl.ptx.mov.b32(logs[0], logs[0] + prior[0])
                                 txl.ptx.mov.b32(logs[1], logs[1] + prior[1])
                         txl.ptx.mov.b32(logs[1], logs[1] + _shfl_idx_f32(logs[0], txl.int32(31)))
@@ -2781,9 +2781,9 @@ def _make_mn_precompute(spec, *, backend_config=None):
                         neg = txl.alloc_local((2,), "float32")
                         txl.ptx.neg.f32(neg[0], _ex2_approx_ftz(end_log - logs[0]))
                         txl.ptx.neg.f32(neg[1], _ex2_approx_ftz(end_log - logs[1]))
-                        with txl.If(token0 >= valid_len), txl.Then():
+                        with txl.if_(token0 >= valid_len), txl.then_():
                             txl.ptx.mov.b32(neg[0], txl.float32(0.0))
-                        with txl.If(token1 >= valid_len), txl.Then():
+                        with txl.if_(token1 >= valid_len), txl.then_():
                             txl.ptx.mov.b32(neg[1], txl.float32(0.0))
                         txl.ptx.st.shared.f32(s_alpha.ptr_to([st_alpha.stage, 0, lane]), logs[0])
                         txl.ptx.st.shared.f32(
@@ -2872,19 +2872,19 @@ def _make_prefill(spec, *, backend_config=None):
         q: txl.Tensor((txl.int64(),), io_dtype),
         k: txl.Tensor((txl.int64(),), io_dtype),
         v: txl.Tensor((txl.int64(),), io_dtype),
-        alpha: txl.Tensor((txl.int64(),), txl.f32),
+        alpha: txl.Tensor((txl.int64(),), "float32"),
         t: txl.Tensor((txl.int64(),), io_dtype),
-        fixed_state: txl.Tensor((txl.int64(),), txl.f32),
-        initial_state_workspace: txl.Tensor((txl.int64(),), txl.f32),
+        fixed_state: txl.Tensor((txl.int64(),), "float32"),
+        initial_state_workspace: txl.Tensor((txl.int64(),), "float32"),
         o: txl.Tensor((txl.int64(),), io_dtype),
         cu_seqlens: txl.Tensor((txl.int64(),), cu_dtype),
-        scale: txl.f32,
+        scale: "float32",
         q_map: txl.Ptr(txl.TensorMap),
         k_map: txl.Ptr(txl.TensorMap),
         v_map: txl.Ptr(txl.TensorMap),
         t_map: txl.Ptr(txl.TensorMap),
         o_map: txl.Ptr(txl.TensorMap),
-        descriptor_workspace: txl.Tensor((txl.int64(),), txl.i8),
+        descriptor_workspace: txl.Tensor((txl.int64(),), "int8"),
     ):
         txl.device_entry(
             launch=txl.cuda.LaunchConfig(grid=(grid_x, num_sequences), block=12 * 32),
@@ -2920,17 +2920,17 @@ def _make_prefill(spec, *, backend_config=None):
         m_nv.init(128)
         m_decay.init(128)
         p_o = txl.Pipeline(smem, 2, full="mbar", empty="mbar", init_full=128, init_empty=32)
-        tmem_holding = smem.alloc((1,), txl.i32, align=4)
-        s_q = smem.alloc((2, T_BLOCK, D_HEAD), io_dtype, swizzle=txl.SW128B)
-        s_k = smem.alloc((3, T_BLOCK, D_HEAD), io_dtype, swizzle=txl.SW128B)
-        s_v = smem.alloc((3, D_HEAD, T_BLOCK), io_dtype, swizzle=txl.SW128B)
-        s_t = smem.alloc((2, T_BLOCK, T_BLOCK), io_dtype, swizzle=txl.SW128B)
-        s_ainv = smem.alloc((3, T_BLOCK, T_BLOCK), io_dtype, swizzle=txl.SW128B)
-        s_qk = smem.alloc((2, T_BLOCK, T_BLOCK), io_dtype, swizzle=txl.SW128B)
-        s_o = smem.alloc((2, D_HEAD, T_BLOCK), io_dtype, swizzle=txl.SW128B)
-        s_cumsumlog = smem.alloc((5, T_BLOCK), txl.f32, align=16)
-        s_cumprod = smem.alloc((5, T_BLOCK), txl.f32, align=16)
-        with txl.If(txl.thread_id() == 0), txl.Then():
+        tmem_holding = smem.alloc((1,), "int32", align=4)
+        s_q = smem.alloc((2, T_BLOCK, D_HEAD), io_dtype, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_k = smem.alloc((3, T_BLOCK, D_HEAD), io_dtype, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_v = smem.alloc((3, D_HEAD, T_BLOCK), io_dtype, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_t = smem.alloc((2, T_BLOCK, T_BLOCK), io_dtype, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_ainv = smem.alloc((3, T_BLOCK, T_BLOCK), io_dtype, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_qk = smem.alloc((2, T_BLOCK, T_BLOCK), io_dtype, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_o = smem.alloc((2, D_HEAD, T_BLOCK), io_dtype, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        s_cumsumlog = smem.alloc((5, T_BLOCK), "float32", align=16)
+        s_cumprod = smem.alloc((5, T_BLOCK), "float32", align=16)
+        with txl.if_(txl.thread_id() == 0), txl.then_():
             txl.ptx.fence.mbarrier_init.release.cluster()
         txl.cuda.cta_sync()
 
@@ -2945,7 +2945,7 @@ def _make_prefill(spec, *, backend_config=None):
         seq_len = seq_end - seq_start
         num_cp_chunks = (seq_len + cp_chunk_len - 1) // cp_chunk_len
         chunk_len = txl.local_scalar("int32", init=0)
-        with txl.If(chunk_in_seq < num_cp_chunks), txl.Then():
+        with txl.if_(chunk_in_seq < num_cp_chunks), txl.then_():
             txl.assign(chunk_len, txl.min(cp_chunk_len, seq_len - chunk_in_seq * cp_chunk_len))
         chunk_start = seq_start + chunk_in_seq * cp_chunk_len
         chunk_end = chunk_start + chunk_len
@@ -2993,7 +2993,7 @@ def _make_prefill(spec, *, backend_config=None):
                 )
                 txl.ptx.fence.proxy.async_.shared__cta()
                 txl.ptx.bar.sync(txl.uint32(PREFILL_OPT_T_STORE_BARRIER), txl.uint32(128))
-                with txl.If(lane == 0), txl.Then():
+                with txl.if_(lane == 0), txl.then_():
                     p_t.empty.arrive(st_t.stage)
                 p_ainv.full.arrive(st_ainv.stage)
 
@@ -3015,7 +3015,7 @@ def _make_prefill(spec, *, backend_config=None):
                         + (frag >> 3) * 16
                     )
                     valid = txl.local_scalar("bool", init=score_s >= score_t)
-                    with txl.If(chunk >= num_valid_chunks - 1), txl.Then():
+                    with txl.if_(chunk >= num_valid_chunks - 1), txl.then_():
                         txl.assign(
                             valid,
                             (
@@ -3053,7 +3053,7 @@ def _make_prefill(spec, *, backend_config=None):
                 st_qk.advance()
 
         with cg1:
-            with txl.If(txl.warp_id_in_role() == 0), txl.Then():
+            with txl.if_(txl.warp_id_in_role() == 0), txl.then_():
                 txl.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
                     txl.address_of(tmem_holding[0]), txl.uint32(TMEM_COLUMNS)
                 )
@@ -3071,15 +3071,15 @@ def _make_prefill(spec, *, backend_config=None):
             st_nv = txl.PipelineState(1, phase=1)
             st_decay = txl.PipelineState(1, phase=1)
             st_o = txl.PipelineState(2, phase=1)
-            with txl.If(chunk_len > 0), txl.Then():
+            with txl.if_(chunk_len > 0), txl.then_():
                 p_kv.empty.wait(st_kv_p.stage, st_kv_p.phase)
                 cg1_thread = txl.tid_in_role()
                 state_words = txl.alloc_local((32,), "uint32")
                 for state_sub in range(4):
                     for vector in range(8):
                         word_offset = state_sub * 32 + vector * 4
-                        with txl.If(chunk_in_seq > 0):
-                            with txl.Then():
+                        with txl.if_(chunk_in_seq > 0):
+                            with txl.then_():
                                 base = (
                                     txl.Cast((cp_slot - 1) * state_heads + state_head, "int64")
                                     * D_HEAD
@@ -3092,7 +3092,7 @@ def _make_prefill(spec, *, backend_config=None):
                                     state_words[vector * 4 + 3],
                                     fixed_state.ptr_to([base]),
                                 )
-                            with txl.Else():
+                            with txl.else_():
                                 if needs_initial_state:
                                     base = (
                                         txl.Cast(seq_idx * state_heads + state_head, "int64")
@@ -3121,12 +3121,12 @@ def _make_prefill(spec, *, backend_config=None):
                     )
                 txl.ptx.tcgen05.wait__st.sync.aligned()
                 txl.ptx.bar.sync(txl.uint32(PREFILL_OPT_INITIAL_STATE_BARRIER), txl.uint32(128))
-                with txl.If(cg1_thread == 0), txl.Then():
+                with txl.if_(cg1_thread == 0), txl.then_():
                     p_kv.full.arrive(st_kv_p.stage)
                 st_kv_p.advance()
 
                 with txl.serial(padded_chunks) as chunk:
-                    with txl.If((chunk & 1) == 0), txl.Then():
+                    with txl.if_((chunk & 1) == 0), txl.then_():
                         st_kv_p.advance()
                         st_kv_p.advance()
                     p_gate.full.wait(st_gate.stage, st_gate.phase)
@@ -3294,7 +3294,7 @@ def _make_prefill(spec, *, backend_config=None):
                     st_qstate_c.advance()
 
                     p_cg1.full.wait(st_shared.stage, st_shared.phase)
-                    with txl.If(lane == 0), txl.Then():
+                    with txl.if_(lane == 0), txl.then_():
                         p_v.empty.arrive(st_v.stage)
                     _mn_opt_tmem_ld_128x64(
                         tmem_base[0], PREFILL_OPT_TMEM_CG1_ACC_COL, cg1_thread, fragment
@@ -3392,7 +3392,7 @@ def _make_prefill(spec, *, backend_config=None):
                 p_kv.empty.arrive(st_kv_c.stage)
 
             txl.cuda.warpgroup_sync(PREFILL_OPT_TMEM_DEALLOC_BARRIER)
-            with txl.If(txl.warp_id_in_role() == 0), txl.Then():
+            with txl.if_(txl.warp_id_in_role() == 0), txl.then_():
                 txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                 txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
                     txl.Cast(tmem_base[0], "uint32"), txl.uint32(TMEM_COLUMNS)
@@ -3527,7 +3527,7 @@ def _make_prefill(spec, *, backend_config=None):
                 st_qk.advance()
                 st_nv.advance()
 
-                with txl.If(chunk == 0), txl.Then():
+                with txl.if_(chunk == 0), txl.then_():
                     st_kv.advance()
                 p_kv.empty.wait(st_kv.stage, st_kv.phase)
                 m_decay.wait(st_decay.stage, st_decay.phase)
@@ -3555,21 +3555,21 @@ def _make_prefill(spec, *, backend_config=None):
             st_k = txl.PipelineState(3, phase=1)
             st_v = txl.PipelineState(3, phase=1)
             st_t = txl.PipelineState(2, phase=1)
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 copy_descriptor(q_map, descriptor_q)
             txl.cuda.warp_sync()
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 copy_descriptor(k_map, descriptor_k)
             txl.cuda.warp_sync()
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 copy_descriptor(v_map, descriptor_v)
             txl.cuda.warp_sync()
             txl.ptx.fence.acq_rel.cta()
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 txl.ptx.cp.async_.bulk.commit_group()
                 txl.ptx.cp.async_.bulk.wait_group.read(0)
             txl.cuda.warp_sync()
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 if is_gqa:
                     replace_descriptor(
                         descriptor_q,
@@ -3638,10 +3638,10 @@ def _make_prefill(spec, *, backend_config=None):
             with txl.serial(padded_chunks) as chunk:
                 token = chunk_start + chunk * T_BLOCK
                 p_k.empty.wait(st_k.stage, st_k.phase)
-                with txl.If(chunk == 0), txl.Then():
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(chunk == 0), txl.then_():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         txl.ptx.fence.proxy.tensormap__generic.acquire.gpu(descriptor_k)
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     p_k.full.arrive(st_k.stage, tx_count=16384)
                     for d_coord in range(0, D_HEAD, 64):
                         txl.ptx[_PREFILL_OPT_TMA_G2S[3]](
@@ -3656,10 +3656,10 @@ def _make_prefill(spec, *, backend_config=None):
                 st_k.advance()
 
                 p_q.empty.wait(st_q.stage, st_q.phase)
-                with txl.If(chunk == 0), txl.Then():
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(chunk == 0), txl.then_():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         txl.ptx.fence.proxy.tensormap__generic.acquire.gpu(descriptor_q)
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     p_q.full.arrive(st_q.stage, tx_count=16384)
                     for d_coord in range(0, D_HEAD, 64):
                         if is_gqa:
@@ -3686,10 +3686,10 @@ def _make_prefill(spec, *, backend_config=None):
                 st_q.advance()
 
                 p_v.empty.wait(st_v.stage, st_v.phase)
-                with txl.If(chunk == 0), txl.Then():
-                    with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(chunk == 0), txl.then_():
+                    with txl.if_(txl.cuda.elect_sync()), txl.then_():
                         txl.ptx.fence.proxy.tensormap__generic.acquire.gpu(descriptor_v)
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     p_v.full.arrive(st_v.stage, tx_count=16384)
                     for d_coord in range(0, D_HEAD, 64):
                         if is_gqa:
@@ -3717,9 +3717,9 @@ def _make_prefill(spec, *, backend_config=None):
 
                 p_t.empty.wait(st_t.stage, st_t.phase)
                 t_chunk = txl.local_scalar("int32", init=chunk)
-                with txl.If(chunk >= num_valid_chunks), txl.Then():
+                with txl.if_(chunk >= num_valid_chunks), txl.then_():
                     txl.assign(t_chunk, num_valid_chunks - 1)
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     p_t.full.arrive(st_t.stage, tx_count=8192)
                     txl.ptx[_PREFILL_OPT_TMA_G2S[5]](
                         s_t[st_t.stage].ptr_to(0, 0),
@@ -3756,19 +3756,19 @@ def _make_prefill(spec, *, backend_config=None):
                 gate = txl.alloc_local((2,), "float32")
                 txl.ptx.mov.b32(gate[0], txl.float32(1.0))
                 txl.ptx.mov.b32(gate[1], txl.float32(1.0))
-                with txl.If(is_last_tile):
-                    with txl.Then():
-                        with txl.If(pos0 < txl.Cast(chunk_end, "int64")), txl.Then():
+                with txl.if_(is_last_tile):
+                    with txl.then_():
+                        with txl.if_(pos0 < txl.Cast(chunk_end, "int64")), txl.then_():
                             txl.ptx.ld.global_.f32(
                                 gate[0],
                                 alpha.ptr_to([pos0 * txl.Cast(state_heads, "int64") + state_head]),
                             )
-                        with txl.If(pos1 < txl.Cast(chunk_end, "int64")), txl.Then():
+                        with txl.if_(pos1 < txl.Cast(chunk_end, "int64")), txl.then_():
                             txl.ptx.ld.global_.f32(
                                 gate[1],
                                 alpha.ptr_to([pos1 * txl.Cast(state_heads, "int64") + state_head]),
                             )
-                    with txl.Else():
+                    with txl.else_():
                         txl.ptx.ld.global_.f32(
                             gate[0],
                             alpha.ptr_to([pos0 * txl.Cast(state_heads, "int64") + state_head]),
@@ -3784,17 +3784,17 @@ def _make_prefill(spec, *, backend_config=None):
                     prior = txl.alloc_local((2,), "float32")
                     txl.ptx.mov.b32(
                         prior[0],
-                        txl.tvm_warp_shuffle_up(
+                        txl.gpu_warp_shuffle_up(
                             txl.uint32(0xFFFFFFFF), gate[0], scan_offset, 32, 32
                         ),
                     )
                     txl.ptx.mov.b32(
                         prior[1],
-                        txl.tvm_warp_shuffle_up(
+                        txl.gpu_warp_shuffle_up(
                             txl.uint32(0xFFFFFFFF), gate[1], scan_offset, 32, 32
                         ),
                     )
-                    with txl.If(lane >= scan_offset), txl.Then():
+                    with txl.if_(lane >= scan_offset), txl.then_():
                         txl.ptx.mov.b32(gate[0], gate[0] + prior[0])
                         txl.ptx.mov.b32(gate[1], gate[1] + prior[1])
                 txl.ptx.mov.b32(gate[1], gate[1] + _shfl_idx_f32(gate[0], txl.int32(31)))
@@ -3811,7 +3811,7 @@ def _make_prefill(spec, *, backend_config=None):
 
             def store_o(chunk_offset):
                 p_o.full.wait(st_o.stage, st_o.phase)
-                with txl.If(txl.cuda.elect_sync()), txl.Then():
+                with txl.if_(txl.cuda.elect_sync()), txl.then_():
                     for d_coord in range(0, D_HEAD, 64):
                         txl.ptx[_PREFILL_OPT_TMA_S2G_4D](
                             descriptor_o,
@@ -3827,15 +3827,15 @@ def _make_prefill(spec, *, backend_config=None):
                 p_o.empty.arrive(st_o.stage)
                 st_o.advance()
 
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 copy_descriptor(o_map, descriptor_o)
             txl.cuda.warp_sync()
             txl.ptx.fence.acq_rel.cta()
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 txl.ptx.cp.async_.bulk.commit_group()
                 txl.ptx.cp.async_.bulk.wait_group.read(0)
             txl.cuda.warp_sync()
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 replace_descriptor(
                     descriptor_o,
                     txl.address_of(o[0]),
@@ -3848,19 +3848,19 @@ def _make_prefill(spec, *, backend_config=None):
                 )
             txl.cuda.warp_sync()
             txl.ptx.fence.proxy.tensormap__generic.release.gpu()
-            with txl.If(txl.cuda.elect_sync()), txl.Then():
+            with txl.if_(txl.cuda.elect_sync()), txl.then_():
                 txl.ptx.fence.proxy.tensormap__generic.acquire.gpu(descriptor_o)
-            with txl.If(chunk_len > 0), txl.Then():
+            with txl.if_(chunk_len > 0), txl.then_():
                 with txl.unroll(2) as prefetch:
                     load_gate(chunk_start + prefetch * T_BLOCK, prefetch >= num_valid_chunks - 1)
-                with txl.If(padded_chunks > 2), txl.Then():
+                with txl.if_(padded_chunks > 2), txl.then_():
                     with txl.unroll(2, 4) as prefetch:
                         load_gate(
                             chunk_start + prefetch * T_BLOCK, prefetch >= num_valid_chunks - 1
                         )
                 with txl.serial(padded_chunks) as chunk:
                     future = chunk + 4
-                    with txl.If(future < padded_chunks), txl.Then():
+                    with txl.if_(future < padded_chunks), txl.then_():
                         load_gate(chunk_start + future * T_BLOCK, future >= num_valid_chunks - 1)
                     store_o(chunk_start + chunk * T_BLOCK)
             for _ in range(5):

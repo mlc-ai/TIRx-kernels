@@ -161,7 +161,7 @@ def _lint_invariant_encode(stage):
     """
     try:
         from tvm_tirx.script.ir_builder import IRBuilder
-        from tvm_tirx.tirx.script.ir_builder.frame import ForFrame
+        from tvm_tirx.script.ir_builder.frame import ForFrame
 
         builder = IRBuilder.current()
     except Exception:  # pylint: disable=broad-except

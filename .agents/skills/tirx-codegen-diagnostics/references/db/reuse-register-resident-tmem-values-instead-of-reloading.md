@@ -38,7 +38,7 @@ unrolling itself changes instruction scheduling and static site counts.
 state = txl.alloc_local((FRAGMENT,), "float32")
 _tmem_load_fragment(state, STATE_COLUMNS)
 _publish_packed(state)
-with txl.If(do_snapshot), txl.Then():
+with txl.if_(do_snapshot), txl.then_():
     snapshot = txl.alloc_local((FRAGMENT,), "float32")
     _tmem_load_fragment(snapshot, STATE_COLUMNS)
     _stage_snapshot(snapshot)
@@ -47,7 +47,7 @@ with txl.If(do_snapshot), txl.Then():
 state = txl.alloc_local((FRAGMENT,), "float32")
 _tmem_load_fragment(state, STATE_COLUMNS)
 _publish_packed(state)
-with txl.If(do_snapshot), txl.Then():
+with txl.if_(do_snapshot), txl.then_():
     _stage_snapshot(state)
 ```
 

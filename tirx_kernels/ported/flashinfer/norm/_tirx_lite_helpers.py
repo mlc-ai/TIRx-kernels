@@ -67,32 +67,32 @@ def _rsqrt_approx_ftz(value):
 
 def _cvt_to_f32(bits, dtype: str):
     if dtype == "float16":
-        return _ptx_unary("cvt.f32.f16", txl.cast(bits, txl.u16))
-    return _ptx_unary("cvt.f32.bf16", txl.cast(bits, txl.u16))
+        return _ptx_unary("cvt.f32.f16", txl.cast(bits, "uint16"))
+    return _ptx_unary("cvt.f32.bf16", txl.cast(bits, "uint16"))
 
 
 def _cvt_from_f32(value, dtype: str):
     if dtype == "float16":
-        return _ptx_unary("cvt.rn.f16.f32", value, dtype=txl.u16)
-    return _ptx_unary("cvt.rn.bf16.f32", value, dtype=txl.u16)
+        return _ptx_unary("cvt.rn.f16.f32", value, dtype="uint16")
+    return _ptx_unary("cvt.rn.bf16.f32", value, dtype="uint16")
 
 
 def _cvt_pair_from_f32(high, low, dtype: str):
     if dtype == "float16":
-        return _ptx_binary("cvt.rn.f16x2.f32", high, low, dtype=txl.u32)
-    return _ptx_binary("cvt.rn.bf16x2.f32", high, low, dtype=txl.u32)
+        return _ptx_binary("cvt.rn.f16x2.f32", high, low, dtype="uint32")
+    return _ptx_binary("cvt.rn.bf16x2.f32", high, low, dtype="uint32")
 
 
 def _shfl_bfly_f32(value, lane_xor: int):
-    out = txl.local_scalar(txl.u32)
+    out = txl.local_scalar("uint32")
     txl.ptx.shfl_sync.bfly.b32(
         out,
-        txl.reinterpret(value, ty=txl.u32),
+        txl.reinterpret(value, ty="uint32"),
         txl.uint32(lane_xor),
         txl.uint32(31),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.reinterpret(out, ty=txl.f32)
+    return txl.reinterpret(out, ty="float32")
 
 
 def _butterfly_sum_f32(value, lane_xors: tuple[int, ...]):
@@ -103,9 +103,9 @@ def _butterfly_sum_f32(value, lane_xors: tuple[int, ...]):
 
 
 def _mapa_u32(pointer, peer):
-    mapped = txl.local_scalar(txl.u32)
+    mapped = txl.local_scalar("uint32")
     txl.ptx.mapa.shared__cluster.u32(
-        mapped, txl.cuda.cvta_generic_to_shared(pointer), txl.cast(peer, txl.u32)
+        mapped, txl.cuda.cvta_generic_to_shared(pointer), txl.cast(peer, "uint32")
     )
     return mapped
 
@@ -122,7 +122,7 @@ def _load_global_bits(buffer, index, values, value_offset, VEC: int):
             values[value_offset], values[value_offset + 1], buffer.ptr_to([index])
         )
     else:
-        words = txl.alloc_local([VEC // 2], txl.u32)
+        words = txl.alloc_local([VEC // 2], "uint32")
         if VEC == 4:
             txl.ptx.ld.global_.v2.b32(words[0], words[1], buffer.ptr_to([index]))
         else:
@@ -132,11 +132,11 @@ def _load_global_bits(buffer, index, values, value_offset, VEC: int):
         for pair in range(VEC // 2):
             txl.assign(
                 values[value_offset + pair * 2],
-                txl.cast(txl.bitwise_and(words[pair], txl.uint32(0xFFFF)), txl.u16),
+                txl.cast(txl.bitwise_and(words[pair], txl.uint32(0xFFFF)), "uint16"),
             )
             txl.assign(
                 values[value_offset + pair * 2 + 1],
-                txl.cast(txl.shift_right(words[pair], txl.uint32(16)), txl.u16),
+                txl.cast(txl.shift_right(words[pair], txl.uint32(16)), "uint16"),
             )
 
 
@@ -146,9 +146,9 @@ def _load_shared_bits(shared_raw, byte_offset, values, value_offset, VEC: int):
             values[value_offset], values[value_offset + 1], shared_raw.ptr_to([byte_offset])
         )
     else:
-        words = txl.alloc_local([VEC // 2], txl.u32)
+        words = txl.alloc_local([VEC // 2], "uint32")
         if VEC == 4:
-            halves = txl.alloc_local([4], txl.u16)
+            halves = txl.alloc_local([4], "uint16")
             txl.ptx.ld.shared.v4.b16(
                 halves[0], halves[1], halves[2], halves[3], shared_raw.ptr_to([byte_offset])
             )
@@ -161,11 +161,11 @@ def _load_shared_bits(shared_raw, byte_offset, values, value_offset, VEC: int):
             for pair in range(4):
                 txl.assign(
                     values[value_offset + pair * 2],
-                    txl.cast(txl.bitwise_and(words[pair], txl.uint32(0xFFFF)), txl.u16),
+                    txl.cast(txl.bitwise_and(words[pair], txl.uint32(0xFFFF)), "uint16"),
                 )
                 txl.assign(
                     values[value_offset + pair * 2 + 1],
-                    txl.cast(txl.shift_right(words[pair], txl.uint32(16)), txl.u16),
+                    txl.cast(txl.shift_right(words[pair], txl.uint32(16)), "uint16"),
                 )
 
 
@@ -178,11 +178,11 @@ def _store_global_fragment(
         if PACKED_NARROW:
             txl.assign(
                 bits[value_offset],
-                txl.cast(txl.bitwise_and(words[word_offset], txl.uint32(0xFFFF)), txl.u16),
+                txl.cast(txl.bitwise_and(words[word_offset], txl.uint32(0xFFFF)), "uint16"),
             )
             txl.assign(
                 bits[value_offset + 1],
-                txl.cast(txl.shift_right(words[word_offset], txl.uint32(16)), txl.u16),
+                txl.cast(txl.shift_right(words[word_offset], txl.uint32(16)), "uint16"),
             )
         txl.ptx.st.global_.v2.b16(
             buffer.ptr_to([index]), bits[value_offset], bits[value_offset + 1], pred=predicate
