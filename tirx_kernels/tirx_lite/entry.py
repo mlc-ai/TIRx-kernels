@@ -211,7 +211,7 @@ class _DeviceEntry:
         _TLS.session = self.session
 
         def index(name, value):
-            return I.bind(value, var=tvm_tirx.ir.Var(name, value.ty))
+            return I.bind_(value, name=name)
 
         cta_ids = [index("b" + axis, I.cuda.block_idx(axis)) for axis in "xyz"[: len(launch.grid)]]
         if len(cta_ids) == 1:
