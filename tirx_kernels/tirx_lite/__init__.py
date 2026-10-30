@@ -299,16 +299,10 @@ def alloc_tensor(
             'tirx-lite does not support scope="tmem" buffers; use raw tcgen05 column '
             "operands and txl.cuda.get_tmem_addr(...)"
         )
-    tensor_type = _I.Tensor(
-        shape,
-        dtype,
-        data=data,
-        elem_offset=elem_offset,
-        byte_offset=byte_offset,
-        scope=scope,
-        align=align,
-    )
-    return _I.bind(_I.alloc_tensor(ty_args=[tensor_type], annotations=annotations))
+    if elem_offset not in (None, 0) or byte_offset not in (None, 0):
+        raise ValueError("Use an explicitly offset pointer with ptr_byte_offset")
+    tensor_type = _I.Tensor(shape, dtype, data=data, scope=scope, align=align)
+    return _I.bind_(_I.alloc_tensor(ty_args=[tensor_type], annotations=annotations))
 
 
 def decl_tensor(
@@ -320,22 +314,21 @@ def decl_tensor(
             'tirx-lite does not support scope="tmem" buffers; use raw tcgen05 column '
             "operands and txl.cuda.get_tmem_addr(...)"
         )
-    tensor_type = _I.Tensor(
-        shape,
-        dtype,
-        data=data,
-        elem_offset=elem_offset,
-        byte_offset=byte_offset,
-        scope=scope,
-        align=align,
-    )
+    if elem_offset not in (None, 0) or byte_offset not in (None, 0):
+        raise ValueError("Use an explicitly offset pointer with ptr_byte_offset")
+    tensor_type = _I.Tensor(shape, dtype, data=data, scope=scope, align=align)
     pointer = _I.ptr(dtype, storage_scope=scope) if data is None else data
-    return _I.bind(_I.decl_tensor(pointer, ty_args=[tensor_type]))
+    return _I.bind_(_I.decl_tensor(pointer, ty_args=[tensor_type]))
 
 
 def alloc_local(shape, dtype="float32", *, align=-1, annotations=None):
     """Allocate a register tensor with layout=None."""
     return alloc_tensor(shape, dtype, scope="local", align=align, annotations=annotations)
+
+
+def local_scalar(dtype="float32", init=None, *, name=None, annotations=None):
+    """Consume the native emission receipt and return writable scalar storage."""
+    return _I.bind_(_T.local_scalar(dtype, init, name=name, annotations=annotations))
 
 
 def stack_alloca(kind, size=1):
@@ -344,7 +337,7 @@ def stack_alloca(kind, size=1):
     The handle names an allocation, so it must be materialized as a single
     binding rather than re-evaluated per use.
     """
-    return _I.bind(_T.stack_alloca(kind, size))
+    return _I.bind_(_T.stack_alloca(kind, size))
 
 
 def assign(dst, value):

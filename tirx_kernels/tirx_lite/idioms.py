@@ -690,10 +690,10 @@ def mma_chain(mma, d, *, a, b, idesc, pred, accumulate, guard, dol=None, k_range
             if a_is_view:
                 a_op = a_desc + a_off(kp)
             else:
-                a_op = T.Cast(a + (a_base + kp) * a_step, "uint32")
+                a_op = T.cast(a + (a_base + kp) * a_step, ty="uint32")
             T.evaluate(
                 T.ptx[mma](
-                    T.Cast(d, "uint32"),
+                    T.cast(d, ty="uint32"),
                     a_op,
                     b_desc + b_off(kp),
                     T.uint32(idesc),
@@ -752,8 +752,8 @@ def sigmoid_tanh_approx_f32(value=None, *, tanh_input=None):
         raise ValueError("pass exactly one of value or tanh_input")
     if tanh_input is None:
         tanh_input = value * T.float32(0.5)
-    tanh_value = T.alloc_local([1], "float32")
-    result = T.alloc_local([1], "float32")
+    tanh_value = T.bind_(T.alloc_local([1], "float32"))
+    result = T.bind_(T.alloc_local([1], "float32"))
     T.evaluate(T.ptx.tanh.approx.f32(tanh_value[0], tanh_input))
     T.evaluate(T.ptx.fma.rn.f32(result[0], tanh_value[0], T.float32(0.5), T.float32(0.5)))
     return result[0]
@@ -796,7 +796,7 @@ def cast_f16x2_to_f32x2(dst, i, word):
     Destination-passing rather than value-returning because ``mov`` and ``cvt``
     write registers; the caller supplies the two f32 slots.
     """
-    halves = T.alloc_local([2], "uint16")
+    halves = T.bind_(T.alloc_local([2], "uint16"))
     T.evaluate(T.ptx.mov.b32(halves[0], halves[1], word))
     T.evaluate(T.ptx.cvt.f32.f16(dst[2 * i], halves[0]))
     T.evaluate(T.ptx.cvt.f32.f16(dst[2 * i + 1], halves[1]))
@@ -868,7 +868,7 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
 
     for step in range(width.bit_length() - 1):
         delta = 1 << step
-        prior = T.alloc_local([n], dtype)
+        prior = T.bind_(T.alloc_local([n], dtype))
         for i in range(n):
             _I.tensor_store(
                 prior, [i], T.gpu_warp_shuffle_up(T.uint32(FULL_MASK), vals[i], delta, width, width)
@@ -879,7 +879,7 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
 
     if chain:
         for i in range(1, n):
-            carry = T.alloc_local([1], dtype)
+            carry = T.bind_(T.alloc_local([1], dtype))
             _I.tensor_store(
                 carry,
                 [0],

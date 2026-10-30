@@ -26,8 +26,8 @@ class RingState:
         self.init(stage, phase)
 
     def init(self, stage=0, phase=0):
-        txl.assign(self.stage, txl.Cast(stage, "uint32"))
-        txl.assign(self.phase, txl.Cast(phase, "uint32"))
+        txl.assign(self.stage, txl.cast(stage, ty="uint32"))
+        txl.assign(self.phase, txl.cast(phase, ty="uint32"))
 
     def advance(self):
         txl.assign(self.stage, self.stage + txl.uint32(self.stride))

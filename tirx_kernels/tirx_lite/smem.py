@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import warnings
 
-from tvm_tirx import DataType
+from tvm_ffi import dtype as DataType
+
 from tvm_tirx.backend.cuda.lang import SMEMPool
 from tvm_tirx.backend.cuda.lang.alloc_pool import _validate_mma_alloc_shape
 from tvm_tirx.backend.cuda.layout import SwizzleMode, mma_shared_layout
@@ -45,9 +46,9 @@ def smem_desc_add_16B_offset(desc_val, offset):
     """Add a 16-byte-unit offset to the low half of an SMEM descriptor."""
     # Descriptor offsets wrap in the low 32 bits without carrying into the
     # encoded layout fields in the high half.
-    desc_lo = T.alloc_local((1,), "uint32")
-    desc_hi = T.alloc_local((1,), "uint32")
-    result = T.alloc_local((1,), "uint64")
+    desc_lo = T.bind_(T.alloc_local((1,), "uint32"))
+    desc_hi = T.bind_(T.alloc_local((1,), "uint32"))
+    result = T.bind_(T.alloc_local((1,), "uint64"))
     T.evaluate(T.ptx.mov.b64(desc_lo[0], desc_hi[0], desc_val))
     T.evaluate(T.ptx.add.u32(desc_lo[0], desc_lo[0], T.cast(offset, "uint32")))
     T.evaluate(T.ptx.mov.b64(result[0], desc_lo[0], desc_hi[0]))
@@ -59,7 +60,7 @@ class SmemDescriptor:
     """Raw tcgen05 shared-memory descriptor with native offset arithmetic."""
 
     def __init__(self):
-        self._buf = T.alloc_local((1,), "uint64")
+        self._buf = T.bind_(T.alloc_local((1,), "uint64"))
 
     @property
     def desc(self):
@@ -82,8 +83,8 @@ class SmemDescriptor:
         Spell the operation as two descriptor moves and one warp shuffle so
         it stays inside the low-level IR contract.
         """
-        desc_lo = T.alloc_local((1,), "uint32")
-        desc_hi = T.alloc_local((1,), "uint32")
+        desc_lo = T.bind_(T.alloc_local((1,), "uint32"))
+        desc_hi = T.bind_(T.alloc_local((1,), "uint32"))
         T.evaluate(T.ptx.mov.b64(desc_lo[0], desc_hi[0], self._buf[0]))
         _I.tensor_store(
             desc_lo, [0], T.gpu_warp_shuffle(T.uint32(0xFFFFFFFF), desc_lo[0], 0, 32, 32)
@@ -494,7 +495,7 @@ class KTileView:
             if any(offset_of(kp) != kp * base_step for kp in range(n_steps)):
                 linear = False
                 why = "the measured k-tile offsets of this tile are not linear in kp"
-        desc = T.alloc_local([1], "uint64")
+        desc = T.bind_(T.alloc_local([1], "uint64"))
         T.evaluate(
             T.cuda.tcgen05.encode_matrix_descriptor(
                 T.address_of(desc[0]),

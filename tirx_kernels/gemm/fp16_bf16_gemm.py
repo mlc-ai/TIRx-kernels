@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import tvm_ffi
 
 import tirx_kernels.tirx_lite as txl
 import tvm_tirx
@@ -28,7 +29,7 @@ def prepare_data(dtype, M, N, K):
     return (A, B, C)
 
 
-_DTYPE_MAP = {"fp16": tvm_tirx.DataType("float16"), "bf16": tvm_tirx.DataType("bfloat16")}
+_DTYPE_MAP = {"fp16": tvm_ffi.dtype("float16"), "bf16": tvm_ffi.dtype("bfloat16")}
 
 _TMA_G2S_2SM = (
     "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::2"
@@ -399,8 +400,14 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config
         # Teardown handshake: 1-arrival cross-CTA mbarrier (OVERLAP) vs cluster_sync.
         tmem_fin = txl.Pipeline(smem, 1, full="mbar", empty="mbar", init_full=1)
         smem.pool.move_base_to(1024)
-        Asmem = smem.alloc((PIPE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), ab_type, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
-        Bsmem = smem.alloc((PIPE_DEPTH, BLK_N, BLK_K), ab_type, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM).buf
+        Asmem = smem.alloc(
+            (PIPE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K),
+            ab_type,
+            swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM,
+        )
+        Bsmem = smem.alloc(
+            (PIPE_DEPTH, BLK_N, BLK_K), ab_type, swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM
+        ).buf
         Dsmem = smem.alloc((NUM_CONSUMER, NUM_D_TILES, BLK_M, EPI_N), ab_type, swizzle=D_SWIZZLE)
         smem_full_cta0 = smem_pipe.full.remote_view(0)
         with txl.if_(warp_in_cta == 0), txl.then_():
@@ -475,16 +482,16 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config
                                 Asmem.ptr_to([stage, c, 0, 0]),
                                 txl.address_of(a_map),
                                 txl.int32(0),
-                                txl.Cast(a_m, "int32"),
-                                txl.Cast(k // 64, "int32"),
+                                txl.cast(a_m, ty="int32"),
+                                txl.cast(k // 64, ty="int32"),
                                 mbar,
                             )
                         else:
                             txl.ptx[_TMA_G2S_2SM](
                                 Asmem.ptr_to([stage, c, 0, 0]),
                                 txl.address_of(a_map),
-                                txl.Cast(k, "int32"),
-                                txl.Cast(a_m, "int32"),
+                                txl.cast(k, ty="int32"),
+                                txl.cast(a_m, ty="int32"),
                                 mbar,
                             )
                     if BLK_K == 128:
@@ -492,16 +499,16 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config
                             Bsmem.ptr_to([stage, 0, 0]),
                             txl.address_of(b_map),
                             txl.int32(0),
-                            txl.Cast(b_n, "int32"),
-                            txl.Cast(k // 64, "int32"),
+                            txl.cast(b_n, ty="int32"),
+                            txl.cast(k // 64, ty="int32"),
                             mbar,
                         )
                     else:
                         txl.ptx[_TMA_G2S_2SM](
                             Bsmem.ptr_to([stage, 0, 0]),
                             txl.address_of(b_map),
-                            txl.Cast(k, "int32"),
-                            txl.Cast(b_n, "int32"),
+                            txl.cast(k, ty="int32"),
+                            txl.cast(b_n, ty="int32"),
                             mbar,
                         )
                     # Loader-side expect_tx for the whole stage; cbx==0 owns the mbar.
@@ -559,15 +566,15 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config
                         # tcgen05 descriptor holds the 14-bit address and the
                         # 14-bit leading-dim offset with bits 31:30 clear, so no
                         # offset this kernel forms can carry out of it.
-                        desc_a_ki = desc_a.desc + txl.Cast(
-                            ((stage * NUM_CONSUMER + pw) * BLK_M * BLK_K) // 8
-                            + (ki // 4) * BLK_M * 8
+                        desc_a_ki = desc_a.desc + txl.cast(
+                            (stage * NUM_CONSUMER + pw) * BLK_M * BLK_K // 8
+                            + ki // 4 * BLK_M * 8
                             + 2 * (ki % 4),
-                            "uint64",
+                            ty="uint64",
                         )
-                        desc_b_ki = desc_b.desc + txl.Cast(
-                            (stage * BLK_N * BLK_K) // 8 + (ki // 4) * BLK_N * 8 + 2 * (ki % 4),
-                            "uint64",
+                        desc_b_ki = desc_b.desc + txl.cast(
+                            stage * BLK_N * BLK_K // 8 + ki // 4 * BLK_N * 8 + 2 * (ki % 4),
+                            ty="uint64",
                         )
                         # orig: pred = any(ki != 0, accum). `ki` is a trace-time
                         # int here, so the disjunction folds: every k-phase after
@@ -575,10 +582,10 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config
                         # asks the runtime flag (0 on the first k-tile of a
                         # tile => overwrite, 1 after).
                         acc_pred = (
-                            txl.ptx.pred(1) if ki else txl.ptx.pred(txl.Cast(accum[0], "bool"))
+                            txl.ptx.pred(1) if ki else txl.ptx.pred(txl.cast(accum[0], ty="bool"))
                         )
                         txl.ptx[_MMA_F16_2SM](
-                            txl.Cast(tmem_n, "uint32"),
+                            txl.cast(tmem_n, ty="uint32"),
                             desc_a_ki,
                             desc_b_ki,
                             desc_i[0],
@@ -682,8 +689,8 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config
                     d_n = n_idx * MMA_N + i * EPI_N
                     txl.ptx[_TMA_S2G_EVICT_FIRST](
                         txl.address_of(d_map),
-                        txl.Cast(d_n, "int32"),
-                        txl.Cast(d_m, "int32"),
+                        txl.cast(d_n, ty="int32"),
+                        txl.cast(d_m, ty="int32"),
                         Dsmem.ptr_to([dtile, db, 0, 0]),
                         txl.uint64(_EVICT_FIRST_L2_POLICY),
                     )
@@ -703,7 +710,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config
                         Dreg = txl.alloc_local((EPI_N,), "float32")
                         tn = tmem_base + i * EPI_N
                         txl.ptx[TMEM_LD_OVERLAP](
-                            *[Dreg[j] for j in range(EPI_N)], txl.Cast(tn, "uint32")
+                            *[Dreg[j] for j in range(EPI_N)], txl.cast(tn, ty="uint32")
                         )
                         txl.ptx.tcgen05.wait__ld.sync.aligned()
                         for j in range(EPI_N // 2):
@@ -728,7 +735,9 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config
                     for i in range(MMA_N // NOL):
                         Dreg = txl.alloc_local((NOL,), "float32")
                         tn = tmem_base + i * NOL
-                        txl.ptx[_TMEM_LD_16](*[Dreg[j] for j in range(NOL)], txl.Cast(tn, "uint32"))
+                        txl.ptx[_TMEM_LD_16](
+                            *[Dreg[j] for j in range(NOL)], txl.cast(tn, ty="uint32")
+                        )
                         txl.ptx.tcgen05.wait__ld.sync.aligned()
                         for j in range(NOL // 2):
                             # Keep the logical (lo, hi) pair in low/high halfword order.
