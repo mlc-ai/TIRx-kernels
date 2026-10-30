@@ -26,7 +26,6 @@ import tvm_ffi
 
 import tirx_kernels.tirx_lite as txl
 import tvm_tirx
-import tvm_tirx.testing
 from tirx_kernels.runner import PREPARE_NUM_SMS_ENV, bench, cuda_target, resolve_backend_config
 from tvm_tirx.backend.cuda import iket
 from tvm_tirx.backend.cuda.iket import IketProfiler
