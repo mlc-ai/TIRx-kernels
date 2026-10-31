@@ -30,7 +30,7 @@ from tirx_kernels.runner import bench, resolve_backend_config
 from tvm_tirx.backend.cuda.axis import TCol, TLane
 from tvm_tirx.backend.cuda.axis import tid_in_wg as AX_THREAD
 from tvm_tirx.backend.cuda.lang import SMEMPool
-from tvm_tirx.backend.cuda.lang.pipeline import MBarrier, Pipeline, PipelineState
+from tvm_tirx.backend.cuda.lang.pipeline import MBarrier, Pipeline, PipelineState, TCGen05Bar
 from tvm_tirx.backend.cuda.lang.tile_scheduler import (
     FlashAttentionLinearScheduler,
     FlashAttentionLPTScheduler,
@@ -74,7 +74,6 @@ TMEM_ST_16 = "tcgen05.st.sync.aligned.32x32b.x16.b32"
 TMEM_ALLOC = "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"
 TMEM_DEALLOC = "tcgen05.dealloc.cta_group::1.sync.aligned.b32"
 TMEM_RELINQUISH = "tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"
-TCGEN05_COMMIT = "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64"
 MAX3_F32 = "max.f32"
 
 
@@ -232,7 +231,6 @@ def make_kernel(
     tmem_alloc = TMEM_ALLOC
     tmem_dealloc = TMEM_DEALLOC
     tmem_relinquish = TMEM_RELINQUISH
-    tcgen05_commit = TCGEN05_COMMIT
 
     def n_block_max_of(m_block_idx):
         nbm = num_kv_blocks
@@ -415,9 +413,9 @@ def make_kernel(
             kv_load = Pipeline(smem, KV_DEPTH, full="tma", empty="tcgen05", empty_phase_offset=1)
             p_o_rescale = MBarrier(smem, 2)
             p_o_rescale.init(256 * cta_group)
-            s_ready = MBarrier(smem, 2)
+            s_ready = TCGen05Bar(smem, 2)
             s_ready.init(1)
-            o_ready = MBarrier(smem, 2)
+            o_ready = TCGen05Bar(smem, 2)
             o_ready.init(1)
             softmax_corr = Pipeline(
                 smem,
@@ -507,10 +505,6 @@ def make_kernel(
 
             def elected():
                 return T.cuda.elect_sync() != T.uint32(0)
-
-            def commit(bar, stage):
-                """The matrix engine's arrive on a one-way barrier — orig TCGen05Bar.arrive."""
-                T.ptx[tcgen05_commit](bar.ptr_to([stage]))
 
             def iket_range(name, *, leader_only=False):
                 token = T.bind_(T.alloc_local([1], "uint32"))
@@ -886,7 +880,7 @@ def make_kernel(
                                         )
                                     )
                             with T.if_(elected()), T.then_():
-                                commit(s_ready, q_stage)
+                                s_ready.arrive(q_stage)
 
                         def gemm_pv_part1(i_q, kv_stage, should_accumulate):
                             for ki in range(K_SPLIT // MMA_K):
@@ -968,7 +962,7 @@ def make_kernel(
                                         kv_pipe.stage, cta_group=cta_group, cta_mask=None
                                     )
                             if elected():
-                                commit(o_ready, i_q)
+                                o_ready.arrive(i_q)
                         kv_pipe.advance()
                         tmem_epoch.advance()
                         if T.constexpr(not EARLY_Q_RELEASE):
