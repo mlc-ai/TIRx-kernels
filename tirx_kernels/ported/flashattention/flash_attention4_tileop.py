@@ -9,8 +9,10 @@
 
 This lifts the existing FA4 implementation without changing its 128x128 tiles,
 warp roles, pipeline depths, packed floating-point instructions or softmax order.
-TMA, MMA, TMEM, shared accesses and supported register instructions use Tx.apply.
-Warp collectives, synchronization and mask bit operations remain scalar TIRx/PTX.
+MMA K ranges and independent register work use tile repeat axes. TMA, MMA,
+TMEM transfers, shared accesses and packed register instructions use Tx.apply;
+scalar functions over register tiles use Tx.ewise. Reduction dependencies,
+warp collectives, synchronization and mask bit operations remain explicit.
 Tensor maps are encoded on the host and passed in the original seven-map ABI.
 
 The initial variant targets B200 (sm_100a), FP16, head dimension 128 and GQA
@@ -59,6 +61,7 @@ EMU_START_CAUSAL = 0
 EMU_PAIRS_NC = 2
 EMU_START_NC = 1
 MAX_CTAS = 148
+# Instruction selectors for Tx.apply; operands are native tensor views.
 TMA_G2S_3D = (
     "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::1"
 )
@@ -71,10 +74,23 @@ MMA_F16 = "tcgen05.mma.cta_group::1.kind::f16"
 TMEM_LD_16 = "tcgen05.ld.sync.aligned.32x32b.x16.b32"
 TMEM_LD_32 = "tcgen05.ld.sync.aligned.32x32b.x32.b32"
 TMEM_ST_16 = "tcgen05.st.sync.aligned.32x32b.x16.b32"
+# TMEM resource management is issued directly, outside tile data operations.
 TMEM_ALLOC = "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"
 TMEM_DEALLOC = "tcgen05.dealloc.cta_group::1.sync.aligned.b32"
 TMEM_RELINQUISH = "tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"
 MAX3_F32 = "max.f32"
+
+
+@T.function
+def _maximum_f32(a: T.float32, b: T.float32) -> T.float32:
+    return T.max(a, b)
+
+
+@T.function
+def _combine_ex2(rounded: T.float32, fraction: T.float32) -> T.float32:
+    exponent = T.reinterpret(rounded, ty="uint32") << T.uint32(23)
+    bits = exponent + T.reinterpret(fraction, ty="uint32")
+    return T.reinterpret(bits, ty="float32")
 
 
 def _shared_instruction(opcode, *values):
@@ -217,6 +233,11 @@ def make_kernel(
     max_ctas = MAX_CTAS
     cta_count = num_total_tasks if is_causal else min(max_ctas, num_total_tasks)
     scheduler_ctas = cta_count // cta_group
+    # Keep grouped election for the short causal schedule and streaming
+    # noncausal MHA. Other existing variants use native instruction predication.
+    MMA_PREDICATED = KV_DEPTH == SMEM_PIPE_DEPTH_KV and (
+        is_causal or GQA_RATIO > 1 or num_total_tasks <= max_ctas
+    )
     thor_causal_d128 = False and is_causal and (HEAD_DIM == 128)
     K_SPLIT = (4 if is_causal else 6) * MMA_K
     P_SPLIT_Q = 2 if is_causal else 3
@@ -296,29 +317,41 @@ def make_kernel(
                             )
                         ],
                     )
-                ).view(1, 1, 128, columns)
+                )
 
-            def mma_pv(i_q, kv_stage, ki, accum):
-                d = mma_tmem((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N, "float32", 128)
-                a = mma_tmem(i_q * MMA_N + MMA_N // 2 + ki * (MMA_K // 2), "float16", 16)
-                b = (
-                    mma_shared_at(v_smem, kv_stage)
-                    .view(8, 16, 128)
-                    .permute(0, 2, 1)
-                    .view(1, 8, 128, 16)[:, ki : ki + 1, :, :]
-                )
-                T.evaluate(
-                    Tx.apply(
-                        T.ptx[MMA_F16],
-                        d,
-                        a,
-                        b,
-                        instruction_shape=(128, 128, 16),
-                        b_major="mn",
-                        accum=accum,
-                        scope="thread",
+            def mma_pv(i_q, kv_stage, begin, end, accum):
+                def issue(pred=None):
+                    d = mma_tmem((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N, "float32", HEAD_DIM)
+                    p = mma_tmem(i_q * MMA_N + MMA_N // 2, "float16", BLK_N)
+                    v = mma_shared_at(v_smem, kv_stage)
+                    a = p.sub[:, begin:end].rearrange(
+                        "(mr m) (kr k) -> mr kr m k", m=BLK_M, k=MMA_K
                     )
-                )
+                    b = (
+                        v.sub[begin:end, :]
+                        .permute(1, 0)
+                        .rearrange("(nr n) (kr k) -> nr kr n k", n=HEAD_DIM, k=MMA_K)
+                    )
+                    options = {} if pred is None else {"pred": pred}
+                    T.evaluate(
+                        Tx.apply(
+                            T.ptx[MMA_F16],
+                            d.rearrange("(mr m) (nr n) -> mr nr m n", m=BLK_M, n=HEAD_DIM),
+                            a,
+                            b,
+                            instruction_shape=(128, 128, 16),
+                            b_major="mn",
+                            accum=accum,
+                            scope="thread",
+                            **options,
+                        )
+                    )
+
+                if MMA_PREDICATED:
+                    issue(elected())
+                else:
+                    with T.if_(elected()), T.then_():
+                        issue()
 
             def tma_view(pointer, box):
                 layout = ComposeLayout(3, 3, 3, TileLayout(S[box]))
@@ -516,90 +549,94 @@ def make_kernel(
                     T.assign(token[0], T.cuda.iket.range_start(name))
                 return token
 
-            def cast_f32x2_f16x2(dst_u32, src, offset):
-                """One packed f32x2 -> f16x2 conversion — orig:L95-97.
-
-                Every consumer uses packed uint32 words, so keep that register view
-                directly."""
-                _register_instruction(
-                    "cvt.rn.f16x2.f32", dst_u32[offset // 2], src[offset + 1], src[offset]
+            def local_tile(tensor, offset, width):
+                return T.bind_(
+                    T.decl_tensor(
+                        tensor.ptr_to([offset]),
+                        ty_args=[
+                            T.Tensor(
+                                (width,),
+                                tensor.ty.dtype,
+                                scope="local",
+                                align=8,
+                                layout=TileLayout(S[width,]),
+                            )
+                        ],
+                    )
                 )
 
-            def fma_f32x2(values, idx, multiplier, addend_value):
-                """A packed f32x2 operand is one 64-bit value."""
-                packed = T.bind_(T.local_scalar("uint64"))
+            def cast_f32_f16_tile(dst_u32, src, offset, width):
+                """Convert a register tile while retaining the original packed lane order."""
+                pairs = local_tile(src, offset, width).view(width // 2, 2)
+                dst = local_tile(dst_u32, offset // 2, width // 2).view(width // 2, 1)
+                T.evaluate(Tx.apply(T.ptx["cvt.rn.f16x2.f32"], dst, pairs[:, 1:2], pairs[:, 0:1]))
+
+            def fma_f32_tile(values, width, multiplier, addend_value):
+                """Repeat the original packed FMA over all pairs in a register tile."""
+                packed = local_tile(values, 0, width).view("uint64").view(width // 2, 1)
                 rhs = T.bind_(T.local_scalar("uint64"))
                 addend = T.bind_(T.local_scalar("uint64"))
-                _register_instruction("mov.b64", packed, values[idx], values[idx + 1])
                 _register_instruction("mov.b64", rhs, multiplier, multiplier)
                 _register_instruction("mov.b64", addend, addend_value, addend_value)
-                _register_instruction("fma.rz.ftz.f32x2", packed, packed, rhs, addend)
-                _register_instruction("mov.b64", values[idx], values[idx + 1], packed)
+                T.evaluate(Tx.apply(T.ptx["fma.rz.ftz.f32x2"], packed, packed, rhs, addend))
 
-            def mul_f32x2(values, idx, multiplier):
-                """orig:L215-223."""
-                packed = T.bind_(T.local_scalar("uint64"))
+            def mul_f32_tile(values, width, multiplier):
+                """Repeat packed multiply over the complete correction/epilogue tile."""
+                packed = local_tile(values, 0, width).view("uint64").view(width // 2, 1)
                 rhs = T.bind_(T.local_scalar("uint64"))
-                _register_instruction("mov.b64", packed, values[idx], values[idx + 1])
                 _register_instruction("mov.b64", rhs, multiplier, multiplier)
-                _register_instruction("mul.rz.ftz.f32x2", packed, packed, rhs)
-                _register_instruction("mov.b64", values[idx], values[idx + 1], packed)
+                T.evaluate(Tx.apply(T.ptx["mul.rz.ftz.f32x2"], packed, packed, rhs))
 
             def reduce_max_128(out, values, accum=False):
-                """SM100 three-input max tree — orig:L226-244. The outer walk stays a
-                real T.serial(15) loop; only the four-element inner fan is expanded."""
+                """Keep the max tree's order; express its four independent branches as repeats."""
                 temp = T.bind_(T.alloc_local([4], "float32"))
-                for i in range(4):
-                    if accum and i == 0:
-                        _register_instruction(
-                            MAX3_F32, temp[i], values[2 * i], values[2 * i + 1], out[0]
-                        )
-                    else:
-                        _register_instruction(
-                            "mov.b32", temp[i], T.max(values[2 * i], values[2 * i + 1])
-                        )
+                dst = local_tile(temp, 0, 4).view(4, 1)
+                initial = local_tile(values, 0, 8).view(4, 2)
+                begin = 1 if accum else 0
+                if accum:
+                    _register_instruction(MAX3_F32, temp[0], values[0], values[1], out[0])
+                T.evaluate(
+                    Tx.ewise(
+                        _maximum_f32, dst[begin:, :], initial[begin:, 0:1], initial[begin:, 1:2]
+                    )
+                )
                 with T.serial(15) as outer:
-                    for i in range(4):
-                        _register_instruction(
-                            MAX3_F32,
-                            temp[i],
-                            temp[i],
-                            values[8 * (outer + 1) + 2 * i],
-                            values[8 * (outer + 1) + 2 * i + 1],
-                        )
+                    pairs = local_tile(values, 8 * (outer + 1), 8).view(4, 2)
+                    T.evaluate(Tx.apply(T.ptx[MAX3_F32], dst, dst, pairs[:, 0:1], pairs[:, 1:2]))
                 T.assign(out[0], T.max(temp[0], temp[1]))
                 _register_instruction(MAX3_F32, out[0], out[0], temp[2], temp[3])
 
             def reduce_sum_128(out, values, accum=False):
-                """Packed add tree, accumulator insertion order preserved — orig:L247-276."""
+                """Preserve the packed add tree and accumulator insertion order."""
                 local_sum = T.bind_(T.alloc_local([8], "float32"))
-                packed = T.bind_(T.local_scalar("uint64"))
-                rhs = T.bind_(T.local_scalar("uint64"))
-                for i in range(8):
-                    if accum and i == 0:
-                        _register_instruction("mov.b32", local_sum[i], values[i] + out[0])
-                    else:
-                        _register_instruction("mov.b32", local_sum[i], values[i])
+                sum_tile = local_tile(local_sum, 0, 8)
+                begin = 1 if accum else 0
+                if accum:
+                    T.assign(local_sum[0], values[0] + out[0])
+                initial = local_tile(values, 0, 8).view(8, 1)
+                T.evaluate(
+                    Tx.apply(T.ptx["mov.b32"], sum_tile.view(8, 1)[begin:, :], initial[begin:, :])
+                )
+                packed = sum_tile.view("uint64").view(4, 1)
                 with T.serial(15) as outer:
-                    for i in range(4):
-                        _register_instruction(
-                            "mov.b64", packed, local_sum[2 * i], local_sum[2 * i + 1]
-                        )
-                        _register_instruction(
-                            "mov.b64",
-                            rhs,
-                            values[8 * (outer + 1) + 2 * i],
-                            values[8 * (outer + 1) + 2 * i + 1],
-                        )
-                        _register_instruction("add.rn.ftz.f32x2", packed, packed, rhs)
-                        _register_instruction(
-                            "mov.b64", local_sum[2 * i], local_sum[2 * i + 1], packed
-                        )
-                for lo, hi in ((0, 2), (4, 6), (0, 4)):
-                    _register_instruction("mov.b64", packed, local_sum[lo], local_sum[lo + 1])
-                    _register_instruction("mov.b64", rhs, local_sum[hi], local_sum[hi + 1])
-                    _register_instruction("add.rn.ftz.f32x2", packed, packed, rhs)
-                    _register_instruction("mov.b64", local_sum[lo], local_sum[lo + 1], packed)
+                    rhs = local_tile(values, 8 * (outer + 1), 8).view("uint64").view(4, 1)
+                    T.evaluate(Tx.apply(T.ptx["add.rn.ftz.f32x2"], packed, packed, rhs))
+                # The first two independent additions retain the reference's two
+                # branches; only their pairwise merge follows them.
+                branches = sum_tile.view("uint64").view(2, 2)
+                T.evaluate(
+                    Tx.apply(
+                        T.ptx["add.rn.ftz.f32x2"],
+                        branches[:, 0:1],
+                        branches[:, 0:1],
+                        branches[:, 1:2],
+                    )
+                )
+                T.evaluate(
+                    Tx.apply(
+                        T.ptx["add.rn.ftz.f32x2"], packed[0:1, :], packed[0:1, :], packed[2:3, :]
+                    )
+                )
                 T.assign(out[0], local_sum[0] + local_sum[1])
 
             def shl_u32_clamp(val, shift):
@@ -608,65 +645,47 @@ def make_kernel(
                 T.ptx.shl.b32(result, val, shift)
                 return result
 
-            def combine_int_frac_ex2(x_rounded, frac_ex2):
-                """orig:L124-135."""
-                x_rounded_i = T.bind_(T.local_scalar("int32"))
-                frac_ex_i = T.bind_(T.local_scalar("int32"))
-                x_rounded_e = T.bind_(T.local_scalar("int32"))
-                out_i = T.bind_(T.local_scalar("int32"))
-                out = T.bind_(T.local_scalar("float32"))
-                _register_instruction("mov.b32", x_rounded_i, x_rounded)
-                _register_instruction("mov.b32", frac_ex_i, frac_ex2)
-                T.ptx.shl.b32(x_rounded_e, x_rounded_i, T.uint32(23))
-                _register_instruction("add.s32", out_i, x_rounded_e, frac_ex_i)
-                _register_instruction("mov.b32", out, out_i)
-                return out
-
             POLY_EX2_DEG3 = (1.0, 0.6951461434364319, 0.22756439447402954, 0.07711908966302872)
             FP32_ROUND_INT = float(2**23 + 2**22)
 
-            def ex2_emulation_2(out, idx, x, y):
-                """Two-lane polynomial ex2 on the packed f32x2 datapath — orig:L155-199."""
-                xy_clamped = T.bind_(T.alloc_local([2], "float32"))
-                _register_instruction("mov.b32", xy_clamped[0], T.max(x, -127.0))
-                _register_instruction("mov.b32", xy_clamped[1], T.max(y, -127.0))
+            def packed_constant(value):
                 packed = T.bind_(T.local_scalar("uint64"))
-                rhs = T.bind_(T.local_scalar("uint64"))
-                addend = T.bind_(T.local_scalar("uint64"))
-                xy_rounded = T.bind_(T.alloc_local([2], "float32"))
-                _register_instruction("mov.b64", packed, xy_clamped[0], xy_clamped[1])
-                _register_instruction(
-                    "mov.b64", rhs, T.float32(FP32_ROUND_INT), T.float32(FP32_ROUND_INT)
-                )
-                _register_instruction("add.rm.ftz.f32x2", packed, packed, rhs)
-                _register_instruction("mov.b64", xy_rounded[0], xy_rounded[1], packed)
-                xy_rounded_back = T.bind_(T.alloc_local([2], "float32"))
-                _register_instruction("mov.b64", packed, xy_rounded[0], xy_rounded[1])
-                _register_instruction(
-                    "mov.b64", rhs, T.float32(FP32_ROUND_INT), T.float32(FP32_ROUND_INT)
-                )
-                _register_instruction("sub.rn.ftz.f32x2", packed, packed, rhs)
-                _register_instruction("mov.b64", xy_rounded_back[0], xy_rounded_back[1], packed)
-                xy_frac = T.bind_(T.alloc_local([2], "float32"))
-                _register_instruction("mov.b64", packed, xy_clamped[0], xy_clamped[1])
-                _register_instruction("mov.b64", rhs, xy_rounded_back[0], xy_rounded_back[1])
-                _register_instruction("sub.rn.ftz.f32x2", packed, packed, rhs)
-                _register_instruction("mov.b64", xy_frac[0], xy_frac[1], packed)
-                xy_frac_ex2 = T.bind_(T.alloc_local([2], "float32"))
-                _register_instruction("mov.b32", xy_frac_ex2[0], T.float32(POLY_EX2_DEG3[3]))
-                _register_instruction("mov.b32", xy_frac_ex2[1], T.float32(POLY_EX2_DEG3[3]))
+                _register_instruction("mov.b64", packed, T.float32(value), T.float32(value))
+                return packed
+
+            def ex2_tile(values, offset, width):
+                registers = local_tile(values, offset, width).view(width, 1)
+                T.evaluate(Tx.apply(T.ptx["ex2.approx.ftz.f32"], registers, registers))
+
+            def ex2_emulation_tile(values, offset, width):
+                """Repeat the original packed polynomial over a contiguous register tile."""
+                clamped = T.bind_(T.alloc_local([width], "float32"))
+                rounded = T.bind_(T.alloc_local([width], "float32"))
+                rounded_back = T.bind_(T.alloc_local([width], "float32"))
+                fraction = T.bind_(T.alloc_local([width], "float32"))
+                polynomial = T.bind_(T.alloc_local([width], "float32"))
+                dst = local_tile(values, offset, width)
+                x = local_tile(clamped, 0, width)
+                r = local_tile(rounded, 0, width)
+                rb = local_tile(rounded_back, 0, width)
+                f = local_tile(fraction, 0, width)
+                p = local_tile(polynomial, 0, width)
+                T.evaluate(Tx.ewise(_maximum_f32, x, dst, T.float32(-127.0)))
+                xp = x.view("uint64").view(width // 2, 1)
+                rp = r.view("uint64").view(width // 2, 1)
+                rbp = rb.view("uint64").view(width // 2, 1)
+                fp = f.view("uint64").view(width // 2, 1)
+                pp = p.view("uint64").view(width // 2, 1)
+                round_int = packed_constant(FP32_ROUND_INT)
+                T.evaluate(Tx.apply(T.ptx["add.rm.ftz.f32x2"], rp, xp, round_int))
+                T.evaluate(Tx.apply(T.ptx["sub.rn.ftz.f32x2"], rbp, rp, round_int))
+                T.evaluate(Tx.apply(T.ptx["sub.rn.ftz.f32x2"], fp, xp, rbp))
+                T.evaluate(Tx.apply(T.ptx["mov.b64"], pp, packed_constant(POLY_EX2_DEG3[3])))
                 for coeff in (POLY_EX2_DEG3[2], POLY_EX2_DEG3[1], POLY_EX2_DEG3[0]):
-                    _register_instruction("mov.b64", rhs, xy_frac[0], xy_frac[1])
-                    _register_instruction("mov.b64", packed, xy_frac_ex2[0], xy_frac_ex2[1])
-                    _register_instruction("mov.b64", addend, T.float32(coeff), T.float32(coeff))
-                    _register_instruction("fma.rz.ftz.f32x2", packed, packed, rhs, addend)
-                    _register_instruction("mov.b64", xy_frac_ex2[0], xy_frac_ex2[1], packed)
-                _register_instruction(
-                    "mov.b32", out[idx], combine_int_frac_ex2(xy_rounded[0], xy_frac_ex2[0])
-                )
-                _register_instruction(
-                    "mov.b32", out[idx + 1], combine_int_frac_ex2(xy_rounded[1], xy_frac_ex2[1])
-                )
+                    T.evaluate(
+                        Tx.apply(T.ptx["fma.rz.ftz.f32x2"], pp, pp, fp, packed_constant(coeff))
+                    )
+                T.evaluate(Tx.ewise(_combine_ex2, dst, r, p))
 
             scheduler = (
                 FlashAttentionLPTScheduler(
@@ -853,54 +872,36 @@ def make_kernel(
                         acc = T.local_scalar("int32", init=0)
 
                         def gemm_qk(q_stage, kv_stage):
-                            for ki in range(HEAD_DIM // MMA_K):
+                            def issue(pred=None):
+                                d = mma_tmem(q_stage * MMA_N, "float32", BLK_N)
+                                q = mma_shared_at(q_smem, q_stage)
+                                k = mma_shared_at(k_smem, kv_stage)
+                                options = {} if pred is None else {"pred": pred}
+                                T.evaluate(
+                                    Tx.apply(
+                                        T.ptx[MMA_F16],
+                                        d.rearrange("(mr m) (nr n) -> mr nr m n", m=BLK_M, n=BLK_N),
+                                        q.rearrange("(mr m) (kr k) -> mr kr m k", m=BLK_M, k=MMA_K),
+                                        k.rearrange("(nr n) (kr k) -> nr kr n k", n=BLK_N, k=MMA_K),
+                                        instruction_shape=(128, 128, 16),
+                                        accum=False,
+                                        scope="thread",
+                                        **options,
+                                    )
+                                )
+
+                            if MMA_PREDICATED:
+                                issue(elected())
+                            else:
                                 with T.if_(elected()), T.then_():
-                                    d = mma_tmem(q_stage * MMA_N, "float32", 128)
-                                    a = (
-                                        mma_shared_at(q_smem, q_stage)
-                                        .view(128, 8, 16)
-                                        .permute(1, 0, 2)
-                                        .view(1, 8, 128, 16)[:, ki : ki + 1, :, :]
-                                    )
-                                    b = (
-                                        mma_shared_at(k_smem, kv_stage)
-                                        .view(128, 8, 16)
-                                        .permute(1, 0, 2)
-                                        .view(1, 8, 128, 16)[:, ki : ki + 1, :, :]
-                                    )
-                                    T.evaluate(
-                                        Tx.apply(
-                                            T.ptx[MMA_F16],
-                                            d,
-                                            a,
-                                            b,
-                                            instruction_shape=(128, 128, 16),
-                                            accum=ki != 0,
-                                            scope="thread",
-                                        )
-                                    )
+                                    issue()
                             with T.if_(elected()), T.then_():
                                 s_ready.arrive(q_stage)
 
-                        def gemm_pv_part1(i_q, kv_stage, should_accumulate):
-                            for ki in range(K_SPLIT // MMA_K):
-                                with T.if_(elected()), T.then_():
-                                    mma_pv(
-                                        i_q,
-                                        kv_stage,
-                                        ki,
-                                        True if ki != 0 else T.cast(should_accumulate, ty="bool"),
-                                    )
-
-                        def gemm_pv_part2(i_q, kv_stage):
-                            p_ready_2.wait(i_q, tmem_epoch.phase)
-                            for ki in range(K_SPLIT // MMA_K, BLK_N // MMA_K):
-                                with T.if_(elected()), T.then_():
-                                    mma_pv(i_q, kv_stage, ki, True)
-
                         def gemm_pv(i_q, kv_stage, should_accumulate):
-                            gemm_pv_part1(i_q, kv_stage, should_accumulate)
-                            gemm_pv_part2(i_q, kv_stage)
+                            mma_pv(i_q, kv_stage, 0, K_SPLIT, T.cast(should_accumulate, ty="bool"))
+                            p_ready_2.wait(i_q, tmem_epoch.phase)
+                            mma_pv(i_q, kv_stage, K_SPLIT, BLK_N, True)
 
                         for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
                             q_load.full.wait(i_q, q_epoch.phase)
@@ -1090,32 +1091,23 @@ def make_kernel(
                         else:
                             T.ptx.bar.arrive(T.cast(1 + wg_id, ty="uint32"), 256)
                         softmax_fma_token = iket_range("softmax-fma", leader_only=True)
-                        for i in range(BLK_N // 2):
-                            fma_f32x2(s_chunk, 2 * i, T.float32(scale_log2), -row_max_scaled)
+                        fma_f32_tile(s_chunk, BLK_N, T.float32(scale_log2), -row_max_scaled)
                         T.cuda.iket.range_end(softmax_fma_token[0])
                         softmax_exp2_token = iket_range("softmax-exp2", leader_only=True)
                         emu_pairs = EMU_PAIRS_CAUSAL if is_causal else EMU_PAIRS_NC
                         emu_start = EMU_START_CAUSAL if is_causal else EMU_START_NC
                         for frag_idx in range(4):
-                            for i in range(BLK_N // 4 // 2):
-                                idx = frag_idx * BLK_N // 4 + 2 * i
-                                if (
-                                    i * 2 % 16 < 16 - 2 * emu_pairs
-                                    or frag_idx >= 4 - 1
-                                    or frag_idx < emu_start
-                                    or apply_mask
-                                ):
-                                    _register_instruction(
-                                        "ex2.approx.ftz.f32", s_chunk[idx], s_chunk[idx]
+                            if frag_idx >= 3 or frag_idx < emu_start or apply_mask:
+                                ex2_tile(s_chunk, frag_idx * BLK_N // 4, BLK_N // 4)
+                            else:
+                                for group in range(BLK_N // 4 // 16):
+                                    offset = frag_idx * BLK_N // 4 + group * 16
+                                    hardware_width = 16 - 2 * emu_pairs
+                                    ex2_tile(s_chunk, offset, hardware_width)
+                                    ex2_emulation_tile(
+                                        s_chunk, offset + hardware_width, 2 * emu_pairs
                                     )
-                                    _register_instruction(
-                                        "ex2.approx.ftz.f32", s_chunk[idx + 1], s_chunk[idx + 1]
-                                    )
-                                else:
-                                    ex2_emulation_2(s_chunk, idx, s_chunk[idx], s_chunk[idx + 1])
-                            for i in range(BLK_N // 4 // 2):
-                                idx = frag_idx * BLK_N // 4 + 2 * i
-                                cast_f32x2_f16x2(p_chunk, s_chunk, idx)
+                            cast_f32_f16_tile(p_chunk, s_chunk, frag_idx * BLK_N // 4, BLK_N // 4)
                         T.cuda.iket.range_end(softmax_exp2_token[0])
                         softmax_tmem_st_token = iket_range("softmax-tmem-st", leader_only=True)
                         for i in range(P_SPLIT_Q):
@@ -1198,10 +1190,8 @@ def make_kernel(
                                         tmem((SMEM_PIPE_DEPTH_Q + epi_q) * MMA_N + d_start),
                                         EPI_LD_SM,
                                     )
-                                    for i in T.unroll(EPI_LD_SM // 2):
-                                        mul_f32x2(o_row_f32_sm, 2 * i, norm_scale_sm)
-                                    for i in T.unroll(EPI_LD_SM // 2):
-                                        cast_f32x2_f16x2(o_row_f16_sm, o_row_f32_sm, 2 * i)
+                                    mul_f32_tile(o_row_f32_sm, EPI_LD_SM, norm_scale_sm)
+                                    cast_f32_f16_tile(o_row_f16_sm, o_row_f32_sm, 0, EPI_LD_SM)
                                     for i in T.unroll(EPI_LD_SM // 8):
                                         _shared_instruction(
                                             "st.shared.v4.u32",
@@ -1270,8 +1260,7 @@ def make_kernel(
                                         if d_start < HEAD_DIM:
                                             addr = tmem((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start)
                                             tmem_load(o_row, 0, addr, RESCALE_TILE)
-                                            for i in T.unroll(RESCALE_TILE // 2):
-                                                mul_f32x2(o_row, 2 * i, acc_scale)
+                                            mul_f32_tile(o_row, RESCALE_TILE, acc_scale)
                                             tmem_store(o_row, 0, addr)
                                     T.ptx.tcgen05.wait__st.sync.aligned()
                             p_o_rescale_remote.arrive(i_q)
@@ -1312,10 +1301,8 @@ def make_kernel(
                                         tmem((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start),
                                         TMEM_EPI_LD_SIZE,
                                     )
-                                    for i in T.unroll(TMEM_EPI_LD_SIZE // 2):
-                                        mul_f32x2(o_row_f32, 2 * i, norm_scale)
-                                    for i in T.unroll(TMEM_EPI_LD_SIZE // 2):
-                                        cast_f32x2_f16x2(o_row_f16, o_row_f32, 2 * i)
+                                    mul_f32_tile(o_row_f32, TMEM_EPI_LD_SIZE, norm_scale)
+                                    cast_f32_f16_tile(o_row_f16, o_row_f32, 0, TMEM_EPI_LD_SIZE)
                                     for i in T.unroll(TMEM_EPI_LD_SIZE // 8):
                                         _shared_instruction(
                                             "st.shared.v4.u32",
