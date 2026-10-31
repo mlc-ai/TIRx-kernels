@@ -38,8 +38,6 @@ from tvm_tirx.backend.cuda.lang.tile_scheduler import (
     FlashAttentionLPTScheduler,
 )
 from tvm_tirx.backend.cuda.layout import SwizzleMode, mma_shared_layout
-from tvm_tirx.backend.cuda.ptx import instruction_forms
-from tvm_tirx.backend.cuda.ptx.table import operand_dtypes, operand_layout
 from tvm_tirx.backend.cuda.script import tile as Tx
 from tvm_tirx.script import tirx as T
 from tvm_tirx.tirx.layout import ComposeLayout, S, TileLayout
@@ -93,101 +91,36 @@ def _combine_ex2(rounded: T.float32, fraction: T.float32) -> T.float32:
     return T.reinterpret(bits, ty="float32")
 
 
-def _shared_instruction(opcode, *values):
+def _scalar_tile(value):
+    return T.bind_(
+        T.decl_tensor(
+            T.address_of(value),
+            ty_args=[T.Tensor((1,), value.ty, scope="local", layout=TileLayout(S[1,]))],
+        )
+    )
+
+
+def _scalar_instruction(opcode, dst, *sources):
+    """One per-thread scalar operation, with an explicit native destination view."""
+    T.evaluate(Tx.apply(T.ptx[opcode], _scalar_tile(dst), *sources, scope="thread"))
+
+
+def _shared_instruction(opcode, first, second):
+    """Scalar statistics/resource handoff; bulk output stores use a tile."""
     load = opcode.startswith("ld.")
-    dtype = {"f32": "float32", "u32": "uint32"}[opcode.split(".")[-1]]
-    count = 4 if ".v4." in opcode else 1
-    pointer = values[-1] if load else values[0]
-    pointer = T.reinterpret(pointer, ty=T.Ptr(dtype, pointer.ty.scope))
+    value, pointer = (first, second) if load else (second, first)
+    pointer = T.reinterpret(pointer, ty=T.Ptr(value.ty, pointer.ty.scope))
     shared = T.bind_(
         T.decl_tensor(
             pointer,
             ty_args=[
-                T.Tensor(
-                    (count,),
-                    dtype,
-                    scope=pointer.ty.scope,
-                    align=4 * count,
-                    layout=TileLayout(S[count,]),
-                )
+                T.Tensor((1,), value.ty, scope=pointer.ty.scope, align=4, layout=TileLayout(S[1,]))
             ],
         )
     )
-    regs = _register_group(values[:-1] if load else values[1:], input_only=not load)
-    dst, src = (regs, shared) if load else (shared, regs)
+    registers = _scalar_tile(value)
+    dst, src = (registers, shared) if load else (shared, registers)
     T.evaluate(Tx.apply(T.ptx[opcode], dst, src, scope="thread"))
-
-
-def _register_group(values, *, input_only=False):
-    """Expose one PTX register group as a native, thread-owned tensor view."""
-    first = values[0]
-    if all(
-        isinstance(v, tvm_tirx.ir.TensorLoad) and v.source.same_as(first.source) for v in values
-    ):
-        base = first.indices[0]
-        analyzer = tvm_tirx.sym.Analyzer()
-        if all(
-            (
-                isinstance((d := analyzer.simplify(v.indices[0] - base - i)), tvm_tirx.ir.IntImm)
-                and int(d) == 0
-                for i, v in enumerate(values)
-            )
-        ):
-            return T.bind_(
-                T.decl_tensor(
-                    T.address_of(first),
-                    ty_args=[
-                        T.Tensor(
-                            (len(values),),
-                            first.ty,
-                            scope="local",
-                            layout=TileLayout(S[len(values),]),
-                        )
-                    ],
-                )
-            )
-    if not input_only:
-        raise ValueError("Writable register groups must occupy consecutive local slots")
-    temp = T.bind_(
-        T.alloc_tensor(
-            ty_args=[
-                T.Tensor(
-                    (len(values),), first.ty, scope="local", layout=TileLayout(S[len(values),])
-                )
-            ]
-        )
-    )
-    for i, v in enumerate(values):
-        T.assign(temp[i], v)
-    return temp
-
-
-def _register_instruction(opcode, *values):
-    """Retain PTX rounding/packing while exposing its operands to tile lowering."""
-    candidates = []
-    for entry, modifiers in instruction_forms(opcode):
-        groups = operand_layout(entry, modifiers)
-        if sum((n for _, _, n in groups)) != len(values):
-            continue
-        if all(
-            (
-                str(v.ty.dtype) in operand_dtypes(slot, modifiers)
-                for slot, start, n in groups
-                for v in values[start : start + n]
-            )
-        ):
-            candidates.append(groups)
-    if len(candidates) != 1:
-        raise ValueError(f"Ambiguous register shape: {opcode}")
-    groups = []
-    for slot, start, n in candidates[0]:
-        args = values[start : start + n]
-        groups.append(
-            args[0]
-            if slot.rw == "r" and n == 1
-            else _register_group(args, input_only=slot.rw == "r")
-        )
-    T.evaluate(Tx.apply(T.ptx[opcode], *groups, scope="thread"))
 
 
 def ceildiv(a, b):
@@ -240,7 +173,6 @@ def make_kernel(
     )
     thor_causal_d128 = False and is_causal and (HEAD_DIM == 128)
     K_SPLIT = (4 if is_causal else 6) * MMA_K
-    P_SPLIT_Q = 2 if is_causal else 3
     ACC_SCALE_BASE = 0
     ROW_SUM_BASE = 0
     scale_log2 = math.log2(math.e) / math.sqrt(HEAD_DIM)
@@ -516,23 +448,27 @@ def make_kernel(
                 )
 
             def tmem_load(dst, offset, address, width):
+                atom = 16 if width == 16 else SOFTMAX_LD_CHUNK
                 r = register_view(dst, offset, width)
                 t = tmem_view(address, width)
                 T.evaluate(
                     Tx.apply(
-                        T.ptx[TMEM_LD_16 if width == 16 else TMEM_LD_32],
-                        r.view(4, 32, width),
-                        t.view(4, 32, width),
+                        T.ptx[TMEM_LD_16 if atom == 16 else TMEM_LD_32],
+                        r.rearrange("(wg row) (repeat col) -> wg repeat row col", row=32, col=atom),
+                        t.rearrange("(wg row) (repeat col) -> wg repeat row col", row=32, col=atom),
                         scope="warpgroup",
                     )
                 )
 
-            def tmem_store(src, offset, address):
-                r = register_view(src, offset, 16)
-                t = tmem_view(address, 16)
+            def tmem_store(src, offset, address, width=16):
+                r = register_view(src, offset, width)
+                t = tmem_view(address, width)
                 T.evaluate(
                     Tx.apply(
-                        T.ptx[TMEM_ST_16], t.view(4, 32, 16), r.view(4, 32, 16), scope="warpgroup"
+                        T.ptx[TMEM_ST_16],
+                        t.rearrange("(wg row) (repeat col) -> wg repeat row col", row=32, col=16),
+                        r.rearrange("(wg row) (repeat col) -> wg repeat row col", row=32, col=16),
+                        scope="warpgroup",
                     )
                 )
 
@@ -565,6 +501,33 @@ def make_kernel(
                     )
                 )
 
+            def pack_f32x2(dst, value):
+                # Retain the broadcast operand's explicit packing dependency.
+                output = _scalar_tile(dst)
+                pair = T.bind_(
+                    T.alloc_tensor(
+                        ty_args=[T.Tensor((2,), "float32", scope="local", layout=TileLayout(S[2,]))]
+                    )
+                )
+                T.assign(pair[0], value)
+                T.assign(pair[1], value)
+                T.evaluate(Tx.apply(T.ptx["mov.b64"], output, pair, scope="thread"))
+
+            def store_output_tile(src, stage, column, width):
+                # Preserve the complete swizzled row layout and expose each
+                # issuing thread's register tile to the warpgroup operation.
+                rows = mma_shared_at(o_smem, stage).view(BLK_M, HEAD_DIM // width, width)
+                dst = rows.sub[:, column // width, :].view("uint32")
+                registers = register_view(src, 0, width // 2)
+                T.evaluate(
+                    Tx.apply(
+                        T.ptx["st.shared.v4.u32"],
+                        dst.view(4, 32, width // 8, 4),
+                        registers.view(4, 32, width // 8, 4),
+                        scope="warpgroup",
+                    )
+                )
+
             def cast_f32_f16_tile(dst_u32, src, offset, width):
                 """Convert a register tile while retaining the original packed lane order."""
                 pairs = local_tile(src, offset, width).view(width // 2, 2)
@@ -576,15 +539,15 @@ def make_kernel(
                 packed = local_tile(values, 0, width).view("uint64").view(width // 2, 1)
                 rhs = T.bind_(T.local_scalar("uint64"))
                 addend = T.bind_(T.local_scalar("uint64"))
-                _register_instruction("mov.b64", rhs, multiplier, multiplier)
-                _register_instruction("mov.b64", addend, addend_value, addend_value)
+                pack_f32x2(rhs, multiplier)
+                pack_f32x2(addend, addend_value)
                 T.evaluate(Tx.apply(T.ptx["fma.rz.ftz.f32x2"], packed, packed, rhs, addend))
 
             def mul_f32_tile(values, width, multiplier):
                 """Repeat packed multiply over the complete correction/epilogue tile."""
                 packed = local_tile(values, 0, width).view("uint64").view(width // 2, 1)
                 rhs = T.bind_(T.local_scalar("uint64"))
-                _register_instruction("mov.b64", rhs, multiplier, multiplier)
+                pack_f32x2(rhs, multiplier)
                 T.evaluate(Tx.apply(T.ptx["mul.rz.ftz.f32x2"], packed, packed, rhs))
 
             def reduce_max_128(out, values, accum=False):
@@ -594,7 +557,7 @@ def make_kernel(
                 initial = local_tile(values, 0, 8).view(4, 2)
                 begin = 1 if accum else 0
                 if accum:
-                    _register_instruction(MAX3_F32, temp[0], values[0], values[1], out[0])
+                    _scalar_instruction(MAX3_F32, temp[0], values[0], values[1], out[0])
                 T.evaluate(
                     Tx.ewise(
                         _maximum_f32, dst[begin:, :], initial[begin:, 0:1], initial[begin:, 1:2]
@@ -604,7 +567,7 @@ def make_kernel(
                     pairs = local_tile(values, 8 * (outer + 1), 8).view(4, 2)
                     T.evaluate(Tx.apply(T.ptx[MAX3_F32], dst, dst, pairs[:, 0:1], pairs[:, 1:2]))
                 T.assign(out[0], T.max(temp[0], temp[1]))
-                _register_instruction(MAX3_F32, out[0], out[0], temp[2], temp[3])
+                _scalar_instruction(MAX3_F32, out[0], out[0], temp[2], temp[3])
 
             def reduce_sum_128(out, values, accum=False):
                 """Preserve the packed add tree and accumulator insertion order."""
@@ -650,7 +613,7 @@ def make_kernel(
 
             def packed_constant(value):
                 packed = T.bind_(T.local_scalar("uint64"))
-                _register_instruction("mov.b64", packed, T.float32(value), T.float32(value))
+                pack_f32x2(packed, T.float32(value))
                 return packed
 
             def ex2_tile(values, offset, width):
@@ -1002,7 +965,7 @@ def make_kernel(
                                         T.bitwise_not(mask_inv),
                                         T.shift_left(T.uint32(1), T.uint32(i)),
                                     )
-                                    _register_instruction(
+                                    _scalar_instruction(
                                         "mov.b32",
                                         s_chunk[c],
                                         T.Select(
@@ -1035,13 +998,7 @@ def make_kernel(
                             T.cuda.iket.mark("softmax-phase-0")
                         softmax_max_token = iket_range("softmax-max", leader_only=True)
                         tile_max = T.bind_(T.alloc_local([1], "float32"))
-                        for chunk_idx in range(BLK_N // SOFTMAX_LD_CHUNK):
-                            tmem_load(
-                                s_chunk,
-                                chunk_idx * SOFTMAX_LD_CHUNK,
-                                tmem(wg_id * MMA_N + chunk_idx * SOFTMAX_LD_CHUNK),
-                                SOFTMAX_LD_CHUNK,
-                            )
+                        tmem_load(s_chunk, 0, tmem(wg_id * MMA_N), BLK_N)
                         if apply_mask:
                             apply_causal_mask(s_chunk, m_block_idx, i_kv)
                         row_max_old = T.bind_(T.local_scalar("float32"))
@@ -1072,9 +1029,7 @@ def make_kernel(
                                     T.assign(row_max_safe, row_max_old)
                                     T.assign(acc_scale, T.float32(1.0))
                                 with T.else_():
-                                    _register_instruction(
-                                        "ex2.approx.ftz.f32", acc_scale, acc_scale_
-                                    )
+                                    _scalar_instruction("ex2.approx.ftz.f32", acc_scale, acc_scale_)
                         T.assign(row_max, row_max_new)
                         row_max_scaled = row_max_safe * scale_log2
                         with T.if_(warp_id == 0), T.then_():
@@ -1110,22 +1065,15 @@ def make_kernel(
                             cast_f32_f16_tile(p_chunk, s_chunk, frag_idx * BLK_N // 4, BLK_N // 4)
                         T.cuda.iket.range_end(softmax_exp2_token[0])
                         softmax_tmem_st_token = iket_range("softmax-tmem-st", leader_only=True)
-                        for i in range(P_SPLIT_Q):
-                            tmem_store(
-                                p_chunk,
-                                i * BLK_N // 4 // 2,
-                                tmem((wg_id * 2 * MMA_N + MMA_N + i * BLK_N // 4) // 2),
-                            )
+                        tmem_store(p_chunk, 0, tmem(wg_id * MMA_N + MMA_N // 2), K_SPLIT // 2)
                         T.ptx.tcgen05.wait__st.sync.aligned()
                         p_o_rescale_remote.arrive(wg_id)
-                        for i in range(4 - P_SPLIT_Q):
-                            tmem_store(
-                                p_chunk,
-                                (P_SPLIT_Q + i) * BLK_N // 4 // 2,
-                                tmem(
-                                    (wg_id * 2 * MMA_N + MMA_N + (P_SPLIT_Q + i) * BLK_N // 4) // 2
-                                ),
-                            )
+                        tmem_store(
+                            p_chunk,
+                            K_SPLIT // 2,
+                            tmem(wg_id * MMA_N + MMA_N // 2 + K_SPLIT // 2),
+                            (BLK_N - K_SPLIT) // 2,
+                        )
                         with T.if_(warp_id == 0), T.then_():
                             T.cuda.iket.mark("softmax-phase-2")
                         T.ptx.tcgen05.wait__st.sync.aligned()
@@ -1173,7 +1121,7 @@ def make_kernel(
                             row_sum[0] == T.float32(0.0), row_sum[0] != row_sum[0]
                         )
                         norm_scale_sm = T.local_scalar("float32")
-                        _register_instruction(
+                        _scalar_instruction(
                             "rcp.approx.ftz.f32",
                             norm_scale_sm,
                             T.Select(acc_O_row_is_zero_or_nan, T.float32(1.0), row_sum[0]),
@@ -1192,15 +1140,7 @@ def make_kernel(
                                     )
                                     mul_f32_tile(o_row_f32_sm, EPI_LD_SM, norm_scale_sm)
                                     cast_f32_f16_tile(o_row_f16_sm, o_row_f32_sm, 0, EPI_LD_SM)
-                                    for i in T.unroll(EPI_LD_SM // 8):
-                                        _shared_instruction(
-                                            "st.shared.v4.u32",
-                                            o_smem.ptr_to([epi_q, tid_in_wg, d_start + i * 8]),
-                                            o_row_f16_sm[i * 4],
-                                            o_row_f16_sm[i * 4 + 1],
-                                            o_row_f16_sm[i * 4 + 2],
-                                            o_row_f16_sm[i * 4 + 3],
-                                        )
+                                    store_output_tile(o_row_f16_sm, epi_q, d_start, EPI_LD_SM)
                         T.cuda.iket.range_end(epi_ld_tmem_token[0])
                         T.ptx.fence.proxy.async_.shared__cta()
                         corr_epi.full.arrive(wg_id)
@@ -1285,7 +1225,7 @@ def make_kernel(
                                 row_sum_c == T.float32(0.0), row_sum_c != row_sum_c
                             )
                             norm_scale = T.local_scalar("float32")
-                            _register_instruction(
+                            _scalar_instruction(
                                 "rcp.approx.ftz.f32",
                                 norm_scale,
                                 T.Select(zero_or_nan, T.float32(1.0), row_sum_c),
@@ -1303,15 +1243,7 @@ def make_kernel(
                                     )
                                     mul_f32_tile(o_row_f32, TMEM_EPI_LD_SIZE, norm_scale)
                                     cast_f32_f16_tile(o_row_f16, o_row_f32, 0, TMEM_EPI_LD_SIZE)
-                                    for i in T.unroll(TMEM_EPI_LD_SIZE // 8):
-                                        _shared_instruction(
-                                            "st.shared.v4.u32",
-                                            o_smem.ptr_to([i_q, tid_in_wg, d_start + i * 8]),
-                                            o_row_f16[i * 4],
-                                            o_row_f16[i * 4 + 1],
-                                            o_row_f16[i * 4 + 2],
-                                            o_row_f16[i * 4 + 3],
-                                        )
+                                    store_output_tile(o_row_f16, i_q, d_start, TMEM_EPI_LD_SIZE)
                             T.cuda.iket.range_end(epi_ld_tmem_token[0])
                             T.ptx.fence.proxy.async_.shared__cta()
                             corr_epi.full.arrive(i_q)
