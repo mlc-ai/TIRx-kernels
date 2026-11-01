@@ -66,8 +66,12 @@ TMA_G2S_3D = (
 TMA_G2S_4D = (
     "cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::1"
 )
+TMA_G2S_5D = (
+    "cp.async.bulk.tensor.5d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::1"
+)
 TMA_S2G_3D = "cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"
 TMA_S2G_4D = "cp.async.bulk.tensor.4d.global.shared::cta.tile.bulk_group"
+TMA_S2G_5D = "cp.async.bulk.tensor.5d.global.shared::cta.tile.bulk_group"
 MMA_F16 = "tcgen05.mma.cta_group::1.kind::f16"
 TMEM_LD_16 = "tcgen05.ld.sync.aligned.32x32b.x16.b32"
 TMEM_LD_32 = "tcgen05.ld.sync.aligned.32x32b.x32.b32"
@@ -180,6 +184,8 @@ def make_kernel(
     NEG_INF = -float("inf")
     tma_g2s_3d = TMA_G2S_3D
     tma_g2s_4d = TMA_G2S_4D
+    q_load_opcode = TMA_G2S_3D if GQA_RATIO == 1 else TMA_G2S_4D
+    q_store_opcode = TMA_S2G_3D if GQA_RATIO == 1 else TMA_S2G_4D
     mma_f16 = MMA_F16
     tmem_alloc = TMEM_ALLOC
     tmem_dealloc = TMEM_DEALLOC
@@ -296,12 +302,37 @@ def make_kernel(
                     )
                 )
 
+            def tma_coordinates(position, head, batch, query=False):
+                if query and GQA_RATIO > 1:
+                    coordinates = (
+                        T.int32(0),
+                        T.cast(head * GQA_RATIO, ty="int32"),
+                        T.cast(position, ty="int32"),
+                        T.int32(0) if BATCH_SIZE > 1 else T.cast(batch * 2, ty="int32"),
+                    )
+                else:
+                    num_heads = NUM_QO_HEADS if query else NUM_KV_HEADS
+                    coordinates = (
+                        T.int32(0),
+                        T.cast(position, ty="int32"),
+                        T.cast(
+                            head * 2 if BATCH_SIZE > 1 else (batch * num_heads + head) * 2,
+                            ty="int32",
+                        ),
+                    )
+                if BATCH_SIZE > 1:
+                    coordinates = (*coordinates, T.cast(batch, ty="int32"))
+                return coordinates
+
             def tma_load(opcode, pointer, tmap, coordinates, mbar):
                 box = (
                     (2, SEQ_Q_PER_TILE, GQA_RATIO, HEAD_DIM // 2)
-                    if len(coordinates) == 4
+                    if len(coordinates) == (5 if BATCH_SIZE > 1 else 4)
                     else (2, BLK_N, HEAD_DIM // 2)
                 )
+                if BATCH_SIZE > 1:
+                    box = (1, *box)
+                    opcode = TMA_G2S_4D if opcode == TMA_G2S_3D else TMA_G2S_5D
                 shared = tma_view(pointer, box)
                 T.evaluate(
                     Tx.apply(
@@ -320,9 +351,12 @@ def make_kernel(
             def tma_store(opcode, tmap, coordinates, pointer):
                 box = (
                     (2, SEQ_Q_PER_TILE, GQA_RATIO, HEAD_DIM // 2)
-                    if len(coordinates) == 4
+                    if len(coordinates) == (5 if BATCH_SIZE > 1 else 4)
                     else (2, BLK_M, HEAD_DIM // 2)
                 )
+                if BATCH_SIZE > 1:
+                    box = (1, *box)
+                    opcode = TMA_S2G_4D if opcode == TMA_S2G_3D else TMA_S2G_5D
                 shared = tma_view(pointer, box)
                 T.evaluate(
                     Tx.apply(
@@ -697,39 +731,17 @@ def make_kernel(
                             tma_q_token = iket_range("issue-tma-q")
                             with T.if_(elected()), T.then_():
                                 for k_part in range(cta_group):
-                                    if GQA_RATIO == 1:
-                                        tma_load(
-                                            tma_g2s_3d,
-                                            q_smem.ptr_to([i_q, k_part * BLK_M, 0]),
-                                            T.address_of(tensor_map),
-                                            (
-                                                T.int32(0),
-                                                T.cast(q_tile_start(i_q), ty="int32"),
-                                                T.cast(
-                                                    (batch_idx * NUM_QO_HEADS + kv_head_idx) * 2
-                                                    + 0,
-                                                    ty="int32",
-                                                ),
-                                            ),
-                                            T.cuda.cvta_generic_to_shared(
-                                                q_load_full_remote.ptr_to([i_q])
-                                            ),
-                                        )
-                                    else:
-                                        tma_load(
-                                            tma_g2s_4d,
-                                            q_smem.ptr_to([i_q, k_part * BLK_M, 0]),
-                                            T.address_of(tensor_map),
-                                            (
-                                                T.int32(0),
-                                                T.cast(kv_head_idx * GQA_RATIO, ty="int32"),
-                                                T.cast(q_tile_start(i_q), ty="int32"),
-                                                T.cast(batch_idx * 2 + 0, ty="int32"),
-                                            ),
-                                            T.cuda.cvta_generic_to_shared(
-                                                q_load_full_remote.ptr_to([i_q])
-                                            ),
-                                        )
+                                    tma_load(
+                                        q_load_opcode,
+                                        q_smem.ptr_to([i_q, k_part * BLK_M, 0]),
+                                        T.address_of(tensor_map),
+                                        tma_coordinates(
+                                            q_tile_start(i_q), kv_head_idx, batch_idx, query=True
+                                        ),
+                                        T.cuda.cvta_generic_to_shared(
+                                            q_load_full_remote.ptr_to([i_q])
+                                        ),
+                                    )
                                 q_load_full_remote.arrive(
                                     i_q, tx_count=cta_group * BLK_M * HEAD_DIM * F16_BYTES
                                 )
@@ -749,19 +761,12 @@ def make_kernel(
                                             [kv_pipe.stage, 0 if is_v else k_part * KV_ROWS, 0]
                                         ),
                                         T.address_of(tensor_map),
-                                        (
-                                            T.int32(0),
-                                            T.cast(
-                                                i_kv * BLK_N + cta_rank * KV_ROWS
-                                                if not is_v
-                                                else i_kv * BLK_N,
-                                                ty="int32",
-                                            ),
-                                            T.cast(
-                                                (batch_idx * NUM_KV_HEADS + kv_head_idx) * 2
-                                                + (cta_rank if is_v and False else 0),
-                                                ty="int32",
-                                            ),
+                                        tma_coordinates(
+                                            i_kv * BLK_N + cta_rank * KV_ROWS
+                                            if not is_v
+                                            else i_kv * BLK_N,
+                                            kv_head_idx,
+                                            batch_idx,
                                         ),
                                         T.cuda.cvta_generic_to_shared(
                                             kv_load_full_remote.ptr_to([kv_pipe.stage])
@@ -798,32 +803,14 @@ def make_kernel(
                                 corr_epi.full.wait(i_q, tmem_epoch.phase)
                             m_start_global = q_tile_start(i_q)
                             if elected():
-                                if T.constexpr(GQA_RATIO == 1):
-                                    tma_store(
-                                        TMA_S2G_3D,
-                                        T.address_of(O_tensor_map),
-                                        (
-                                            T.int32(0),
-                                            T.cast(m_start_global, ty="int32"),
-                                            T.cast(
-                                                (batch_idx * NUM_QO_HEADS + kv_head_idx) * 2,
-                                                ty="int32",
-                                            ),
-                                        ),
-                                        o_smem.ptr_to([i_q, 0, 0]),
-                                    )
-                                else:
-                                    tma_store(
-                                        TMA_S2G_4D,
-                                        T.address_of(O_tensor_map),
-                                        (
-                                            T.int32(0),
-                                            T.cast(kv_head_idx * GQA_RATIO, ty="int32"),
-                                            T.cast(m_start_global, ty="int32"),
-                                            T.cast(batch_idx * 2, ty="int32"),
-                                        ),
-                                        o_smem.ptr_to([i_q, 0, 0]),
-                                    )
+                                tma_store(
+                                    q_store_opcode,
+                                    T.address_of(O_tensor_map),
+                                    tma_coordinates(
+                                        m_start_global, kv_head_idx, batch_idx, query=True
+                                    ),
+                                    o_smem.ptr_to([i_q, 0, 0]),
+                                )
                             T.ptx.cp.async_.bulk.commit_group()
                         T.ptx.cp.async_.bulk.wait_group(1)
                         corr_epi.empty.arrive(0)
@@ -1314,9 +1301,17 @@ def build_tensor_maps(
     )
     cta_group = 2 if use_2cta else 1
 
+    def encode_map(t, dims, strides, box):
+        if batch_size > 1:
+            # Dimension halves are 128 bytes apart; batches have a separate stride.
+            dims = (*dims[:-1], dims[-1] // batch_size, batch_size)
+            strides = (*strides, t.stride(0) * t.element_size())
+            box = (*box, 1)
+        return _encode(t, dims, strides, box)
+
     def q_map(t):
         if gqa == 1:
-            return _encode(
+            return encode_map(
                 t,
                 (head_dim // 2, seq_len_q, batch_size * num_qo_heads * 2),
                 (num_qo_heads * head_dim * F16_BYTES, head_dim),
@@ -1324,7 +1319,7 @@ def build_tensor_maps(
                 if use_2cta
                 else (head_dim // 2, seq_q_per_tile, 2),
             )
-        return _encode(
+        return encode_map(
             t,
             (head_dim // 2, num_qo_heads, seq_len_q, batch_size * 2),
             (head_dim * F16_BYTES, num_qo_heads * head_dim * F16_BYTES, head_dim),
@@ -1335,13 +1330,13 @@ def build_tensor_maps(
 
     def o_map(t):
         if gqa == 1:
-            return _encode(
+            return encode_map(
                 t,
                 (head_dim // 2, seq_len_q, batch_size * num_qo_heads * 2),
                 (num_qo_heads * head_dim * F16_BYTES, head_dim),
                 (head_dim // 2, seq_q_per_tile, 2),
             )
-        return _encode(
+        return encode_map(
             t,
             (head_dim // 2, num_qo_heads, seq_len_q, batch_size * 2),
             (head_dim * F16_BYTES, num_qo_heads * head_dim * F16_BYTES, head_dim),
@@ -1349,7 +1344,7 @@ def build_tensor_maps(
         )
 
     def k_map(t):
-        return _encode(
+        return encode_map(
             t,
             (head_dim // 2, seq_len_kv, batch_size * num_kv_heads * 2),
             (num_kv_heads * head_dim * F16_BYTES, head_dim),
@@ -1357,7 +1352,7 @@ def build_tensor_maps(
         )
 
     def v_map(t):
-        return _encode(
+        return encode_map(
             t,
             (head_dim // 2, seq_len_kv, batch_size * num_kv_heads * 2),
             (num_kv_heads * head_dim * F16_BYTES, head_dim),
