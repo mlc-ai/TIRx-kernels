@@ -224,6 +224,9 @@ def make_kernel(
             backend_config=resolve_backend_config(backend_config),
         ):
 
+            def mma_input_at(tensor, stage):
+                return tensor.sub[stage, :, :]
+
             def mma_shared_at(tensor, stage):
                 return T.bind_(
                     T.decl_tensor(
@@ -261,7 +264,7 @@ def make_kernel(
                 def issue(pred=None):
                     d = mma_tmem((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N, "float32", HEAD_DIM)
                     p = mma_tmem(i_q * MMA_N + MMA_N // 2, "float16", BLK_N)
-                    v = mma_shared_at(v_smem, kv_stage)
+                    v = mma_input_at(v_mma, kv_stage)
                     a = p.sub[:, begin:end].rearrange(
                         "(mr m) (kr k) -> mr kr m k", m=BLK_M, k=MMA_K
                     )
@@ -394,6 +397,22 @@ def make_kernel(
                 "float16",
                 swizzle_mode=SwizzleMode.SWIZZLE_128B_ATOM,
             )
+
+            def uniform_smem_root(tensor):
+                # All threads execute these broadcasts before warp-role dispatch.
+                pointer = T.gpu_warp_shuffle(
+                    T.uint32(0xFFFFFFFF), T.reinterpret(tensor.data, ty="uint64"), 0, 32, 32
+                )
+                return T.bind_(
+                    T.decl_tensor(
+                        T.reinterpret(pointer, ty=tensor.data.ty),
+                        ty_args=[tensor.ty],
+                    )
+                )
+
+            q_mma = uniform_smem_root(q_smem)
+            k_mma = uniform_smem_root(k_smem)
+            v_mma = uniform_smem_root(v_smem)
             smem.move_base_to(kv_base + KV_DEPTH * KV_ROWS * HEAD_DIM * F16_BYTES)
             o_smem = smem.alloc_tcgen05_mma_AB(
                 (TMEM_DEPTH, BLK_M, HEAD_DIM), "float16", swizzle_mode=SwizzleMode.SWIZZLE_128B_ATOM
@@ -824,8 +843,8 @@ def make_kernel(
                         def gemm_qk(q_stage, kv_stage):
                             def issue(pred=None):
                                 d = mma_tmem(q_stage * MMA_N, "float32", BLK_N)
-                                q = mma_shared_at(q_smem, q_stage)
-                                k = mma_shared_at(k_smem, kv_stage)
+                                q = mma_input_at(q_mma, q_stage)
+                                k = mma_input_at(k_mma, kv_stage)
                                 options = {} if pred is None else {"pred": pred}
                                 T.evaluate(
                                     Tx.apply(
