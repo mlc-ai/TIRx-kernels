@@ -288,6 +288,7 @@ def make_kernel(
                         )
                     )
 
+                T.ptx.tcgen05.fence__after_thread_sync()
                 if MMA_PREDICATED:
                     issue(elected())
                 else:
@@ -501,6 +502,7 @@ def make_kernel(
                 )
 
             def tmem_load(dst, offset, address, width):
+                # Callers fence after acquiring TMEM; one fence covers the column fragments.
                 atom = 16 if width == 16 else SOFTMAX_LD_CHUNK
                 r = register_view(dst, offset, width)
                 t = tmem_view(address, width)
@@ -512,6 +514,7 @@ def make_kernel(
                         scope="warpgroup",
                     )
                 )
+                T.ptx.tcgen05.wait__ld.sync.aligned()
 
             def tmem_store(src, offset, address, width=16):
                 r = register_view(src, offset, width)
@@ -859,6 +862,7 @@ def make_kernel(
                                     )
                                 )
 
+                            T.ptx.tcgen05.fence__after_thread_sync()
                             if MMA_PREDICATED:
                                 issue(elected())
                             else:
@@ -1000,6 +1004,7 @@ def make_kernel(
                         s_chunk = T.bind_(T.alloc_local([BLK_N], "float32"))
                         p_chunk = T.bind_(T.alloc_local([BLK_N // 2], "uint32"))
                         s_ready.wait(wg_id, score_epoch.phase)
+                        T.ptx.tcgen05.fence__after_thread_sync()
                         with T.if_(warp_id == 0), T.then_():
                             T.cuda.iket.mark("softmax-phase-0")
                         softmax_max_token = iket_range("softmax-max", leader_only=True)
@@ -1122,6 +1127,7 @@ def make_kernel(
                     if T.constexpr(EPI_ON_SOFTMAX):
                         o_ready.wait(wg_id, o_epi_epoch.phase)
                         corr_epi.empty.wait(wg_id, o_epi_epoch.phase)
+                        T.ptx.tcgen05.fence__after_thread_sync()
                         epi_ld_tmem_token = iket_range("epi-ld-tmem", leader_only=True)
                         acc_O_row_is_zero_or_nan = tvm_tirx.tirx.any(
                             row_sum[0] == T.float32(0.0), row_sum[0] != row_sum[0]
@@ -1201,6 +1207,7 @@ def make_kernel(
                             if any_needs_rescale != 0:
                                 if tid_in_wg < BLK_M:
                                     o_row = T.alloc_local([RESCALE_TILE], "float32")
+                                    T.ptx.tcgen05.fence__after_thread_sync()
                                     for d_tile in T.unroll(ceildiv(HEAD_DIM, RESCALE_TILE)):
                                         d_start = d_tile * RESCALE_TILE
                                         if d_start < HEAD_DIM:
@@ -1226,6 +1233,7 @@ def make_kernel(
                             softmax_corr.empty.arrive(i_q)
                             o_ready.wait(i_q, tmem_epoch.phase)
                             corr_epi.empty.wait(i_q, tmem_epoch.phase)
+                            T.ptx.tcgen05.fence__after_thread_sync()
                             epi_ld_tmem_token = iket_range("epi-ld-tmem", leader_only=True)
                             zero_or_nan = tvm_tirx.tirx.any(
                                 row_sum_c == T.float32(0.0), row_sum_c != row_sum_c
