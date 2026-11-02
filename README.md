@@ -82,6 +82,7 @@ keeps them in sync.
 
 - **Forward:**
   [`flash_attention4`](tirx_kernels/ported/flashattention/flash_attention4.py) ⟨+sm_110a⟩,
+  [`flash_attention4_tileop`](tirx_kernels/ported/flashattention/flash_attention4_tileop.py) ⟨sm_100a⟩,
   [`flash_attention4_fp4`](tirx_kernels/ported/flashattention/flash_attention4_fp4.py) ⟨sm_103a⟩
 - **Backward:**
   [`flash_attention_backward_sm100`](tirx_kernels/ported/flashattention/flash_attention_backward.py) ⟨+sm_110a⟩

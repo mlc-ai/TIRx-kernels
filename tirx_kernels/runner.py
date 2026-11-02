@@ -583,7 +583,7 @@ def defer_gpu_interrupts():
 
 def bench(*args: Any, references: Mapping[str, Any] | None = None, **kwargs: Any):
     """Run the canonical timer, admitting references only in explicit diagnostic mode."""
-    from tvm_tirx.tirx.bench import bench as canonical_bench
+    from tvm_tirx.testing.bench import bench as canonical_bench
 
     if _CUDA_ASSIGNMENT is not None:
         validate_current_cuda_assignment("before benchmark setup", restore=True)
