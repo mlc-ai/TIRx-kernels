@@ -223,6 +223,24 @@ def make_kernel(
             kernel_attrs=T.cuda.KernelAttributes(min_blocks_per_sm=1),
             backend_config=resolve_backend_config(backend_config),
         ):
+            # The CTA reserves all 512 columns, so the checked allocation base is zero.
+            # S0/S1 occupy the first two blocks; O0/O1 occupy the next two.
+            # P reuses the high fp16 half of each S block after S is read.
+            tmem = T.cuda.decl_tmem(
+                T.uint32(0),
+                ty_args=[
+                    T.Tensor(
+                        (128, N_COLS_TMEM),
+                        "float32",
+                        scope="tmem",
+                        layout=TileLayout(S[(128, N_COLS_TMEM) : (1 @ TLane, 1 @ TCol)]),
+                    )
+                ],
+            )
+            tmem_as_f16 = tmem.view("float16")
+            S_region = T.meta_var(tmem.rearrange("m (s n) -> s m n", n=MMA_N))
+            O_region = S_region
+            P_region = T.meta_var(tmem_as_f16.rearrange("m (s two n) -> s two m n", two=2, n=MMA_N))
 
             def mma_input_at(tensor, stage):
                 return tensor.sub[stage, :, :]
@@ -245,25 +263,10 @@ def make_kernel(
                     )
                 )
 
-            def mma_tmem(column, dtype, columns):
-                return T.bind_(
-                    T.cuda.decl_tmem(
-                        column,
-                        ty_args=[
-                            T.Tensor(
-                                (128, columns),
-                                dtype,
-                                scope="tmem",
-                                layout=TileLayout(S[(128, columns) : (1 @ TLane, 1 @ TCol)]),
-                            )
-                        ],
-                    )
-                )
-
             def mma_pv(i_q, kv_stage, begin, end, accum):
                 def issue(pred=None):
-                    d = mma_tmem((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N, "float32", HEAD_DIM)
-                    p = mma_tmem(i_q * MMA_N + MMA_N // 2, "float16", BLK_N)
+                    d = O_region.sub[SMEM_PIPE_DEPTH_Q + i_q, :, :]
+                    p = P_region.sub[i_q, 1, :, :]
                     v = mma_input_at(v_mma, kv_stage)
                     a = p.sub[:, begin:end].rearrange(
                         "(mr m) (kr k) -> mr kr m k", m=BLK_M, k=MMA_K
@@ -405,10 +408,7 @@ def make_kernel(
                     T.uint32(0xFFFFFFFF), T.reinterpret(tensor.data, ty="uint64"), 0, 32, 32
                 )
                 return T.bind_(
-                    T.decl_tensor(
-                        T.reinterpret(pointer, ty=tensor.data.ty),
-                        ty_args=[tensor.ty],
-                    )
+                    T.decl_tensor(T.reinterpret(pointer, ty=tensor.data.ty), ty_args=[tensor.ty])
                 )
 
             q_mma = uniform_smem_root(q_smem)
@@ -467,25 +467,6 @@ def make_kernel(
             T.ptx.fence.mbarrier_init.release.cluster()
             T.cuda.cta_sync()
 
-            def tmem(col):
-                return T.cast(col, ty="uint32")
-
-            def tmem_view(address, width):
-                column = address
-                return T.bind_(
-                    T.cuda.decl_tmem(
-                        column,
-                        ty_args=[
-                            T.Tensor(
-                                (128, width),
-                                "uint32",
-                                scope="tmem",
-                                layout=TileLayout(S[(128, width) : (1 @ TLane, 1 @ TCol)]),
-                            )
-                        ],
-                    )
-                )
-
             def register_view(tensor, offset, width):
                 return T.bind_(
                     T.decl_tensor(
@@ -501,11 +482,12 @@ def make_kernel(
                     )
                 )
 
-            def tmem_load(dst, offset, address, width):
+            def tmem_load(dst, offset, source):
                 # Callers fence after acquiring TMEM; one fence covers the column fragments.
+                t = source.view("uint32")
+                width = int(t.ty.shape[1])
                 atom = 16 if width == 16 else SOFTMAX_LD_CHUNK
                 r = register_view(dst, offset, width)
-                t = tmem_view(address, width)
                 T.evaluate(
                     Tx.apply(
                         T.ptx[TMEM_LD_16 if atom == 16 else TMEM_LD_32],
@@ -516,9 +498,10 @@ def make_kernel(
                 )
                 T.ptx.tcgen05.wait__ld.sync.aligned()
 
-            def tmem_store(src, offset, address, width=16):
+            def tmem_store(src, offset, destination):
+                t = destination.view("uint32")
+                width = int(t.ty.shape[1])
                 r = register_view(src, offset, width)
-                t = tmem_view(address, width)
                 T.evaluate(
                     Tx.apply(
                         T.ptx[TMEM_ST_16],
@@ -845,7 +828,7 @@ def make_kernel(
 
                         def gemm_qk(q_stage, kv_stage):
                             def issue(pred=None):
-                                d = mma_tmem(q_stage * MMA_N, "float32", BLK_N)
+                                d = S_region.sub[q_stage, :, :]
                                 q = mma_input_at(q_mma, q_stage)
                                 k = mma_input_at(k_mma, kv_stage)
                                 options = {} if pred is None else {"pred": pred}
@@ -1009,7 +992,7 @@ def make_kernel(
                             T.cuda.iket.mark("softmax-phase-0")
                         softmax_max_token = iket_range("softmax-max", leader_only=True)
                         tile_max = T.bind_(T.alloc_local([1], "float32"))
-                        tmem_load(s_chunk, 0, tmem(wg_id * MMA_N), BLK_N)
+                        tmem_load(s_chunk, 0, S_region.sub[wg_id, :, :])
                         if apply_mask:
                             apply_causal_mask(s_chunk, m_block_idx, i_kv)
                         row_max_old = T.bind_(T.local_scalar("float32"))
@@ -1076,15 +1059,10 @@ def make_kernel(
                             cast_f32_f16_tile(p_chunk, s_chunk, frag_idx * BLK_N // 4, BLK_N // 4)
                         T.cuda.iket.range_end(softmax_exp2_token[0])
                         softmax_tmem_st_token = iket_range("softmax-tmem-st", leader_only=True)
-                        tmem_store(p_chunk, 0, tmem(wg_id * MMA_N + MMA_N // 2), K_SPLIT // 2)
+                        tmem_store(p_chunk, 0, P_region.sub[wg_id, 1, :, :K_SPLIT])
                         T.ptx.tcgen05.wait__st.sync.aligned()
                         p_o_rescale_remote.arrive(wg_id)
-                        tmem_store(
-                            p_chunk,
-                            K_SPLIT // 2,
-                            tmem(wg_id * MMA_N + MMA_N // 2 + K_SPLIT // 2),
-                            (BLK_N - K_SPLIT) // 2,
-                        )
+                        tmem_store(p_chunk, K_SPLIT // 2, P_region.sub[wg_id, 1, :, K_SPLIT:BLK_N])
                         with T.if_(warp_id == 0), T.then_():
                             T.cuda.iket.mark("softmax-phase-2")
                         T.ptx.tcgen05.wait__st.sync.aligned()
@@ -1147,8 +1125,11 @@ def make_kernel(
                                     tmem_load(
                                         o_row_f32_sm,
                                         0,
-                                        tmem((SMEM_PIPE_DEPTH_Q + epi_q) * MMA_N + d_start),
-                                        EPI_LD_SM,
+                                        O_region.sub[
+                                            SMEM_PIPE_DEPTH_Q + epi_q,
+                                            :,
+                                            d_start : d_start + EPI_LD_SM,
+                                        ],
                                     )
                                     mul_f32_tile(o_row_f32_sm, EPI_LD_SM, norm_scale_sm)
                                     cast_f32_f16_tile(o_row_f16_sm, o_row_f32_sm, 0, EPI_LD_SM)
@@ -1211,10 +1192,14 @@ def make_kernel(
                                     for d_tile in T.unroll(ceildiv(HEAD_DIM, RESCALE_TILE)):
                                         d_start = d_tile * RESCALE_TILE
                                         if d_start < HEAD_DIM:
-                                            addr = tmem((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start)
-                                            tmem_load(o_row, 0, addr, RESCALE_TILE)
+                                            o_tile = O_region.sub[
+                                                SMEM_PIPE_DEPTH_Q + i_q,
+                                                :,
+                                                d_start : d_start + RESCALE_TILE,
+                                            ]
+                                            tmem_load(o_row, 0, o_tile)
                                             mul_f32_tile(o_row, RESCALE_TILE, acc_scale)
-                                            tmem_store(o_row, 0, addr)
+                                            tmem_store(o_row, 0, o_tile)
                                     T.ptx.tcgen05.wait__st.sync.aligned()
                             p_o_rescale_remote.arrive(i_q)
                             softmax_corr.empty.arrive(1 - i_q)
@@ -1252,8 +1237,11 @@ def make_kernel(
                                     tmem_load(
                                         o_row_f32,
                                         0,
-                                        tmem((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start),
-                                        TMEM_EPI_LD_SIZE,
+                                        O_region.sub[
+                                            SMEM_PIPE_DEPTH_Q + i_q,
+                                            :,
+                                            d_start : d_start + TMEM_EPI_LD_SIZE,
+                                        ],
                                     )
                                     mul_f32_tile(o_row_f32, TMEM_EPI_LD_SIZE, norm_scale)
                                     cast_f32_f16_tile(o_row_f16, o_row_f32, 0, TMEM_EPI_LD_SIZE)
