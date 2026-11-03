@@ -436,6 +436,13 @@ _BINDING_HELP = (
 )
 
 
+_CAST_HELP = (
+    "tirx-lite rejects 'Cast': txl.Cast would resolve to the native prim.Cast node, whose\n"
+    "signature is Cast(ty, value), so the value-first spelling txl.Cast(value, dtype) fails to trace.\n"
+    'Spell conversions as txl.cast(value, "dtype") (or txl.cast(value, ty="dtype")).'
+)
+
+
 _EVALUATE_HELP = (
     "tirx-lite rejects 'evaluate': every txl call emits itself.\n"
     "txl.ptx.* / txl.cuda.* and table ops reached as txl.<op>(...) all auto-emit their void result at\n"
@@ -453,6 +460,8 @@ def __getattr__(name):
         )
     if name == "evaluate":
         raise AttributeError(_EVALUATE_HELP)
+    if name == "Cast":
+        raise AttributeError(_CAST_HELP)
     if name in _FORBIDDEN_BINDING_NAMES:
         raise AttributeError(_BINDING_HELP.format(name=name))
     if name in _FORBIDDEN_TIRX_NAMES:

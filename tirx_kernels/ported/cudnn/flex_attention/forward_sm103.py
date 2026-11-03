@@ -1227,24 +1227,27 @@ def _make_kernel(*, backend_config=None, **config):
         q_smem = txl.decl_tensor(
             (q_stages * 128 * dp,),
             elem_dtype_name,
-            data=arena.data,
-            byte_offset=offsets["sq"],
+            data=txl.ptr_byte_offset(
+                arena.data, offsets["sq"], ty=txl.Ptr(elem_dtype_name, "shared.dyn")
+            ),
             scope="shared.dyn",
             align=1024,
         )
         kv_smem = txl.decl_tensor(
             (kv_storage_bytes // 2,),
             elem_dtype_name,
-            data=arena.data,
-            byte_offset=offsets["skv"],
+            data=txl.ptr_byte_offset(
+                arena.data, offsets["skv"], ty=txl.Ptr(elem_dtype_name, "shared.dyn")
+            ),
             scope="shared.dyn",
             align=1024,
         )
         o_smem = txl.decl_tensor(
             (output_stages * 128 * dvp,),
             elem_dtype_name,
-            data=arena.data,
-            byte_offset=offsets["so"],
+            data=txl.ptr_byte_offset(
+                arena.data, offsets["so"], ty=txl.Ptr(elem_dtype_name, "shared.dyn")
+            ),
             scope="shared.dyn",
             align=1024,
         )
@@ -1252,8 +1255,9 @@ def _make_kernel(*, backend_config=None, **config):
             mask_smem = txl.decl_tensor(
                 (2 * 128 * 4,),
                 "uint32",
-                data=arena.data,
-                byte_offset=offsets["mask"],
+                data=txl.ptr_byte_offset(
+                    arena.data, offsets["mask"], ty=txl.Ptr("uint32", "shared.dyn")
+                ),
                 scope="shared.dyn",
                 align=16,
             )

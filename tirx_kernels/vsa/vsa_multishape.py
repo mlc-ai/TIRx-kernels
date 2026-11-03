@@ -281,19 +281,19 @@ def encode(view, major):
     desc, off16 = view.encode(major=major, mma_k=16)
     lo = txl.alloc_local((1,), "uint32")
     hi = txl.alloc_local((1,), "uint32")
-    txl.assign(lo[0], txl.uniform(txl.Cast(desc.value, "uint32")))
-    txl.assign(hi[0], txl.Cast(txl.shift_right(desc.value, txl.uint64(32)), "uint32"))
+    txl.assign(lo[0], txl.uniform(txl.cast(desc.value, "uint32")))
+    txl.assign(hi[0], txl.cast(txl.shift_right(desc.value, txl.uint64(32)), "uint32"))
     return (lo, hi), off16
 
 
 def desc_at(desc, off16):
     lo, hi = desc
-    low = lo[0] if isinstance(off16, int) and off16 == 0 else lo[0] + txl.Cast(off16, "uint32")
+    low = lo[0] if isinstance(off16, int) and off16 == 0 else lo[0] + txl.cast(off16, "uint32")
     packed_desc = txl.alloc_local((1,), "uint64")
     txl.assign(
         packed_desc[0],
         txl.bitwise_or(
-            txl.shift_left(txl.Cast(hi[0], "uint64"), txl.uint64(32)), txl.Cast(low, "uint64")
+            txl.shift_left(txl.cast(hi[0], "uint64"), txl.uint64(32)), txl.cast(low, "uint64")
         ),
     )
     return packed_desc[0]
@@ -537,8 +537,8 @@ def make_attention_kernel_blk128(
             desc, off16 = view.encode(major=major, mma_k=16)
             lo = txl.alloc_local((1,), "uint32")
             hi = txl.alloc_local((1,), "uint32")
-            txl.assign(lo[0], txl.uniform(txl.Cast(desc.value, "uint32")))
-            txl.assign(hi[0], txl.Cast(txl.shift_right(desc.value, txl.uint64(32)), "uint32"))
+            txl.assign(lo[0], txl.uniform(txl.cast(desc.value, "uint32")))
+            txl.assign(hi[0], txl.cast(txl.shift_right(desc.value, txl.uint64(32)), "uint32"))
             return (lo, hi), off16
 
         def desc_at(desc, off16):
@@ -546,14 +546,14 @@ def make_attention_kernel_blk128(
             low = (
                 lo[0]
                 if isinstance(off16, int) and off16 == 0
-                else lo[0] + txl.Cast(off16, "uint32")
+                else lo[0] + txl.cast(off16, "uint32")
             )
             packed_desc = txl.alloc_local((1,), "uint64")
             txl.assign(
                 packed_desc[0],
                 txl.bitwise_or(
-                    txl.shift_left(txl.Cast(hi[0], "uint64"), txl.uint64(32)),
-                    txl.Cast(low, "uint64"),
+                    txl.shift_left(txl.cast(hi[0], "uint64"), txl.uint64(32)),
+                    txl.cast(low, "uint64"),
                 ),
             )
             return packed_desc[0]

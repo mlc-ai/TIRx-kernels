@@ -245,7 +245,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
         # ---------------- mutable TMA descriptors — orig:L1469-1474 --------
         # A mutable descriptor is a raw pointer to a CTA-private 128B slot in
         # the global workspace; every tensormap op below is bare PTX on it.
-        desc_base = txl.Cast(txl.cta_id(), "int64") * txl.int64(512)
+        desc_base = txl.cast(txl.cta_id(), "int64") * txl.int64(512)
         d_q = desc_ws.ptr_to([desc_base])
         d_k = desc_ws.ptr_to([desc_base + txl.int64(128)])
         d_v = desc_ws.ptr_to([desc_base + txl.int64(256)])
@@ -272,7 +272,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
 
         def mma_desc(view, *, transpose=False):
             addr = txl.cuda.cvta_generic_to_shared(view.ptr_to(0, 0))
-            desc_lo = txl.Cast((addr >> 4) & txl.uint32(0x3FFF), "uint64")
+            desc_lo = txl.cast((addr >> 4) & txl.uint32(0x3FFF), "uint64")
             if transpose:
                 return txl.uint64(0x4000404002000000) | (desc_lo + txl.uint64(0x02000000))
             return txl.uint64(0x4000404000010000) | desc_lo
@@ -282,9 +282,9 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
             a_desc = mma_desc(a)
             b_desc = a_desc if a is b else mma_desc(b)
             with txl.serial(8) as kp:
-                phase_off = txl.Cast((kp & 3) * 2 + (kp >> 2) * 512, "uint64")
+                phase_off = txl.cast((kp & 3) * 2 + (kp >> 2) * 512, "uint64")
                 txl.ptx[MMA_SS](
-                    txl.Cast(d, "uint32"),
+                    txl.cast(d, "uint32"),
                     a_desc + phase_off,
                     b_desc + phase_off,
                     txl.uint32(ID_KK),
@@ -292,7 +292,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                     txl.uint32(0),
                     txl.uint32(0),
                     txl.uint32(0),
-                    txl.ptx.pred(txl.Cast(kp != 0, "uint32")),
+                    txl.ptx.pred(txl.cast(kp != 0, "uint32")),
                     pred=pred,
                 )
 
@@ -301,14 +301,14 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
             b_desc = mma_desc(b, transpose=transpose_b)
             with txl.serial(phases) as kp:
                 phase_off = (
-                    txl.Cast(kp * 128, "uint64")
+                    txl.cast(kp * 128, "uint64")
                     if transpose_b
-                    else txl.Cast((kp & 3) * 2 + (kp >> 2) * 512, "uint64")
+                    else txl.cast((kp & 3) * 2 + (kp >> 2) * 512, "uint64")
                 )
-                enable_input_d = txl.uint32(1) if accumulate else txl.Cast(kp != 0, "uint32")
+                enable_input_d = txl.uint32(1) if accumulate else txl.cast(kp != 0, "uint32")
                 txl.ptx[MMA_SS](
-                    txl.Cast(d, "uint32"),
-                    txl.Cast(a + kp * 8, "uint32"),
+                    txl.cast(d, "uint32"),
+                    txl.cast(a + kp * 8, "uint32"),
                     b_desc + phase_off,
                     txl.uint32(ID_KV if transpose_b else ID_TS),
                     txl.uint32(0),
@@ -323,19 +323,19 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
             return txl.cuda.elect_sync() != txl.uint32(0)
 
         def work_coords(work):  # orig:L1509-1524
-            work_u32 = txl.Cast(work, "uint32")
+            work_u32 = txl.cast(work, "uint32")
             remain = udiv_const(work_u32, HV)
-            head = txl.Cast(work_u32 - remain * txl.uint32(HV), "int32")
+            head = txl.cast(work_u32 - remain * txl.uint32(HV), "int32")
             # The valid-work guard proves remain < num_sequences, so the frozen
             # fast-divmod remainder has its quotient known zero.
-            batch = txl.Cast(remain, "int32")
+            batch = txl.cast(remain, "int32")
             bounds = txl.alloc_local([2], "int32")
             # Keep these scalar: an odd batch index is only four-byte aligned.
             txl.ptx.ld.global_.s32(bounds[0], cu_seqlens.ptr_to([batch]))
             txl.ptx.ld.global_.s32(bounds[1], cu_seqlens.ptr_to([batch + 1]))
-            lo = txl.Cast(bounds[0], "int64")
-            hi = txl.Cast(bounds[1], "int64")
-            return batch, head, lo, hi, txl.Cast(hi - lo, "int32")
+            lo = txl.cast(bounds[0], "int64")
+            hi = txl.cast(bounds[1], "int64")
+            return batch, head, lo, hi, txl.cast(hi - lo, "int32")
 
         if HQ == HV:
 
@@ -345,7 +345,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
         else:
 
             def head_split(head):
-                qk_head = txl.Cast(udiv_const(txl.Cast(head, "uint32"), SUBHEADS), "int32")
+                qk_head = txl.cast(udiv_const(txl.cast(head, "uint32"), SUBHEADS), "int32")
                 return qk_head, head - qk_head * SUBHEADS
 
         # Register-level spellings this kernel uses. These are NOT library
@@ -408,7 +408,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
             right about is the CAST: signed n/3 costs 4 instructions and n%3
             costs 6, the extras being sign correction. See idioms_NOTES.md §2.
             """
-            return txl.Cast(value, "uint32") // txl.uint32(divisor)
+            return txl.cast(value, "uint32") // txl.uint32(divisor)
 
         def replace_desc(dsc, addr, dim1, dim2, dim3, s0, s1, s2):
             # Frozen TensorMapManager field order — orig:L380-393.
@@ -417,12 +417,12 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
             # pointer expression.
             txl.ptx[f"{R}.global_address.global.b1024.b64"](dsc, txl.reinterpret(addr, ty="uint64"))
             txl.ptx[f"{R}.global_dim.global.b1024.b32"](dsc, 0, txl.uint32(128))
-            txl.ptx[f"{R}.global_dim.global.b1024.b32"](dsc, 1, txl.Cast(dim1, "uint32"))
-            txl.ptx[f"{R}.global_stride.global.b1024.b64"](dsc, 0, txl.Cast(s0, "uint64"))
-            txl.ptx[f"{R}.global_dim.global.b1024.b32"](dsc, 2, txl.Cast(dim2, "uint32"))
-            txl.ptx[f"{R}.global_stride.global.b1024.b64"](dsc, 1, txl.Cast(s1, "uint64"))
-            txl.ptx[f"{R}.global_dim.global.b1024.b32"](dsc, 3, txl.Cast(dim3, "uint32"))
-            txl.ptx[f"{R}.global_stride.global.b1024.b64"](dsc, 2, txl.Cast(s2, "uint64"))
+            txl.ptx[f"{R}.global_dim.global.b1024.b32"](dsc, 1, txl.cast(dim1, "uint32"))
+            txl.ptx[f"{R}.global_stride.global.b1024.b64"](dsc, 0, txl.cast(s0, "uint64"))
+            txl.ptx[f"{R}.global_dim.global.b1024.b32"](dsc, 2, txl.cast(dim2, "uint32"))
+            txl.ptx[f"{R}.global_stride.global.b1024.b64"](dsc, 1, txl.cast(s1, "uint64"))
+            txl.ptx[f"{R}.global_dim.global.b1024.b32"](dsc, 3, txl.cast(dim3, "uint32"))
+            txl.ptx[f"{R}.global_stride.global.b1024.b64"](dsc, 2, txl.cast(s2, "uint64"))
             txl.ptx[f"{R}.global_dim.global.b1024.b32"](dsc, 4, txl.uint32(1))
             txl.ptx[f"{R}.global_stride.global.b1024.b64"](dsc, 3, txl.uint64(0))
 
@@ -454,7 +454,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
             return tm
 
         def tmem_at(tm, col, row_bits=0):
-            return txl.Cast(tm[0] + col + row_bits, "uint32")
+            return txl.cast(tm[0] + col + row_bits, "uint32")
 
         def drain(pipe, st):  # producer tail: acquire all stages before exit
             for _ in range(pipe.stages):
@@ -887,9 +887,9 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                     txl.ptx[STM_X4T_O](addr, words[oo], words[oo + 1], words[oo + 2], words[oo + 3])
 
             def state_gidx(batch, head):  # orig:L894-897
-                t = txl.Cast(tid1 & 127, "int64")
+                t = txl.cast(tid1 & 127, "int64")
                 return (
-                    txl.Cast(batch, "int64") * txl.int64(HV) + txl.Cast(head, "int64")
+                    txl.cast(batch, "int64") * txl.int64(HV) + txl.cast(head, "int64")
                 ) * txl.int64(D_HEAD * D_HEAD) + t * txl.int64(D_HEAD)
 
             def load_initial_state(batch, head):  # orig:L888-912
@@ -1119,10 +1119,10 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                         # The source deliberately keeps this loop rolled.
                         with txl.serial(D_HEAD) as key:
                             txl.ptx.ld.global_.f32(
-                                sval, initial_state.ptr_to([base + txl.Cast(key, "int64")])
+                                sval, initial_state.ptr_to([base + txl.cast(key, "int64")])
                             )
                             txl.ptx.st.global_.f32(
-                                final_state.ptr_to([base + txl.Cast(key, "int64")]), sval
+                                final_state.ptr_to([base + txl.cast(key, "int64")]), sval
                             )
                 txl.assign(work[0], work[0] + grid_x)
             # tmem dealloc by owner at role exit — orig:L2136-2143
@@ -1130,7 +1130,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
             with txl.if_(txl.warp_id_in_role() == 0), txl.then_():
                 txl.ptx["tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"]()
                 txl.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
-                    txl.Cast(tmem[0], "uint32"), txl.uint32(TMEM_COLS)
+                    txl.cast(tmem[0], "uint32"), txl.uint32(TMEM_COLS)
                 )
             drain(p_o, st_op)
             drain(p_sinp, st_sinp)
@@ -1222,7 +1222,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                         st_kp,
                         TMA_G2S_QK,
                         lambda t, d: s_k[t].ptr_to(0, d),
-                        lambda d: (txl.int32(d), txl.Cast(off, "int32"), qk_head),
+                        lambda d: (txl.int32(d), txl.cast(off, "int32"), qk_head),
                     ),
                     (
                         d_q,
@@ -1230,7 +1230,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                         st_qp,
                         TMA_G2S_QK,
                         lambda t, d: s_q[t].ptr_to(0, d),
-                        lambda d: (txl.int32(d), txl.Cast(off, "int32"), qk_head),
+                        lambda d: (txl.int32(d), txl.cast(off, "int32"), qk_head),
                     ),
                     (
                         d_v,
@@ -1239,9 +1239,9 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                         TMA_G2S_V,
                         lambda t, d: s_v[t].ptr_to(d, 0),
                         lambda d: (
-                            (txl.int32(d), txl.Cast(off, "int32"), sub, qk_head)
+                            (txl.int32(d), txl.cast(off, "int32"), sub, qk_head)
                             if RANK == 4
-                            else (txl.int32(d), txl.Cast(off, "int32"), head)
+                            else (txl.int32(d), txl.cast(off, "int32"), head)
                         ),
                     ),
                 )
@@ -1302,12 +1302,12 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                     # all-but-last valid, explicit last valid, then even-pair
                     # padding; each call itself is K -> Q -> V.  orig:L2488-2586
                     with txl.serial(valid - 1) as c:
-                        load_chunk(lo + txl.Cast(c * CHUNK, "int64"), c, head, qk_head, sub)
+                        load_chunk(lo + txl.cast(c * CHUNK, "int64"), c, head, qk_head, sub)
                     load_chunk(
-                        lo + txl.Cast((valid - 1) * CHUNK, "int64"), valid - 1, head, qk_head, sub
+                        lo + txl.cast((valid - 1) * CHUNK, "int64"), valid - 1, head, qk_head, sub
                     )
                     with txl.serial(valid, chunks) as c:  # padding chunks
-                        load_chunk(lo + txl.Cast(c * CHUNK, "int64"), c, head, qk_head, sub)
+                        load_chunk(lo + txl.cast(c * CHUNK, "int64"), c, head, qk_head, sub)
                 txl.assign(work[0], work[0] + grid_x)
             drain(p_q, st_qp)  # orig:L2590-2592
             drain(p_k, st_kp)
@@ -1460,9 +1460,9 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                 # `is_last` is a RUNTIME predicate. Both last-tile comparisons
                 # stay confined to the last-tile branch, matching the frozen
                 # predicate lifetime — orig:L1194-1195.
-                pos = [off + txl.Cast(lane_a, "int64"), off + txl.Cast(lane_a + 32, "int64")]
-                gsrc = [gate.ptr_to([p * txl.int64(HV) + txl.Cast(head, "int64")]) for p in pos]
-                bsrc = [beta.ptr_to([p * txl.int64(HV) + txl.Cast(head, "int64")]) for p in pos]
+                pos = [off + txl.cast(lane_a, "int64"), off + txl.cast(lane_a + 32, "int64")]
+                gsrc = [gate.ptr_to([p * txl.int64(HV) + txl.cast(head, "int64")]) for p in pos]
+                bsrc = [beta.ptr_to([p * txl.int64(HV) + txl.cast(head, "int64")]) for p in pos]
                 g = txl.alloc_local([2], "float32")
                 valid = txl.alloc_local([2], "int32")
                 for i in range(2):
@@ -1471,7 +1471,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                 with txl.if_(is_last):
                     with txl.then_():
                         for i in range(2):
-                            txl.assign(valid[i], txl.Cast(pos[i] < hi, "int32"))
+                            txl.assign(valid[i], txl.cast(pos[i] < hi, "int32"))
                         for i in range(2):
                             with txl.if_(valid[i] != 0), txl.then_():
                                 txl.ptx.ld.global_.f32(g[i], gsrc[i])
@@ -1529,9 +1529,9 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                 with txl.if_(elected()), txl.then_():
                     for d in (0, 64):
                         coords = (
-                            (txl.int32(d), txl.Cast(off, "int32"), sub, qk_head)
+                            (txl.int32(d), txl.cast(off, "int32"), sub, qk_head)
                             if RANK == 4
-                            else (txl.int32(d), txl.Cast(off, "int32"), head)
+                            else (txl.int32(d), txl.cast(off, "int32"), head)
                         )
                         txl.ptx[TMA_S2G_O](
                             d_o, *coords, s_o[st_oc.stage].ptr_to(d, 0), txl.uint64(0)
@@ -1573,7 +1573,7 @@ def make_kernel(HQ: int, HV: int, *, backend_config=None):
                                 lo + txl.int64(c * CHUNK), head, txl.int32(c) >= valid - 1, hi
                             )
                     with txl.serial(chunks) as c:  # steady state: +4 lookahead
-                        coff = lo + txl.Cast(c * CHUNK, "int64")
+                        coff = lo + txl.cast(c * CHUNK, "int64")
                         with txl.if_(c + 4 < chunks), txl.then_():
                             produce_gate_beta(
                                 coff + txl.int64(4 * CHUNK), head, c + 4 >= valid - 1, hi

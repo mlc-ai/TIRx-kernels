@@ -260,7 +260,7 @@ def _mma(mma, d, a_desc, b_desc, idesc, accumulate, pred=None):
     diverging on every chain.
     """
     ops = (
-        txl.Cast(d, "uint32"),
+        txl.cast(d, "uint32"),
         a_desc,
         b_desc,
         txl.uint32(idesc),

@@ -444,11 +444,11 @@ def make_forward_kernel(*, backend_config=None, **config):
         kv_smem = pool.alloc((98304,), "bfloat16", align=1024)
         assert pool.offset == 217088
 
+        # Arena-relative offsets: exchange (64 KiB) and then O alias kv_smem from its start.
         exchange = txl.decl_tensor(
             (16384,),
             "float32",
-            data=kv_smem.data,
-            byte_offset=20480,
+            data=txl.ptr_byte_offset(arena.data, 20480, ty=txl.Ptr("float32", "shared.dyn")),
             scope="shared.dyn",
             align=1024,
         )
@@ -456,8 +456,7 @@ def make_forward_kernel(*, backend_config=None, **config):
             o_smem = txl.decl_tensor(
                 (16384,),
                 "float32",
-                data=kv_smem.data,
-                byte_offset=86016,
+                data=txl.ptr_byte_offset(arena.data, 86016, ty=txl.Ptr("float32", "shared.dyn")),
                 scope="shared.dyn",
                 align=1024,
             )
@@ -465,8 +464,7 @@ def make_forward_kernel(*, backend_config=None, **config):
             o_smem = txl.decl_tensor(
                 (16384,),
                 "bfloat16",
-                data=kv_smem.data,
-                byte_offset=86016,
+                data=txl.ptr_byte_offset(arena.data, 86016, ty=txl.Ptr("bfloat16", "shared.dyn")),
                 scope="shared.dyn",
                 align=1024,
             )

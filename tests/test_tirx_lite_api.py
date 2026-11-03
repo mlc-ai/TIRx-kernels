@@ -393,6 +393,40 @@ def test_retired_binding_forms_are_rejected_with_guidance():
         txl.evaluate
 
 
+def test_capital_cast_is_rejected_for_value_first_cast():
+    with pytest.raises(AttributeError, match=r"txl\.cast\(value"):
+        txl.Cast
+
+    def build(out):
+        n = txl.local_scalar("int64", init=txl.int64(7))
+        txl.ptx.st.global_.f32(out.ptr_to([0]), txl.cast(n, "float32"))
+
+    assert 'T.Cast("float32"' in _tir(build)
+
+
+def test_smem_pool_offset_of_reports_native_allocation_offsets():
+    offsets = {}
+
+    @txl.kernel()
+    def probe():
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=32))
+        smem = txl.smem_pool()
+        head = smem.alloc((3,), "uint8")
+        word = smem.alloc((4,), "uint32", align=16)
+        tile = smem.alloc((16, 128), "bfloat16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
+        offsets.update(
+            head=smem.offset_of(head),
+            word=smem.offset_of(word),
+            tile=smem.offset_of(tile),
+            tile_buf=smem.offset_of(tile.buf),
+            end=smem.pool.offset,
+        )
+        with pytest.raises(ValueError, match="offset_of"):
+            smem.offset_of(txl.alloc_tensor((1,), "uint32", scope="shared.dyn"))
+
+    assert offsets == {"head": 0, "word": 16, "tile": 1024, "tile_buf": 1024, "end": 5120}
+
+
 def test_kernel_build_runs_low_level_ir_check_by_default():
     import pytest
 
@@ -462,8 +496,7 @@ def test_alloc_tensor_preserves_defaults_and_positional_options():
     def build(out):
         region = txl.alloc_tensor((2,), scope="local")
         assert region.dtype == "float32"
-        view = txl.alloc_tensor((1,), "float32", region.data, 1, None, "local", 16)
-        assert int(view.elem_offset) == 1
+        view = txl.alloc_tensor((1,), "float32", region.data, 0, None, "local", 16)
         assert str(view.scope()) == "local"
         assert view.data_alignment == 16
         txl.assign(view[0], txl.float32(1))
@@ -476,14 +509,25 @@ def test_decl_tensor_preserves_defaults_and_positional_options():
     def build(out):
         region = txl.decl_tensor((2,), scope="local")
         assert region.dtype == "float32"
-        view = txl.decl_tensor((1,), "float32", region.data, 1, None, "local", 16)
-        assert int(view.elem_offset) == 1
+        data = txl.ptr_byte_offset(region.data, 4, ty=txl.Ptr("float32", "local"))
+        view = txl.decl_tensor((1,), "float32", data, 0, None, "local", 16)
         assert str(view.scope()) == "local"
         assert view.data_alignment == 16
         txl.assign(view[0], txl.float32(1))
         txl.ptx.st.global_.f32(out.ptr_to([0]), view[0])
 
-    _tir(build)
+    assert "T.ptr_byte_offset(" in _tir(build)
+
+
+@pytest.mark.parametrize("buffer_api", [txl.alloc_tensor, txl.decl_tensor])
+@pytest.mark.parametrize("offsets", [(1, None), (None, 4)])
+def test_buffer_nonzero_offsets_are_rejected(buffer_api, offsets):
+    def build(out):
+        region = txl.alloc_tensor((2,), scope="local")
+        buffer_api((1,), "float32", region.data, *offsets, "local")
+
+    with pytest.raises(ValueError, match="ptr_byte_offset"):
+        _tir(build)
 
 
 def test_decl_tensor_strided_shared_alias_is_rejected():
@@ -500,7 +544,6 @@ def test_decl_tensor_strided_shared_alias_is_rejected():
                 (2, 4, 32),
                 "float32",
                 data=region.data,
-                elem_offset=int(region.elem_offset),
                 strides=(2048, 512, 1),
                 scope="shared.dyn",
                 align=16,
@@ -512,7 +555,6 @@ def test_default_buffer_strides_preserve_layout():
         region = txl.alloc_tensor((2, 4, 512), "float32", scope="local")
         view = txl.decl_tensor((2, 4, 512), "float32", data=region.data, scope="local")
         ir.assert_structural_equal(view.layout, region.layout)
-        assert not view.strides
         txl.assign(view[0, 2, 7], txl.float32(1))
         txl.ptx.st.global_.f32(out.ptr_to([0]), view[0, 2, 7])
 

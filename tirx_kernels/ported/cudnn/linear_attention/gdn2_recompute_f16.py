@@ -304,20 +304,17 @@ def _elected():
 
 
 def _copy_tensormap(src_map, dst):
-    """Copy one grid-constant TensorMap parameter into descriptor workspace."""
-    source = txl.decl_tensor(
-        (_TENSOR_MAP_WORDS,),
-        "uint64",
-        data=txl.reinterpret(txl.address_of(src_map), ty=PtrType(PrimType("uint64"), "param")),
-        scope="param",
-    )
+    """Copy one grid-constant TensorMap parameter into descriptor workspace.
+
+    There is no parameter memory scope, so each word is read with a generic
+    ``ld`` through the parameter's generic address (``&src_map``).
+    """
+    source = txl.reinterpret(txl.address_of(src_map), ty=PtrType(PrimType("uint64")))
     target = txl.reinterpret(dst, ty="uint64")
-    for group in range(4):
-        for word in range(4):
-            txl.ptx.st.global_.b64(
-                txl.reinterpret(target + txl.uint64((group * 4 + word) * 8), ty="handle"),
-                source[group * 4 + word],
-            )
+    word = txl.local_scalar("uint64")
+    for index in range(_TENSOR_MAP_WORDS):
+        txl.ptx.ld.b64(word, txl.ptr_byte_offset(source, index * 8, ty=source.ty))
+        txl.ptx.st.global_.b64(txl.reinterpret(target + txl.uint64(index * 8), ty="handle"), word)
 
 
 def _replace_tensormap_address(desc, address):

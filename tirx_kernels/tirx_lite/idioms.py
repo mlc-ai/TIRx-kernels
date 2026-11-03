@@ -322,8 +322,8 @@ def mma_chain(mma, d, *, a, b, idesc, pred, accumulate, guard, dol=None, k_range
         # encodes above and the MMAs below -- and no per-MMA predicate exists
         for kp in range(n_k):
             txl.ptx[mma](
-                txl.Cast("uint32", d),           # accumulator, tmem
-                a_desc + off16_a(kp),          # or Cast(u32, a + kp*a_step) for tmem A
+                txl.cast(d, "uint32"),           # accumulator, tmem
+                a_desc + off16_a(kp),          # or cast(a + kp*a_step, u32) for tmem A
                 b_desc + off16_b(kp),
                 txl.uint32(idesc),
                 *dol,                          # 4 masks, or 8 under cta_group::2

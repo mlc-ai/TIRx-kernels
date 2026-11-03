@@ -500,7 +500,7 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any], *, backend_config=
 
         def gidx(offset):
             txl.assign(global_offset, offset)
-            return txl.Cast(global_offset, "int64")
+            return txl.cast(global_offset, "int64")
 
         # --- sequence metadata (recurrent_kda.py:248-252) -----------------------
         token_base_offset = txl.local_scalar("int32")

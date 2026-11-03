@@ -2274,7 +2274,7 @@ def _make_kernel(*, backend_config=None, **config):
                 txl.ptx.lg2.approx.ftz.f32(lg[0], row_sum_l)
                 lse_val = txl.if_then_else(
                     txl.Or(row_sum_l == txl.float32(0.0), row_sum_l != row_sum_l),
-                    -txl.infinity("float32"),
+                    -txl.infinity(ty="float32"),
                     (row_max_l * scale_log2 + lg[0]) * txl.float32(LN_2),
                 )
                 q_idx_l = ld_shared_i32(s_q_idx, slot * q_tokens_per_group + tok_l)

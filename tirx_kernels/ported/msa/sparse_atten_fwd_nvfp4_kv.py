@@ -2632,7 +2632,7 @@ def _make_kernel(*, backend_config=None, **config):
                     "float32",
                     init=txl.if_then_else(
                         txl.Or(row_sum_l == txl.float32(0.0), row_sum_l != row_sum_l),
-                        -txl.infinity("float32"),
+                        -txl.infinity(ty="float32"),
                         (row_max_l * scale_log2 + lg[0]) * txl.float32(LN_2),
                     ),
                     name="lse_val",

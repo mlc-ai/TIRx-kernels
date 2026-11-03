@@ -193,8 +193,7 @@ def _make_kernel(log_max_splits, *, backend_config=None):
             return txl.decl_tensor(
                 shape,
                 dtype,
-                data=arena.data,
-                byte_offset=byte_offset,
+                data=txl.ptr_byte_offset(arena.data, byte_offset, ty=txl.Ptr(dtype, "shared.dyn")),
                 scope="shared.dyn",
                 align=128,
             )

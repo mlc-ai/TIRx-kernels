@@ -35,9 +35,11 @@ def zero(out: txl.Tensor((txl.int64(),), "float32")):
 - `txl.cta_id`, `txl.warp_id`, `txl.lane_id`, and `txl.thread_id` are the entry-owned
   coordinates. `txl.specialize()` defines named warp roles when the schedule is
   warp-specialized.
-- Shared memory is owned by `txl.smem_pool()`. PTX and CUDA instructions are
-  spelled through `txl.ptx` and `txl.cuda`; higher-level reusable instruction
-  sequences live under `txl.idioms`.
+- Shared memory is owned by `txl.smem_pool()`. An allocation's `.data` pointer
+  already includes its pool offset, so `data=t.data` aliases `t` itself; read the
+  byte offset with `smem.offset_of(t)`. PTX and CUDA instructions are spelled
+  through `txl.ptx` and `txl.cuda`; higher-level reusable instruction sequences
+  live under `txl.idioms`.
 - Every kernel is checked against the low-level IR contract when it is traced.
   Keep the default `check_ir=True`. `allowed_func_calls` is only for a task that
   explicitly owns a named runtime-call exception.
@@ -84,7 +86,7 @@ def zero_matrix(
 ```
 
 Primitive expressions follow the native signatures: `txl.reinterpret(value,
-ty=txl.uint32)`, `txl.Cast(value, "int32")`, and
+ty=txl.uint32)`, `txl.cast(value, "int32")`, and
 `txl.tensor_store(tensor, indices, value)`. Byte offsets specify their result
 pointer type: `txl.ptr_byte_offset(ptr, offset, ty=txl.Ptr(txl.uint32, ptr.ty.scope))`.
 

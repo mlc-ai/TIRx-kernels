@@ -382,7 +382,7 @@ def _warp_uniform_i32(value):
         txl.uint32(_shfl_clamp(32)),
         txl.uint32(0xFFFFFFFF),
     )
-    return txl.Cast(uniform, "int32")
+    return txl.cast(uniform, "int32")
 
 
 def _prefill_predicated_gamma(s_addr, t_addr, pred):
@@ -1614,7 +1614,7 @@ def _make_t_precompute(spec, *, backend_config=None):
                                 s_k.ptr_to(0, d_coord),
                                 txl.address_of(k_map),
                                 txl.int32(d_coord),
-                                txl.Cast(token_start, "int32"),
+                                txl.cast(token_start, "int32"),
                                 k_head,
                                 k_ready.ptr_to([0]),
                                 txl.uint64(0),
@@ -1716,9 +1716,9 @@ def _make_t_precompute(spec, *, backend_config=None):
                     with txl.unroll(4) as pair8:
                         txl.ptx.mov.b32(
                             inverse_row[pair8 * 2],
-                            txl.Cast(
+                            txl.cast(
                                 txl.reinterpret(
-                                    txl.Cast(inverse_words[pair8] & txl.uint32(0xFFFF), "uint16"),
+                                    txl.cast(inverse_words[pair8] & txl.uint32(0xFFFF), "uint16"),
                                     ty="float16",
                                 ),
                                 "float32",
@@ -1726,9 +1726,9 @@ def _make_t_precompute(spec, *, backend_config=None):
                         )
                         txl.ptx.mov.b32(
                             inverse_row[pair8 * 2 + 1],
-                            txl.Cast(
+                            txl.cast(
                                 txl.reinterpret(
-                                    txl.Cast(inverse_words[pair8] >> 16, "uint16"), ty="float16"
+                                    txl.cast(inverse_words[pair8] >> 16, "uint16"), ty="float16"
                                 ),
                                 "float32",
                             ),
@@ -1788,7 +1788,7 @@ def _make_t_precompute(spec, *, backend_config=None):
                 _t_ldmatrix_x4(s_inv, warp * 16, 16, lane, False, inverse_t1)
                 _t_ldmatrix_x4(s_inv, warp * 16, 32, lane, False, inverse_t2)
                 _t_ldmatrix_x4(s_inv, warp * 16, 48, lane, False, inverse_t3)
-                t_base = txl.Cast((t_block * state_heads + state_head) * T_BLOCK * T_BLOCK, "int64")
+                t_base = txl.cast((t_block * state_heads + state_head) * T_BLOCK * T_BLOCK, "int64")
                 _t_store_t_fragment(
                     inverse_t0, s_beta, t, t_base, valid_len, warp, lane, 0, io_dtype
                 )
@@ -2093,7 +2093,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
                 with txl.if_(warp == 0), txl.then_():
                     txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                     txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                        txl.Cast(tmem_base_invalid, "uint32"), txl.uint32(_FIXUP_TMEM_COLUMNS)
+                        txl.cast(tmem_base_invalid, "uint32"), txl.uint32(_FIXUP_TMEM_COLUMNS)
                     )
             with txl.else_():
                 with compute:
@@ -2111,15 +2111,15 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
                     ready_state = txl.PipelineState(1, phase=1)
                     done_state = txl.PipelineState(1, phase=0)
                     state_base = (
-                        txl.Cast(state_slot * state_heads + state_head, "int64") * D_HEAD * D_HEAD
+                        txl.cast(state_slot * state_heads + state_head, "int64") * D_HEAD * D_HEAD
                         + row_start * D_HEAD
                     )
                     workspace_base = (
-                        txl.Cast(seq_idx * state_heads + state_head, "int64") * D_HEAD * D_HEAD
+                        txl.cast(seq_idx * state_heads + state_head, "int64") * D_HEAD * D_HEAD
                         + row_start * D_HEAD
                     )
                     fixed_base = (
-                        txl.Cast(chunk_start * state_heads + state_head, "int64") * D_HEAD * D_HEAD
+                        txl.cast(chunk_start * state_heads + state_head, "int64") * D_HEAD * D_HEAD
                         + row_start * D_HEAD
                     )
                     values = txl.alloc_local((128,), "float32")
@@ -2173,7 +2173,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
                         )
                         txl.ptx.tcgen05.wait__ld.sync.aligned()
                         chunk_base = (
-                            txl.Cast((chunk_start + chunk) * state_heads + state_head, "int64")
+                            txl.cast((chunk_start + chunk) * state_heads + state_head, "int64")
                             * D_HEAD
                             * D_HEAD
                             + row_start * D_HEAD
@@ -2188,7 +2188,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
                         )
                         txl.ptx.tcgen05.wait__ld.sync.aligned()
                         last_fixed_base = (
-                            txl.Cast(
+                            txl.cast(
                                 (chunk_start + num_chunks - 1) * state_heads + state_head, "int64"
                             )
                             * D_HEAD
@@ -2203,7 +2203,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
                     with txl.if_(txl.warp_id_in_role() == 0), txl.then_():
                         txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                         txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                            txl.Cast(tmem_base[0], "uint32"), txl.uint32(_FIXUP_TMEM_COLUMNS)
+                            txl.cast(tmem_base[0], "uint32"), txl.uint32(_FIXUP_TMEM_COLUMNS)
                         )
 
                 with mma:
@@ -2248,7 +2248,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs, *, backend_config=Non
                                     s_n[part].ptr_to(0, 0),
                                     txl.address_of(local_state_map),
                                     txl.int32(part * 32),
-                                    txl.Cast(row_start, "int32"),
+                                    txl.cast(row_start, "int32"),
                                     state_head,
                                     cp_slot,
                                     p_n.full.ptr_to([n_state.stage]),
@@ -2358,7 +2358,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
         seq_end = sequence_bounds[1]
         seq_len = seq_end - seq_start
         num_chunks = (seq_len + cp_chunk_len - 1) // cp_chunk_len
-        valid_chunk = txl.Cast(chunk_in_seq < num_chunks, "int32")
+        valid_chunk = txl.cast(chunk_in_seq < num_chunks, "int32")
         token_start = seq_start + chunk_in_seq * cp_chunk_len
         valid_len = txl.min(cp_chunk_len, seq_end - token_start)
         num_blocks = (valid_len + T_BLOCK - 1) // T_BLOCK
@@ -2382,7 +2382,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                 with txl.if_(warp == 4), txl.then_():
                     txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                     txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                        txl.Cast(tmem_base_invalid, "uint32"), txl.uint32(TMEM_COLUMNS)
+                        txl.cast(tmem_base_invalid, "uint32"), txl.uint32(TMEM_COLUMNS)
                     )
             with txl.else_():
                 with cg0:
@@ -2450,7 +2450,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
 
                     cp_slot = _device_chunk_bound(seq_idx, seq_start, cp_chunk_len) + chunk_in_seq
                     output_base = (
-                        txl.Cast(cp_slot * state_heads + state_head, "int64") * D_HEAD * D_HEAD
+                        txl.cast(cp_slot * state_heads + state_head, "int64") * D_HEAD * D_HEAD
                     )
                     _mn_opt_store_matrix_global(
                         tmem_base[0], MN_OPT_TMEM_M_COL, transfer, output_base, thread
@@ -2528,7 +2528,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
 
                     cp_slot = _device_chunk_bound(seq_idx, seq_start, cp_chunk_len) + chunk_in_seq
                     output_base = (
-                        txl.Cast(cp_slot * state_heads + state_head, "int64") * D_HEAD * D_HEAD
+                        txl.cast(cp_slot * state_heads + state_head, "int64") * D_HEAD * D_HEAD
                     )
                     _mn_opt_store_matrix_global(
                         tmem_base[0], MN_OPT_TMEM_N_COL, local_state, output_base, thread
@@ -2539,7 +2539,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                     with txl.if_(txl.warp_id_in_role() == 0), txl.then_():
                         txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                         txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                            txl.Cast(tmem_base[0], "uint32"), txl.uint32(TMEM_COLUMNS)
+                            txl.cast(tmem_base[0], "uint32"), txl.uint32(TMEM_COLUMNS)
                         )
 
                 with mma_m:
@@ -2701,7 +2701,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                                     s_k[st_k.stage].ptr_to(d_coord, 0),
                                     txl.address_of(k_map),
                                     txl.int32(d_coord),
-                                    txl.Cast(token_start + block * T_BLOCK, "int32"),
+                                    txl.cast(token_start + block * T_BLOCK, "int32"),
                                     k_head,
                                     p_k.full.ptr_to([st_k.stage]),
                                     txl.uint64(0),
@@ -2710,7 +2710,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                                     s_v[st_v.stage].ptr_to(d_coord, 0),
                                     txl.address_of(v_map),
                                     txl.int32(d_coord),
-                                    txl.Cast(token_start + block * T_BLOCK, "int32"),
+                                    txl.cast(token_start + block * T_BLOCK, "int32"),
                                     v_head,
                                     p_v.full.ptr_to([st_v.stage]),
                                     txl.uint64(0),
@@ -2743,7 +2743,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                                 alpha_values[0],
                                 alpha.ptr_to(
                                     [
-                                        txl.Cast(token_start + token0, "int64") * state_heads
+                                        txl.cast(token_start + token0, "int64") * state_heads
                                         + state_head
                                     ]
                                 ),
@@ -2753,7 +2753,7 @@ def _make_mn_precompute(spec, *, backend_config=None):
                                 alpha_values[1],
                                 alpha.ptr_to(
                                     [
-                                        txl.Cast(token_start + token1, "int64") * state_heads
+                                        txl.cast(token_start + token1, "int64") * state_heads
                                         + state_head
                                     ]
                                 ),
@@ -2958,7 +2958,7 @@ def _make_prefill(spec, *, backend_config=None):
         subhead = state_head % head_ratio
         base_head = state_head // head_ratio
         k_head = state_head * k_heads // state_heads
-        descriptor_base = txl.Cast(seq_idx * grid_x + bx, "int64") * txl.int64(
+        descriptor_base = txl.cast(seq_idx * grid_x + bx, "int64") * txl.int64(
             DESCRIPTOR_SLOTS * DESCRIPTOR_SLOT_BYTES
         )
         descriptor_q = descriptor_workspace.ptr_to([descriptor_base])
@@ -3081,9 +3081,9 @@ def _make_prefill(spec, *, backend_config=None):
                         with txl.if_(chunk_in_seq > 0):
                             with txl.then_():
                                 base = (
-                                    txl.Cast((cp_slot - 1) * state_heads + state_head, "int64")
+                                    txl.cast((cp_slot - 1) * state_heads + state_head, "int64")
                                     * D_HEAD
-                                    + txl.Cast(cg1_thread, "int64")
+                                    + txl.cast(cg1_thread, "int64")
                                 ) * D_HEAD + word_offset
                                 txl.ptx["ld.global.L1::no_allocate.v4.b32"](
                                     state_words[vector * 4],
@@ -3095,9 +3095,9 @@ def _make_prefill(spec, *, backend_config=None):
                             with txl.else_():
                                 if needs_initial_state:
                                     base = (
-                                        txl.Cast(seq_idx * state_heads + state_head, "int64")
+                                        txl.cast(seq_idx * state_heads + state_head, "int64")
                                         * D_HEAD
-                                        + txl.Cast(cg1_thread, "int64")
+                                        + txl.cast(cg1_thread, "int64")
                                     ) * D_HEAD + word_offset
                                     txl.ptx["ld.global.L1::no_allocate.v4.b32"](
                                         state_words[vector * 4],
@@ -3395,7 +3395,7 @@ def _make_prefill(spec, *, backend_config=None):
             with txl.if_(txl.warp_id_in_role() == 0), txl.then_():
                 txl.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                 txl.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                    txl.Cast(tmem_base[0], "uint32"), txl.uint32(TMEM_COLUMNS)
+                    txl.cast(tmem_base[0], "uint32"), txl.uint32(TMEM_COLUMNS)
                 )
             for _ in range(2):
                 p_o.empty.wait(st_o.stage, st_o.phase)
@@ -3648,7 +3648,7 @@ def _make_prefill(spec, *, backend_config=None):
                             s_k[st_k.stage].ptr_to(0, d_coord),
                             descriptor_k,
                             txl.int32(d_coord),
-                            txl.Cast(token, "int32"),
+                            txl.cast(token, "int32"),
                             k_head,
                             p_k.full.ptr_to([st_k.stage]),
                             txl.uint64(0),
@@ -3667,7 +3667,7 @@ def _make_prefill(spec, *, backend_config=None):
                                 s_q[st_q.stage].ptr_to(0, d_coord),
                                 descriptor_q,
                                 txl.int32(d_coord),
-                                txl.Cast(token, "int32"),
+                                txl.cast(token, "int32"),
                                 subhead,
                                 base_head,
                                 p_q.full.ptr_to([st_q.stage]),
@@ -3678,7 +3678,7 @@ def _make_prefill(spec, *, backend_config=None):
                                 s_q[st_q.stage].ptr_to(0, d_coord),
                                 descriptor_q,
                                 txl.int32(d_coord),
-                                txl.Cast(token, "int32"),
+                                txl.cast(token, "int32"),
                                 base_head,
                                 p_q.full.ptr_to([st_q.stage]),
                                 txl.uint64(0),
@@ -3697,7 +3697,7 @@ def _make_prefill(spec, *, backend_config=None):
                                 s_v[st_v.stage].ptr_to(d_coord, 0),
                                 descriptor_v,
                                 txl.int32(d_coord),
-                                txl.Cast(token, "int32"),
+                                txl.cast(token, "int32"),
                                 base_head,
                                 p_v.full.ptr_to([st_v.stage]),
                                 txl.uint64(0),
@@ -3707,7 +3707,7 @@ def _make_prefill(spec, *, backend_config=None):
                                 s_v[st_v.stage].ptr_to(d_coord, 0),
                                 descriptor_v,
                                 txl.int32(d_coord),
-                                txl.Cast(token, "int32"),
+                                txl.cast(token, "int32"),
                                 subhead,
                                 base_head,
                                 p_v.full.ptr_to([st_v.stage]),
@@ -3751,31 +3751,31 @@ def _make_prefill(spec, *, backend_config=None):
             st_o = txl.PipelineState(2, phase=0)
 
             def load_gate(chunk_offset, is_last_tile):
-                pos0 = txl.Cast(chunk_offset, "int64") + txl.Cast(lane, "int64")
-                pos1 = txl.Cast(chunk_offset, "int64") + txl.Cast(lane + 32, "int64")
+                pos0 = txl.cast(chunk_offset, "int64") + txl.cast(lane, "int64")
+                pos1 = txl.cast(chunk_offset, "int64") + txl.cast(lane + 32, "int64")
                 gate = txl.alloc_local((2,), "float32")
                 txl.ptx.mov.b32(gate[0], txl.float32(1.0))
                 txl.ptx.mov.b32(gate[1], txl.float32(1.0))
                 with txl.if_(is_last_tile):
                     with txl.then_():
-                        with txl.if_(pos0 < txl.Cast(chunk_end, "int64")), txl.then_():
+                        with txl.if_(pos0 < txl.cast(chunk_end, "int64")), txl.then_():
                             txl.ptx.ld.global_.f32(
                                 gate[0],
-                                alpha.ptr_to([pos0 * txl.Cast(state_heads, "int64") + state_head]),
+                                alpha.ptr_to([pos0 * txl.cast(state_heads, "int64") + state_head]),
                             )
-                        with txl.if_(pos1 < txl.Cast(chunk_end, "int64")), txl.then_():
+                        with txl.if_(pos1 < txl.cast(chunk_end, "int64")), txl.then_():
                             txl.ptx.ld.global_.f32(
                                 gate[1],
-                                alpha.ptr_to([pos1 * txl.Cast(state_heads, "int64") + state_head]),
+                                alpha.ptr_to([pos1 * txl.cast(state_heads, "int64") + state_head]),
                             )
                     with txl.else_():
                         txl.ptx.ld.global_.f32(
                             gate[0],
-                            alpha.ptr_to([pos0 * txl.Cast(state_heads, "int64") + state_head]),
+                            alpha.ptr_to([pos0 * txl.cast(state_heads, "int64") + state_head]),
                         )
                         txl.ptx.ld.global_.f32(
                             gate[1],
-                            alpha.ptr_to([pos1 * txl.Cast(state_heads, "int64") + state_head]),
+                            alpha.ptr_to([pos1 * txl.cast(state_heads, "int64") + state_head]),
                         )
                 txl.ptx.lg2.approx.ftz.f32(gate[0], gate[0] + txl.float32(1.0e-10))
                 txl.ptx.lg2.approx.ftz.f32(gate[1], gate[1] + txl.float32(1.0e-10))
@@ -3816,7 +3816,7 @@ def _make_prefill(spec, *, backend_config=None):
                         txl.ptx[_PREFILL_OPT_TMA_S2G_4D](
                             descriptor_o,
                             txl.int32(d_coord),
-                            txl.Cast(chunk_offset, "int32"),
+                            txl.cast(chunk_offset, "int32"),
                             subhead,
                             base_head,
                             s_o[st_o.stage].ptr_to(d_coord, 0),
