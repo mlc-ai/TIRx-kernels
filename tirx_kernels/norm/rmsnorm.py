@@ -149,7 +149,7 @@ def make_kernel(hidden_size: int, *, backend_config=None):
             this implies is the original's too (largest config: 4113*8192).
             """
             txl.assign(goff, offset)
-            return txl.Cast(goff, "int64")
+            return txl.cast(goff, "int64")
 
         def warp_sum(acc):
             """Butterfly sum of ``acc[0]`` over the 32 lanes — orig:L725-729.

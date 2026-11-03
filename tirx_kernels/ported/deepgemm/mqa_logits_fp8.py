@@ -421,10 +421,10 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
         )
 
         cache_policy_evict_normal = txl.uint64(0x1000000000000000)
-        sm_idx_u32 = txl.Cast(txl.cta_id(), "uint32")
+        sm_idx_u32 = txl.cast(txl.cta_id(), "uint32")
         warp_idx = txl.warp_id()
         warpgroup_idx = txl.cuda.warpgroup_id()
-        lane_idx_u32 = txl.Cast(txl.lane_id(), "uint32")
+        lane_idx_u32 = txl.cast(txl.lane_id(), "uint32")
 
         # One elected lane of warp 0 prefetches every descriptor before any
         # pipeline traffic (the former dispatcher's placement).
@@ -487,16 +487,16 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                 )
                 row = txl.alloc_local([2], "int32")
                 txl.ptx.ld.global_.s32(
-                    row[0], cu_seq_len_k_start.ptr_to([txl.Cast(row_idx, "int32")])
+                    row[0], cu_seq_len_k_start.ptr_to([txl.cast(row_idx, "int32")])
                 )
                 txl.ptx.mov.b32(
-                    seq_k_start[schedule_i], txl.min(txl.Cast(row[0], "uint32"), seq_len_kv)
+                    seq_k_start[schedule_i], txl.min(txl.cast(row[0], "uint32"), seq_len_kv)
                 )
                 txl.ptx.ld.global_.s32(
-                    row[1], cu_seq_len_k_end.ptr_to([txl.Cast(row_idx, "int32")])
+                    row[1], cu_seq_len_k_end.ptr_to([txl.cast(row_idx, "int32")])
                 )
                 txl.ptx.mov.b32(
-                    seq_k_end[schedule_i], txl.min(txl.Cast(row[1], "uint32"), seq_len_kv)
+                    seq_k_end[schedule_i], txl.min(txl.cast(row[1], "uint32"), seq_len_kv)
                 )
                 txl.assign(schedule_start, txl.min(schedule_start, seq_k_start[schedule_i]))
                 txl.assign(schedule_end, txl.max(schedule_end, seq_k_end[schedule_i]))
@@ -576,7 +576,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         smem_q[q_state.stage].ptr_to(0, 0),
                         txl.address_of(q_map),
                         txl.int32(0),
-                        txl.Cast(q_idx * txl.uint32(block_q * num_heads), "int32"),
+                        txl.cast(q_idx * txl.uint32(block_q * num_heads), "int32"),
                         q_pipe.full.ptr_to([q_state.stage]),
                         cache_policy_evict_normal,
                     )
@@ -584,7 +584,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         smem_weights.ptr_to([q_state.stage, 0, 0]),
                         txl.address_of(weights_map),
                         txl.int32(0),
-                        txl.Cast(q_idx * txl.uint32(block_q), "int32"),
+                        txl.cast(q_idx * txl.uint32(block_q), "int32"),
                         q_pipe.full.ptr_to([q_state.stage]),
                         cache_policy_evict_normal,
                     )
@@ -613,14 +613,14 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                             smem_kv[kv_state.stage].ptr_to(0, 0),
                             txl.address_of(kv_map),
                             txl.int32(0),
-                            txl.Cast(kv_row0, "int32"),
+                            txl.cast(kv_row0, "int32"),
                             kv_pipe.full.ptr_to([kv_state.stage]),
                             cache_policy_evict_normal,
                         )
                         txl.ptx[TMA_G2S_1D](
                             smem_kv_scales.ptr_to([kv_state.stage, 0]),
                             txl.address_of(kv_scales_map),
-                            txl.Cast(kv_row0, "int32"),
+                            txl.cast(kv_row0, "int32"),
                             kv_pipe.full.ptr_to([kv_state.stage]),
                             cache_policy_evict_normal,
                         )
@@ -685,7 +685,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                 offset = ki * umma_k // 16
                                 txl.ptx[MMA](
                                     txl.uint32(tmem_col)
-                                    + txl.Cast(tmem_state.stage, "uint32") * txl.uint32(umma_n),
+                                    + txl.cast(tmem_state.stage, "uint32") * txl.uint32(umma_n),
                                     txl.smem_desc_add_16B_offset(desc_a, offset),
                                     txl.smem_desc_add_16B_offset(desc_b, offset),
                                     desc_i,
@@ -709,7 +709,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
 
         # ---------------- warps 0-7: math + epilogue --------------------
         with math:
-            math_thread_idx = txl.Cast(txl.tid_in_role(), "uint32")
+            math_thread_idx = txl.cast(txl.tid_in_role(), "uint32")
             accum = txl.alloc_local([num_heads], "float32")
             cached_weights = txl.alloc_local([block_q, num_heads], "float32")
             q_row_off_base = txl.local_scalar("uint64")
@@ -738,8 +738,8 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                             )
                     txl.assign(
                         q_row_off_base,
-                        txl.Cast(q_idx * txl.uint32(block_q), "uint64")
-                        * txl.Cast(logits_stride, "uint64"),
+                        txl.cast(q_idx * txl.uint32(block_q), "uint64")
+                        * txl.cast(logits_stride, "uint64"),
                     )
                     # Publish the generic-proxy weight reads before this
                     # consumer releases the Q stage for a later TMA overwrite.
@@ -755,7 +755,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         tmem_pipe.full.wait(tmem_state.stage, tmem_state.phase)
                         txl.ptx.fence.proxy.async_.shared__cta()
                         kv_pipe.empty.arrive(kv_state.stage)
-                        tmem_stage_base = txl.uint32(tmem_col) + txl.Cast(
+                        tmem_stage_base = txl.uint32(tmem_col) + txl.cast(
                             tmem_state.stage, "uint32"
                         ) * txl.uint32(umma_n)
                         for q_inner_i in range(block_q):
@@ -773,10 +773,10 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                             )
                             txl.ptx.tcgen05.wait__ld.sync.aligned()
                             reduced = wrelu_reduce(accum, cached_weights, q_inner_i)
-                            result = txl.Cast(scale_kv * reduced, logits_tir_dtype)
-                            q_offset = q_row_off_base + txl.Cast(
+                            result = txl.cast(scale_kv * reduced, logits_tir_dtype)
+                            q_offset = q_row_off_base + txl.cast(
                                 txl.uint32(q_inner_i), "uint64"
-                            ) * txl.Cast(logits_stride, "uint64")
+                            ) * txl.cast(logits_stride, "uint64")
                             if config.compressed_logits:
                                 # Unconditional store with the column clamped
                                 # into the row's stride padding; a range guard
@@ -785,9 +785,9 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                     kv_offset - seq_k_start[q_inner_i],
                                     logits_stride - txl.uint32(1),
                                 )
-                                store_logits(q_offset + txl.Cast(col, "uint64"), result)
+                                store_logits(q_offset + txl.cast(col, "uint64"), result)
                             else:
-                                store_logits(q_offset + txl.Cast(kv_offset, "uint64"), result)
+                                store_logits(q_offset + txl.cast(kv_offset, "uint64"), result)
                         # Release the tmem stage once per kv block AFTER the
                         # token loop; inside the last token ptxas fuses it with
                         # the compressed guard branch.

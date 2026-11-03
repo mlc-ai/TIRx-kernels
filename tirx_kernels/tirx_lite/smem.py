@@ -519,11 +519,33 @@ class SmemPool:
         self.pool = SMEMPool() if base is None else SMEMPool(base.data)
         self._max_offset = 0
         self._committed = False
+        self._offsets = []
 
-    def _alloc(self, *args, **kwargs):
-        result = self.pool.alloc(*args, **kwargs)
+    def _alloc(self, shape, dtype, *, align=0, **kwargs):
+        # Same rounding as the native allocator, which places the tensor at
+        # the aligned cursor and then advances past it.
+        start = self.pool.offset
+        if align > 0:
+            start = (start + align - 1) // align * align
+        result = self.pool.alloc(shape, dtype, align=align, **kwargs)
+        self._offsets.append((result, start))
         self._max_offset = max(self._max_offset, self.pool.offset)
         return result
+
+    def offset_of(self, tensor):
+        """Byte offset of a tensor allocated by this pool, relative to the pool base.
+
+        A native tensor ``Var`` has no ``elem_offset``: its data pointer already
+        includes the allocation offset, so ``data=t.data`` aliases ``t`` itself.
+        Kernels that need the position itself -- re-basing the pool onto storage
+        it aliases, or the 16-byte delta between two descriptor start addresses
+        -- read it here. Accepts the raw tensor, a ``KTile`` or a ``KTileView``.
+        """
+        buf = getattr(tensor, "buf", tensor)
+        for allocated, start in self._offsets:
+            if allocated.same_as(buf):
+                return start
+        raise ValueError("offset_of: tensor was not allocated through this txl.smem_pool()")
 
     def alloc(self, shape, dtype="float32", swizzle=None, align=0):
         """Allocate a tile.

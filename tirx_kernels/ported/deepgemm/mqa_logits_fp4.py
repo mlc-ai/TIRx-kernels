@@ -487,7 +487,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
 
         def replace_smem_desc_addr(desc, smem_ptr):
             shared_addr = txl.cuda.cvta_generic_to_shared(smem_ptr)
-            start_addr = txl.Cast(
+            start_addr = txl.cast(
                 txl.bitwise_and(txl.shift_right(shared_addr, txl.uint32(4)), txl.uint32(0x3FFF)),
                 "uint64",
             )
@@ -499,7 +499,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
             # ldo=0, sdo=32, 64B swizzle.  This is the exact uniform descriptor
             # form produced by the former ``smem_desc="recompute"`` dispatch.
             shared_addr = txl.cuda.cvta_generic_to_shared(smem_ptr)
-            start_addr = txl.Cast(
+            start_addr = txl.cast(
                 txl.bitwise_and(txl.shift_right(shared_addr, txl.uint32(4)), txl.uint32(0x3FFF)),
                 "uint64",
             )
@@ -554,7 +554,6 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
             "uint32",
             data=smem_sf_q.data,
             scope="shared.dyn",
-            elem_offset=smem_sf_q.elem_offset,
             align=16,
         )
         smem_sf_kv = pool.alloc((num_kv_stages, num_sfkv), "uint32", align=16)
@@ -611,16 +610,16 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                 row_start = txl.local_scalar("int32")
                 row_end = txl.local_scalar("int32")
                 txl.ptx.ld.global_.s32(
-                    row_start, cu_seq_len_k_start.ptr_to([txl.Cast(row_idx, "int32")])
+                    row_start, cu_seq_len_k_start.ptr_to([txl.cast(row_idx, "int32")])
                 )
                 txl.ptx.ld.global_.s32(
-                    row_end, cu_seq_len_k_end.ptr_to([txl.Cast(row_idx, "int32")])
+                    row_end, cu_seq_len_k_end.ptr_to([txl.cast(row_idx, "int32")])
                 )
                 txl.ptx.mov.b32(
-                    seq_k_start[schedule_i], txl.min(txl.Cast(row_start, "uint32"), seq_len_kv)
+                    seq_k_start[schedule_i], txl.min(txl.cast(row_start, "uint32"), seq_len_kv)
                 )
                 txl.ptx.mov.b32(
-                    seq_k_end[schedule_i], txl.min(txl.Cast(row_end, "uint32"), seq_len_kv)
+                    seq_k_end[schedule_i], txl.min(txl.cast(row_end, "uint32"), seq_len_kv)
                 )
                 txl.assign(schedule_start, txl.min(schedule_start, seq_k_start[schedule_i]))
                 txl.assign(schedule_end, txl.max(schedule_end, seq_k_end[schedule_i]))
@@ -678,7 +677,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         smem_q[q_state.stage].ptr_to(0, 0),
                         txl.address_of(q_map),
                         txl.int32(0),
-                        txl.Cast(q_row0, "int32"),
+                        txl.cast(q_row0, "int32"),
                         q_pipe.full.ptr_to([q_state.stage]),
                         cache_policy_evict_normal,
                     )
@@ -687,7 +686,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         smem_sf_q_2d.ptr_to([q_state.stage, 0, 0]),
                         txl.address_of(sf_q_map),
                         txl.int32(0),
-                        txl.Cast(q_blk0, "int32"),
+                        txl.cast(q_blk0, "int32"),
                         q_pipe.full.ptr_to([q_state.stage]),
                         cache_policy_evict_normal,
                     )
@@ -695,7 +694,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         smem_weights.ptr_to([q_state.stage, 0, 0]),
                         txl.address_of(weights_map),
                         txl.int32(0),
-                        txl.Cast(q_blk0, "int32"),
+                        txl.cast(q_blk0, "int32"),
                         q_pipe.full.ptr_to([q_state.stage]),
                         cache_policy_evict_normal,
                     )
@@ -728,14 +727,14 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                             smem_kv[kv_state.stage].ptr_to(0, 0),
                             txl.address_of(kv_map),
                             txl.int32(0),
-                            txl.Cast(kv_row0, "int32"),
+                            txl.cast(kv_row0, "int32"),
                             kv_pipe.full.ptr_to([kv_state.stage]),
                             cache_policy_evict_normal,
                         )
                         txl.ptx[TMA_G2S_1D](
                             smem_sf_kv.ptr_to([kv_state.stage, 0]),
                             txl.address_of(sf_kv_map),
-                            txl.Cast(kv_row0, "int32"),
+                            txl.cast(kv_row0, "int32"),
                             kv_pipe.full.ptr_to([kv_state.stage]),
                             cache_policy_evict_normal,
                         )
@@ -925,7 +924,7 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
             tmem_state = txl.RingState(
                 num_tmem_stages, stage=warpgroup_idx, stride=num_math_warpgroups
             )
-            math_thread_idx = txl.Cast(txl.tid_in_role(), "uint32")
+            math_thread_idx = txl.cast(txl.tid_in_role(), "uint32")
             q_idx = txl.local_scalar("uint32", init=sm_idx)
             with txl.while_(q_idx < num_q_blocks):
                 load_schedule(q_idx)
@@ -950,9 +949,9 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                         for tb_i in range(block_q):
                             txl.ptx.mov.b64(
                                 token_store_off[tb_i],
-                                txl.Cast(q_idx * txl.uint32(block_q) + txl.uint32(tb_i), "uint64")
-                                * txl.Cast(logits_stride, "uint64")
-                                + txl.Cast(kv_start + math_thread_idx, "uint64"),
+                                txl.cast(q_idx * txl.uint32(block_q) + txl.uint32(tb_i), "uint64")
+                                * txl.cast(logits_stride, "uint64")
+                                + txl.cast(kv_start + math_thread_idx, "uint64"),
                             )
                     kv_idx = txl.local_scalar("uint32", init=txl.uint32(0))
                     with txl.while_(kv_idx < num_kv_blocks):
@@ -992,16 +991,16 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                 accum, cached_weights, q_inner_i, num_heads
                             )
                             result = txl.local_scalar(
-                                logits_tir_dtype, init=txl.Cast(result_f32, logits_tir_dtype)
+                                logits_tir_dtype, init=txl.cast(result_f32, logits_tir_dtype)
                             )
                             if config.compressed_logits:
                                 q_offset = txl.local_scalar(
                                     "uint64",
-                                    init=txl.Cast(
+                                    init=txl.cast(
                                         q_idx * txl.uint32(block_q) + txl.uint32(q_inner_i),
                                         "uint64",
                                     )
-                                    * txl.Cast(logits_stride, "uint64"),
+                                    * txl.cast(logits_stride, "uint64"),
                                 )
                                 row_k_start = txl.local_scalar(
                                     "uint32", init=seq_k_start[q_inner_i]
@@ -1019,8 +1018,8 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                 ):
                                     store_logits(
                                         q_offset
-                                        + txl.Cast(kv_offset, "uint64")
-                                        - txl.Cast(row_k_start, "uint64"),
+                                        + txl.cast(kv_offset, "uint64")
+                                        - txl.cast(row_k_start, "uint64"),
                                         result,
                                     )
                             elif config.logits_dtype == "float32":
@@ -1029,13 +1028,13 @@ def get_kernel(*, backend_config=None, **kwargs: Any):
                                 # bf16-dense: per-iter offset; see token_store_off note.
                                 q_offset_bf16 = txl.local_scalar(
                                     "uint64",
-                                    init=txl.Cast(
+                                    init=txl.cast(
                                         q_idx * txl.uint32(block_q) + txl.uint32(q_inner_i),
                                         "uint64",
                                     )
-                                    * txl.Cast(logits_stride, "uint64"),
+                                    * txl.cast(logits_stride, "uint64"),
                                 )
-                                store_logits(q_offset_bf16 + txl.Cast(kv_offset, "uint64"), result)
+                                store_logits(q_offset_bf16 + txl.cast(kv_offset, "uint64"), result)
                         if not config.compressed_logits and config.logits_dtype == "float32":
                             for tb_i in range(block_q):
                                 txl.ptx.mov.b64(

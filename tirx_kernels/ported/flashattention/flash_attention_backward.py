@@ -572,9 +572,9 @@ def build_kernel(
         # tile linearises identically and the writes below are flat anyway.
         dQ_smem = smem.alloc((DQ_STAGES, BLK_M * DQ_RED_N), "float32", align=1024)
         # The two-stage dKV epilogue reuses sV for dV and sK for dK.
-        smem.pool.move_base_to(K_smem.buf.elem_offset * DTYPE_SIZE)
+        smem.pool.move_base_to(smem.offset_of(K_smem))
         dK_epi = smem.alloc((2, CTA_N, EPI_N), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
-        smem.pool.move_base_to(V_smem.buf.elem_offset * DTYPE_SIZE)
+        smem.pool.move_base_to(smem.offset_of(V_smem))
         dV_epi = smem.alloc((2, CTA_N, EPI_N), "float16", swizzle=txl.SwizzleMode.SWIZZLE_128B_ATOM)
 
         tma_kv.init(1)
@@ -658,7 +658,7 @@ def build_kernel(
             txl.ptx[TMA_S2G.format(dim=dim)](txl.address_of(tensormap), *coords, src_ptr)
 
         def tcgen05_commit(mbar_ptr):
-            txl.ptx[TCGEN05_COMMIT](mbar_ptr, txl.Cast(pair_mask, "uint16"))
+            txl.ptx[TCGEN05_COMMIT](mbar_ptr, txl.cast(pair_mask, "uint16"))
 
         def mma_chain2(d, *, a, b, idesc, accumulate, dol=MMA_KEEP_ALL_LANES):
             """Issue an unpredicated cta_group::2 chain inside ``elect_sync``.
@@ -843,9 +843,7 @@ def build_kernel(
                 )
 
                 def descriptor(base, view):
-                    delta16 = (
-                        (view.buf.elem_offset - anchor.buf.elem_offset) * DTYPE_SIZE // 16
-                    )
+                    delta16 = (smem.offset_of(view) - smem.offset_of(anchor)) // 16
                     start = txl.bitwise_and(
                         anchor_start + txl.uint64(delta16), txl.uint64(0x3FFF)
                     )
@@ -1333,16 +1331,16 @@ def build_kernel(
                         out.view("uint128")[ni],
                     )
                 txl.ptx.fence.proxy.async_.shared__cta()
-                txl.ptx.bar.sync(txl.Cast(wg_bar, "uint32"), 128)
+                txl.ptx.bar.sync(txl.cast(wg_bar, "uint32"), 128)
                 with txl.if_((warp_id == 0) & (lane_id == 0)), txl.then_():
                     tma_s2g(
                         4, epi_tile[compute_wg].ptr_to(0, 0), tensormap,
                         compute_wg * EPI_N, n_st_cta, h_idx, b_idx,
                     )
                 with txl.if_(warp_id == 0), txl.then_():
-                    txl.ptx.bar.arrive(txl.Cast(wg_bar, "uint32"), 160)
+                    txl.ptx.bar.arrive(txl.cast(wg_bar, "uint32"), 160)
                 txl.ptx.fence.proxy.async_.shared__cta()
-                txl.ptx.bar.sync(txl.Cast(wg_bar, "uint32"), 160)
+                txl.ptx.bar.sync(txl.cast(wg_bar, "uint32"), 160)
 
             epilogue_stage(dv_done, dv_done_ph, TMEM_OFF_B, dV_epi, dv_map)
             epilogue_stage(dk_done, dk_done_ph, TMEM_OFF_C, dK_epi, dk_map, softmax_scale)

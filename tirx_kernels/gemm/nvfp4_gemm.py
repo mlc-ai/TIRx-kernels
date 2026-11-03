@@ -528,19 +528,19 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                 txl.ptx[_TMA_G2S_2D](
                     A_smem_packed[stage].ptr_to(0, 0),
                     txl.address_of(A_tensor_map),
-                    txl.Cast(k, "int32"),
-                    txl.Cast(a_m, "int32"),
+                    txl.cast(k, "int32"),
+                    txl.cast(a_m, "int32"),
                     txl.cuda.cvta_generic_to_shared(txl.reinterpret(mapped_tile_bar, ty="handle")),
-                    txl.Cast(single_cta_mask, "uint16"),
+                    txl.cast(single_cta_mask, "uint16"),
                     txl.uint64(_EVICT_NORMAL_L2_POLICY),
                 )
                 txl.ptx[_TMA_G2S_2D](
                     B_smem_packed[stage].ptr_to(0, 0),
                     txl.address_of(B_tensor_map),
-                    txl.Cast(k, "int32"),
-                    txl.Cast(b_n, "int32"),
+                    txl.cast(k, "int32"),
+                    txl.cast(b_n, "int32"),
                     txl.cuda.cvta_generic_to_shared(txl.reinterpret(mapped_tile_bar, ty="handle")),
-                    txl.Cast(single_cta_mask, "uint16"),
+                    txl.cast(single_cta_mask, "uint16"),
                     txl.uint64(_EVICT_NORMAL_L2_POLICY),
                 )
 
@@ -573,10 +573,10 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                     SFA_smem.ptr_to([stage, 0, 0]),
                     txl.address_of(SFA_tensor_map),
                     txl.int32(0),
-                    txl.Cast(sf_k // 4, "int32"),
-                    txl.Cast(sf_m // 128, "int32"),
+                    txl.cast(sf_k // 4, "int32"),
+                    txl.cast(sf_m // 128, "int32"),
                     txl.cuda.cvta_generic_to_shared(txl.reinterpret(mapped_sfa_bar, ty="handle")),
-                    txl.Cast(single_cta_mask, "uint16"),
+                    txl.cast(single_cta_mask, "uint16"),
                     txl.uint64(_EVICT_NORMAL_L2_POLICY),
                 )
                 mapped_sfb_bar = _mapa_u64(scale_full_bar.ptr_to([stage]), 0)
@@ -586,12 +586,12 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                             SFB_smem.ptr_to([stage, 0, 0]),
                             txl.address_of(SFB_tensor_map),
                             txl.int32(0),
-                            txl.Cast(sf_k // 4, "int32"),
-                            txl.Cast(sf_n // 128, "int32"),
+                            txl.cast(sf_k // 4, "int32"),
+                            txl.cast(sf_n // 128, "int32"),
                             txl.cuda.cvta_generic_to_shared(
                                 txl.reinterpret(mapped_sfb_bar, ty="handle")
                             ),
-                            txl.Cast(pair_mask, "uint16"),
+                            txl.cast(pair_mask, "uint16"),
                             txl.uint64(_EVICT_NORMAL_L2_POLICY),
                         )
                 else:
@@ -599,12 +599,12 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                         SFB_smem.ptr_to([stage, cb_m * 128, 0]),
                         txl.address_of(SFB_tensor_map),
                         txl.int32(0),
-                        txl.Cast(sf_k // 4, "int32"),
-                        txl.Cast(sf_n // 128 + cb_m, "int32"),
+                        txl.cast(sf_k // 4, "int32"),
+                        txl.cast(sf_n // 128 + cb_m, "int32"),
                         txl.cuda.cvta_generic_to_shared(
                             txl.reinterpret(mapped_sfb_bar, ty="handle")
                         ),
-                        txl.Cast(pair_mask, "uint16"),
+                        txl.cast(pair_mask, "uint16"),
                         txl.uint64(_EVICT_NORMAL_L2_POLICY),
                     )
 
@@ -638,7 +638,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                             "uint64",
                             init=txl.bitwise_or(
                                 txl.bitwise_and(sf_desc.desc, txl.bitwise_not(txl.uint64(0x3FFF))),
-                                txl.Cast(
+                                txl.cast(
                                     txl.bitwise_and(
                                         txl.shift_right(sfa_shared_addr, txl.uint32(4)),
                                         txl.uint32(0x3FFF),
@@ -648,7 +648,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                             ),
                         )
                         txl.ptx[_TCGEN05_CP_2SM](
-                            txl.Cast(sfa_tmem_col + flat % 4 * 4, "uint32"), sfa_cp_desc
+                            txl.cast(sfa_tmem_col + flat % 4 * 4, "uint32"), sfa_cp_desc
                         )
                     for flat in range(SFB_N // 32):
                         sfb_row = flat % 4 * 32 + flat // 4 * 128
@@ -666,7 +666,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                             "uint64",
                             init=txl.bitwise_or(
                                 txl.bitwise_and(sf_desc.desc, txl.bitwise_not(txl.uint64(0x3FFF))),
-                                txl.Cast(
+                                txl.cast(
                                     txl.bitwise_and(
                                         txl.shift_right(sfb_shared_addr, txl.uint32(4)),
                                         txl.uint32(0x3FFF),
@@ -676,7 +676,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                             ),
                         )
                         txl.ptx[_TCGEN05_CP_2SM](
-                            txl.Cast(
+                            txl.cast(
                                 sfb_tmem_col + flat % 4 * SFB_n_chunks * 4 + flat // 4 * 4, "uint32"
                             ),
                             sfb_cp_desc,
@@ -705,7 +705,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                         )
                         sf_linear = ki * sf_mma_k
                         txl.ptx[_MMA_NVFP4_2SM](
-                            txl.Cast(tmem_col, "uint32"),
+                            txl.cast(tmem_col, "uint32"),
                             desc_a_ki,
                             desc_b_ki,
                             desc_i,
@@ -720,7 +720,7 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                                 sf_linear % 16 // sf_mma_k * sf_mma_k * SFB_n_chunks
                                 + sf_linear // 512,
                             ),
-                            txl.bool(True) if ki else txl.Cast(accum, "bool"),
+                            txl.bool(True) if ki else txl.cast(accum, "bool"),
                         )
                     txl.assign(accum, 1)
                     smem_pipe.empty.arrive(mma_smem.stage, cta_group=CTA_GROUP, cta_mask=pair_mask)
@@ -770,8 +770,8 @@ def make_kernel(M, N, KDIM, *, backend_config=None):
                     txl.ptx.fence.proxy.async_.shared__cta()
                     txl.ptx[_TMA_S2G_EVICT_FIRST](
                         txl.address_of(D_tensor_map),
-                        txl.Cast(d_n_out, "int32"),
-                        txl.Cast(d_m, "int32"),
+                        txl.cast(d_n_out, "int32"),
+                        txl.cast(d_m, "int32"),
                         output_smem[epi_wb_state.stage].ptr_to(0, 0),
                         txl.uint64(_EVICT_FIRST_L2_POLICY),
                     )

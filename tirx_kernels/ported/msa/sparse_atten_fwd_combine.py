@@ -257,7 +257,11 @@ def make_kernel(
 
         def _view(shape, dtype, byte_offset):
             return txl.decl_tensor(
-                shape, dtype, data=raw.data, scope="shared.dyn", byte_offset=byte_offset, align=1024
+                shape,
+                dtype,
+                data=txl.ptr_byte_offset(raw.data, byte_offset, ty=txl.Ptr(dtype, "shared.dyn")),
+                scope="shared.dyn",
+                align=1024,
             )
 
         s_lse = _view((topk * TILE_M,), "float32", OFF_SLSE)

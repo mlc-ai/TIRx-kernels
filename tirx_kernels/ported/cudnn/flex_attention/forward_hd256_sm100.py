@@ -654,36 +654,44 @@ def _make_kernel(*, backend_config=None, **config):
         q_smem = txl.decl_tensor(
             (2 * q_stage_bytes // 2,),
             elem_dtype_name,
-            data=arena.data,
-            byte_offset=sq_offset,
+            data=txl.ptr_byte_offset(
+                arena.data, sq_offset, ty=txl.Ptr(elem_dtype_name, "shared.dyn")
+            ),
             scope="shared.dyn",
             align=1024,
         )
         k_smem = txl.decl_tensor(
             (2 * kv_stage_bytes // 2,),
             elem_dtype_name,
-            data=arena.data,
-            byte_offset=sk_offset,
+            data=txl.ptr_byte_offset(
+                arena.data, sk_offset, ty=txl.Ptr(elem_dtype_name, "shared.dyn")
+            ),
             scope="shared.dyn",
             align=1024,
         )
         v_smem = txl.decl_tensor(
             (2 * kv_stage_bytes // 2,),
             elem_dtype_name,
-            data=arena.data,
-            byte_offset=sv_offset,
+            data=txl.ptr_byte_offset(
+                arena.data, sv_offset, ty=txl.Ptr(elem_dtype_name, "shared.dyn")
+            ),
             scope="shared.dyn",
             align=1024,
         )
         sum_smem = txl.decl_tensor(
-            (128,), "float32", data=arena.data, byte_offset=sum_offset, scope="shared.dyn", align=16
+            (128,),
+            "float32",
+            data=txl.ptr_byte_offset(arena.data, sum_offset, ty=txl.Ptr("float32", "shared.dyn")),
+            scope="shared.dyn",
+            align=16,
         )
         if not varlen:
             o_smem = txl.decl_tensor(
                 (128 * 256,),
                 elem_dtype_name,
-                data=arena.data,
-                byte_offset=so_offset,
+                data=txl.ptr_byte_offset(
+                    arena.data, so_offset, ty=txl.Ptr(elem_dtype_name, "shared.dyn")
+                ),
                 scope="shared.dyn",
                 align=1024,
             )

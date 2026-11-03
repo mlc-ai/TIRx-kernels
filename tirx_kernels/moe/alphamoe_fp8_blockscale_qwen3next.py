@@ -1094,7 +1094,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                     def mma_issue(bview):
                         a_desc, a_off = a_tile[sst.stage].encode(major="k", mma_k=32)
                         b_desc, b_off = bview.encode(major="k", mma_k=32)
-                        d_addr = tmem_base + txl.Cast(tst.stage, "uint32") * txl.uint32(NT)
+                        d_addr = tmem_base + txl.cast(tst.stage, "uint32") * txl.uint32(NT)
                         for ki in range(BK // 32):
                             txl.ptx[MMA](
                                 d_addr,
@@ -1112,7 +1112,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                         a_desc, a_off = a_tile[sst.stage].encode(major="k", mma_k=32)
                         b0_desc, b0_off = b_act[act_par * CS].encode(major="k", mma_k=32)
                         b1_desc, b1_off = b_act[act_par * CS + 1].encode(major="k", mma_k=32)
-                        d_addr = tmem_base + txl.Cast(tst.stage, "uint32") * txl.uint32(NT)
+                        d_addr = tmem_base + txl.cast(tst.stage, "uint32") * txl.uint32(NT)
                         for ki in range(CH // 32):
                             txl.ptx[MMA](
                                 d_addr,
@@ -1444,7 +1444,7 @@ def build_kernel(G, M, TOPK, E, HID, INTER, cs=CS, *, backend_config=None):
                 for _ in range(4):
                     tst.advance()
                 txl.ptx.tcgen05.fence__after_thread_sync()
-                taddr = tmem_base + txl.Cast(s0, "uint32") * txl.uint32(NT)
+                taddr = tmem_base + txl.cast(s0, "uint32") * txl.uint32(NT)
                 if nblk == NT:
                     txl.ptx[TMEM_LD64](*[pv[i] for i in range(4 * NT)], taddr)
                 else:

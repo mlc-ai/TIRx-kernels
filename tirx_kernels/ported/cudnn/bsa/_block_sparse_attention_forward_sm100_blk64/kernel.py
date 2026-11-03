@@ -278,7 +278,11 @@ def make_combine_kernel(*, backend_config=None, **config):
 
         def view(shape, dtype, byte_offset):
             return txl.decl_tensor(
-                shape, dtype, data=raw.data, byte_offset=byte_offset, scope="shared.dyn", align=128
+                shape,
+                dtype,
+                data=txl.ptr_byte_offset(raw.data, byte_offset, ty=txl.Ptr(dtype, "shared.dyn")),
+                scope="shared.dyn",
+                align=128,
             )
 
         s_lse = view((lse_split_storage * 16,), "float32", 0)

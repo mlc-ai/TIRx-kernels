@@ -1216,7 +1216,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                             txl.cast(384 + qk_rope_ki * 8, "uint32"),
                                             _desc_add_16B_offset(qk_rope_desc.desc, qk_rope_offset),
                                             txl.uint32(69207184),
-                                            txl.ptx.pred(txl.Cast(qk_rope_ki != 0, "bool")),
+                                            txl.ptx.pred(txl.cast(qk_rope_ki != 0, "bool")),
                                             txl.uint64(0),
                                         )
                                     bar_nope_ready.wait(rs_buf.stage, rs_buf.phase)
@@ -1240,7 +1240,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                         _desc_add_16B_offset(qk_nope_desc.desc, qk_nope_offset),
                                         txl.uint32(69207184),
                                         txl.ptx.pred(
-                                            txl.Cast(
+                                            txl.cast(
                                                 txl.Or(
                                                     qk_nope_ki != 0,
                                                     txl.cast(
@@ -1272,7 +1272,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                         _desc_add_16B_offset(pv_b_lo_desc.desc, pv_b_lo_offset),
                                         txl.uint32(71369872),
                                         txl.ptx.pred(
-                                            txl.Cast(
+                                            txl.cast(
                                                 txl.Or(pv_ki != 0, txl.cast(mma_o_accum, "bool")),
                                                 "bool",
                                             )
@@ -1293,7 +1293,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                         _desc_add_16B_offset(pv_b_hi_desc.desc, pv_b_hi_offset),
                                         txl.uint32(71369872),
                                         txl.ptx.pred(
-                                            txl.Cast(
+                                            txl.cast(
                                                 txl.Or(pv_ki != 0, txl.cast(mma_o_accum, "bool")),
                                                 "bool",
                                             )
@@ -1572,7 +1572,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                             byte_offsets[pair_i],
                                             (
                                                 txl.if_then_else(
-                                                    txl.Cast(token_valid, "bool"),
+                                                    txl.cast(token_valid, "bool"),
                                                     txl.cast(cache_block, "uint64")
                                                     * txl.cast(block_stride, "int64")
                                                     + txl.cast(index_in_block, "uint64")
@@ -1603,7 +1603,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                         # The offset is unguarded here (unlike the
                                         # V32 arm, which zeroes it), so the load stays
                                         # inside the validity branch.
-                                        with txl.if_(txl.Cast(token_valid, "bool")):
+                                        with txl.if_(txl.cast(token_valid, "bool")):
                                             with txl.then_():
                                                 txl.ptx.ld.global_.nc.u64(
                                                     words[pair_i],
@@ -1630,7 +1630,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                         pair_indices[pair_i] != -1, abs_pos + pair_i < cur_length
                                     )
                                     txl.ptx.mov.pred(
-                                        pair_token_valid[pair_i], txl.Cast(token_valid, "bool")
+                                        pair_token_valid[pair_i], txl.cast(token_valid, "bool")
                                     )
                                     txl.assign(
                                         valid_mask,
@@ -1648,7 +1648,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                     txl.ptx.mov.b32(
                                         coords[pair_i],
                                         txl.if_then_else(
-                                            txl.Cast(pair_token_valid[pair_i], "bool"),
+                                            txl.cast(pair_token_valid[pair_i], "bool"),
                                             txl.cast(cache_blocks[pair_i], "int32")
                                             * cur_tma_coords_step_per_block
                                             + txl.cast(indices_in_block[pair_i], "int32")
@@ -1689,7 +1689,7 @@ def make_main_kernel(model_type, presence, use_pdl=False, *, backend_config=None
                                             scale_words[pair_i],
                                             (
                                                 txl.if_then_else(
-                                                    txl.Cast(pair_token_valid[pair_i], "bool"),
+                                                    txl.cast(pair_token_valid[pair_i], "bool"),
                                                     txl.cast(packed_scale, "uint64"),
                                                     txl.uint64(0),
                                                 )
@@ -2091,13 +2091,10 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False, *, backend_co
         g_lse_accum = txl.decl_tensor(
             (max_splits * stride_lse_accum_split + 8,),
             "float32",
-            data=lse_accum.data,
+            data=lse_accum.ptr_to([g_lse_accum_offset]),
             scope="global",
-            elem_offset=g_lse_accum_offset,
         )
-        g_lse = txl.decl_tensor(
-            (8,), "float32", data=lse.data, scope="global", elem_offset=g_lse_offset
-        )
+        g_lse = txl.decl_tensor((8,), "float32", data=lse.ptr_to([g_lse_offset]), scope="global")
 
         # combine.cu:58-69. PDL wait follows both early returns.
         if use_pdl:
@@ -2113,9 +2110,8 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False, *, backend_co
         oaccum_ptr = txl.decl_tensor(
             (num_sm_parts * stride_o_accum_split + D_V,),
             "float32",
-            data=o_accum.data,
+            data=o_accum.ptr_to([oaccum_offset]),
             scope="global",
-            elem_offset=oaccum_offset,
         )
         datas = txl.alloc_local((D_V // (32 * 4), 4), "float32")
         data_words = datas.view("uint32")
@@ -2244,9 +2240,7 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False, *, backend_co
             "int32",
             init=batch_idx * stride_o_b + query_idx * stride_o_s_q + head_idx * stride_o_h_q,
         )
-        o_ptr = txl.decl_tensor(
-            (D_V,), "bfloat16", data=out.data, scope="global", elem_offset=out_offset
-        )
+        o_ptr = txl.decl_tensor((D_V,), "bfloat16", data=out.ptr_to([out_offset]), scope="global")
         with txl.unroll(D_V // (32 * 4)) as elem_i:
             data_converted = txl.alloc_local((4,), "uint16")
             txl.ptx.cvt.rn.bf16.f32(data_converted[0], result[elem_i, 0])

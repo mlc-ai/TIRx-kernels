@@ -1096,16 +1096,21 @@ def get_kernel(
         l1_acts = txl.decl_tensor(
             (num_ring_tokens, hidden),
             "int8",
-            data=symm_buffer.data,
+            data=txl.reinterpret(
+                symm_buffer.ptr_to([symm_buffer_layout.l1_token_offset]),
+                ty=PtrType(PrimType("int8")),
+            ),
             scope="global",
-            elem_offset=symm_buffer_layout.l1_token_offset,
         )
+        if symm_buffer_layout.l1_sf_offset % 4:
+            raise ValueError("l1_sf_offset must be 4-byte aligned for the int32 SF view")
         l1_acts_sf = txl.decl_tensor(
             (hidden // 128, workspace_layout.num_sf_ring_tokens),
             "int32",
-            data=symm_buffer.data,
+            data=txl.reinterpret(
+                symm_buffer.ptr_to([symm_buffer_layout.l1_sf_offset]), ty=PtrType(PrimType("int32"))
+            ),
             scope="global",
-            elem_offset=symm_buffer_layout.l1_sf_offset // 4,
         )
         workspace_expert_send_count = txl.decl_tensor(
             (num_experts,),
@@ -1290,16 +1295,19 @@ def get_kernel(
         l2_acts = txl.decl_tensor(
             (num_ring_tokens, intermediate_hidden),
             "int8",
-            data=symm_buffer.data,
+            data=txl.reinterpret(
+                symm_buffer.ptr_to([symm_buffer_layout.l2_token_offset]),
+                ty=PtrType(PrimType("int8")),
+            ),
             scope="global",
-            elem_offset=symm_buffer_layout.l2_token_offset,
         )
         l2_sf_buffer = txl.decl_tensor(
             (intermediate_hidden // 128 * workspace_layout.num_sf_ring_tokens * 4,),
             "int8",
-            data=symm_buffer.data,
+            data=txl.reinterpret(
+                symm_buffer.ptr_to([symm_buffer_layout.l2_sf_offset]), ty=PtrType(PrimType("int8"))
+            ),
             scope="global",
-            elem_offset=symm_buffer_layout.l2_sf_offset,
         )
         combine_tokens = txl.decl_tensor(
             (num_combine_slots, workspace_layout.num_max_tokens_per_rank, hidden),
@@ -1396,13 +1404,12 @@ def get_kernel(
             )
         smem.commit()
 
-        # Aliases must retain the pool allocation offset; sharing only `data` rebases to SMEM 0.
+        # `data` already carries the pool allocation offset, so these alias smem_cd_raw itself.
         smem_cd_l1 = txl.decl_tensor(
             (num_tma_store_stages, num_epilogue_wgs, kernel_config.store_block_m, l1_out_block_n),
             "int8",
             data=smem_cd_raw.data,
             scope="shared.dyn",
-            elem_offset=smem_cd_raw.elem_offset,
             align=16,
         )
         smem_cd_l2 = txl.decl_tensor(
@@ -1410,8 +1417,6 @@ def get_kernel(
             "uint16",
             data=smem_cd_raw.data,
             scope="shared.dyn",
-            # elem_offset is measured in the alias dtype, so retain the same byte base.
-            elem_offset=smem_cd_raw.elem_offset // 2,
             align=16,
         )
         combine_chunks = txl.decl_tensor(
