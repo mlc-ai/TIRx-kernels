@@ -1622,14 +1622,16 @@ def _encode_tma_3d_desc(
 
 
 def _build_tirx_tensor_maps(data: dict[str, Any]) -> dict[str, Any]:
-    import tvm_tirx
+    import tvm_ffi
+
+    import tvm_tirx  # noqa: F401 (registers runtime global functions)
     from tirx_kernels.ported.deepgemm._sm100_fp8_fp4_mega_moe.spec import _encode_tma_2d_desc
 
     config: PagedMQALogitsFP8Config = data["config"]
     q_fp8 = data["q"]
     fused = data["fused_kv_cache"]
     weights = data["weights"]
-    encode_tensormap = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode_tensormap = tvm_ffi.get_global_func("runtime.cuTensorMapEncodeTiled")
     kv_flat = fused.view(torch.uint8).view(
         config.num_pages, config.page_size * (config.head_dim + 4)
     )

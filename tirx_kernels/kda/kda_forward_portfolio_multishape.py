@@ -1907,7 +1907,7 @@ _TMAP_ENCODE = None
 def _tmap_encode():
     global _TMAP_ENCODE
     if _TMAP_ENCODE is None:
-        _TMAP_ENCODE = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
+        _TMAP_ENCODE = tvm_ffi.get_global_func("runtime.cuTensorMapEncodeTiled")
     return _TMAP_ENCODE
 
 
@@ -3767,7 +3767,7 @@ class _AlignedTensorMap:
 
 def _encode(tensor, dims, strides_bytes, box, swizzle_code):
     desc = _AlignedTensorMap()
-    encode = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode = tvm_ffi.get_global_func("runtime.cuTensorMapEncodeTiled")
     encode(
         desc.ptr,
         "bfloat16",

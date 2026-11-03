@@ -625,13 +625,15 @@ def _as_preallocated(state):
 
 
 def _encode_tensormap(tensor, dtype_name, dims, strides, box, swizzle):
-    import tvm_tirx
+    import tvm_ffi
+
+    import tvm_tirx  # noqa: F401 (registers runtime global functions)
 
     rank = len(dims)
     if len(strides) != rank - 1 or len(box) != rank:
         raise ValueError("TensorMap dimensions, strides, and box disagree")
     result = _AlignedTensorMap()
-    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_ffi.get_global_func("runtime.cuTensorMapEncodeTiled")(
         result.ptr,
         dtype_name,
         rank,

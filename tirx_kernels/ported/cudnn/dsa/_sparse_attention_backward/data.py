@@ -172,11 +172,13 @@ def _encode_tensormap(tensor, dtype, global_dims, global_strides, box_dims):
     """One ``cuTensorMapEncodeTiled``; element strides are all 1 here."""
     import ctypes
 
-    import tvm_tirx
+    import tvm_ffi
+
+    import tvm_tirx  # noqa: F401 (registers runtime global functions)
 
     rank = len(global_dims)
     descriptor = _AlignedTensorMap()
-    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_ffi.get_global_func("runtime.cuTensorMapEncodeTiled")(
         descriptor.ptr,
         dtype,
         rank,

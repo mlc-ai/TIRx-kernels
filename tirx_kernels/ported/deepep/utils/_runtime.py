@@ -26,7 +26,7 @@ import torch.multiprocessing as mp
 
 import tvm_tirx
 from tirx_kernels.runner import cuda_target
-from tvm_tirx.tirx.bench import DistributedBenchContext
+from tvm_tirx.testing.bench import DistributedBenchContext
 
 _PROCESS_GROUP_TIMEOUT = timedelta(seconds=60)
 

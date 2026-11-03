@@ -23,7 +23,7 @@ Before editing a kernel, inspect the current versions of:
 - `tests/lint/check_license_headers.py` and the license hook in
   `.pre-commit-config.yaml`
 - the `license` and `license-files` fields in `pyproject.toml`
-- `tvm_tirx.tirx.bench.bench` in the paired TVM worktree
+- `tvm_tirx.testing.bench.bench` in the paired tvm-tirx checkout
 - tests covering the affected CLI or protocol
 - one recently maintained module with similar runtime and reference behavior
 
@@ -35,7 +35,7 @@ it lags the executable code. If sources conflict, follow this order:
 3. `_protocol.py`
 4. this skill
 
-The paired worktrees matter: the host `~/tvm` or `~/tirx-kernels` checkout may not
+The paired worktrees matter: the host `~/tvm-tirx` or `~/tirx-kernels` checkout may not
 match the branch under development. If live code differs from this skill, follow
 the live code and update the skill.
 
@@ -291,12 +291,12 @@ python -m tirx_kernels.bench_suite --check-imports
 
 ## 7. Benchmark Entry Point
 
-Use the paired TVM worktree's `tvm_tirx.tirx.bench.bench` as the standard timing API.
+Use the paired tvm-tirx checkout's `tvm_tirx.testing.bench.bench` as the standard timing API.
 The local benchmark API takes our no-argument launch closures and optional lazy
 reference builders:
 
 ```python
-from tvm_tirx.tirx.bench import bench
+from tvm_tirx.testing.bench import bench
 
 
 def run_bench(
@@ -376,7 +376,7 @@ Distributed timing:
 - Auxiliary streams must synchronize correctly with the context's timing stream.
 
 `megamoe` is a specialized CLI/module protocol for the DeepGEMM MegaMoE path, not
-a general `tvm_tirx.tirx.bench.bench` timer. It fixes its own schedule; do not pass
+a general `tvm_tirx.testing.bench.bench` timer. It fixes its own schedule; do not pass
 `warmup` or `repeat` overrides to it.
 
 Do not mix values from different timers in one unlabeled comparison. Do not claim
@@ -434,7 +434,7 @@ Suite rules:
 
 - The suite runs on a kcoral benchmark server (`--server` / `$TIRX_BENCH_SERVER`,
   client via `pip install -e '.[remote]'`); it never touches a local GPU. The
-  local `tirx_kernels/` tree is shipped with every request; TVM and the
+  local `tirx_kernels/` tree is shipped with every request; `tvm_tirx` and the
   reference packages are the server worker's.
 - Multi-GPU workloads cannot run through the suite; keep them `default: false`.
 - The default is five independent rounds with arithmetic-mean aggregation.
@@ -455,7 +455,7 @@ python tirx_kernels/bench_suite/promote_baseline.py \
 ```
 
 Incremental `--merge` promotion is disabled: only a complete default sweep may
-become the baseline, and it must come from the same server TVM and execution
+become the baseline, and it must come from the same server `tvm_tirx` and execution
 mode as the runs gated against it. Promotion regenerates `baseline.md`. Never
 copy a run JSON over `baseline.json`.
 
