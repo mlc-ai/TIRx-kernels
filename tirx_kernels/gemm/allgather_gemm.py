@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.distributed as dist
+import tvm_ffi
 
 import tirx_kernels.tirx_lite as txl
 import tvm_tirx
@@ -1154,7 +1155,7 @@ class _Case:
         sync_compute_to_communication(self.runtime)
 
     def launch(self) -> None:
-        tvm_tirx.get_global_func(ALLGATHER_HOST_ENTRYPOINT)(
+        tvm_ffi.get_global_func(ALLGATHER_HOST_ENTRYPOINT)(
             self.semaphore,
             self.A,
             self.ag_out,

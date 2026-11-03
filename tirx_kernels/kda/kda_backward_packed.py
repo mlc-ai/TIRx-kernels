@@ -218,10 +218,12 @@ class AlignedTensorMap:
 
 def encode_tensor_map(tensor, dtype: str, dims, strides_bytes, box, swizzle=3, l2promo=2):
     """cuTensorMapEncodeTiled through TVM's runtime function (dims innermost first)."""
-    import tvm_tirx
+    import tvm_ffi
+
+    import tvm_tirx  # noqa: F401 (registers runtime global functions)
 
     desc = AlignedTensorMap()
-    encode = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode = tvm_ffi.get_global_func("runtime.cuTensorMapEncodeTiled")
     rank = len(dims)
     assert len(strides_bytes) == rank - 1 and len(box) == rank
     encode(

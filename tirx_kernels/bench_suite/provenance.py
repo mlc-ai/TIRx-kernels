@@ -48,40 +48,69 @@ def git_label(repo: Path) -> str | None:
     return sha + ("-dirty" if dirty else "")
 
 
-def module_repo_root(import_name: str) -> Path | None:
-    """Git root of an importable package, if it's a local checkout."""
+def _module_dir(import_name: str) -> Path | None:
+    """Resolved directory of an importable package, if it can be imported."""
     try:
         mod = __import__(import_name)
     except Exception:
         return None
     pkg_file = getattr(mod, "__file__", None)
-    if not pkg_file:
-        try:
-            paths = list(getattr(mod, "__path__", []) or [])
-            if paths:
-                pkg_file = str(Path(paths[0]) / "__init__.py")
-        except Exception:
-            pass
-    if not pkg_file:
+    if pkg_file:
+        return Path(pkg_file).resolve().parent
+    try:
+        paths = list(getattr(mod, "__path__", []) or [])
+    except Exception:
         return None
-    for p in [Path(pkg_file).resolve().parent, *Path(pkg_file).resolve().parents]:
+    return Path(paths[0]).resolve() if paths else None
+
+
+def _enclosing_git_root(path: Path) -> Path | None:
+    for p in [path, *path.parents]:
         if (p / ".git").exists():
             return p
     return None
 
 
-def tir_repo_root() -> Path | None:
-    """TVM git root: TVM_PATH env, else the imported tvm_tirx checkout."""
-    env = os.environ.get("TVM_PATH")
+def module_repo_root(import_name: str) -> Path | None:
+    """Git root of an importable package, if it's a local checkout."""
+    package = _module_dir(import_name)
+    return _enclosing_git_root(package) if package else None
+
+
+# Location of the ``tvm_tirx`` package inside an apache/tvm-tirx checkout.
+TIRX_PACKAGE_PATH = "python/tvm_tirx"
+
+
+def tirx_checkout() -> tuple[Path, str] | None:
+    """``(git root, package path)`` of the tvm-tirx checkout providing ``tvm_tirx``.
+
+    ``TVM_TIRX_PATH`` names a tvm-tirx checkout explicitly. Otherwise the
+    imported package's enclosing git repository is used, provided it tracks the
+    package; a wheel installed inside an unrelated repository has no checkout.
+    """
+    env = os.environ.get("TVM_TIRX_PATH")
     if env:
-        p = Path(env).resolve()
-        if (p / "tirx" / "python" / "tvm_tirx").is_dir():
-            return p
-    return module_repo_root("tvm_tirx")
+        root = Path(env).resolve()
+        if (root / TIRX_PACKAGE_PATH).is_dir():
+            return root, TIRX_PACKAGE_PATH
+    package = _module_dir("tvm_tirx")
+    root = _enclosing_git_root(package) if package else None
+    if root is None:
+        return None
+    path = package.relative_to(root).as_posix()
+    if git_tree_sha(root, path) is None:
+        return None
+    return root, path
+
+
+def tir_repo_root() -> Path | None:
+    """Git root of the tvm-tirx checkout providing ``tvm_tirx``."""
+    checkout = tirx_checkout()
+    return checkout[0] if checkout else None
 
 
 def collect_repo_git() -> dict[str, str | None]:
-    """SHAs for the three repos involved: tvm, tirx-kernels, tirx-bench-ci."""
+    """SHAs for the three repos involved: tvm-tirx, tirx-kernels, tirx-bench-ci."""
     tir_root = tir_repo_root()
     tirx_root = module_repo_root("tirx_kernels") or kernels_repo_root()
     bench_ci_root: Path | None = None
@@ -117,11 +146,11 @@ def collect_kernel_fingerprint() -> dict[str, str | None]:
     unchanged. Confirm a checkout matches a recorded baseline with
     ``git rev-parse HEAD:<path>``.
     """
-    tir_root = tir_repo_root()
+    checkout = tirx_checkout()
     tirx_root = module_repo_root("tirx_kernels") or kernels_repo_root()
     return {
-        # Preserve the report schema while fingerprinting the split compiler package.
-        "tir:python/tvm/tirx": git_tree_sha(tir_root, "tirx/python/tvm_tirx"),
+        # Preserve the report schema key while fingerprinting the tvm_tirx package.
+        "tir:python/tvm/tirx": git_tree_sha(*checkout) if checkout else None,
         "tirx-kernels:tirx_kernels": git_tree_sha(tirx_root, "tirx_kernels"),
     }
 

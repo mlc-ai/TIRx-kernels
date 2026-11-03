@@ -12,8 +12,9 @@ import sys
 from enum import IntEnum
 from pathlib import Path
 
+import tvm_ffi
+
 import tirx_kernels.tirx_lite as txl
-import tvm_tirx
 from tirx_kernels.runner import bench, cuda_target, resolve_backend_config
 
 
@@ -921,7 +922,7 @@ class _AlignedTensorMap:
 
 def _encode_tiled(dtype, tensor, *, dims, strides_bytes, box, swizzle):
     descriptor = _AlignedTensorMap()
-    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_ffi.get_global_func("runtime.cuTensorMapEncodeTiled")(
         descriptor.ptr,
         dtype,
         len(dims),

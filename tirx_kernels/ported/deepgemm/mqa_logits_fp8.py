@@ -14,9 +14,9 @@ from typing import Any
 from unittest import SkipTest
 
 import torch
+import tvm_ffi
 
 import tirx_kernels.tirx_lite as txl
-import tvm_tirx
 from tirx_kernels.runner import cache_backend_config, cuda_target, resolve_backend_config
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
@@ -34,7 +34,7 @@ class _AlignedTensorMap:
 
 def _encode_tensor_map(dtype, rank, tensor, dims, strides, box, swizzle):
     descriptor = _AlignedTensorMap()
-    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_ffi.get_global_func("runtime.cuTensorMapEncodeTiled")(
         descriptor.ptr,
         dtype,
         rank,

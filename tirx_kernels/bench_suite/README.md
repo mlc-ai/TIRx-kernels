@@ -53,12 +53,12 @@ export TIRX_BENCH_SERVER=http://127.0.0.1:8901   # or pass --server URL
 
 The local `tirx_kernels/` tree is shipped with each request (a deterministic
 tar.gz, blob-cached on the server by SHA-256), so the kernels measured are the
-ones in this checkout. TVM, torch, triton and the reference packages are the
-server worker's; `/health` versions, the worker's TVM git HEAD and a content
-fingerprint of its `tirx/python/tvm_tirx` are recorded under `pipeline.server` and
-as `git.tir` / `kernel_tree` in every run. A local TVM checkout is never
-measured; changing the server's TVM makes `ratio_diff` refuse the comparison
-until the baseline is promoted again.
+ones in this checkout. `tvm_tirx`, torch, triton and the reference packages are
+the server worker's; `/health` versions, the git HEAD of the worker's tvm-tirx
+checkout and a content fingerprint of its `tvm_tirx/tirx` package are recorded
+under `pipeline.server` and as `git.tir` / `kernel_tree` in every run. A local
+tvm-tirx checkout is never measured; changing the server's `tvm_tirx` makes
+`ratio_diff` refuse the comparison until the baseline is promoted again.
 
 `--with-references` builds the reference implementations on the worker, so the
 worker environment needs the pinned packages from `reference-dependencies.json`
@@ -85,7 +85,7 @@ rows from different revisions would create competing baseline identities.
 
 ## Run the after gate
 
-Use the same workload set, TVM, dependencies, runner, timer, round count, and
+Use the same workload set, `tvm_tirx`, dependencies, runner, timer, round count, and
 implementation order:
 
 ```bash
@@ -113,7 +113,7 @@ pass iff speedup > -1%
 
 Equality at `-1%` fails. Missing, duplicate, failed, dirty, or otherwise
 incomparable rows fail; the baseline and the run must come from the same
-execution mode, measurement protocol, and server TVM. A complete matrix discovers crossings;
+execution mode, measurement protocol, and server `tvm_tirx`. A complete matrix discovers crossings;
 after that, rerun only configs that are missing, changed, failed, or polluted.
 An explicit workload file or filter records a targeted selection, so the gate
 requires exactly those after rows while still requiring the immutable before

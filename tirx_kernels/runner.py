@@ -732,7 +732,7 @@ def run_kernel_bench(
     Delegates to ``mod.run_bench(**params, ...)`` if available, otherwise runs
     ``run_test`` without timing. warmup/repeat are only forwarded when explicitly
     provided (CLI ``--warmup/--repeat`` or a per-workload override); otherwise each
-    timer uses its own Triton-aligned default inside ``tvm_tirx.tirx.bench.bench``.
+    timer uses its own Triton-aligned default inside ``tvm_tirx.testing.bench.bench``.
     """
     mod = None if registry is None else registry[kernel_name]
     if mod is None:

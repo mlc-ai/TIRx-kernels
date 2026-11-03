@@ -1037,9 +1037,11 @@ def _build_tirx_tensor_maps(
     shared_l2_weights: torch.Tensor | None = None,
     shared_l2_weights_sf: torch.Tensor | None = None,
 ) -> dict[str, _AlignedTensorMap]:
-    import tvm_tirx
+    import tvm_ffi
 
-    encode_tensormap = tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")
+    import tvm_tirx  # noqa: F401 (registers runtime global functions)
+
+    encode_tensormap = tvm_ffi.get_global_func("runtime.cuTensorMapEncodeTiled")
     launch = get_deepgemm_launch_config(case.config)
     workspace = case.workspace_layout
     gran_k = 32
@@ -1357,7 +1359,7 @@ def _compile_tirx_mega_moe(
 def _load_prepared_mega_moe_executable(library_path: str) -> Any:
     import tvm_tirx
 
-    return tvm_tirx.runtime.Executable(tvm_tirx.runtime.load_module(library_path))
+    return tvm_tirx.codegen.Executable(tvm_tirx.runtime.load_module(library_path))
 
 
 def _require_mega_moe_tuple(name: str, value: Any) -> tuple[torch.Tensor, torch.Tensor]:

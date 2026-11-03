@@ -154,7 +154,7 @@ def main():
             if args.config and label != args.config:
                 continue
             try:
-                # GPU flock is inside tvm_tirx.tirx.bench (prepare + rounds).
+                # GPU flock is inside tvm_tirx.testing.bench (prepare + rounds).
                 result = run_kernel_bench(
                     name,
                     cfg,

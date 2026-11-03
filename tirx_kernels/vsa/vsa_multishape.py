@@ -50,6 +50,7 @@ from typing import Any
 from unittest import SkipTest
 
 import torch
+import tvm_ffi
 
 import tirx_kernels.tirx_lite as txl
 import tvm_tirx
@@ -2410,7 +2411,7 @@ def _encode_map(tensor, S, H, box_rows, box_bands=1):
     dims = (64, S, H * 2)
     strides = (H * D * 2, 128)
     box = (64, box_rows, box_bands)
-    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_ffi.get_global_func("runtime.cuTensorMapEncodeTiled")(
         desc.ptr,
         "bfloat16",
         3,

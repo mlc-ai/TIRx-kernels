@@ -50,6 +50,7 @@ from typing import Any
 from unittest import SkipTest
 
 import torch
+import tvm_ffi
 
 import tirx_kernels.tirx_lite as txl
 import tvm_tirx
@@ -2528,7 +2529,7 @@ def _encode(tensor, dtype_name, dims, strides, box, l2_promotion=2):
     desc = _AlignedTensorMap()
     rank = len(dims)
     assert len(strides) == rank - 1 and len(box) == rank
-    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(
+    tvm_ffi.get_global_func("runtime.cuTensorMapEncodeTiled")(
         desc.ptr,
         dtype_name,
         rank,

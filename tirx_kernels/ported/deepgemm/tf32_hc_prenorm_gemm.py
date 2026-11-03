@@ -9,6 +9,7 @@ from typing import Any
 from unittest import SkipTest
 
 import torch
+import tvm_ffi
 
 import tirx_kernels.tirx_lite as txl
 import tvm_tirx
@@ -922,7 +923,7 @@ def _encode_tensor_map(
     ]
     if force_cu_dtype is not None:
         args.append(force_cu_dtype)
-    tvm_tirx.get_global_func("runtime.cuTensorMapEncodeTiled")(*args)
+    tvm_ffi.get_global_func("runtime.cuTensorMapEncodeTiled")(*args)
     return descriptor
 
 

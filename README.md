@@ -1,6 +1,6 @@
 # TIRx kernels
 
-Curated high-performance [TIRx](https://github.com/apache/tvm) GPU kernels,
+Curated high-performance [TIRx](https://github.com/apache/tvm-tirx) GPU kernels,
 with support for [tirx-harness](https://github.com/mlc-ai/TIRx-harness).
 
 ## Kernels
@@ -226,7 +226,7 @@ remain externally managed runtime/compiler dependencies.
 
 | Dependency       | Needed by                          | Notes                                                  |
 | ---------------- | ---------------------------------- | ------------------------------------------------------ |
-| `tvm_tirx`       | all kernels (compile + run)        | The TIRx compiler. Put it on `PYTHONPATH`, e.g. `/path/to/tvm/tirx/python`. |
+| `tvm_tirx`       | all kernels (compile + run)        | The TIRx compiler from [apache/tvm-tirx](https://github.com/apache/tvm-tirx). Install it from a checkout, or put the checkout's `python/` on `PYTHONPATH`. |
 | `torch`          | all kernels                        | CUDA build matching your GPU.                          |
 | `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels and the MegaMoE timer. |
 | cuDNN Frontend (`cudnn`) | `cudnn_*` correctness and baselines | Source install pinned in the lock (v1.28.0); replaces any released `nvidia-cudnn-frontend` wheel, which lacks the CuTeDSL kernel sources. |
