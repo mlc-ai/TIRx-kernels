@@ -1,6 +1,6 @@
 # Treat a dead tail's unrolling as a change, not a cleanup
 
-**Symptoms:** `instruction_count_bloat`, `unreachable_code_expansion`, `dead_tail_loop`
+**Symptoms:** `instruction_count_bloat`, `unreachable_code_expansion`, `dead_tail_loop`, `missing_pragma_unroll`
 
 ## Symptom
 
@@ -14,14 +14,15 @@ Disable unrolling on the dead tail -- then put the change through the complete
 matrix like any other change, not as a free cleanup, and do not land it
 alongside a second change.
 
+Spell it `unroll=False`, never as a hand-written annotation key. The builder
+writes the key that the current toolchain reads. A stale key such as
+`"disable_unroll"` stays on the loop but emits no `#pragma unroll 1`.
+
 ```python
 # The bound is a runtime value that is zero in every dispatched regime,
 # so the unrolled copies are unreachable code.
+# before: for t_offset in T.serial(0, tail_bound, annotations={"disable_unroll": True}):
 for t_offset in T.serial(0, tail_bound, unroll=False):
-    ...
-
-# Equivalent explicit form.
-for t_offset in T.serial(0, tail_bound, annotations={"disable_unroll": True}):
     ...
 ```
 
@@ -42,5 +43,6 @@ specialization axis that had to be withdrawn.
 
 ## Verification
 
-Identify the expansion in SASS, then run the complete shape matrix with the
-unroll change isolated from any other change.
+Identify the expansion in SASS and confirm `#pragma unroll 1` on the loop in
+the generated CUDA. Then run the complete shape matrix with the unroll change
+isolated from any other change.

@@ -41,6 +41,8 @@ from __future__ import annotations
 
 import tvm_tirx
 from tvm_tirx.backend.cuda.layout import SwizzleMode
+from tvm_tirx.ir.op import Op as _Op
+from tvm_tirx.ir.type import PrimType as _PrimType
 from tvm_tirx.script import tirx as _T
 from tvm_tirx.script.ir_builder import IRBuilder
 from tvm_tirx.tirx.script import ir_builder as _I
@@ -57,6 +59,46 @@ from .smem import (
     smem_pool,
 )
 from .specialize import specialize, tid_in_role, warp_id_in_role
+
+# ---------------------------------------------------------------------------
+# tvm-tirx registration gap: void intrinsics without a result type
+# ---------------------------------------------------------------------------
+#
+# tvm-tirx registers these intrinsics with neither ``TFixedReturnType`` nor
+# ``FInferType``; siblings such as ``tirx.nvshmem.wait_until`` and
+# ``tirx.nvshmem.getmem_nbi_warp`` register void. A Call built with ``ty=None``
+# is then typed ``Missing``, which ``auto_emit_void_call`` does not count as
+# void, so the Call is returned instead of emitted. TVMScript still wraps the
+# expression statement in ``Evaluate``. A traced ``txl`` call discards the
+# return value, so the statement vanishes from the kernel. A dropped
+# ``txl.cuda.wait_until`` leaves a real cross-CTA race. Register void here
+# until tvm-tirx does, and never replace a type it already registers.
+_UNTYPED_VOID_INTRINSICS = (
+    "tirx.cuda.wait_until",
+    "tirx.cuda.timer_init",
+    "tirx.cuda.timer_start",
+    "tirx.cuda.timer_end",
+    "tirx.cuda.timer_finalize",
+    "tirx.nvshmem.getmem_nbi_block",
+)
+
+
+def _register_void_result_types():
+    registered = set(_Op.list_op_names())
+    typed = [
+        attr_map
+        for attr_map in (_Op.get_attr_map("TFixedReturnType"), _Op.get_attr_map("FInferType"))
+        if attr_map is not None
+    ]
+    for name in _UNTYPED_VOID_INTRINSICS:
+        if name not in registered:
+            continue
+        op = _Op.get(name)
+        if not any(op in attr_map for attr_map in typed):
+            op.set_attr("TFixedReturnType", _PrimType("void"))
+
+
+_register_void_result_types()
 
 # ---------------------------------------------------------------------------
 # Explicit statement helpers

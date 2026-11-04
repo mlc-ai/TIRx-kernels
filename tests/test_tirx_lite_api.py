@@ -339,6 +339,43 @@ def test_call_packed_has_statement_semantics():
     )
 
 
+def test_wait_until_is_emitted_as_a_statement():
+    @txl.kernel()
+    def probe(flag: txl.Tensor((1,), "int32")):
+        txl.device_entry(launch=txl.cuda.LaunchConfig(grid=1, block=1 * 32))
+
+        spin = txl.local_scalar("int32")
+        txl.cuda.wait_until(spin, flag.ptr_to([0]), spin >= 1, scope="gpu", ptx_type="b32")
+
+    statements = []
+    structural_walk(probe.func.body, (ir.Evaluate, lambda op: statements.append(op)))
+    assert (
+        sum(
+            getattr(getattr(op.value, "op", None), "name", None) == "tirx.cuda.wait_until"
+            for op in statements
+        )
+        == 1
+    )
+
+
+def test_cuda_intrinsics_without_explicit_ty_have_a_result_type():
+    # A Call built with ty=None to an Op that registers neither attribute is
+    # typed Missing, is not auto-emitted, and so is silently dropped by tracing.
+    typed = [
+        attr_map
+        for attr_map in (ir.Op.get_attr_map("TFixedReturnType"), ir.Op.get_attr_map("FInferType"))
+        if attr_map is not None
+    ]
+    untyped = sorted(
+        name
+        for name in ir.Op.list_op_names()
+        if name.startswith(("tirx.cuda.", "tirx.nvshmem."))
+        and not any(ir.Op.get(name) in attr_map for attr_map in typed)
+    )
+    # Their constructors take a required keyword-only ty.
+    assert untyped == ["tirx.cuda.mma_fill", "tirx.cuda.mma_store"]
+
+
 def test_cu_tensor_map_encode_tiled_emits_typed_encode():
     @txl.kernel(check_ir=False)
     def probe(out: txl.Tensor((txl.int64(),), "float32")):
