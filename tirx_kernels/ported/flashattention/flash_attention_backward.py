@@ -802,9 +802,7 @@ def build_kernel(
             # Every stream is single-stage and released at the earliest
             # observable consumption point. Qt trails the row-major streams
             # by one M tile, so it is issued at the front of the trip.
-            with txl.serial(
-                num_m_tiles_this_n - 1, annotations={"disable_unroll": True}
-            ) as i_m:
+            with txl.serial(num_m_tiles_this_n - 1, unroll=False) as i_m:
                 m_st_next = (m_tile_start + i_m + 1) * BLK_M
                 load_q_col(m_st_next - BLK_M)
                 load_q_row(m_st_next)
@@ -997,9 +995,7 @@ def build_kernel(
                 phase_c()
 
                 # ---- main loop: M-tiles 1..N-1 ----
-                with txl.serial(
-                    num_m_tiles_this_n - 1, annotations={"disable_unroll": True}
-                ) as _i_m:
+                with txl.serial(num_m_tiles_this_n - 1, unroll=False) as _i_m:
                     # From the second trip onward Phase A also waits until the
                     # reducer drained the previous dQ tile aliasing the upper
                     # half of S.
@@ -1056,9 +1052,7 @@ def build_kernel(
             # Relay the per-CTA DSMEM completion to one leader-local
             # barrier, keeping the MMA warp off the cross-CTA wait path.
             relay_ph = txl.PipelineState(1, phase=0)
-            with txl.serial(
-                num_m_tiles_this_n, annotations={"disable_unroll": True}
-            ) as _r:
+            with txl.serial(num_m_tiles_this_n, unroll=False) as _r:
                 ds_exch_mbar.wait(0, relay_ph.phase)
                 relay_ph.advance()
                 with txl.if_(elected()), txl.then_():
@@ -1099,9 +1093,7 @@ def build_kernel(
                 txl.ptx.fma.rn.f32x2(result, scores, scale, neg_lse)
                 return result
 
-            with txl.serial(
-                num_m_tiles_this_n, annotations={"disable_unroll": True}
-            ) as i_m_inner:
+            with txl.serial(num_m_tiles_this_n, unroll=False) as i_m_inner:
                 i_m = m_tile_start + i_m_inner
                 m_st_val = i_m * BLK_M
 
@@ -1360,9 +1352,7 @@ def build_kernel(
             row_local = warp_id * 32 + lane_id
             gemm_dq_ph = txl.PipelineState(1, phase=0)
 
-            with txl.serial(
-                num_m_tiles_this_n, annotations={"disable_unroll": True}
-            ) as i_m_inner:
+            with txl.serial(num_m_tiles_this_n, unroll=False) as i_m_inner:
                 m_st_val = (m_tile_start + i_m_inner) * BLK_M
 
                 mma2wg0_dq.wait(0, gemm_dq_ph.phase)
