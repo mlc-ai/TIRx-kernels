@@ -90,6 +90,26 @@ def test_cpu_prepare_requires_explicit_arch():
         runner.prepare_kernel_bench("unused", {})
 
 
+@pytest.mark.parametrize("family", ["q4r", "q4d", "q1d", "q16_twotile", "qm64", "qm", "kv"])
+def test_msa_dispatch_forwards_backend_config(monkeypatch, family):
+    module = importlib.import_module("tirx_kernels.msa.msa_decode_multishape")
+    config = {"cuda": {"arch": "sm_100a", "nvrtc": ["--ftz=false"]}}
+    data = {"q": object(), "k": object()}
+    for candidate in ("q4r", "q4d", "q1d", "q16_twotile", "qm64"):
+        monkeypatch.setattr(
+            module, f"_use_{candidate}", lambda *args, name=candidate: name == family
+        )
+    monkeypatch.setattr(module, "choose_family", lambda *args: family)
+    seen = []
+    monkeypatch.setattr(
+        module,
+        f"setup_{family}",
+        lambda *args, backend_config: seen.append((args, backend_config)),
+    )
+    module._candidate_setup(data, 32, 1, backend_config=config)
+    assert seen == [((data, 32, 1), config)]
+
+
 def test_prepare_and_gpu_stage_keep_same_config(monkeypatch):
     monkeypatch.setattr(runner, "cuda_is_initialized", lambda: False)
     seen = []
@@ -157,35 +177,27 @@ def test_factory_cache_uses_config_snapshots():
     assert "compiler" not in seen[0]["cuda"]
 
 
-def test_factory_cache_keeps_target_defaults():
-    import tvm_tirx
-
+def test_factory_cache_keeps_explicit_options():
     @runner.cache_backend_config
     def factory(*, backend_config=None):
         return backend_config
 
-    base = {"kind": "cuda", "arch": "sm_100a"}
-    with tvm_tirx.target.Target(base):
-        plain = factory()
-    with tvm_tirx.target.Target({**base, "backend_config": {"cuda": {"nvrtc": []}}}):
-        configured = factory()
-        assert runner.cuda_target().attrs["backend_config"]["cuda"]["nvrtc"] == []
-    assert plain == {"cuda": {"arch": "sm_100a"}}
-    assert configured == plain
+    base = {"cuda": {"arch": "sm_100a"}}
+    options = {"cuda": {"arch": "sm_100a", "nvrtc": []}}
+    plain = factory(backend_config=base)
+    configured = factory(backend_config=options)
+    assert runner.cuda_target(backend_config=options).attrs["backend_config"]["cuda"]["nvrtc"] == []
+    assert plain == base
+    assert configured == options
     assert configured is not plain
     assert factory.cache_info().misses == 2
 
 
-def test_manual_cache_key_tracks_presence_and_target_defaults():
-    import tvm_tirx
-
+def test_manual_cache_key_tracks_explicit_option_presence():
     config = {"cuda": {"arch": "sm_100a"}}
     first = runner.backend_config_key(config)
     assert hash(first) == hash(runner.backend_config_key({"cuda": {"arch": "sm_100a"}}))
     config["cuda"]["nvrtc"] = ["--use_fast_math"]
     # An explicit list must still override factory-local math defaults.
     assert first != runner.backend_config_key(config)
-    with tvm_tirx.target.Target(
-        {"kind": "cuda", "arch": "sm_100a", "backend_config": {"cuda": {"ptxas": []}}}
-    ):
-        assert first != runner.backend_config_key({"cuda": {"arch": "sm_100a"}})
+    assert first != runner.backend_config_key({"cuda": {"arch": "sm_100a", "ptxas": []}})

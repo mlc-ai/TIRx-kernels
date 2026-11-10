@@ -848,15 +848,13 @@ def get_kernel(dtype, M, N, K, *, backend_config=None, **kwargs):
 
 def run_test(dtype, M, N, K, *, backend_config=None, **kwargs):
     """Compile, run, and verify fp16/bf16 GEMM kernel."""
-    from tirx_kernels.runner import compile_kernel, cuda_target
+    from tirx_kernels.runner import compile_kernel
 
     A, B, C = prepare_data(dtype, M, N, K)
     kernel = get_kernel(dtype, M, N, K, backend_config=backend_config)
     C_tvm = torch.zeros_like(C)
-    target = cuda_target(backend_config=backend_config)
-    with target:
-        ex = compile_kernel(kernel, backend_config=backend_config)
-        ex(A, B, C_tvm)
+    ex = compile_kernel(kernel, backend_config=backend_config)
+    ex(A, B, C_tvm)
     # cuBLAS baseline: torch.matmul dispatches to cuBLAS, so this IS the
     # library comparison.
     C_ref = torch.matmul(A, B.T)
@@ -917,9 +915,8 @@ def prepare_bench(dtype, M, N, K, *, backend_config=None, **kwargs):
     with cuda_initialization_guard():
         kernel = get_kernel(dtype, M, N, K, backend_config=backend_config)
         target = cuda_target(backend_config=backend_config)
-        with target:
-            mod = tvm_tirx.IRModule({"main": kernel})
-            ex = tvm_tirx.tirx.compile(mod, target=target, pipeline="tirx")
+        mod = tvm_tirx.IRModule({"main": kernel})
+        ex = tvm_tirx.tirx.compile(mod, target=target, pipeline="tirx")
     state = PreparedBench(dtype=dtype, M=M, N=N, K=K, executable=ex)
     return prepared_gpu_benchmark(run_gpu, state, backend_config=backend_config)
 

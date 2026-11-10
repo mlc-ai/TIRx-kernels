@@ -2557,8 +2557,7 @@ def _compile(cfg, builder, family, *, backend_config=None):
     if hit is None:
         kernel = builder(cfg, backend_config=backend_config)
         target = cuda_target(backend_config=backend_config)
-        with target:
-            hit = tvm_tirx.tirx.compile(kernel.mod, target=target, pipeline="tirx")
+        hit = tvm_tirx.tirx.compile(kernel.mod, target=target, pipeline="tirx")
         _EXEC_CACHE[(cache_config, key)] = hit
     return hit
 
@@ -2937,11 +2936,11 @@ def choose_family(q, k, T):
     return "qm"
 
 
-def setup(data, B, seqlen_q):
+def setup(data, B, seqlen_q, *, backend_config=None):
     family = choose_family(data["q"], data["k"], int(seqlen_q))
     if family == "qm":
-        return setup_qm(data, B, seqlen_q)
-    return setup_kv(data, B, seqlen_q)
+        return setup_qm(data, B, seqlen_q, backend_config=backend_config)
+    return setup_kv(data, B, seqlen_q, backend_config=backend_config)
 
 
 def make_kernel_qm64(cfg, *, backend_config=None):
@@ -5633,10 +5632,11 @@ def setup_q16_twotile(data, B, seqlen_q, *, backend_config=None):
                 }
             },
         )
-        kernel = make_kernel_q16_twotile(B, T, hq, hkv, topk, int(num_sms))
+        kernel = _build_q16_twotile_factory(backend_config=backend_config)(
+            B, T, hq, hkv, topk, int(num_sms)
+        )
         target = cuda_target(backend_config=backend_config)
-        with target:
-            ex = tvm_tirx.tirx.compile(kernel.mod, target=target, pipeline="tirx")
+        ex = tvm_tirx.tirx.compile(kernel.mod, target=target, pipeline="tirx")
         _EXEC_CACHE[(cache_config, key)] = ex
 
     scale_log2 = float(data["softmax_scale"]) * LOG2E
@@ -5722,16 +5722,16 @@ def _use_q16_twotile(data, B, T):
     )
 
 
-def setup(data, B, seqlen_q):  # noqa: F811 - chained shape-dispatch override
+def setup(data, B, seqlen_q, *, backend_config=None):  # noqa: F811 - chained shape-dispatch override
     T = int(seqlen_q)
     if _use_q16_twotile(data, B, T):
-        return setup_q16_twotile(data, B, T)
+        return setup_q16_twotile(data, B, T, backend_config=backend_config)
     if _use_qm64(data, B, T):
-        return setup_qm64(data, B, T)
+        return setup_qm64(data, B, T, backend_config=backend_config)
     family = choose_family(data["q"], data["k"], T)
     if family == "qm":
-        return setup_qm(data, B, T)
-    return setup_kv(data, B, T)
+        return setup_qm(data, B, T, backend_config=backend_config)
+    return setup_kv(data, B, T, backend_config=backend_config)
 
 
 Q1D_NOFENCE = os.environ.get("Q1D_NOFENCE", "0") == "1"
@@ -7201,11 +7201,11 @@ def _use_q1d(data, B, T):
 _setup_prev = setup
 
 
-def setup(data, B, seqlen_q):
+def setup(data, B, seqlen_q, *, backend_config=None):
     T = int(seqlen_q)
     if _use_q1d(data, B, T):
-        return setup_q1d(data, B, T)
-    return _setup_prev(data, B, seqlen_q)
+        return setup_q1d(data, B, T, backend_config=backend_config)
+    return _setup_prev(data, B, seqlen_q, backend_config=backend_config)
 
 
 def make_kernel_q4d(cfg, *, backend_config=None):
@@ -8497,7 +8497,7 @@ def setup(data, B, seqlen_q, *, backend_config=None):
     T = int(seqlen_q)
     if _use_q4d(data, B, T):
         return setup_q4d(data, B, T, backend_config=backend_config)
-    return _setup_prev_q4d(data, B, seqlen_q)
+    return _setup_prev_q4d(data, B, seqlen_q, backend_config=backend_config)
 
 
 # Query-major q4 experiment.  The 64 query rows are the M extent and the
@@ -9130,7 +9130,7 @@ def _candidate_setup(data, B, seqlen_q, *, backend_config=None):
     T = int(seqlen_q)
     if _use_q4r(data, B, T):
         return setup_q4r(data, B, T, backend_config=backend_config)
-    return _setup_prev_q4r(data, B, seqlen_q)
+    return _setup_prev_q4r(data, B, seqlen_q, backend_config=backend_config)
 
 
 # ---------------------------------------------------------------------------

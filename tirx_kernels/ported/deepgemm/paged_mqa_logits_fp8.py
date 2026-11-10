@@ -1446,9 +1446,8 @@ def _compile_tirx_paged_mqa_for_config(
         indices_pair_stride=indices_pair_stride,
         backend_config=backend_config,
     )
-    with target:
-        mod = tvm_tirx.IRModule({"main": kernel})
-        return tvm_tirx.tirx.compile(mod, target=target, pipeline="tirx")
+    mod = tvm_tirx.IRModule({"main": kernel})
+    return tvm_tirx.tirx.compile(mod, target=target, pipeline="tirx")
 
 
 _compile_tirx_paged_mqa_for_config = cache_backend_config(_compile_tirx_paged_mqa_for_config)

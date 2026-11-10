@@ -28,9 +28,8 @@ def _split(kernel):
     # (tile dispatch and layout lowering onward) took its place.
     target = tvm_tirx.target.Target("cuda", host="llvm")
     prepare, _, _ = tvm_tirx.tirx.get_tir_pipeline("tirx", target=target, prepare_only=True)
-    with target:
-        mod = prepare(tvm_tirx.IRModule({"main": kernel.func}))
-        mod = tvm_tirx.tirx.transform.SplitHostDevice()(mod)
+    mod = prepare(tvm_tirx.IRModule({"main": kernel.func}))
+    mod = tvm_tirx.tirx.transform.SplitHostDevice()(mod)
     device = [f for f in mod.functions.values() if f.attrs and f.attrs.get("calling_conv") == 2]
     assert len(device) == 1
     return mod["main"], device[0]

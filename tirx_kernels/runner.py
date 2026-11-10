@@ -348,8 +348,6 @@ def resolve_backend_config(backend_config=None, *, defaults=None, target=None):
     from tvm_tirx.backend.cuda.backend_config import resolve_backend_config as resolve_cuda
 
     config = merge_backend_configs(defaults, backend_config)
-    if target is None:
-        target = tvm_tirx.target.Target.current()
     resolved = resolve_cuda(config.get("cuda"), target)
     config.setdefault("cuda", {})["arch"] = resolved["arch"]
     return config
@@ -405,8 +403,7 @@ def cache_backend_config(function=None, *, maxsize=None):
 def cuda_target(*, backend_config=None):
     """Construct a CUDA Target from explicit settings, detecting online if absent."""
     config = resolve_backend_config(backend_config)
-    active = tvm_tirx.target.Target.current()
-    attrs = dict(active.export()) if active is not None else {"kind": "cuda"}
+    attrs = {"kind": "cuda"}
     attrs["arch"] = config["cuda"]["arch"]
     attrs["backend_config"] = merge_backend_configs(attrs.get("backend_config"), config)
     return tvm_tirx.target.Target(attrs)
