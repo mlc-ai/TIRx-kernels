@@ -145,7 +145,7 @@ class Kernel:
     def compile(self, target=None):
         """Compile with Target defaults overridden by the device entry settings."""
         if target is None:
-            target = tvm_tirx.target.Target.current() or "cuda"
+            target = "cuda"
         return tvm_tirx.tirx.compile(self.mod, target=target, pipeline="tirx")
 
     def source(self, target=None):

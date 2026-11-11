@@ -1522,9 +1522,8 @@ def _compile_tirx_paged_mqa_for_config(
         return _paged_mqa_logits_fp4_cuda_postproc(code)
 
     try:
-        with target:
-            mod = tvm_tirx.IRModule({"main": kernel})
-            return tvm_tirx.tirx.compile(mod, target=target, pipeline="tirx")
+        mod = tvm_tirx.IRModule({"main": kernel})
+        return tvm_tirx.tirx.compile(mod, target=target, pipeline="tirx")
     finally:
         if previous_postproc is not None:
             tvm_ffi.register_global_func(

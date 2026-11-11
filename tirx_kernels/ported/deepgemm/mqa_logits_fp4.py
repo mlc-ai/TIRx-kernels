@@ -1075,7 +1075,6 @@ def _compile_tirx_mqa_for_config(
     import tvm_tirx
     from tirx_kernels.runner import cuda_target
 
-    target = cuda_target(backend_config=backend_config)
     mod = get_kernel(
         seq_len=seq_len,
         seq_len_kv=seq_len_kv,
@@ -1088,33 +1087,32 @@ def _compile_tirx_mqa_for_config(
         logits_stride_override=logits_stride_override,
         backend_config=backend_config,
     )
-    with target:
-        # --ftz=false lets abs fold into FADD2 operand modifiers (ftz blocks it).
-        backend_config = resolve_backend_config(
-            backend_config,
-            defaults={
-                "cuda": {
-                    "nvcc": ["--use_fast_math", "--ftz=false"],
-                    "nvrtc": ["--use_fast_math", "--ftz=false"],
-                }
-            },
-        )
-        backend_config = resolve_backend_config(
-            backend_config,
-            defaults={
-                "cuda": {
-                    "ptxas": [
-                        "-v",
-                        "--warn-on-local-memory-usage",
-                        "--register-usage-level=10",
-                        "--allow-expensive-optimizations=true",
-                    ]
-                }
-            },
-        )
-        return tvm_tirx.tirx.compile(
-            mod, target=cuda_target(backend_config=backend_config), pipeline="tirx"
-        )
+    # --ftz=false lets abs fold into FADD2 operand modifiers (ftz blocks it).
+    backend_config = resolve_backend_config(
+        backend_config,
+        defaults={
+            "cuda": {
+                "nvcc": ["--use_fast_math", "--ftz=false"],
+                "nvrtc": ["--use_fast_math", "--ftz=false"],
+            }
+        },
+    )
+    backend_config = resolve_backend_config(
+        backend_config,
+        defaults={
+            "cuda": {
+                "ptxas": [
+                    "-v",
+                    "--warn-on-local-memory-usage",
+                    "--register-usage-level=10",
+                    "--allow-expensive-optimizations=true",
+                ]
+            }
+        },
+    )
+    return tvm_tirx.tirx.compile(
+        mod, target=cuda_target(backend_config=backend_config), pipeline="tirx"
+    )
 
 
 _compile_tirx_mqa_for_config = cache_backend_config(_compile_tirx_mqa_for_config)

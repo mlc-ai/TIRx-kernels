@@ -1979,10 +1979,9 @@ def _get_kernel(
             backend_config=backend_config,
         )
         target = cuda_target(backend_config=backend_config)
-        with target:
-            _KERNELS[(cache_config, key)] = tvm_tirx.tirx.compile(
-                kernel.mod, target=target, pipeline="tirx"
-            )
+        _KERNELS[(cache_config, key)] = tvm_tirx.tirx.compile(
+            kernel.mod, target=target, pipeline="tirx"
+        )
     return _KERNELS[(cache_config, key)]
 
 
