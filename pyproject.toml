@@ -10,8 +10,16 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0 AND BSD-3-Clause AND MIT"
 license-files = ["LICENSE", "NOTICE", "licenses/*.txt"]
-# GPU runtimes and the TIRx compiler are managed externally.
-dependencies = ["kcoral", "packaging>=23.0", "pyyaml>=6.0"]
+# GPU runtimes and kernel-specific reference libraries are managed externally.
+dependencies = [
+    "apache-tvm-ffi==0.1.16",
+    "apache-tvm-tirx==0.1.0rc2",
+    "packaging>=23.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+remote = ["kcoral"]
 
 [project.urls]
 Homepage = "https://github.com/mlc-ai/tirx-kernels"

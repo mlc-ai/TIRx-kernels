@@ -208,7 +208,8 @@ pip install tirx-kernels
 pip install -e .
 ```
 
-The kcoral client for remote benchmarking is installed automatically.
+TIRx and TVM FFI are installed automatically. For remote benchmarking, install
+`pip install 'tirx-kernels[remote]'` (or `pip install -e '.[remote]'` from a checkout).
 
 ### External dependencies
 
@@ -221,12 +222,11 @@ python scripts/install_reference_dependencies.py
 
 [`reference-dependencies.json`](reference-dependencies.json) is the single
 source of truth for reference revisions and the shared CUTLASS DSL version.
-The same command installs the pinned pytest/xdist runner. `torch` and `tvm_tirx`
-remain externally managed runtime/compiler dependencies.
+The same command installs the pinned pytest/xdist runner. `torch` remains an
+externally managed GPU runtime dependency.
 
 | Dependency       | Needed by                          | Notes                                                  |
 | ---------------- | ---------------------------------- | ------------------------------------------------------ |
-| `tvm_tirx`       | all kernels (compile + run)        | The TIRx compiler from [apache/tvm-tirx](https://github.com/apache/tvm-tirx). Install it from a checkout, or put the checkout's `python/` on `PYTHONPATH`. |
 | `torch`          | all kernels                        | CUDA build matching your GPU.                          |
 | `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels and the MegaMoE timer. |
 | cuDNN Frontend (`cudnn`) | `cudnn_*` correctness and baselines | Source install pinned in the lock (v1.28.0); replaces any released `nvidia-cudnn-frontend` wheel, which lacks the CuTeDSL kernel sources. |
