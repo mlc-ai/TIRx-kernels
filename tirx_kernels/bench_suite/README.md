@@ -44,10 +44,10 @@ The suite never touches a local GPU. Every workload is one request to a
 [kcoral](https://github.com/mlc-ai/kcoral) benchmark server, which owns GPU
 exclusivity (one lease per GPU, a fresh worker process per request, several
 workers per GPU so compilation overlaps measurement). Locally you need the
-package, which includes the kcoral client, and a reachable server:
+package with its optional kcoral client and a reachable server:
 
 ```bash
-pip install -e .                   # includes kcoral (httpx, numpy, ml_dtypes)
+pip install -e '.[remote]'         # includes the kcoral client
 export TIRX_BENCH_SERVER=http://127.0.0.1:8901   # or pass --server URL
 ```
 
