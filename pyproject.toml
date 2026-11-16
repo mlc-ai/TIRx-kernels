@@ -13,7 +13,7 @@ license-files = ["LICENSE", "NOTICE", "licenses/*.txt"]
 # GPU runtimes and kernel-specific reference libraries are managed externally.
 dependencies = [
     "apache-tvm-ffi==0.1.16",
-    "apache-tvm-tirx==0.1.0rc2",
+    "apache-tvm-tirx==0.1.0",
     "packaging>=23.0",
     "pyyaml>=6.0",
 ]
