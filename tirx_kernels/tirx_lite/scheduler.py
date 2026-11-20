@@ -1,15 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
-"""tirx-lite overrides for the in-tree tile schedulers and CLC helpers.
+"""tirx-lite overrides for the in-tree tile schedulers.
 
 The backend classes remain the source of truth for construction, state, and
 ordinary Python dispatch. tirx-lite only replaces their parser-inline expansion
-points, spelling those bodies directly with the public ``txl`` primitives.
+points, spelling those bodies directly with the public ``txl`` primitives. The
+native expansions bind every ``T.meta_var`` / ``T.let`` and leave dead locals in
+the generated CUDA, and re-transpile on every call. The pipeline classes and
+``query_cancel_first_ctaid_x`` are used as-is: their native expansion emits the
+same CUDA.
 """
 
 from __future__ import annotations
 
 import tirx_kernels.tirx_lite as txl
+from tvm_tirx.backend.cuda.lang.clc import query_cancel_first_ctaid_x
+from tvm_tirx.backend.cuda.lang.pipeline import Pipeline, PipelineState
 from tvm_tirx.backend.cuda.lang.tile_scheduler import (
     ClusterLaunchControlScheduler as _ClusterLaunchControlScheduler,
 )
@@ -22,23 +28,6 @@ from tvm_tirx.backend.cuda.lang.tile_scheduler import (
 from tvm_tirx.backend.cuda.lang.tile_scheduler import (
     FlashAttentionLPTScheduler as _FlashAttentionLPTScheduler,
 )
-
-from .pipeline import Pipeline, PipelineState
-
-
-def query_cancel_first_ctaid_x(first_ctaid_x, handle, *, use_ld_acquire=True):
-    """Decode one CLC cancellation response into ``first_ctaid_x``."""
-    response = txl.local_scalar("uint128", name="clc_response")
-    canceled = txl.local_scalar("uint32", name="clc_canceled")
-    suffix = ".acquire.cta" if use_ld_acquire else ""
-
-    txl.ptx[f"ld{suffix}.shared.b128"](response, handle)
-    txl.ptx.clusterlaunchcontrol.query_cancel.is_canceled.pred.b128(canceled, response)
-    txl.assign(first_ctaid_x, txl.uint32(0xFFFFFFFF))
-    txl.ptx.clusterlaunchcontrol.query_cancel.get_first_ctaid__x.b32.b128(
-        first_ctaid_x, response, pred=canceled
-    )
-    txl.ptx.fence.proxy.async_.shared__cta()
 
 
 class ClusterPersistentScheduler2D(_ClusterPersistentScheduler2D):

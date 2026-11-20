@@ -39,11 +39,10 @@ instrument, including the f16x2 widening case corrected by
 :func:`cast_f16x2_to_f32x2`.
 
 Style note: like ``entry.py`` and ``smem.py`` this module talks to ``tirx``
-directly (``from tvm_tirx.script import tirx as T``) and wraps void instruction
-calls in ``T.evaluate`` by hand. The ``txl.ptx`` / ``txl.cuda`` statement proxies
-live in the package ``__init__``, which imports *this* module; going through
-them here would be a cycle, and ``T.evaluate(T.ptx...)`` is exactly what the
-proxy does anyway.
+directly (``from tvm_tirx.script import tirx as T``). The ``txl.ptx`` /
+``txl.cuda`` statement proxies live in the package ``__init__``, which imports
+*this* module, so going through them here would be a cycle. Void instruction
+calls auto-emit at the call either way, so no ``T.evaluate`` wrapper is needed.
 """
 
 from __future__ import annotations
@@ -691,16 +690,14 @@ def mma_chain(mma, d, *, a, b, idesc, pred, accumulate, guard, dol=None, k_range
                 a_op = a_desc + a_off(kp)
             else:
                 a_op = T.cast(a + (a_base + kp) * a_step, ty="uint32")
-            T.evaluate(
-                T.ptx[mma](
-                    T.cast(d, ty="uint32"),
-                    a_op,
-                    b_desc + b_off(kp),
-                    T.uint32(idesc),
-                    *dol,
-                    T.ptx.pred(acc0 if kp == 0 else 1),
-                    pred=issue_pred,
-                )
+            T.ptx[mma](
+                T.cast(d, ty="uint32"),
+                a_op,
+                b_desc + b_off(kp),
+                T.uint32(idesc),
+                *dol,
+                T.ptx.pred(acc0 if kp == 0 else 1),
+                pred=issue_pred,
             )
 
     if guard == "branch":
@@ -754,8 +751,8 @@ def sigmoid_tanh_approx_f32(value=None, *, tanh_input=None):
         tanh_input = value * T.float32(0.5)
     tanh_value = T.bind_(T.alloc_local([1], "float32"))
     result = T.bind_(T.alloc_local([1], "float32"))
-    T.evaluate(T.ptx.tanh.approx.f32(tanh_value[0], tanh_input))
-    T.evaluate(T.ptx.fma.rn.f32(result[0], tanh_value[0], T.float32(0.5), T.float32(0.5)))
+    T.ptx.tanh.approx.f32(tanh_value[0], tanh_input)
+    T.ptx.fma.rn.f32(result[0], tanh_value[0], T.float32(0.5), T.float32(0.5))
     return result[0]
 
 
@@ -797,9 +794,9 @@ def cast_f16x2_to_f32x2(dst, i, word):
     write registers; the caller supplies the two f32 slots.
     """
     halves = T.bind_(T.alloc_local([2], "uint16"))
-    T.evaluate(T.ptx.mov.b32(halves[0], halves[1], word))
-    T.evaluate(T.ptx.cvt.f32.f16(dst[2 * i], halves[0]))
-    T.evaluate(T.ptx.cvt.f32.f16(dst[2 * i + 1], halves[1]))
+    T.ptx.mov.b32(halves[0], halves[1], word)
+    T.ptx.cvt.f32.f16(dst[2 * i], halves[0])
+    T.ptx.cvt.f32.f16(dst[2 * i + 1], halves[1])
 
 
 # ---------------------------------------------------------------------------

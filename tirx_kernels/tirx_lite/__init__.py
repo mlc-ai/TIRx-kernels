@@ -4,9 +4,11 @@
 
 The base language is tirx script plus the in-tree ``T.ptx`` instruction table,
 used as-is: one call is one instruction, spelled the way the ISA spells it.
-The protocol layer implements native traced classes (``Pipeline``,
-``PipelineState``, ``MBarrier``, and the one-way barriers ``TMABar`` /
-``TCGen05Bar``) so a kernel's source is ``txl``-only. On top of that ``txl`` adds
+The protocol classes (``Pipeline``, ``PipelineState``, ``MBarrier``, and the
+one-way barriers ``TMABar`` / ``TCGen05Bar``) are tvm-tirx's own
+``backend.cuda.lang`` helpers, re-exported so a kernel's source is ``txl``-only.
+Their methods are ``@T.inline`` macros, which re-transpile their source on every
+call; that costs trace time only, not generated code. On top of that ``txl`` adds
 three primitive families — the things neither PTX nor ``lang`` has a word for:
 
 specialize
@@ -39,10 +41,14 @@ instruction or a shape.
 
 from __future__ import annotations
 
-import tvm_tirx
+from tvm_tirx.backend.cuda.lang.pipeline import (
+    MBarrier,
+    Pipeline,
+    PipelineState,
+    TCGen05Bar,
+    TMABar,
+)
 from tvm_tirx.backend.cuda.layout import SwizzleMode
-from tvm_tirx.ir.op import Op as _Op
-from tvm_tirx.ir.type import PrimType as _PrimType
 from tvm_tirx.script import tirx as _T
 from tvm_tirx.script.ir_builder import IRBuilder
 from tvm_tirx.tirx.script import ir_builder as _I
@@ -59,46 +65,6 @@ from .smem import (
     smem_pool,
 )
 from .specialize import specialize, tid_in_role, warp_id_in_role
-
-# ---------------------------------------------------------------------------
-# tvm-tirx registration gap: void intrinsics without a result type
-# ---------------------------------------------------------------------------
-#
-# tvm-tirx registers these intrinsics with neither ``TFixedReturnType`` nor
-# ``FInferType``; siblings such as ``tirx.nvshmem.wait_until`` and
-# ``tirx.nvshmem.getmem_nbi_warp`` register void. A Call built with ``ty=None``
-# is then typed ``Missing``, which ``auto_emit_void_call`` does not count as
-# void, so the Call is returned instead of emitted. TVMScript still wraps the
-# expression statement in ``Evaluate``. A traced ``txl`` call discards the
-# return value, so the statement vanishes from the kernel. A dropped
-# ``txl.cuda.wait_until`` leaves a real cross-CTA race. Register void here
-# until tvm-tirx does, and never replace a type it already registers.
-_UNTYPED_VOID_INTRINSICS = (
-    "tirx.cuda.wait_until",
-    "tirx.cuda.timer_init",
-    "tirx.cuda.timer_start",
-    "tirx.cuda.timer_end",
-    "tirx.cuda.timer_finalize",
-    "tirx.nvshmem.getmem_nbi_block",
-)
-
-
-def _register_void_result_types():
-    registered = set(_Op.list_op_names())
-    typed = [
-        attr_map
-        for attr_map in (_Op.get_attr_map("TFixedReturnType"), _Op.get_attr_map("FInferType"))
-        if attr_map is not None
-    ]
-    for name in _UNTYPED_VOID_INTRINSICS:
-        if name not in registered:
-            continue
-        op = _Op.get(name)
-        if not any(op in attr_map for attr_map in typed):
-            op.set_attr("TFixedReturnType", _PrimType("void"))
-
-
-_register_void_result_types()
 
 # ---------------------------------------------------------------------------
 # Explicit statement helpers
@@ -382,19 +348,6 @@ def stack_alloca(kind, size=1):
     return _I.bind_(_T.stack_alloca(kind, size))
 
 
-def assign(dst, value):
-    """Store into one writable scalar element of a local register tensor."""
-    if not isinstance(dst, tvm_tirx.ir.TensorLoad):
-        raise TypeError(
-            f"txl.assign destination must be a writable scalar, got {type(dst).__name__}"
-        )
-    if not tvm_tirx.tirx.is_tensor_var(
-        dst.source
-    ) or dst.source.scope() != tvm_tirx.runtime.MemoryScope("local"):
-        raise TypeError("txl.assign destination must be a local scalar element")
-    return _I.assign(dst, value)
-
-
 # ---------------------------------------------------------------------------
 # warp-uniform values
 # ---------------------------------------------------------------------------
@@ -518,10 +471,9 @@ def __getattr__(name):
     return value
 
 
-# Protocol helpers import only after tirx-lite's public primitives exist, so their
-# native overrides can express themselves through txl rather than a second,
+# Ring and scheduler helpers import only after tirx-lite's public primitives exist,
+# so their overrides can express themselves through txl rather than a second,
 # private IRBuilder surface.
-from .pipeline import MBarrier, Pipeline, PipelineState, TCGen05Bar, TMABar
 from .ring import RingState
 from .scheduler import (
     ClusterLaunchControlScheduler,
