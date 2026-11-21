@@ -49,9 +49,9 @@ def smem_desc_add_16B_offset(desc_val, offset):
     desc_lo = T.bind_(T.alloc_local((1,), "uint32"))
     desc_hi = T.bind_(T.alloc_local((1,), "uint32"))
     result = T.bind_(T.alloc_local((1,), "uint64"))
-    T.evaluate(T.ptx.mov.b64(desc_lo[0], desc_hi[0], desc_val))
-    T.evaluate(T.ptx.add.u32(desc_lo[0], desc_lo[0], T.cast(offset, "uint32")))
-    T.evaluate(T.ptx.mov.b64(result[0], desc_lo[0], desc_hi[0]))
+    T.ptx.mov.b64(desc_lo[0], desc_hi[0], desc_val)
+    T.ptx.add.u32(desc_lo[0], desc_lo[0], T.cast(offset, "uint32"))
+    T.ptx.mov.b64(result[0], desc_lo[0], desc_hi[0])
     return result[0]
 
 
@@ -71,10 +71,8 @@ class SmemDescriptor:
         return self.desc
 
     def init(self, smem_ptr, ldo, sdo, swizzle):
-        _I.evaluate(
-            T.cuda.tcgen05.encode_matrix_descriptor(
-                T.address_of(self._buf[0]), smem_ptr, ldo, sdo, swizzle
-            )
+        T.cuda.tcgen05.encode_matrix_descriptor(
+            T.address_of(self._buf[0]), smem_ptr, ldo, sdo, swizzle
         )
 
     def make_lo_uniform(self):
@@ -85,11 +83,11 @@ class SmemDescriptor:
         """
         desc_lo = T.bind_(T.alloc_local((1,), "uint32"))
         desc_hi = T.bind_(T.alloc_local((1,), "uint32"))
-        T.evaluate(T.ptx.mov.b64(desc_lo[0], desc_hi[0], self._buf[0]))
+        T.ptx.mov.b64(desc_lo[0], desc_hi[0], self._buf[0])
         _I.tensor_store(
             desc_lo, [0], T.gpu_warp_shuffle(T.uint32(0xFFFFFFFF), desc_lo[0], 0, 32, 32)
         )
-        T.evaluate(T.ptx.mov.b64(self._buf[0], desc_lo[0], desc_hi[0]))
+        T.ptx.mov.b64(self._buf[0], desc_lo[0], desc_hi[0])
 
     def add_16B_offset(self, offset):
         return smem_desc_add_16B_offset(self._buf[0], offset)
@@ -496,14 +494,12 @@ class KTileView:
                 linear = False
                 why = "the measured k-tile offsets of this tile are not linear in kp"
         desc = T.bind_(T.alloc_local([1], "uint64"))
-        T.evaluate(
-            T.cuda.tcgen05.encode_matrix_descriptor(
-                T.address_of(desc[0]),
-                self.ptr_to(base_row, base_col),
-                ldo=ldo,
-                sdo=sdo,
-                swizzle=self.swizzle.value,
-            )
+        T.cuda.tcgen05.encode_matrix_descriptor(
+            T.address_of(desc[0]),
+            self.ptr_to(base_row, base_col),
+            ldo=ldo,
+            sdo=sdo,
+            swizzle=self.swizzle.value,
         )
         return KDesc(desc, KStep(offset_of, max(n_steps, 1), linear, why), major), offset_of
 

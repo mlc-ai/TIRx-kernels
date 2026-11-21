@@ -57,7 +57,7 @@ class RegisterScope:
         """Emit the transition at the caller's current predicate and position."""
         self.emissions += 1
         direction = "inc" if self.regs > self.owner.session.entry_regs else "dec"
-        T.evaluate(T.ptx[f"setmaxnreg.{direction}.sync.aligned.u32"](self.regs))
+        T.ptx[f"setmaxnreg.{direction}.sync.aligned.u32"](self.regs)
 
     def __repr__(self):
         return f"<txl.register_scope {self.name} warps={self.warps} regs={self.regs}>"
@@ -86,7 +86,7 @@ class WarpGroup:
             frame.__enter__()
         if self.regs is not None:
             direction = "inc" if self.regs > self.owner.session.entry_regs else "dec"
-            T.evaluate(T.ptx[f"setmaxnreg.{direction}.sync.aligned.u32"](self.regs))
+            T.ptx[f"setmaxnreg.{direction}.sync.aligned.u32"](self.regs)
         self.owner.active_group = self
         return self
 
@@ -159,7 +159,7 @@ class Role:
             frame.__enter__()
         if self.regs is not None and self.register_scope is None:
             direction = "inc" if self.regs > self.owner.session.entry_regs else "dec"
-            T.evaluate(T.ptx[f"setmaxnreg.{direction}.sync.aligned.u32"](self.regs))
+            T.ptx[f"setmaxnreg.{direction}.sync.aligned.u32"](self.regs)
         self.owner.active = self
         return self
 
