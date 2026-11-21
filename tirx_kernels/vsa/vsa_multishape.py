@@ -1391,7 +1391,6 @@ def make_attention_kernel_blk64(
     """
     if complete_groups and not full_blocks:
         raise ValueError("complete_groups requires full_blocks")
-    grid = "num_ctas" if static_grid is None else int(static_grid)
 
     def body(
         q_map,
@@ -2375,7 +2374,9 @@ def make_attention_kernel_blk64(
         scale_log2: "float32",
     ):
         txl.device_entry(
-            launch=txl.cuda.LaunchConfig(block=16 * 32, grid=grid),
+            launch=txl.cuda.LaunchConfig(
+                block=16 * 32, grid=num_ctas if static_grid is None else int(static_grid)
+            ),
             kernel_attrs=txl.cuda.KernelAttributes(min_blocks_per_sm=1),
             backend_config=resolve_backend_config(backend_config),
         )
