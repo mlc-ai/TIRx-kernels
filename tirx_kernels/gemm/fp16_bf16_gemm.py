@@ -10,6 +10,7 @@ import tvm_ffi
 
 import tirx_kernels.tirx_lite as txl
 import tvm_tirx
+from tirx_kernels.gemm import _fp16_bf16_gemm_sm120 as _sm120
 from tirx_kernels.runner import bench, resolve_backend_config
 
 
@@ -817,11 +818,14 @@ def make_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config=None):
 KERNEL_META = {
     "name": "fp16_bf16_gemm",
     "category": "gemm",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a", "sm_120a"],
 }
 # Rectangular shapes the square sweep cannot reach: LLM projection and FFN
 # aspect ratios.
 _RECT_SHAPES = [
+    (128, 1536, 6144),
+    (1000, 3072, 2048),
+    (1000, 7168, 1024),
     (1024, 8192, 2048),
     (2048, 4096, 11008),
     (2048, 8192, 1024),
@@ -842,7 +846,29 @@ CONFIGS = [
 ]
 
 
-def get_kernel(dtype, M, N, K, *, backend_config=None, **kwargs):
+SM120_TABLE = _sm120.TABLE
+
+
+def sm120_schedule(N, K, dtype="fp16"):
+    """SM120 row ranges for (N, K): ((largest M or None, config), ...); M may be symbolic
+    when ``config`` is passed to ``get_kernel``."""
+    schedule = _sm120.schedule(N, K, str(_DTYPE_MAP[dtype]))
+    return tuple((limit, (make, cfg)) for limit, make, cfg in schedule)
+
+
+def get_kernel(dtype, M, N, K, *, backend_config=None, config=None, direct_store=False, **kwargs):
+    if resolve_backend_config(backend_config)["cuda"]["arch"] in _sm120.ARCHS:
+        return _sm120.get_kernel(
+            str(_DTYPE_MAP[dtype]),
+            M,
+            N,
+            K,
+            config=config,
+            direct_store=direct_store,
+            backend_config=backend_config,
+        )
+    if config is not None or direct_store:
+        raise ValueError("config and direct_store apply to sm_120 only")
     return make_kernel(dtype, M, N, K, backend_config=backend_config)
 
 
@@ -855,6 +881,16 @@ def run_test(dtype, M, N, K, *, backend_config=None, **kwargs):
     C_tvm = torch.zeros_like(C)
     ex = compile_kernel(kernel, backend_config=backend_config)
     ex(A, B, C_tvm)
+    if resolve_backend_config(backend_config)["cuda"]["arch"] in _sm120.ARCHS:
+        # The SM120 kernels sum K in another order than cuBLAS, which can move a BF16 output
+        # by one ulp; compare with an FP32 product (TF32 off) instead.
+        tf32 = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = False
+        C_ref = torch.matmul(A.float(), B.float().T)
+        torch.backends.cuda.matmul.allow_tf32 = tf32
+        rtol = 0.001 if dtype == "fp16" else 0.016
+        torch.testing.assert_close(C_tvm.float().cpu(), C_ref.cpu(), rtol=rtol, atol=0.01)
+        return
     # cuBLAS baseline: torch.matmul dispatches to cuBLAS, so this IS the
     # library comparison.
     C_ref = torch.matmul(A, B.T)
@@ -886,8 +922,9 @@ def run_gpu(
         return lambda: torch.matmul(A, B.T, out=C_out)
 
     references = {"torch-cublas": _torch_cublas}
-    # DeepGEMM's BF16 references reject Thor; cuBLAS supports the device.
-    if prepared.dtype == "bf16" and torch.cuda.get_device_capability() != (11, 0):
+    # DeepGEMM's BF16 references reject Thor and SM120; cuBLAS supports both.
+    capability = torch.cuda.get_device_capability()
+    if prepared.dtype == "bf16" and capability != (11, 0) and capability[0] != 12:
 
         def _deepgemm_cublaslt():
             import deep_gemm
