@@ -1,0 +1,28 @@
+# No sm_120a benchmark server or baseline exists yet, so no row is in the default sweep.
+kernel: flash_attention2
+default_suite: false
+configs:
+  - {config: llama3_h32_kv8_d64_1x1024, default: false}
+  - {config: llama3_h32_kv8_d64_1x4096, default: false}
+  - {config: llama3_h32_kv8_d64_8x512, default: false}
+  - {config: llama3_h32_kv8_d64_mixed, default: false}
+  - {config: qwen3_h16_kv8_d128_1x1024, default: false}
+  - {config: qwen3_h16_kv8_d128_1x4096, default: false}
+  - {config: qwen3_h16_kv8_d128_8x512, default: false}
+  - {config: qwen3_h16_kv8_d128_mixed, default: false}
+  - {config: qwen3_4b_h32_kv8_d128_1x1024, default: false}
+  - {config: qwen3_4b_h32_kv8_d128_1x4096, default: false}
+  - {config: qwen3_4b_h32_kv8_d128_8x512, default: false}
+  - {config: qwen3_4b_h32_kv8_d128_mixed, default: false}
+  - {config: qwen35_h8_kv2_d256_1x1024, default: false}
+  - {config: qwen35_h8_kv2_d256_1x4096, default: false}
+  - {config: qwen35_h8_kv2_d256_8x512, default: false}
+  - {config: qwen35_h8_kv2_d256_mixed, default: false}
+  - {config: gemma4_sliding_h8_kv1_d256_w512_1x1024, default: false}
+  - {config: gemma4_sliding_h8_kv1_d256_w512_1x4096, default: false}
+  - {config: gemma4_sliding_h8_kv1_d256_w512_8x512, default: false}
+  - {config: gemma4_sliding_h8_kv1_d256_w512_mixed, default: false}
+  - {config: gemma4_global_h8_kv1_d512_1x1024, default: false}
+  - {config: gemma4_global_h8_kv1_d512_1x4096, default: false}
+  - {config: gemma4_global_h8_kv1_d512_8x512, default: false}
+  - {config: gemma4_global_h8_kv1_d512_mixed, default: false}
