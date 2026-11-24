@@ -18,7 +18,7 @@ from tirx_kernels.runner import bench, resolve_backend_config
 KERNEL_META = {
     "name": "flashinfer_rmsnorm",
     "category": "ported.flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a", "sm_120a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",

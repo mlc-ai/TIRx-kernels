@@ -92,7 +92,7 @@ keeps them in sync.
 Grouped by the FlashInfer Python entry point each port backs.
 
 - **`flashinfer.activation`:**
-  [`act_and_mul`](tirx_kernels/ported/flashinfer/activation/act_and_mul.py) ⟨+sm_110a⟩,
+  [`act_and_mul`](tirx_kernels/ported/flashinfer/activation/act_and_mul.py) ⟨+sm_110a +sm_120a⟩,
   [`silu_and_mul_nvfp4_experts_quantize`](tirx_kernels/ported/flashinfer/activation/silu_and_mul_nvfp4_experts_quantize.py)
 - **`flashinfer.cascade`:**
   [`merge_state`](tirx_kernels/ported/flashinfer/cascade/merge_state.py) ⟨+sm_110a⟩
@@ -102,7 +102,7 @@ Grouped by the FlashInfer Python entry point each port backs.
   [`mxfp4_quantize`](tirx_kernels/ported/flashinfer/quantization/mxfp4_quantize.py) ⟨+sm_110a⟩,
   [`mxfp8_quantize`](tirx_kernels/ported/flashinfer/quantization/mxfp8_quantize.py)
 - **`flashinfer.norm`:**
-  [`flashinfer_rmsnorm`](tirx_kernels/ported/flashinfer/norm/rmsnorm.py) ⟨+sm_110a⟩,
+  [`flashinfer_rmsnorm`](tirx_kernels/ported/flashinfer/norm/rmsnorm.py) ⟨+sm_110a +sm_120a⟩,
   [`flashinfer_rmsnorm_quant`](tirx_kernels/ported/flashinfer/norm/rmsnorm_quant.py),
   [`flashinfer_rmsnorm_fp4quant`](tirx_kernels/ported/flashinfer/norm/rmsnorm_fp4quant.py),
   [`flashinfer_add_rmsnorm_fp4quant`](tirx_kernels/ported/flashinfer/norm/add_rmsnorm_fp4quant.py),
