@@ -23,6 +23,8 @@ keeps them in sync.
   [`nvfp4_gemm`](tirx_kernels/gemm/nvfp4_gemm.py)
 - **Normalization:**
   [`rmsnorm`](tirx_kernels/norm/rmsnorm.py)
+- **Attention:**
+  [`flash_attention2`](tirx_kernels/attention/flash_attention2.py) ⟨sm_120a⟩
 - **Distributed:**
   [`allgather_gemm`](tirx_kernels/gemm/allgather_gemm.py) ⟨sm_100a⟩,
   [`gemm_reduce_scatter`](tirx_kernels/gemm/gemm_reduce_scatter.py) ⟨sm_100a⟩
