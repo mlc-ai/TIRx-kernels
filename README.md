@@ -19,7 +19,7 @@ keeps them in sync.
 ### Native TIRx
 
 - **GEMM:**
-  [`fp16_bf16_gemm`](tirx_kernels/gemm/fp16_bf16_gemm.py) ⟨+sm_110a⟩,
+  [`fp16_bf16_gemm`](tirx_kernels/gemm/fp16_bf16_gemm.py) ⟨+sm_110a +sm_120a⟩,
   [`nvfp4_gemm`](tirx_kernels/gemm/nvfp4_gemm.py)
 - **Normalization:**
   [`rmsnorm`](tirx_kernels/norm/rmsnorm.py)
