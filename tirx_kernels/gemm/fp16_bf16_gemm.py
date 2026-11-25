@@ -250,7 +250,10 @@ def _thor_heuristic_cfg(M, N, K):
 
 def _cfg_for(M, N, K, *, backend_config=None):
     if resolve_backend_config(backend_config)["cuda"]["arch"] == "sm_110a":
-        override = _THOR_SHAPE_CONFIGS.get((M, N, K))
+        # A symbolic M (one kernel for every row count) matches no measured shape
+        # and cannot size the heuristic's tile grid.
+        static_m = isinstance(M, int)
+        override = _THOR_SHAPE_CONFIGS.get((M, N, K)) if static_m else None
         if override is not None:
             cfg = dict(_DEFAULT_CONFIG)
             cfg.update(override)
@@ -261,6 +264,8 @@ def _cfg_for(M, N, K, *, backend_config=None):
             return _THOR_GEMM_CONFIGS[N]
         if N in GEMM_CONFIGS:
             return GEMM_CONFIGS[N]
+        if not static_m:
+            return dict(_DEFAULT_CONFIG)
         return _thor_heuristic_cfg(M, N, K)
     return GEMM_CONFIGS.get(N, _DEFAULT_CONFIG)
 
