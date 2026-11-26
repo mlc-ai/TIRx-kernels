@@ -270,12 +270,18 @@ def _cfg_for(M, N, K, *, backend_config=None):
     return GEMM_CONFIGS.get(N, _DEFAULT_CONFIG)
 
 
-def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config=None):
-    """Trace the kernel for one (dtype, M, N, K). Every knob is baked."""
+def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config=None, config=None):
+    """Trace the kernel for one (dtype, M, N, K). Every knob is baked; ``config`` (from
+    ``sm110_schedule``) replaces the table lookup."""
     if dtype not in _DTYPE_MAP:
         raise ValueError(f"Unsupported dtype: {dtype}")
     ab_type = _DTYPE_MAP[dtype]
-    cfg = _cfg_for(M, N, Kdim, backend_config=backend_config)
+    if config is None:
+        cfg = _cfg_for(M, N, Kdim, backend_config=backend_config)
+    else:
+        cfg = {**_DEFAULT_CONFIG, **config}
+        if not _cfg_valid(Kdim, cfg):
+            raise ValueError(f"invalid GEMM config for K={Kdim}: {cfg}")
     MMA_N = cfg["cta_n"]
     BLK_K = cfg["cta_k"]
     PIPE_DEPTH = cfg["pipe_depth"]
@@ -816,8 +822,8 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config
     return txl.kernel()(gemm)
 
 
-def make_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config=None):
-    return _make_device_kernel(dtype, M, N, Kdim, backend_config=backend_config).func
+def make_kernel(dtype: str, M: int, N: int, Kdim: int, *, backend_config=None, config=None):
+    return _make_device_kernel(dtype, M, N, Kdim, backend_config=backend_config, config=config).func
 
 
 KERNEL_META = {
@@ -853,12 +859,41 @@ CONFIGS = [
 
 SM120_TABLE = _sm120.TABLE
 
+# sm_110a (Jetson AGX Thor) row ranges of a symbolic-M GEMM, by measured (N, K):
+# ((largest M or None, config), ...). Qwen3-0.6B's o_proj and down_proj, timed after a clean
+# L2 flush: past 256 rows, 256-wide tiles with an overlapped epilogue beat the B200's N=1024
+# entry by 1.16-1.22x at 338-512 rows, 1.5x at 1024 and 2.0x at 4096 (on par with cuBLAS);
+# up to 256 rows the B200 entry is 2-4% faster.
+_SM110_WIDE = {
+    "cta_n": 256,
+    "cta_k": 64,
+    "l2_group_size": 4,
+    "overlap_epilogue": True,
+    "pipe_depth": 4,
+    "wb_pipe_depth": 4,
+}
+SM110_TABLE = {
+    (1024, 2048): ((256, GEMM_CONFIGS[1024]), (None, _SM110_WIDE)),
+    (1024, 3072): ((256, GEMM_CONFIGS[1024]), (None, _SM110_WIDE)),
+}
+
 
 def sm120_schedule(N, K, dtype="fp16"):
     """SM120 row ranges for (N, K): ((largest M or None, config), ...); M may be symbolic
     when ``config`` is passed to ``get_kernel``."""
     schedule = _sm120.schedule(N, K, str(_DTYPE_MAP[dtype]))
     return tuple((limit, (make, cfg)) for limit, make, cfg in schedule)
+
+
+def sm110_schedule(N, K, dtype="fp16"):
+    """sm_110a row ranges for (N, K): ((largest M or None, config), ...), each config to pass
+    to ``get_kernel`` with a symbolic M. Untuned shapes get one range with the config a
+    symbolic M takes without one."""
+    ranges = SM110_TABLE.get((N, K)) if dtype == "fp16" else None
+    if ranges is None:
+        rows = tvm_tirx.tirx.Var("rows", "int64")
+        return ((None, _cfg_for(rows, N, K, backend_config={"cuda": {"arch": "sm_110a"}})),)
+    return tuple((limit, dict(cfg)) for limit, cfg in ranges)
 
 
 def get_kernel(dtype, M, N, K, *, backend_config=None, config=None, direct_store=False, **kwargs):
@@ -872,9 +907,10 @@ def get_kernel(dtype, M, N, K, *, backend_config=None, config=None, direct_store
             direct_store=direct_store,
             backend_config=backend_config,
         )
-    if config is not None or direct_store:
-        raise ValueError("config and direct_store apply to sm_120 only")
-    return make_kernel(dtype, M, N, K, backend_config=backend_config)
+    arch = resolve_backend_config(backend_config)["cuda"]["arch"]
+    if direct_store or (config is not None and arch != "sm_110a"):
+        raise ValueError("direct_store applies to sm_120 only, config to sm_120 and sm_110a")
+    return make_kernel(dtype, M, N, K, backend_config=backend_config, config=config)
 
 
 def run_test(dtype, M, N, K, *, backend_config=None, **kwargs):
